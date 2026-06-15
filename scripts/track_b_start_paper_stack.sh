@@ -761,6 +761,10 @@ import json
 import sys
 from pathlib import Path
 
+from mgc_v05l.execution_core.track_b_broker_startup_authority import (
+    classify_fresh_complete_clean_broker_truth,
+)
+
 (
     repo_root,
     broker_truth_stdout,
@@ -932,10 +936,29 @@ managed_positions_artifact = load_json(
 managed_orders_artifact = load_json(
     repo_root / "outputs/track_b_execution_core/managed_orders/latest_managed_orders.json"
 )
+broker_positions_snapshot = load_json(
+    broker_truth.get("positions_snapshot_path")
+    or repo_root / "outputs/reports/ibkr_read_only_verification/ibkr_positions_snapshot.json"
+)
+broker_open_orders_snapshot = load_json(
+    broker_truth.get("open_orders_snapshot_path")
+    or repo_root / "outputs/reports/ibkr_read_only_verification/ibkr_open_orders_snapshot.json"
+)
 reconciliation = reconciliation_stdout_payload or load_json(
     repo_root
     / "outputs/reports/track_b_paper_broker_reconciliation/latest_track_b_paper_broker_reconciliation.json"
 )
+
+broker_startup_authority = classify_fresh_complete_clean_broker_truth(
+    broker_truth_status=broker_truth,
+    positions_snapshot=broker_positions_snapshot,
+    open_orders_snapshot=broker_open_orders_snapshot,
+    reconciliation=reconciliation,
+    open_order_truth=open_order_truth,
+    status=status,
+    safety=as_mapping(status.get("safety")),
+    expected_account_id="DUM882026",
+).to_dict()
 
 paths = {str(Path(readiness_artifact)), str(Path(control_artifact))}
 for payload in (
@@ -956,6 +979,13 @@ add_path(paths, control.get("refreshed_artifact_paths"))
 
 blockers = []
 dependency_refresh_failures = []
+if broker_startup_authority.get("broker_truth_clean") is not True:
+    for code in broker_startup_authority.get("blockers") or []:
+        add_blocker(
+            blockers,
+            f"broker_startup_authority_{code}",
+            source="broker_startup_authority",
+        )
 
 def nested_runtime_preflight_classification(payload):
     runtime_start = payload.get("runtime_start_preflight")
@@ -1371,14 +1401,45 @@ maintenance_allowed_blockers = {
     "control_plane_primary_blocker",
     "control_plane_explicit_unsafe_status",
 }
+broker_truth_authority_diagnostic_blockers = {
+    "broker_lifecycle_reconciliation_refresh_failed",
+    "broker_lifecycle_not_reconciled",
+    "broker_lifecycle_reconciled_flag_false",
+    "broker_positions_or_orders_not_flat",
+    "open_order_truth_refresh_failed",
+    "lifecycle_positions_or_orders_not_flat",
+    "open_order_truth_not_clean",
+    "managed_position_registry_refresh_failed",
+    "managed_position_registry_not_clean",
+    "managed_order_registry_refresh_failed",
+    "managed_order_registry_not_clean",
+    "shared_truth_refresh_failed",
+    "shared_truth_runtime_start_not_clean",
+    "shared_truth_runtime_start_blocker",
+}
+broker_truth_authority_diagnostic_steps = {
+    "broker_lifecycle_reconciliation",
+    "open_order_truth",
+    "managed_position_registry",
+    "managed_order_registry",
+    "shared_truth",
+}
 startup_mode = "OWNED_MANAGED_EXPOSURE_MAINTENANCE_RESTORE" if maintenance_restore["allowed"] else "STANDARD_START"
 effective_blockers = [
     row for row in blockers
     if not (maintenance_restore["allowed"] and row.get("code") in maintenance_allowed_blockers)
+    and not (
+        broker_startup_authority.get("broker_truth_clean") is True
+        and row.get("code") in broker_truth_authority_diagnostic_blockers
+    )
 ]
 effective_dependency_refresh_failures = [
     row for row in dependency_refresh_failures
     if not (maintenance_restore["allowed"] and row.get("code") == "control_plane_snapshot_refresh_failed")
+    and not (
+        broker_startup_authority.get("broker_truth_clean") is True
+        and row.get("step") in broker_truth_authority_diagnostic_steps
+    )
 ]
 
 dependency_return_codes = [
@@ -1397,6 +1458,9 @@ if to_int(control_rc) == 2 and control:
     effective_dependency_return_codes[7] = 0
 if maintenance_restore["allowed"]:
     effective_dependency_return_codes[7] = 0
+if broker_startup_authority.get("broker_truth_clean") is True:
+    for index in (1, 2, 3, 4, 5):
+        effective_dependency_return_codes[index] = 0
 
 if all(rc == 0 for rc in effective_dependency_return_codes) and not effective_blockers:
     classification = "STARTUP_PREFLIGHT_REFRESH_CLEAN"
@@ -1411,6 +1475,7 @@ payload = {
     "startup_preflight_dependency_refresh_attempted": True,
     "startup_mode": startup_mode,
     "owned_managed_exposure_maintenance_restore": maintenance_restore,
+    "broker_startup_authority": broker_startup_authority,
     "dependency_refresh_steps": dependency_steps,
     "dependency_refresh_failures": effective_dependency_refresh_failures,
     "refreshed_artifact_paths": sorted(paths),
@@ -1559,7 +1624,7 @@ if config.get("profile") != expected_profile:
 lanes = [row for row in config.get("lanes") or [] if isinstance(row, dict)]
 active_lane_ids = [str(value) for value in config.get("active_lane_ids") or [] if str(value)]
 if expected_profile == "mnq_mes_full_session_active_evidence":
-    expected_lane_count = 15
+    expected_lane_count = 43
 else:
     expected_lane_count = len(active_lane_ids) or len(lanes)
 if len(lanes) != expected_lane_count:

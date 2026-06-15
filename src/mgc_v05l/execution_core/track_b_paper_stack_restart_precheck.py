@@ -7,6 +7,10 @@ import sys
 from dataclasses import dataclass
 from typing import Any, Mapping
 
+from mgc_v05l.execution_core.track_b_broker_startup_authority import (
+    classify_fresh_complete_clean_broker_truth,
+)
+
 
 RESTART_ALLOWED_FLAT_RECONCILED = "RESTART_ALLOWED_FLAT_RECONCILED"
 RESTART_ALLOWED_OWNED_MANAGED_EXPOSURE = "RESTART_ALLOWED_OWNED_MANAGED_EXPOSURE"
@@ -96,6 +100,37 @@ def classify_paper_stack_restart_precheck(status: Mapping[str, Any]) -> PaperSta
             reason_codes=("BROKER_TRUTH_NOT_FRESH",),
         )
 
+    broker_startup_authority = _broker_startup_authority(status)
+    if broker_startup_authority.get("broker_truth_clean") is True:
+        return PaperStackRestartPrecheck(
+            classification=RESTART_ALLOWED_FLAT_RECONCILED,
+            restart_allowed=True,
+            detail=(
+                "Fresh complete IBKR broker truth is flat and clean; stale lifecycle, "
+                "reconciliation, or broker-lease mismatches are diagnostic for PAPER restart."
+            ),
+            reason_codes=("FRESH_COMPLETE_CLEAN_BROKER_TRUTH",),
+        )
+    if broker_startup_authority.get("blockers"):
+        blockers = tuple(str(code) for code in broker_startup_authority.get("blockers") or ())
+        if any(code in blockers for code in ("broker_open_orders_present", "unknown_open_orders_present")):
+            return PaperStackRestartPrecheck(
+                classification=BLOCKED_OPEN_ORDERS,
+                restart_allowed=False,
+                detail="Fresh broker truth reports open or unknown broker orders; restart must not proceed.",
+                reason_codes=blockers,
+            )
+        authority_hard_blockers = tuple(
+            code for code in blockers if code != "track_b_futures_positions_present"
+        )
+        if authority_hard_blockers:
+            return PaperStackRestartPrecheck(
+                classification=BLOCKED_STALE_BROKER_TRUTH,
+                restart_allowed=False,
+                detail="Fresh complete clean broker truth was not established for restart.",
+                reason_codes=authority_hard_blockers,
+            )
+
     if restart_policy.get("owned_exposure_restart_allowed") is True:
         resolution = str(restart_policy.get("pre_restart_exposure_resolution_classification") or "")
         if resolution in {
@@ -109,6 +144,16 @@ def classify_paper_stack_restart_precheck(status: Mapping[str, Any]) -> PaperSta
                 detail="Pre-restart resolver proved exact owned managed exposure; restart may reload guarded maintenance.",
                 reason_codes=(resolution,),
             )
+
+    if broker_startup_authority.get("blockers"):
+        blockers = tuple(str(code) for code in broker_startup_authority.get("blockers") or ())
+        reason_codes = tuple(str(code) for code in restart_policy.get("reason_codes") or ())
+        return PaperStackRestartPrecheck(
+            classification=BLOCKED_UNMANAGED_EXPOSURE,
+            restart_allowed=False,
+            detail="Fresh broker truth reports Track B futures exposure without exact owned managed restart authority.",
+            reason_codes=tuple(dict.fromkeys((*reason_codes, *blockers))),
+        )
 
     current_positions = int(diagnostics.get("track_b_managed_futures_position_count") or 0)
     lifecycle_positions = _current_scope_lifecycle_position_count(diagnostics)
@@ -142,6 +187,45 @@ def _broker_lifecycle_reconciled(broker: Mapping[str, Any]) -> bool:
         "RECONCILED" in str(broker.get("reconciliation_classification") or "")
         and broker.get("broker_truth_fresh") is True
     )
+
+
+def _broker_startup_authority(status: Mapping[str, Any]) -> Mapping[str, Any]:
+    broker = _mapping(status.get("broker_lifecycle"))
+    diagnostics = _mapping(status.get("registry_truth_diagnostics"))
+    broker_truth_status = _mapping(status.get("broker_truth_status")) or _mapping(status.get("broker_truth"))
+    if not broker_truth_status:
+        broker_truth_status = {
+            "account": "DUM882026",
+            "fresh": broker.get("broker_truth_fresh") is True,
+            "positions_complete": broker.get("broker_positions_complete", True),
+            "open_orders_complete": broker.get("broker_open_orders_complete", True),
+            "open_order_count": _broker_open_order_count(status),
+            "unknown_open_order_count": diagnostics.get("unknown_open_order_count")
+            or diagnostics.get("unknown_broker_open_order_count")
+            or broker.get("unknown_open_order_count")
+            or 0,
+            "live_money_eligible": broker.get("live_money_eligible") is True,
+            "paper_proof_invoked": broker.get("paper_proof_invoked") is True,
+            "positions": [
+                {
+                    "security_type": "FUT",
+                    "symbol": "MNQ",
+                    "quantity": diagnostics.get("track_b_managed_futures_position_count")
+                    or broker.get("track_b_broker_position_count")
+                    or 0,
+                }
+            ],
+        }
+    authority = classify_fresh_complete_clean_broker_truth(
+        broker_truth_status=broker_truth_status,
+        positions_snapshot=_mapping(status.get("broker_positions_snapshot")),
+        open_orders_snapshot=_mapping(status.get("broker_open_orders_snapshot")),
+        reconciliation=broker,
+        open_order_truth=_mapping(status.get("open_order_truth")),
+        status=status,
+        expected_account_id="DUM882026",
+    )
+    return authority.to_dict()
 
 
 def _broker_open_order_count(status: Mapping[str, Any]) -> int:

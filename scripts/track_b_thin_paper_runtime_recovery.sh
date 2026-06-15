@@ -18,7 +18,7 @@ STATE_DIR="${REPO_ROOT}/outputs/track_b_execution_core/runtime_recovery"
 ARTIFACT_PATH="${STATE_DIR}/latest_thin_paper_runtime_recovery.json"
 START_SCRIPT="${REPO_ROOT}/scripts/track_b_start_paper_stack.sh"
 PROFILE="${TRACK_B_PAPER_STACK_PROFILE:-mnq_mes_full_session_active_evidence}"
-EXPECTED_LANES="${TRACK_B_PAPER_EXPECTED_LANE_COUNT:-15}"
+EXPECTED_LANES="${TRACK_B_PAPER_EXPECTED_LANE_COUNT:-43}"
 EXPECTED_EXECUTION_MODE="${TRACK_B_PAPER_EXPECTED_EXECUTION_MODE:-IBKR_PAPER_BRIDGE}"
 MODE="${1:-start}"
 
@@ -93,6 +93,10 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
+from mgc_v05l.execution_core.track_b_broker_startup_authority import (
+    classify_fresh_complete_clean_broker_truth,
+)
+
 repo_root = Path(sys.argv[1])
 artifact_path = Path(sys.argv[2])
 positions_path = repo_root / "outputs/reports/ibkr_read_only_verification/ibkr_positions_snapshot.json"
@@ -108,48 +112,14 @@ def load(path: Path) -> dict:
 positions = load(positions_path)
 orders = load(orders_path)
 status = load(status_path)
-blockers = []
-if positions.get("ok") is not True or positions.get("positions_complete") is not True:
-    blockers.append("broker_positions_unavailable")
-if orders.get("ok") is not True or orders.get("open_orders_complete") is not True:
-    blockers.append("broker_open_orders_unavailable")
-if str(positions.get("selected_account_id") or positions.get("account") or "") != "DUM882026":
-    blockers.append("wrong_account")
-if str(orders.get("selected_account_id") or orders.get("account") or "") != "DUM882026":
-    blockers.append("wrong_order_account")
-track_b_positions = []
-for row in positions.get("positions") or []:
-    if str(row.get("security_type") or row.get("secType") or "").upper() != "FUT":
-        continue
-    symbol = str(row.get("symbol") or "").upper()
-    local_symbol = str(row.get("local_symbol") or row.get("localSymbol") or "").upper()
-    if symbol not in {"MES", "MNQ"} and not (local_symbol.startswith("MES") or local_symbol.startswith("MNQ")):
-        continue
-    try:
-        qty = float(row.get("quantity") or row.get("position") or 0)
-    except (TypeError, ValueError):
-        blockers.append("broker_position_quantity_unparseable")
-        continue
-    if abs(qty) > 0:
-        track_b_positions.append({"symbol": symbol, "local_symbol": local_symbol, "quantity": qty})
-open_orders = list(orders.get("open_orders") or [])
-try:
-    open_order_count = int(orders.get("open_order_count") if orders.get("open_order_count") is not None else len(open_orders))
-except (TypeError, ValueError):
-    open_order_count = len(open_orders)
-unknown_order_count = 0
-for key in ("unknown_open_order_count", "unknown_order_count", "unknown_broker_open_order_count"):
-    try:
-        unknown_order_count = max(unknown_order_count, int(status.get(key) or 0), int(orders.get(key) or 0))
-    except (TypeError, ValueError):
-        unknown_order_count = max(unknown_order_count, 1)
-if track_b_positions:
-    blockers.append("track_b_futures_positions_present")
-if open_order_count != 0 or open_orders:
-    blockers.append("broker_open_orders_present")
-if unknown_order_count != 0:
-    blockers.append("unknown_orders_present")
-classification = "BROKER_TRUTH_CLEAN" if not blockers else "BROKER_TRUTH_NOT_CLEAN_RECOVERY_BLOCKED"
+authority = classify_fresh_complete_clean_broker_truth(
+    broker_truth_status=status,
+    positions_snapshot=positions,
+    open_orders_snapshot=orders,
+    expected_account_id="DUM882026",
+)
+blockers = list(authority.blockers)
+classification = "BROKER_TRUTH_CLEAN" if authority.broker_truth_clean else "BROKER_TRUTH_NOT_CLEAN_RECOVERY_BLOCKED"
 payload = {
     "schema_version": "track_b_thin_paper_runtime_recovery_broker_truth_check_v1",
     "generated_at": datetime.now(timezone.utc).isoformat(),
@@ -157,9 +127,10 @@ payload = {
     "broker_positions_path": str(positions_path),
     "broker_open_orders_path": str(orders_path),
     "broker_truth_status_path": str(status_path),
-    "track_b_futures_positions": track_b_positions,
-    "broker_open_order_count": open_order_count,
-    "unknown_order_count": unknown_order_count,
+    "broker_startup_authority": authority.to_dict(),
+    "track_b_futures_positions": [dict(row) for row in authority.track_b_futures_positions],
+    "broker_open_order_count": authority.broker_open_order_count,
+    "unknown_order_count": authority.unknown_open_order_count,
     "blockers": blockers,
     "paper_only": True,
     "live_money_eligible": False,

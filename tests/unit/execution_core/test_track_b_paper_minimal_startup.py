@@ -138,6 +138,7 @@ def _seed_fresh_ibkr_read_only_truth(
     *,
     mes_qty: str = "0.0",
     mnq_qty: str = "0.0",
+    extra_positions: list[dict] | None = None,
     open_orders: list[dict] | None = None,
     unknown_orders: int = 0,
 ) -> None:
@@ -171,6 +172,7 @@ def _seed_fresh_ibkr_read_only_truth(
                     "security_type": "STK",
                     "quantity": "900.0",
                 },
+                *(extra_positions or []),
             ],
         },
     )
@@ -222,6 +224,28 @@ def test_flat_broker_known_orders_price_profile_paper_route_qty_cap_allows_submi
     assert payload["account_id"] == "DUM882026"
     assert payload["configured_instruments"] == ["MES", "MNQ"]
     assert all(row["available"] for row in payload["price_availability"])
+
+
+def test_batch1_track_b_futures_position_blocks_minimal_startup(tmp_path: Path) -> None:
+    config = _seed_minimal_ready(tmp_path)
+    _seed_fresh_ibkr_read_only_truth(
+        tmp_path,
+        config,
+        extra_positions=[
+            {
+                "account_id": "DUM882026",
+                "symbol": "MGC",
+                "local_symbol": "MGCQ6",
+                "security_type": "FUT",
+                "quantity": "1.0",
+            }
+        ],
+    )
+
+    payload = _classification(tmp_path)
+
+    assert payload["classification"] == "PAPER_MINIMAL_STARTUP_BLOCKED"
+    assert "broker_positions_present" in _codes(payload)
 
 
 def test_live_money_true_blocks(tmp_path: Path) -> None:

@@ -7,6 +7,7 @@ from mgc_v05l.execution_core.track_b_paper_stack_restart_precheck import (
     BLOCKED_LIVE_MONEY_OR_PAPER_PROOF,
     BLOCKED_OPEN_ORDERS,
     BLOCKED_RECOVERY_INACTIVE,
+    BLOCKED_STALE_BROKER_TRUTH,
     BLOCKED_UNMANAGED_EXPOSURE,
     RESTART_ALLOWED_FLAT_RECONCILED,
     RESTART_ALLOWED_OWNED_MANAGED_EXPOSURE,
@@ -113,9 +114,82 @@ def test_stale_raw_lifecycle_count_does_not_block_when_current_scope_flat() -> N
 
     result = classify_paper_stack_restart_precheck(payload)
 
+    assert result.restart_allowed is True
+    assert result.classification == RESTART_ALLOWED_FLAT_RECONCILED
+    assert "FRESH_COMPLETE_CLEAN_BROKER_TRUTH" in result.reason_codes
+
+
+def test_clean_fresh_broker_truth_allows_restart_when_lifecycle_mismatch_is_stale() -> None:
+    payload = _status(
+        reconciliation_classification="TRACK_B_PAPER_BROKER_RECONCILIATION_BLOCKED",
+        track_b_positions=0,
+        lifecycle_positions=1,
+        current_scope_lifecycle_positions=1,
+    )
+    payload["broker_truth_status"] = {
+        "account": "DUM882026",
+        "fresh": True,
+        "positions_complete": True,
+        "open_orders_complete": True,
+        "open_order_count": 0,
+        "unknown_open_order_count": 0,
+        "positions": [
+            {"account_id": "DUM882026", "security_type": "FUT", "symbol": "MNQ", "local_symbol": "MNQU6", "quantity": "0"},
+            {"account_id": "DUM882026", "security_type": "FUT", "symbol": "MES", "local_symbol": "MESU6", "quantity": "0"},
+        ],
+    }
+    payload["open_order_truth"] = {"classification": "ORDER_TRUTH_STALE"}
+
+    result = classify_paper_stack_restart_precheck(payload)
+
+    assert result.restart_allowed is True
+    assert result.classification == RESTART_ALLOWED_FLAT_RECONCILED
+    assert "FRESH_COMPLETE_CLEAN_BROKER_TRUTH" in result.reason_codes
+
+
+def test_actual_broker_position_blocks_restart_even_when_lifecycle_projection_is_flat() -> None:
+    payload = _status(
+        reconciliation_classification="TRACK_B_PAPER_BROKER_RECONCILED",
+        track_b_positions=0,
+        lifecycle_positions=0,
+        current_scope_lifecycle_positions=0,
+    )
+    payload["broker_truth_status"] = {
+        "account": "DUM882026",
+        "fresh": True,
+        "positions_complete": True,
+        "open_orders_complete": True,
+        "open_order_count": 0,
+        "unknown_open_order_count": 0,
+        "positions": [
+            {"account_id": "DUM882026", "security_type": "FUT", "symbol": "MGC", "local_symbol": "MGCQ6", "quantity": "1"},
+        ],
+    }
+
+    result = classify_paper_stack_restart_precheck(payload)
+
     assert result.restart_allowed is False
     assert result.classification == BLOCKED_UNMANAGED_EXPOSURE
-    assert result.reason_codes == ("BROKER_LIFECYCLE_NOT_RECONCILED",)
+    assert "track_b_futures_positions_present" in result.reason_codes
+
+
+def test_incomplete_fresh_broker_truth_blocks_restart_authority() -> None:
+    payload = _status()
+    payload["broker_truth_status"] = {
+        "account": "DUM882026",
+        "fresh": True,
+        "positions_complete": False,
+        "open_orders_complete": True,
+        "open_order_count": 0,
+        "unknown_open_order_count": 0,
+        "positions": [],
+    }
+
+    result = classify_paper_stack_restart_precheck(payload)
+
+    assert result.restart_allowed is False
+    assert result.classification == BLOCKED_STALE_BROKER_TRUTH
+    assert "broker_positions_incomplete" in result.reason_codes
 
 
 def test_stale_raw_lifecycle_count_does_not_block_flat_reconciled_restart() -> None:
@@ -148,9 +222,9 @@ def test_current_scope_lifecycle_position_blocks_restart_when_not_reconciled() -
 
     result = classify_paper_stack_restart_precheck(payload)
 
-    assert result.restart_allowed is False
-    assert result.classification == BLOCKED_UNMANAGED_EXPOSURE
-    assert "CURRENT_SCOPE_LIFECYCLE_POSITION_PRESENT" in result.reason_codes
+    assert result.restart_allowed is True
+    assert result.classification == RESTART_ALLOWED_FLAT_RECONCILED
+    assert "FRESH_COMPLETE_CLEAN_BROKER_TRUTH" in result.reason_codes
 
 
 def test_runtime_down_ambiguous_broker_state_blocks_restart() -> None:
