@@ -247,6 +247,7 @@ def build_track_b_managed_position_registry(
         terminal_records=terminal_records,
         source_stale=source_stale,
     )
+    managed_positions = _repair_owner_confirmed_timebox_due_positions(managed_positions)
     classification = _overall_classification(
         managed_positions=managed_positions,
         broker_positions=broker_positions,
@@ -1114,6 +1115,73 @@ def _overall_classification(
     return classifications[0] if classifications else NO_MANAGED_POSITIONS
 
 
+def _repair_owner_confirmed_timebox_due_positions(managed_positions: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    repaired: list[dict[str, Any]] = []
+    for row in managed_positions:
+        item = dict(row)
+        if _owner_confirmed_timebox_due(item):
+            signed_broker_qty = _decimal(
+                _mapping(item.get("broker_position")).get("quantity") or item.get("signed_broker_qty")
+            )
+            item["classification"] = OPEN_MANAGED_EXIT_DUE
+            item["exit_due"] = True
+            item["exit_due_state"] = "EXIT_DUE"
+            item["required_close_action"] = _required_close_action(side=item.get("side"), signed_broker_qty=signed_broker_qty)
+            item["required_close_quantity"] = (
+                _decimal_display(abs(signed_broker_qty)) if signed_broker_qty is not None else item.get("quantity")
+            )
+            item["stale_review_due_repair"] = {
+                "classification": "OWNER_CONFIRMED_TIMEBOX_DUE_SUPERSEDES_STALE_REVIEW",
+                "reason": (
+                    "Current broker-backed owner projection has enough policy/bar evidence for timebox due; "
+                    "stale lifecycle review remains diagnostic."
+                ),
+                "previous_classification": row.get("classification"),
+            }
+            item["attention_required"] = False
+        repaired.append(item)
+    return repaired
+
+
+def _owner_confirmed_timebox_due(row: Mapping[str, Any]) -> bool:
+    if row.get("projection_authority_owner_confirmed") is not True:
+        return False
+    if row.get("exit_due") is True or str(row.get("exit_due_state") or "").upper() == "EXIT_DUE":
+        return False
+    if str(row.get("classification") or "") not in {REVIEW_REQUIRED, STALE_MANAGED_POSITION_EVIDENCE}:
+        return False
+    if row.get("close_order_state"):
+        return False
+    broker = _mapping(row.get("broker_position"))
+    lifecycle = _mapping(row.get("lifecycle_position"))
+    if not broker or not lifecycle:
+        return False
+    if not _account_matches(lifecycle, broker) or not _contract_identity_matches(lifecycle, broker):
+        return False
+    signed_lifecycle_qty = _signed_lifecycle_quantity(lifecycle)
+    signed_broker_qty = _decimal(broker.get("quantity"))
+    if signed_lifecycle_qty is None or signed_broker_qty is None or signed_lifecycle_qty != signed_broker_qty:
+        return False
+    policy = str(row.get("managed_exit_policy_id") or _managed_exit_policy_id(lifecycle, None, {}, None) or "")
+    required = _required_completed_5m_bars_for_policy(policy)
+    bars_since_entry = _int_or_none(row.get("bars_since_entry"))
+    return required is not None and bars_since_entry is not None and bars_since_entry >= required
+
+
+def _required_completed_5m_bars_for_policy(policy: str) -> int | None:
+    return {
+        "PAPER_DIAGNOSTIC_TIME_BOXED_3X5M_EXIT_V1": 3,
+        "FORCED_SESSION_SEGMENT_LOCAL_EXIT_V1": 3,
+        "CHANGEOVER_0300_LONG_TIMEBOX_6H_EXIT_V1": 72,
+        "CHANGEOVER_0700_LONG_TIMEBOX_4H_EXIT_V1": 48,
+        "US_SESSION_CONTINUATION_TIMEBOX_2H_EXIT_V1": 24,
+        "US_ACTIVE_EVIDENCE_TIMEBOX_60M_EXIT_V1": 12,
+        "GLOBEX_ACTIVE_EVIDENCE_TIMEBOX_15M_EXIT_V1": 3,
+        "GLOBEX_ACTIVE_EVIDENCE_TIMEBOX_60M_EXIT_V1": 3,
+        "GLOBEX_REOPEN_FIRST_CANDLE_60M_TIMEBOX_SHADOW_EXIT_V1": 12,
+    }.get(policy)
+
+
 def _review_required_position_scope(
     *,
     reconciliation: Mapping[str, Any],
@@ -1360,20 +1428,10 @@ def _exit_due(
     if classification != OPEN_MANAGED_MATCHED:
         return False
     policy = str(_managed_exit_policy_id(lifecycle, None, lifecycle_report, None) or "")
-    required_by_policy = {
-        "PAPER_DIAGNOSTIC_TIME_BOXED_3X5M_EXIT_V1": 3,
-        "FORCED_SESSION_SEGMENT_LOCAL_EXIT_V1": 3,
-        "CHANGEOVER_0300_LONG_TIMEBOX_6H_EXIT_V1": 72,
-        "CHANGEOVER_0700_LONG_TIMEBOX_4H_EXIT_V1": 48,
-        "US_SESSION_CONTINUATION_TIMEBOX_2H_EXIT_V1": 24,
-        "US_ACTIVE_EVIDENCE_TIMEBOX_60M_EXIT_V1": 12,
-        "GLOBEX_ACTIVE_EVIDENCE_TIMEBOX_15M_EXIT_V1": 3,
-        "GLOBEX_ACTIVE_EVIDENCE_TIMEBOX_60M_EXIT_V1": 3,
-        "GLOBEX_REOPEN_FIRST_CANDLE_60M_TIMEBOX_SHADOW_EXIT_V1": 12,
-    }
-    if policy not in required_by_policy:
+    required_by_policy = _required_completed_5m_bars_for_policy(policy)
+    if required_by_policy is None:
         return False
-    required = _int_or_none((lifecycle or {}).get("required_completed_5m_bars")) or required_by_policy[policy]
+    required = _int_or_none((lifecycle or {}).get("required_completed_5m_bars")) or required_by_policy
     return bars_since_entry is not None and bars_since_entry >= required
 
 

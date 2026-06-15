@@ -768,6 +768,112 @@ def test_exit_due_survives_stale_dependency_freshness_when_current_owner_is_exac
     assert position["trade_id"] == "trade_mnq_due"
 
 
+def test_owner_confirmed_timebox_due_supersedes_stale_lifecycle_review(tmp_path: Path) -> None:
+    lifecycle = {
+        **_lifecycle_position(
+            policy="GLOBEX_ACTIVE_EVIDENCE_TIMEBOX_15M_EXIT_V1",
+            bars_since_fill=0,
+            lifecycle_id="life-stale-review-due",
+        ),
+        "trade_id": "trade-stale-review-due",
+        "bars_since_fill": None,
+    }
+    _seed_base(tmp_path, broker_positions=[_broker_position()], lifecycle_positions=[lifecycle])
+    _write_lifecycle_report(
+        tmp_path,
+        lifecycle_id=lifecycle["lifecycle_id"],
+        policy="GLOBEX_ACTIVE_EVIDENCE_TIMEBOX_15M_EXIT_V1",
+        bars_since_fill=0,
+        review_required=True,
+        paper_lifecycle_classification="TRACK_B_STRATEGY_PAPER_REVIEW_REQUIRED",
+        primary_blocker="Existing OPEN_MANAGED lifecycle has no broker-confirmed entry fill.",
+    )
+    _write_phase1_5m_bars(
+        tmp_path,
+        symbol="MNQ",
+        bar_ends=[
+            "2026-05-22T16:25:00+00:00",
+            "2026-05-22T16:30:00+00:00",
+            "2026-05-22T16:35:00+00:00",
+        ],
+    )
+
+    payload = build_track_b_managed_position_registry(
+        config=TrackBManagedPositionRegistryConfig(repo_root=tmp_path),
+        now=NOW,
+    )
+
+    position = payload["managed_positions"][0]
+    assert payload["classification"] == OPEN_MANAGED_EXIT_DUE
+    assert position["projection_authority_owner_confirmed"] is True
+    assert position["bars_since_entry"] == 3
+    assert position["exit_due"] is True
+    assert position["exit_due_state"] == "EXIT_DUE"
+    assert position["required_close_action"] == "BUY"
+    assert position["required_close_quantity"] == "1"
+    assert (
+        position["stale_review_due_repair"]["classification"]
+        == "OWNER_CONFIRMED_TIMEBOX_DUE_SUPERSEDES_STALE_REVIEW"
+    )
+    assert (
+        position["review_required_position"]["primary_blocker"]
+        == "Existing OPEN_MANAGED lifecycle has no broker-confirmed entry fill."
+    )
+
+
+def test_stale_lifecycle_review_without_owner_confirmation_does_not_become_due() -> None:
+    row = {
+        "classification": REVIEW_REQUIRED,
+        "managed_exit_policy_id": "GLOBEX_ACTIVE_EVIDENCE_TIMEBOX_15M_EXIT_V1",
+        "bars_since_entry": 3,
+        "broker_position": _broker_position(),
+        "lifecycle_position": _lifecycle_position(policy="GLOBEX_ACTIVE_EVIDENCE_TIMEBOX_15M_EXIT_V1"),
+    }
+
+    repaired = managed_position_registry_module._repair_owner_confirmed_timebox_due_positions([row])
+
+    assert repaired[0]["classification"] == REVIEW_REQUIRED
+    assert repaired[0].get("exit_due") is not True
+    assert "stale_review_due_repair" not in repaired[0]
+
+
+def test_owner_confirmed_timebox_due_supersedes_stale_dependency_classification() -> None:
+    row = {
+        "classification": STALE_MANAGED_POSITION_EVIDENCE,
+        "projection_authority_owner_confirmed": True,
+        "managed_exit_policy_id": "GLOBEX_ACTIVE_EVIDENCE_TIMEBOX_15M_EXIT_V1",
+        "bars_since_entry": 3,
+        "broker_position": _broker_position(),
+        "lifecycle_position": _lifecycle_position(policy="GLOBEX_ACTIVE_EVIDENCE_TIMEBOX_15M_EXIT_V1"),
+    }
+
+    repaired = managed_position_registry_module._repair_owner_confirmed_timebox_due_positions([row])
+
+    assert repaired[0]["classification"] == OPEN_MANAGED_EXIT_DUE
+    assert repaired[0]["exit_due"] is True
+    assert repaired[0]["required_close_action"] == "BUY"
+    assert repaired[0]["required_close_quantity"] == "1"
+
+
+def test_owner_confirmed_timebox_due_repair_keeps_account_mismatch_in_review() -> None:
+    broker = {**_broker_position(), "account_id": "OTHER_ACCOUNT"}
+    lifecycle = _lifecycle_position(policy="GLOBEX_ACTIVE_EVIDENCE_TIMEBOX_15M_EXIT_V1")
+    row = {
+        "classification": REVIEW_REQUIRED,
+        "projection_authority_owner_confirmed": True,
+        "managed_exit_policy_id": "GLOBEX_ACTIVE_EVIDENCE_TIMEBOX_15M_EXIT_V1",
+        "bars_since_entry": 3,
+        "broker_position": broker,
+        "lifecycle_position": lifecycle,
+    }
+
+    repaired = managed_position_registry_module._repair_owner_confirmed_timebox_due_positions([row])
+
+    assert repaired[0]["classification"] == REVIEW_REQUIRED
+    assert repaired[0].get("exit_due") is not True
+    assert "stale_review_due_repair" not in repaired[0]
+
+
 def test_stale_dependency_does_not_invent_exit_due_without_bar_evidence(tmp_path: Path) -> None:
     lifecycle = {**_lifecycle_position(bars_since_fill=1), "trade_id": "trade_mnq_not_due"}
     _seed_base(tmp_path, broker_positions=[_broker_position()], lifecycle_positions=[lifecycle])
