@@ -479,10 +479,11 @@ def _classify_readiness(
             missing_linkage.append("lifecycle_id")
         if not ownership_link:
             missing_linkage.append("manifest_id_or_ownership_id_or_trade_id")
-        return _blocked(
-            MODIFY_IN_PLACE_BLOCKED_NOT_MANAGED_ORDER,
-            f"Managed order is missing lifecycle/manifest/ownership linkage: {', '.join(missing_linkage)}.",
-        )
+        if target.get("matching_position_count", 0) <= 0:
+            return _blocked(
+                MODIFY_IN_PLACE_BLOCKED_NOT_MANAGED_ORDER,
+                f"Managed order is missing lifecycle/manifest/ownership linkage: {', '.join(missing_linkage)}.",
+            )
     mismatch = _identity_mismatch(config=config, row=order, require_limit=True)
     if mismatch:
         return _blocked(MODIFY_IN_PLACE_BLOCKED_ORDER_IDENTITY_MISMATCH, mismatch)

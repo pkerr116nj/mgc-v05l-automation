@@ -407,6 +407,27 @@ def test_lifecycle_plus_ownership_id_is_sufficient_without_manifest(tmp_path: Pa
     assert report["target_evidence"]["managed_order_match"]["ownership_id"] == "owner_mnq"
 
 
+def test_exact_broker_backed_close_can_modify_without_internal_linkage(tmp_path: Path) -> None:
+    _seed_authorities(tmp_path)
+    managed_path = tmp_path / "outputs/track_b_execution_core/managed_orders/latest_managed_orders.json"
+    managed_payload = json.loads(managed_path.read_text(encoding="utf-8"))
+    managed_payload["managed_orders"][0]["lifecycle_id"] = None
+    managed_payload["managed_orders"][0]["manifest_id"] = None
+    managed_payload["managed_orders"][0]["ownership_id"] = None
+    managed_path.write_text(json.dumps(managed_payload), encoding="utf-8")
+    plan_path = tmp_path / "outputs/track_b_execution_core/managed_orders/latest_order_adjustment_plan.json"
+    plan_payload = json.loads(plan_path.read_text(encoding="utf-8"))
+    plan_payload["plans"][0]["lifecycle_id"] = None
+    plan_payload["plans"][0]["manifest_id"] = None
+    plan_payload["plans"][0]["ownership_id"] = None
+    plan_path.write_text(json.dumps(plan_payload), encoding="utf-8")
+
+    report = _run(tmp_path)
+
+    assert report["classification"] == MODIFY_IN_PLACE_DRY_RUN_READY
+    assert report["target_evidence"]["matching_position_count"] > 0
+
+
 def test_cli_writes_dry_run_audit(tmp_path: Path, capsys) -> None:
     _seed_authorities(tmp_path, generated_at=datetime.now(UTC).isoformat())
 
