@@ -358,6 +358,18 @@ def test_runtime_supervisor_stale_is_diagnostic_for_exact_modify(tmp_path: Path)
     assert report["broker_mutation_attempted"] is False
 
 
+def test_self_recover_manual_review_is_diagnostic_for_exact_modify(tmp_path: Path) -> None:
+    _seed_authorities(tmp_path, self_recover_classification="MANUAL_TWS_REVIEW_REQUIRED")
+
+    report = _run(tmp_path)
+
+    assert report["classification"] == MODIFY_IN_PLACE_DRY_RUN_READY
+    diagnostics = report["shared_truth_evidence"]["diagnostic_only_blockers"]
+    assert any("MANUAL_TWS_REVIEW_REQUIRED" in item for item in diagnostics)
+    assert not report["shared_truth_evidence"]["blockers"]
+    assert report["broker_mutation_attempted"] is False
+
+
 def test_lifecycle_plus_ownership_id_is_sufficient_without_manifest(tmp_path: Path) -> None:
     _seed_authorities(tmp_path)
     managed_path = tmp_path / "outputs/track_b_execution_core/managed_orders/latest_managed_orders.json"
@@ -517,6 +529,7 @@ def _seed_authorities(
     managed_positions: list[dict] | None = None,
     live_money_eligible: bool = False,
     runtime_supervisor_classification: str = "SUPERVISOR_NO_ACTION_NEEDED",
+    self_recover_classification: str = "NO_ACTION_NEEDED",
 ) -> None:
     broker_positions = [_position()] if broker_positions is None else broker_positions
     managed_positions = [_managed_position()] if managed_positions is None else managed_positions
@@ -574,7 +587,7 @@ def _seed_authorities(
             "classification": runtime_supervisor_classification
         },
         "outputs/track_b_execution_core/self_recover/latest_self_recover_rules.json": {
-            "classification": "NO_ACTION_NEEDED"
+            "classification": self_recover_classification
         },
         "outputs/track_b_execution_core/runtime_resume/latest_runtime_resume_semantics.json": {
             "classification": "RESUME_BLOCKED_OPEN_ORDER"

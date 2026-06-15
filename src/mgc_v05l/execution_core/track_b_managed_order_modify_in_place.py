@@ -101,6 +101,9 @@ _MODIFY_DIAGNOSTIC_ONLY_CLASSIFICATIONS: dict[str, set[str]] = {
         "REPEATED_BROKER_LEASE_FAILURE",
         "OPERATOR_ACK_REQUIRED",
     },
+    "self_recover_rules": {
+        "MANUAL_TWS_REVIEW_REQUIRED",
+    },
 }
 
 
@@ -577,11 +580,14 @@ def _shared_truth_evidence(*, config: ManagedOrderModifyInPlaceConfig, now: date
         )
     if classifications["self_recover_rules"] in {
         "OPERATOR_REVIEW_REQUIRED",
-        "MANUAL_TWS_REVIEW_REQUIRED",
         "DO_NOT_RECOVER_UNSAFE_STATE",
         "REFRESH_SHARED_TRUTH",
     }:
         blockers.append(f"Self-Recover Rules block modify-in-place: {classifications['self_recover_rules']}.")
+    if classifications["self_recover_rules"] in _MODIFY_DIAGNOSTIC_ONLY_CLASSIFICATIONS["self_recover_rules"]:
+        diagnostic_only_blockers.append(
+            f"Self-Recover Rules are diagnostic for exact modify-in-place: {classifications['self_recover_rules']}."
+        )
     if classifications["runtime_resume_semantics"] in _MODIFY_DIAGNOSTIC_ONLY_CLASSIFICATIONS["runtime_resume_semantics"]:
         diagnostic_only_blockers.append(
             f"Runtime Resume Semantics is diagnostic for modify-in-place: {classifications['runtime_resume_semantics']}."
