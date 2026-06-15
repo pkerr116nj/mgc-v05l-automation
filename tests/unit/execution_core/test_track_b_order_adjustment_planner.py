@@ -191,7 +191,7 @@ def test_reprice_prefers_bid_ask_over_aggressive_fallback(tmp_path: Path) -> Non
     assert policy["passive_execution_allowed"] is False
 
 
-def test_suspicious_sentinel_order_requires_review_not_auto_replace(tmp_path: Path) -> None:
+def test_exact_sentinel_suspicious_order_can_modify_in_place(tmp_path: Path) -> None:
     _seed_base(
         tmp_path,
         managed_orders=[
@@ -210,11 +210,13 @@ def test_suspicious_sentinel_order_requires_review_not_auto_replace(tmp_path: Pa
 
     payload = _build(tmp_path)
 
-    assert payload["classification"] == REVIEW_REQUIRED_SUSPICIOUS_STATE
+    assert payload["classification"] == MODIFY_IN_PLACE_ELIGIBLE
     plan = payload["plans"][0]
-    assert plan["classification"] == REVIEW_REQUIRED_SUSPICIOUS_STATE
-    assert plan["recommended_operator_action"] == "OPERATOR_REVIEW_OR_MANUAL_TWS_PATH"
+    assert plan["classification"] == MODIFY_IN_PLACE_ELIGIBLE
+    assert plan["recommended_operator_action"] == "MODIFY_IN_PLACE_CANDIDATE"
     assert "sentinel_filled_quantity" in plan["suspicious_reasons"]
+    assert plan["tolerated_ibkr_status_gaps"] == ["missing_remaining_quantity", "sentinel_filled_quantity"]
+    assert plan["blocking_suspicious_reasons"] == []
 
 
 def test_known_working_close_tolerates_ibkr_sentinel_status_gap(tmp_path: Path) -> None:

@@ -230,7 +230,7 @@ def _plan_for_managed_order(
         classification = BROKER_FLAT_NO_REPLACE
         recommended_action = "REVIEW_BROKER_FLAT_WITH_OPEN_CLOSE"
         rationale = "Broker is flat while a close order appears working; replacement is forbidden."
-    elif blocking_suspicious_reasons or source_classification == CLOSE_ORDER_SUSPICIOUS:
+    elif blocking_suspicious_reasons:
         classification = REVIEW_REQUIRED_SUSPICIOUS_STATE
         recommended_action = "OPERATOR_REVIEW_OR_MANUAL_TWS_PATH"
         rationale = "Suspicious order evidence requires review; automatic replacement is not planned."
@@ -251,7 +251,7 @@ def _plan_for_managed_order(
         classification = ORDER_NOT_FOUND if position_open else NO_ACTION_NEEDED
         recommended_action = "REVIEW_REQUIRED" if position_open else "WAIT"
         rationale = "Broker position exists without a current managed close order."
-    elif source_classification in {CLOSE_ORDER_MODIFIABLE, CLOSE_ORDER_CANCEL_REPLACE_REQUIRED} or (
+    elif source_classification in {CLOSE_ORDER_MODIFIABLE, CLOSE_ORDER_CANCEL_REPLACE_REQUIRED, CLOSE_ORDER_SUSPICIOUS} or (
         source_classification == WORKING_CLOSE_ORDER and marketability.get("marketable") is not True
     ):
         if _identity_complete(identity):
@@ -387,7 +387,7 @@ def _tolerated_ibkr_status_gaps(
     tolerable = {"sentinel_filled_quantity", "missing_remaining_quantity"}
     reasons = {str(reason) for reason in suspicious_reasons}
     if (
-        source_classification in {WORKING_CLOSE_ORDER, CLOSE_ORDER_CANCEL_REPLACE_REQUIRED}
+        source_classification in {WORKING_CLOSE_ORDER, CLOSE_ORDER_CANCEL_REPLACE_REQUIRED, CLOSE_ORDER_SUSPICIOUS}
         and position_open
         and _identity_complete(identity)
         and reasons
