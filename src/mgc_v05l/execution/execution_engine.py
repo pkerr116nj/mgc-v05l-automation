@@ -57,6 +57,7 @@ class ExecutionEngine:
 
     def register_intent(self, intent: OrderIntent) -> bool:
         """Return whether the order intent is new and accepted for submission."""
+        self._reconcile_stale_pending_state_for_intent(intent)
         if intent.order_intent_id in self._pending_order_ids:
             return False
         if intent.is_entry and self._has_pending_entry():
@@ -68,6 +69,19 @@ class ExecutionEngine:
         self._pending_order_ids.add(intent.order_intent_id)
         self._pending_intent_types.add(intent.intent_type)
         return True
+
+    def _reconcile_stale_pending_state_for_intent(self, intent: OrderIntent) -> None:
+        hook = getattr(self._broker, "reconcile_stale_pending_state_for_intent", None)
+        if not callable(hook):
+            return
+        try:
+            result = hook(intent=intent, pending_executions=self.pending_executions())
+        except Exception:
+            return
+        if not isinstance(result, dict):
+            return
+        for order_intent_id in result.get("clear_pending_intent_ids") or []:
+            self.clear_intent(str(order_intent_id))
 
     def submit_intent(
         self,

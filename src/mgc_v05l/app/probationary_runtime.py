@@ -13022,6 +13022,60 @@ class _IbkrPaperBridgeRuntimeBroker:
             "bridge_proxy_mode": self._bridge_adapter.get("bridge_proxy_mode"),
         }
 
+    def reconcile_stale_pending_state_for_intent(
+        self,
+        *,
+        intent: OrderIntent,
+        pending_executions: Sequence[PendingExecution],
+    ) -> dict[str, Any]:
+        if not intent.is_entry or not pending_executions:
+            return {"classification": "NO_PENDING_ENTRY_RECONCILIATION_NEEDED", "clear_pending_intent_ids": []}
+        snapshot = self.load_snapshot(force_refresh=True)
+        health = dict(snapshot.get("health") or {})
+        orders_fresh = _ibkr_runtime_health_ok(health, "orders_fresh")
+        positions_fresh = _ibkr_runtime_health_ok(health, "positions_fresh")
+        matching_position = self._matching_broker_truth_position(snapshot=snapshot)
+        matching_open_orders = self._matching_broker_truth_open_orders(snapshot=snapshot)
+        matching_position_quantity = _signed_ibkr_runtime_position_quantity(matching_position or {})
+        unknown_open_order_count = _ibkr_runtime_unknown_open_order_count(snapshot)
+        clearable = (
+            orders_fresh
+            and positions_fresh
+            and matching_position_quantity == 0
+            and not matching_open_orders
+            and unknown_open_order_count == 0
+        )
+        result = {
+            "classification": "BROKER_TRUTH_CLEAN_PENDING_STATE_DIAGNOSTIC_ONLY"
+            if clearable
+            else "BROKER_TRUTH_NOT_CLEAN_PENDING_STATE_RETAINED",
+            "route_destination": self.route_destination,
+            "lane_id": self._lane_id,
+            "source_symbol": self._source_symbol,
+            "orders_fresh": orders_fresh,
+            "positions_fresh": positions_fresh,
+            "matching_position_quantity": matching_position_quantity,
+            "matching_open_order_count": len(matching_open_orders),
+            "unknown_open_order_count": unknown_open_order_count,
+            "pending_execution_count": len(list(pending_executions)),
+            "diagnostic_only": clearable,
+            "clear_pending_intent_ids": [],
+        }
+        if not clearable:
+            return result
+        clear_ids = [
+            pending.intent.order_intent_id
+            for pending in pending_executions
+            if pending.intent.is_entry
+        ]
+        self._open_order_ids = []
+        result["clear_pending_intent_ids"] = clear_ids
+        self._last_submit_context = {
+            **self._last_submit_context,
+            "pending_state_reconciliation": dict(result),
+        }
+        return result
+
     def restore_state(
         self,
         *,
@@ -13385,6 +13439,7 @@ def _load_ibkr_runtime_read_only_truth_snapshot(repo_root: Path) -> dict[str, An
         },
         "orders": {
             "open_rows": list(open_orders_payload.get("open_rows") or open_orders_payload.get("open_orders") or []),
+            "unknown_open_order_count": _unknown_open_order_count_from_payload(open_orders_payload),
         },
         "portfolio": {
             "positions": list(positions_payload.get("positions") or []),
@@ -13445,7 +13500,7 @@ def _bridge_verified_truth_snapshot(report: dict[str, Any]) -> dict[str, Any]:
             "detail": "broker truth verified by submit-capable IBKR PAPER bridge result",
             "mismatch_count": 0,
         },
-        "orders": {"open_rows": open_orders},
+        "orders": {"open_rows": open_orders, "unknown_open_order_count": 0},
         "portfolio": {"positions": positions},
         "positions_snapshot_generated_at": (positions_payload or {}).get("generated_at"),
         "open_orders_snapshot_generated_at": (open_orders_payload or {}).get("generated_at"),
@@ -13488,6 +13543,35 @@ def _ibkr_runtime_snapshot_fresh(payload: dict[str, Any]) -> bool:
 def _ibkr_runtime_health_ok(health: dict[str, Any], name: str) -> bool:
     value = health.get(name)
     return isinstance(value, dict) and value.get("ok") is True
+
+
+def _ibkr_runtime_unknown_open_order_count(payload: dict[str, Any]) -> int:
+    orders = dict(payload.get("orders") or {})
+    for value in (
+        orders.get("unknown_open_order_count"),
+        payload.get("unknown_open_order_count"),
+        payload.get("unknown_broker_open_order_count"),
+        payload.get("unknown_order_count"),
+    ):
+        parsed = _optional_int(value)
+        if parsed is not None:
+            return max(parsed, 0)
+    return 0
+
+
+def _unknown_open_order_count_from_payload(payload: Mapping[str, Any]) -> int:
+    for key in (
+        "unknown_open_order_count",
+        "unknown_broker_open_order_count",
+        "unknown_order_count",
+        "suspicious_order_count",
+    ):
+        parsed = _optional_int(payload.get(key))
+        if parsed is not None:
+            return max(parsed, 0)
+    if payload.get("open_orders_complete") is False:
+        return 1
+    return 0
 
 
 def _signed_ibkr_runtime_position_quantity(position_row: dict[str, Any]) -> int:
