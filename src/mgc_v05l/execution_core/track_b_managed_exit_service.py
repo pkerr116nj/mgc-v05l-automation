@@ -953,7 +953,22 @@ def _classify_managed_paper_risk_reducing_exit_authority(
         "CLOSE_ORDER_MODIFIABLE",
         "CLOSE_ORDER_CANCEL_REPLACE_REQUIRED",
     }:
-        blockers.append(f"managed_order_not_current:{managed_orders}")
+        if _exit_authority_checks_clear_order_risk(decision) and _exit_authority_checks_prove_current_managed_exposure(
+            decision,
+            executable_intent,
+        ):
+            diagnostics.append(
+                {
+                    "kind": "diagnostic_managed_order_classification",
+                    "classification": managed_orders,
+                    "detail": (
+                        "Managed-order publication is diagnostic because ExitAuthority V1.1 proved same-contract "
+                        "working-close risk is clear for this broker-backed managed exposure."
+                    ),
+                }
+            )
+        else:
+            blockers.append(f"managed_order_not_current:{managed_orders}")
     if source_classifications:
         diagnostics.append({"kind": "source_classifications", "rows": source_classifications})
 

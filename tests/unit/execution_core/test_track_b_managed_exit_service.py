@@ -550,7 +550,7 @@ def test_apply_service_treats_stale_publication_as_diagnostic_when_v11_broker_ri
             source_classifications={
                 "open_order_truth": "ORDER_TRUTH_STALE",
                 "managed_positions": "LIFECYCLE_WITHOUT_BROKER",
-                "managed_orders": "POSITION_WITHOUT_CLOSE_ORDER",
+                "managed_orders": "CLOSE_ORDER_SUSPICIOUS",
                 "reconciliation": "TRACK_B_PAPER_BROKER_RECONCILIATION_BLOCKED",
             },
         ),
@@ -564,6 +564,7 @@ def test_apply_service_treats_stale_publication_as_diagnostic_when_v11_broker_ri
     assert {row["kind"] for row in diagnostics} >= {
         "diagnostic_open_order_truth_classification",
         "diagnostic_managed_position_classification",
+        "diagnostic_managed_order_classification",
     }
 
 
