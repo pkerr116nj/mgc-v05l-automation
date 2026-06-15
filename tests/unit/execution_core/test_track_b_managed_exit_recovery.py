@@ -47,7 +47,7 @@ def test_runtime_healthy_but_maintenance_stale_is_ready() -> None:
     assert payload["eligible_positions"][0]["diagnostic_close_candidate_ready"] is True
 
 
-def test_order_status_unreliable_reports_candidate_but_blocks_apply() -> None:
+def test_order_status_unreliable_is_diagnostic_for_exact_risk_reducing_close() -> None:
     inputs = _inputs()
     inputs["broker_session_authority"] = _broker_session_authority(
         classification="BROKER_SESSION_AUTHORITY_ORDER_STATUS_UNRELIABLE",
@@ -57,16 +57,17 @@ def test_order_status_unreliable_reports_candidate_but_blocks_apply() -> None:
 
     payload = _build(inputs)
 
-    assert payload["classification"] == EXIT_DUE_CLOSE_BLOCKED
+    assert payload["classification"] == EXIT_DUE_CLOSE_READY
     assert payload["diagnostic_close_candidate_count"] == 1
-    assert payload["eligible_count"] == 0
-    assert payload["apply_eligible_count"] == 0
+    assert payload["eligible_count"] == 1
+    assert payload["apply_eligible_count"] == 1
     assert payload["managed_exit_recovery_plan"]["close_candidates"][0]["local_symbol"] == "MNQM6"
-    blocked = payload["blocked_positions"][0]
-    assert blocked["diagnostic_close_candidate_ready"] is True
-    assert blocked["apply_eligible"] is False
-    assert "BROKER_SESSION_CLOSE_AUTHORITY_BLOCKED_ORDER_STATUS_UNRELIABLE" in blocked["apply_blockers"]
-    assert "BROKER_SESSION_MANAGED_RISK_REDUCING_CLOSE_NOT_ALLOWED" in blocked["apply_blockers"]
+    ready = payload["eligible_positions"][0]
+    assert ready["diagnostic_close_candidate_ready"] is True
+    assert ready["apply_eligible"] is True
+    assert ready["apply_blockers"] == []
+    assert "BROKER_SESSION_CLOSE_AUTHORITY_BLOCKED_ORDER_STATUS_UNRELIABLE" in ready["legacy_apply_blockers_diagnostic"]
+    assert "BROKER_SESSION_MANAGED_RISK_REDUCING_CLOSE_NOT_ALLOWED" in ready["legacy_apply_blockers_diagnostic"]
 
 
 def test_order_status_unreliable_with_exact_degraded_close_authority_is_ready() -> None:
@@ -148,14 +149,14 @@ def test_ambiguous_owner_blocks() -> None:
     assert "COMPETING_MANAGED_POSITION_CANDIDATE" in payload["blocked_positions"][0]["blockers"]
 
 
-def test_missing_registry_lifecycle_identity_blocks() -> None:
+def test_missing_registry_lifecycle_identity_is_diagnostic_for_exact_broker_close() -> None:
     inputs = _inputs()
     inputs["reconciliation"]["registry_reconciliation"]["mapped_records"] = []
 
     payload = _build(inputs)
 
-    assert payload["classification"] == EXIT_DUE_CLOSE_BLOCKED
-    assert "REGISTRY_OPEN_MANAGED_RECORD_MISSING" in payload["blocked_positions"][0]["blockers"]
+    assert payload["classification"] == EXIT_DUE_CLOSE_READY
+    assert "REGISTRY_OPEN_MANAGED_RECORD_MISSING" in payload["eligible_positions"][0]["legacy_apply_blockers_diagnostic"]
 
 
 def test_incomplete_registry_review_row_superseded_by_current_scope_lifecycle_for_close() -> None:
@@ -222,7 +223,7 @@ def test_track_b_lifecycle_positions_supersede_incomplete_registry_review_for_cl
     assert payload["eligible_positions"][0]["apply_blockers"] == []
 
 
-def test_registry_current_scope_identity_conflict_blocks_close() -> None:
+def test_registry_current_scope_identity_conflict_is_diagnostic_for_exact_broker_close() -> None:
     inputs = _inputs(runtime_down=False)
     inputs["reconciliation"]["broker_reconciled"] = True
     inputs["reconciliation"]["current_scope_lifecycle_positions"] = [
@@ -248,9 +249,10 @@ def test_registry_current_scope_identity_conflict_blocks_close() -> None:
 
     payload = _build(inputs)
 
-    assert payload["classification"] == EXIT_DUE_CLOSE_BLOCKED
-    assert "REGISTRY_OPEN_MANAGED_RECORD_MISSING" in payload["blocked_positions"][0]["blockers"]
-    assert "COMPETING_REGISTRY_CANDIDATE" in payload["blocked_positions"][0]["blockers"]
+    assert payload["classification"] == EXIT_DUE_CLOSE_READY
+    diagnostics = payload["eligible_positions"][0]["legacy_apply_blockers_diagnostic"]
+    assert "REGISTRY_OPEN_MANAGED_RECORD_MISSING" in diagnostics
+    assert "COMPETING_REGISTRY_CANDIDATE" in diagnostics
 
 
 def test_exact_mnq_mes_simultaneous_long_exits_are_ready() -> None:

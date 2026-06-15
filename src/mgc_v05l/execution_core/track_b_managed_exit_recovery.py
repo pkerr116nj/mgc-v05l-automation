@@ -324,29 +324,37 @@ def _classify_position(
         candidate.update({key: guardian_candidate.get(key) for key in ("classification", "reason") if guardian_candidate.get(key) is not None})
 
     diagnostic_blockers = _dedupe(blockers)
+    freshness_blockers = _managed_position_freshness_apply_blockers(
+        position=position,
+        managed_positions=inputs["managed_positions"],
+        managed_orders=inputs["managed_orders"],
+        now=now,
+        artifact_max_age_seconds=artifact_max_age_seconds,
+    )
+    broker_session_blockers = _broker_session_apply_blockers(inputs=inputs)
     apply_blockers = _dedupe(
         [
             *diagnostic_blockers,
-            *_managed_position_freshness_apply_blockers(
-                position=position,
-                managed_positions=inputs["managed_positions"],
-                managed_orders=inputs["managed_orders"],
-                now=now,
-                artifact_max_age_seconds=artifact_max_age_seconds,
-            ),
-            *_broker_session_apply_blockers(inputs=inputs),
+            *freshness_blockers,
+            *broker_session_blockers,
         ]
     )
-    diagnostic_ready = not diagnostic_blockers
-    apply_eligible = diagnostic_ready and not apply_blockers
+    hard_apply_blockers = _risk_reducing_close_hard_apply_blockers(
+        diagnostic_blockers=diagnostic_blockers,
+        freshness_blockers=freshness_blockers,
+        broker_session_blockers=broker_session_blockers,
+    )
+    diagnostic_ready = not _close_candidate_identity_blockers(diagnostic_blockers)
+    apply_eligible = not hard_apply_blockers
     return {
         "classification": READY_POSITION if apply_eligible else BLOCKED_POSITION,
         "eligible": apply_eligible,
         "diagnostic_close_candidate_ready": diagnostic_ready,
         "apply_eligible": apply_eligible,
-        "blockers": apply_blockers,
+        "blockers": hard_apply_blockers,
         "diagnostic_blockers": diagnostic_blockers,
-        "apply_blockers": apply_blockers,
+        "apply_blockers": hard_apply_blockers,
+        "legacy_apply_blockers_diagnostic": apply_blockers,
         "close_candidate": candidate,
         "identity": {
             "account_id": account_id,
@@ -368,6 +376,61 @@ def _classify_position(
         "broker_session_allowed_uses": _mapping(inputs["broker_session_authority"].get("allowed_uses")),
         "callback_ownership_attribution": _mapping(inputs["broker_session_authority"].get("callback_ownership_attribution")),
     }
+
+
+def _risk_reducing_close_hard_apply_blockers(
+    *,
+    diagnostic_blockers: Sequence[str],
+    freshness_blockers: Sequence[str],
+    broker_session_blockers: Sequence[str],
+) -> list[str]:
+    hard_codes = {
+        "BROKER_POSITION_MISSING",
+        "TRADE_ID_MISSING",
+        "LIFECYCLE_ID_MISSING",
+        "POSITION_NOT_EXIT_DUE",
+        "EXIT_DUE_FALSE_OR_MISSING",
+        "OWNERSHIP_AMBIGUOUS",
+        "OWNER_PROJECTION_NOT_CONFIRMED",
+        "COMPETING_MANAGED_POSITION_CANDIDATE",
+        "RECONCILIATION_UNKNOWN_OPEN_ORDERS_PRESENT",
+        "BROKER_OPEN_ORDER_CONFLICT",
+        "MANAGED_ORDER_STATE_NOT_CLOSE_REQUIRED",
+        "GUARDIAN_EXACT_CLOSE_CANDIDATE_MISSING",
+        "GUARDIAN_CLOSE_AUTHORITY_NOT_ALLOWED",
+        "SAFE_STATE_CLOSE_NOT_ALLOWED",
+        "LIVE_MONEY_ELIGIBLE_TRUE",
+        "PAPER_PROOF_INVOKED_TRUE",
+        "BROAD_FLATTEN_AVAILABLE_UNSAFE",
+        "GLOBAL_FLATTEN_AVAILABLE_UNSAFE",
+        "MANAGED_POSITION_APPLY_AUTHORITY_DEGRADED",
+        "BROKER_SESSION_AUTHORITY_MISSING",
+        "BROKER_SESSION_CLOSE_AUTHORITY_BLOCKED_POSITION_TRUTH_ONLY",
+        "BROKER_SESSION_CLOSE_AUTHORITY_BLOCKED_NOT_SUBMIT_CAPABLE",
+        "BROKER_SESSION_LIVE_MONEY_ELIGIBLE_TRUE",
+        "BROKER_SESSION_PAPER_PROOF_INVOKED_TRUE",
+    }
+    hard: list[str] = []
+    for blocker in [*diagnostic_blockers, *freshness_blockers, *broker_session_blockers]:
+        text = str(blocker)
+        if text in hard_codes:
+            hard.append(text)
+    return _dedupe(hard)
+
+
+def _close_candidate_identity_blockers(blockers: Sequence[str]) -> list[str]:
+    candidate_blockers = {
+        "BROKER_POSITION_MISSING",
+        "TRADE_ID_MISSING",
+        "LIFECYCLE_ID_MISSING",
+        "POSITION_NOT_EXIT_DUE",
+        "EXIT_DUE_FALSE_OR_MISSING",
+        "OWNERSHIP_AMBIGUOUS",
+        "OWNER_PROJECTION_NOT_CONFIRMED",
+        "COMPETING_MANAGED_POSITION_CANDIDATE",
+        "BROKER_OPEN_ORDER_CONFLICT",
+    }
+    return [str(blocker) for blocker in blockers if str(blocker) in candidate_blockers]
 
 
 def _managed_position_freshness_apply_blockers(

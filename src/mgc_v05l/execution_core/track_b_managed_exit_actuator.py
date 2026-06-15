@@ -378,7 +378,12 @@ def _v11_eligible_positions(
         row["exit_authority_decision"] = dict(decision)
         row["exit_intent"] = dict(candidate.get("exit_intent") or {})
         row["exit_authority_attribution_status"] = candidate.get("attribution_status")
-        row["legacy_apply_blockers_diagnostic"] = list(row.get("apply_blockers") or row.get("blockers") or [])
+        row["legacy_apply_blockers_diagnostic"] = list(
+            row.get("legacy_apply_blockers_diagnostic")
+            or row.get("apply_blockers")
+            or row.get("blockers")
+            or []
+        )
         row["legacy_diagnostic_blockers"] = list(row.get("diagnostic_blockers") or [])
         row["apply_eligible"] = True
         row["eligible"] = True

@@ -2017,6 +2017,82 @@ def test_reconciled_lifecycle_identity_preserves_true_account_mismatch_block(tmp
     assert reason == "No exact active broker/lifecycle position matches account, contract, conId, and quantity."
 
 
+def test_selected_current_scope_position_recovers_entry_fill_for_review_lifecycle(tmp_path: Path) -> None:
+    config = TrackBManagedExitAttachConfig(
+        repo_root=tmp_path,
+        account_id="DUM882026",
+        strategy_id="mes_us_active_participation_long",
+        lane_id="mes_us_active_participation_long",
+        instrument_family="MES",
+        contract_key="MES-202609",
+        local_symbol="MESU6",
+        con_id=793356217,
+        quantity=1,
+        side="LONG",
+        lifecycle_id="life-mes",
+    )
+    lifecycle_report = {
+        "lifecycle_id": "life-mes",
+        "strategy_id": "mes_us_active_participation_long",
+        "account_id": "DUM882026",
+        "contract_key": "MES-202609",
+        "local_symbol": "MESU6",
+        "con_id": 793356217,
+        "managed_exit_policy_id": "GLOBEX_ACTIVE_EVIDENCE_TIMEBOX_15M_EXIT_V1",
+        "paper_lifecycle_classification": "TRACK_B_STRATEGY_PAPER_REVIEW_REQUIRED",
+        "primary_blocker": "Existing OPEN_MANAGED lifecycle has no broker-confirmed entry fill.",
+        "broker_state_mutated": False,
+        "entry_intent": {"lifecycle_id": "life-mes"},
+    }
+    selected_position = {
+        "classification": "OPEN_MANAGED_EXIT_DUE",
+        "exit_due": True,
+        "projection_authority_owner_confirmed": True,
+        "account_id": "DUM882026",
+        "local_symbol": "MESU6",
+        "con_id": 793356217,
+        "lifecycle_id": "life-mes",
+        "strategy_id": "mes_us_active_participation_long",
+        "trade_id": "trade-mes",
+        "managed_exit_policy_id": "GLOBEX_ACTIVE_EVIDENCE_TIMEBOX_15M_EXIT_V1",
+        "broker_position": {"account_id": "DUM882026", "local_symbol": "MESU6", "con_id": 793356217, "quantity": "1"},
+        "lifecycle_units": [
+            {
+                "lifecycle_id": "life-mes",
+                "strategy_id": "mes_us_active_participation_long",
+                "trade_id": "trade-mes",
+                "account_id": "DUM882026",
+                "local_symbol": "MESU6",
+                "con_id": 793356217,
+                "quantity": "1",
+                "entry_order_id": "10",
+                "entry_perm_id": "1211134196",
+                "entry_exec_id": "0000e1a7.6a446209.01.01",
+                "entry_price": "7646.75",
+                "entry_time": "2026-06-15T16:26:41.211227+00:00",
+            }
+        ],
+    }
+
+    report = attach_module._with_registry_trade_id_for_managed_exit(  # noqa: SLF001
+        config=config,
+        lifecycle_report=lifecycle_report,
+        selected_position=selected_position,
+        managed_exit_policy_id="GLOBEX_ACTIVE_EVIDENCE_TIMEBOX_15M_EXIT_V1",
+    )
+    ok, reason = attach_module._lifecycle_matches(  # noqa: SLF001
+        config=config,
+        lifecycle_report=report,
+        selected_position=selected_position,
+        managed_exit_policy_id="GLOBEX_ACTIVE_EVIDENCE_TIMEBOX_15M_EXIT_V1",
+    )
+
+    assert ok is True, reason
+    assert report["entry_fill"]["execution_id"] == "0000e1a7.6a446209.01.01"
+    assert report["entry_fill"]["price"] == "7646.75"
+    assert report["entry_timestamp"] == "2026-06-15T16:26:41.211227+00:00"
+
+
 def _write_reconciliation(
     repo_root: Path,
     *,

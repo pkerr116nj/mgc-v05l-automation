@@ -747,6 +747,20 @@ def _with_registry_trade_id_for_managed_exit(
     report["trade_id"] = registry_trade_id
     if selected_trade_id:
         report["current_scope_identity_source"] = "MANAGED_POSITION_REGISTRY_SELECTED_POSITION"
+        recovered_entry_fill = _entry_fill_from_selected_managed_position(selected_position)
+        if recovered_entry_fill and not _mapping(report.get("entry_fill")):
+            report["entry_fill"] = recovered_entry_fill
+            report["entry_fill_recovered_from_current_scope"] = True
+        if recovered_entry_fill:
+            entry_timestamp = recovered_entry_fill.get("filled_at")
+            if entry_timestamp and not report.get("entry_timestamp"):
+                report["entry_timestamp"] = entry_timestamp
+            open_state = report.get("open_state")
+            if isinstance(open_state, Mapping):
+                nested_open_state = dict(open_state)
+                nested_open_state.setdefault("entry_timestamp", entry_timestamp)
+                nested_open_state.setdefault("fill_timestamp_source", "BROKER_ENTRY_FILL")
+                report["open_state"] = nested_open_state
     for key in ("entry_intent", "open_state", "close_intent"):
         value = report.get(key)
         if isinstance(value, Mapping):
@@ -755,6 +769,43 @@ def _with_registry_trade_id_for_managed_exit(
             nested["trade_id"] = registry_trade_id
             report[key] = nested
     return report
+
+
+def _entry_fill_from_selected_managed_position(selected_position: Mapping[str, Any] | None) -> dict[str, Any]:
+    selected = _mapping(selected_position)
+    if not selected:
+        return {}
+    lifecycle_position = _mapping(selected.get("lifecycle_position"))
+    units = [
+        _mapping(item)
+        for item in (selected.get("lifecycle_units") or lifecycle_position.get("lifecycle_units") or [])
+        if isinstance(item, Mapping)
+    ]
+    sources = [selected, lifecycle_position, *units]
+    for source in sources:
+        entry_time = source.get("entry_time") or source.get("entry_timestamp")
+        entry_price = source.get("entry_price") or source.get("avg_entry_price")
+        order_id = source.get("entry_order_id") or _first(source.get("entry_order_ids"))
+        perm_id = source.get("entry_perm_id") or _first(source.get("entry_perm_ids"))
+        exec_id = source.get("entry_exec_id") or _first(source.get("entry_exec_ids"))
+        quantity = source.get("quantity") or source.get("aggregate_qty")
+        if entry_time and entry_price and (exec_id or perm_id or order_id):
+            return {
+                "broker_order_id": str(order_id or ""),
+                "perm_id": str(perm_id or ""),
+                "execution_id": str(exec_id or ""),
+                "exec_id": str(exec_id or ""),
+                "price": str(entry_price),
+                "quantity": str(quantity or ""),
+                "filled_at": str(entry_time),
+            }
+    return {}
+
+
+def _first(value: Any) -> Any:
+    if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
+        return value[0] if value else None
+    return value
 
 
 def _select_active_managed_exit_due_position(
@@ -1512,6 +1563,12 @@ def _lifecycle_matches(
             return False, "Lifecycle con_id mismatch."
     lifecycle_classification = str(lifecycle_report.get("paper_lifecycle_classification") or "")
     if lifecycle_classification != "TRACK_B_STRATEGY_PAPER_OPEN_MANAGED":
+        selected_ok = _selected_current_scope_lifecycle_matches(
+            config=config,
+            lifecycle_report=lifecycle_report,
+            managed_exit_policy_id=managed_exit_policy_id,
+            selected_position=selected_position,
+        )
         previous_attach_guard = (
             lifecycle_classification == "TRACK_B_STRATEGY_PAPER_REVIEW_REQUIRED"
             and lifecycle_report.get("broker_state_mutated") is False
@@ -1530,7 +1587,7 @@ def _lifecycle_matches(
             managed_exit_policy_id=managed_exit_policy_id,
             retryable_close_quantity=retryable_close_quantity,
         )
-        if not previous_attach_guard and not retryable_unmutated_close_review:
+        if not selected_ok and not previous_attach_guard and not retryable_unmutated_close_review:
             return False, "Lifecycle is not OPEN_MANAGED."
     if str(lifecycle_report.get("managed_exit_policy_id") or "") != managed_exit_policy_id and not _selected_current_scope_lifecycle_matches(
         config=config,
@@ -1587,7 +1644,30 @@ def _selected_current_scope_lifecycle_matches(
     report_policy = str(lifecycle_report.get("managed_exit_policy_id") or "").strip()
     if selected_policy != managed_exit_policy_id and report_policy != managed_exit_policy_id:
         return False
-    return str(lifecycle_report.get("paper_lifecycle_classification") or "") == "TRACK_B_STRATEGY_PAPER_OPEN_MANAGED"
+    lifecycle_classification = str(lifecycle_report.get("paper_lifecycle_classification") or "")
+    if lifecycle_classification == "TRACK_B_STRATEGY_PAPER_OPEN_MANAGED":
+        return True
+    if not _selected_position_confirms_broker_backed_current_exposure(selected_position):
+        return False
+    return lifecycle_classification == "TRACK_B_STRATEGY_PAPER_REVIEW_REQUIRED"
+
+
+def _selected_position_confirms_broker_backed_current_exposure(selected_position: Mapping[str, Any] | None) -> bool:
+    selected = _mapping(selected_position)
+    if not selected:
+        return False
+    if selected.get("projection_authority_owner_confirmed") is not True:
+        return False
+    if selected.get("exit_due") is not True:
+        return False
+    if str(selected.get("classification") or "") != "OPEN_MANAGED_EXIT_DUE":
+        return False
+    broker_position = _mapping(selected.get("broker_position"))
+    if not broker_position:
+        return False
+    if _decimal(broker_position.get("quantity")) == Decimal("0"):
+        return False
+    return bool(_entry_fill_from_selected_managed_position(selected))
 
 
 def _retryable_unmutated_close_review(
