@@ -153,8 +153,9 @@ def build_track_b_managed_position_registry(
         broker_open_orders=_list(reconciliation.get("track_b_broker_open_orders")),
         lifecycle_reports=lifecycle_reports,
     )
-    owner_resolution = _mapping(reconciliation.get("current_exposure_owner_resolution")) or _mapping(
-        pre_restart_exposure_resolution.get("current_exposure_owner_resolution")
+    owner_resolution = _current_owner_resolution_for_projection(
+        pre_restart_exposure_resolution=pre_restart_exposure_resolution,
+        reconciliation=reconciliation,
     )
     lifecycle_positions, owner_superseded_lifecycle_positions = apply_current_exposure_owner_lifecycle_overlay(
         lifecycle_positions=lifecycle_positions,
@@ -964,7 +965,41 @@ def _broker_position_nonzero(position: Mapping[str, Any]) -> bool:
 
 def _owner_exposure_supersedes_existing_projection(owner_exposure: Mapping[str, Any]) -> bool:
     reason_codes = {str(code or "") for code in owner_exposure.get("reason_codes") or []}
-    return "NEWEST_EXACT_BROKER_BACKED_LIFECYCLE_REPORT_SELECTED" in reason_codes
+    return bool(
+        {
+            "NEWEST_EXACT_BROKER_BACKED_LIFECYCLE_REPORT_SELECTED",
+            "NEWEST_EXACT_BROKER_BACKED_ENTRY_SELECTED",
+            "REGISTRY_OPEN_MANAGED_MATCHED_BROKER_POSITION",
+        }
+        & reason_codes
+    )
+
+
+def _current_owner_resolution_for_projection(
+    *,
+    pre_restart_exposure_resolution: Mapping[str, Any],
+    reconciliation: Mapping[str, Any],
+) -> dict[str, Any]:
+    fresh = _mapping(pre_restart_exposure_resolution.get("current_exposure_owner_resolution"))
+    cached = _mapping(reconciliation.get("current_exposure_owner_resolution"))
+    if fresh and (_has_broker_backed_projection_owner(fresh) or not cached):
+        return fresh
+    return cached or fresh
+
+
+def _has_broker_backed_projection_owner(owner_resolution: Mapping[str, Any]) -> bool:
+    broker_backed_reasons = {
+        "NEWEST_EXACT_BROKER_BACKED_LIFECYCLE_REPORT_SELECTED",
+        "NEWEST_EXACT_BROKER_BACKED_ENTRY_SELECTED",
+        "REGISTRY_OPEN_MANAGED_MATCHED_BROKER_POSITION",
+        "EXACT_BROKER_BACKED_LIFECYCLE_REPORT_CAN_REPAIR_PROJECTION",
+    }
+    for exposure in owner_resolution.get("owned_exposures") or []:
+        if not isinstance(exposure, Mapping):
+            continue
+        if broker_backed_reasons & {str(code or "") for code in exposure.get("reason_codes") or []}:
+            return True
+    return False
 
 
 def _position_classification(

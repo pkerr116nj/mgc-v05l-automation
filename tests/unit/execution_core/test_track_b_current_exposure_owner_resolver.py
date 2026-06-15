@@ -230,6 +230,104 @@ def test_current_owner_overlay_deduplicates_stale_same_contract_lifecycle_aggreg
     assert superseded[0]["raw_lifecycle_position"]["aggregate_qty"] == "-2"
 
 
+def test_current_registry_owner_without_lifecycle_report_carries_fill_identity_and_policy(tmp_path: Path) -> None:
+    stale = _registry_record(
+        trade_id="trade_old_mes_london_short",
+        lifecycle_id="life_old_mes_london_short",
+        generated_at=NOW - timedelta(days=2),
+        exit_due=False,
+        symbol="MES",
+        local_symbol="MESU6",
+        con_id=793356224,
+        lane_id="mes_london_open_active_participation_short",
+    )
+    current = _registry_record(
+        trade_id="trade_current_mes_globex_short",
+        lifecycle_id="reserved_submit_mes_globex_active_participation_short_20260614T224221875069Z_d054ab235060",
+        generated_at=NOW,
+        exit_due=False,
+        symbol="MES",
+        local_symbol="MESU6",
+        con_id=793356224,
+        lane_id="mes_globex_active_participation_short",
+        managed_exit_policy_id=None,
+    )
+    broker_position = _broker_position(quantity="-1")
+    broker_position.update({"symbol": "MES", "track_b_root": "MES", "local_symbol": "MESU6", "con_id": 793356224})
+    _write_lifecycle_report(
+        tmp_path,
+        "life_old_mes_london_short",
+        _lifecycle_report(
+            trade_id=stale.trade_id,
+            lifecycle_id="life_old_mes_london_short",
+            symbol="MES",
+            local_symbol="MESU6",
+            con_id=793356224,
+            order_id="1",
+            perm_id="old_perm",
+            exec_id="old_exec",
+            filled_at=NOW - timedelta(days=2),
+            lane_id="mes_london_open_active_participation_short",
+        ),
+    )
+
+    owner_resolution = resolve_current_exposure_ownership(
+        config=CurrentExposureOwnerResolverConfig(repo_root=tmp_path),
+        broker_positions=[broker_position],
+        registry_records=[stale, current],
+        lifecycle_positions=[
+            {
+                "trade_id": stale.trade_id,
+                "lifecycle_id": "life_old_mes_london_short",
+                "lane_id": "mes_london_open_active_participation_short",
+                "account_id": "DUM882026",
+                "local_symbol": "MESU6",
+                "con_id": 793356224,
+                "aggregate_qty": "-1",
+                "quantity": "1",
+                "side": "SHORT",
+                "managed_exit_policy_id": "GLOBEX_ACTIVE_EVIDENCE_TIMEBOX_60M_EXIT_V1",
+            }
+        ],
+    )
+
+    assert owner_resolution["classification"] == OWNED_MANAGED_EXPOSURE
+    exposure = owner_resolution["owned_exposures"][0]
+    assert exposure["trade_id"] == "trade_current_mes_globex_short"
+    assert set(exposure["reason_codes"]) & {
+        "NEWEST_EXACT_BROKER_BACKED_ENTRY_SELECTED",
+        "REGISTRY_OPEN_MANAGED_MATCHED_BROKER_POSITION",
+    }
+    lifecycle = exposure["lifecycle_position"]
+    assert lifecycle["lifecycle_id"] == current.ownership_identity.lifecycle_id
+    assert lifecycle["lane_id"] == "mes_globex_active_participation_short"
+    assert lifecycle["entry_timestamp"] == NOW.isoformat()
+    assert lifecycle["entry_order_ids"] == ["2"]
+    assert lifecycle["entry_perm_ids"] == ["perm_trade_current_mes_globex_short"]
+    assert lifecycle["entry_exec_ids"] == ["exec_trade_current_mes_globex_short"]
+    assert lifecycle["managed_exit_policy_id"] == "GLOBEX_ACTIVE_EVIDENCE_TIMEBOX_15M_EXIT_V1"
+
+    current_scope, superseded = apply_current_exposure_owner_lifecycle_overlay(
+        lifecycle_positions=[
+            {
+                "trade_id": stale.trade_id,
+                "lifecycle_id": "life_old_mes_london_short",
+                "lane_id": "mes_london_open_active_participation_short",
+                "account_id": "DUM882026",
+                "local_symbol": "MESU6",
+                "con_id": 793356224,
+                "aggregate_qty": "-1",
+                "quantity": "1",
+                "side": "SHORT",
+            }
+        ],
+        owner_resolution=owner_resolution,
+    )
+
+    assert current_scope == [lifecycle]
+    assert superseded[0]["owner_lifecycle_id"] == current.ownership_identity.lifecycle_id
+
+
 def test_fresh_submit_owner_with_exact_lifecycle_fill_beats_stale_same_contract_owner(tmp_path: Path) -> None:
     stale = _registry_record(
         trade_id="trade_submit_owner_mes_globex_short",
@@ -475,6 +573,8 @@ def _registry_record(
     symbol: str = "MNQ",
     local_symbol: str = "MNQM6",
     con_id: int = 770561201,
+    lane_id: str = "mnq_globex_active_participation_short",
+    managed_exit_policy_id: str | None = "GLOBEX_ACTIVE_EVIDENCE_TIMEBOX_60M_EXIT_V1",
 ):
     events = [
         _event(
@@ -489,6 +589,8 @@ def _registry_record(
             symbol=symbol,
             local_symbol=local_symbol,
             con_id=con_id,
+            lane_id=lane_id,
+            managed_exit_policy_id=managed_exit_policy_id,
         ),
         _event(
             event_type=TradeEventType.LIFECYCLE_OPEN_MANAGED,
@@ -498,6 +600,8 @@ def _registry_record(
             symbol=symbol,
             local_symbol=local_symbol,
             con_id=con_id,
+            lane_id=lane_id,
+            managed_exit_policy_id=managed_exit_policy_id,
         ),
     ]
     if exit_due:
@@ -510,6 +614,8 @@ def _registry_record(
                 symbol=symbol,
                 local_symbol=local_symbol,
                 con_id=con_id,
+                lane_id=lane_id,
+                managed_exit_policy_id=managed_exit_policy_id,
             )
         )
     return reduce_trade_events(events)
@@ -631,6 +737,8 @@ def _event(
     symbol: str = "MNQ",
     local_symbol: str = "MNQM6",
     con_id: int = 770561201,
+    lane_id: str = "mnq_globex_active_participation_short",
+    managed_exit_policy_id: str | None = "GLOBEX_ACTIVE_EVIDENCE_TIMEBOX_60M_EXIT_V1",
 ) -> TradeEvent:
     return TradeEvent(
         event_id=f"{trade_id}_{event_type.value}_{generated_at.timestamp()}",
@@ -638,8 +746,8 @@ def _event(
         generated_at=generated_at,
         trade_id=trade_id,
         lifecycle_id=lifecycle_id,
-        lane_id="mnq_globex_active_participation_short",
-        thesis_strategy_id="mnq_globex_active_participation_short",
+        lane_id=lane_id,
+        thesis_strategy_id=lane_id,
         account_id="DUM882026",
         symbol=symbol,
         con_id=con_id,
@@ -654,7 +762,7 @@ def _event(
         perm_id=perm_id,
         exec_id=exec_id,
         price=Decimal("30675"),
-        metadata={"managed_exit_policy_id": "GLOBEX_ACTIVE_EVIDENCE_TIMEBOX_60M_EXIT_V1"},
+        metadata={"managed_exit_policy_id": managed_exit_policy_id} if managed_exit_policy_id else {},
     )
 
 

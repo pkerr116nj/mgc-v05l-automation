@@ -951,6 +951,125 @@ def test_owner_resolution_overlay_repairs_missing_managed_position_projection(
     assert diagnostics["repairs"][0]["classification"] == "CURRENT_OWNER_PROJECTION_REPAIRED"
 
 
+def test_registry_owner_supersedes_stale_same_contract_projection(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    broker = _broker_position()
+    stale = _lifecycle_position(
+        lifecycle_id="reserved_submit_mnq_london_open_active_participation_short_20260612T073709027361Z_20a34f036564",
+        policy="GLOBEX_ACTIVE_EVIDENCE_TIMEBOX_60M_EXIT_V1",
+    )
+    current = {
+        **_lifecycle_position(
+            lifecycle_id="reserved_submit_mnq_globex_active_participation_short_20260614T224221875069Z_d054ab235060",
+            policy="GLOBEX_ACTIVE_EVIDENCE_TIMEBOX_15M_EXIT_V1",
+        ),
+        "trade_id": "trade_current_mnq_globex_short",
+        "lane_id": "mnq_globex_active_participation_short",
+        "strategy_id": "mnq_globex_active_participation_short",
+        "entry_timestamp": "2026-06-14T22:42:22+00:00",
+        "entry_order_ids": ["2"],
+        "entry_perm_ids": ["1793991648"],
+        "entry_exec_ids": ["0000e1a7.6a431355.01.01"],
+    }
+    _seed_base(tmp_path, broker_positions=[broker], lifecycle_positions=[stale])
+    reconciliation_path = (
+        tmp_path
+        / "outputs"
+        / "reports"
+        / "track_b_paper_broker_reconciliation"
+        / "latest_track_b_paper_broker_reconciliation.json"
+    )
+    reconciliation = json.loads(reconciliation_path.read_text(encoding="utf-8"))
+    reconciliation["current_exposure_owner_resolution"] = {
+        "classification": "OWNED_MANAGED_EXPOSURE",
+        "broker_position_count": 1,
+        "owned_exposure_count": 1,
+        "owned_exposures": [
+            {
+                "classification": "OWNED_MANAGED_EXPOSURE",
+                "reason_codes": ["STALE_CACHED_RECONCILIATION_OWNER"],
+                "broker_position": broker,
+                "canonical_broker_position": broker,
+                "lifecycle_position": stale,
+                "trade_id": "stale_trade",
+                "lifecycle_id": stale["lifecycle_id"],
+                "position_key": "DUM882026|MNQM6|770561201",
+                "exit_due": False,
+            }
+        ],
+        "resolved_lifecycle_positions": [stale],
+    }
+    reconciliation_path.write_text(json.dumps(reconciliation), encoding="utf-8")
+    _write_lifecycle_report(
+        tmp_path,
+        lifecycle_id=stale["lifecycle_id"],
+        policy="GLOBEX_ACTIVE_EVIDENCE_TIMEBOX_60M_EXIT_V1",
+        bars_since_fill=1,
+    )
+
+    def fake_resolver(**_kwargs):
+        owner_resolution = {
+            "classification": "OWNED_MANAGED_EXPOSURE",
+            "broker_position_count": 1,
+            "broker_open_order_count": 0,
+            "owned_exposure_count": 1,
+            "review_required_exposure_count": 0,
+            "owned_exposures": [
+                {
+                    "classification": "OWNED_MANAGED_EXPOSURE",
+                    "reason_codes": ["REGISTRY_OPEN_MANAGED_MATCHED_BROKER_POSITION"],
+                    "broker_position": broker,
+                    "canonical_broker_position": broker,
+                    "lifecycle_position": current,
+                    "trade_id": current["trade_id"],
+                    "lifecycle_id": current["lifecycle_id"],
+                    "position_key": "DUM882026|MNQM6|770561201",
+                    "exit_due": False,
+                }
+            ],
+            "review_required_exposures": [],
+            "resolved_lifecycle_positions": [current],
+            "stale_superseded_full_audit_only": [],
+            "read_only": True,
+            "no_broad_flatten_generated": True,
+        }
+        return {
+            "classification": "PROJECTION_STALE_MANAGED_EXPOSURE_RESOLVED",
+            "broker_position_count": 1,
+            "broker_open_order_count": 0,
+            "resolved_managed_exposure_count": 1,
+            "review_required_exposure_count": 0,
+            "resolved_lifecycle_positions": [current],
+            "managed_exposures": [],
+            "review_required_exposures": [],
+            "restart_with_owned_exposure_allowed": True,
+            "no_broad_flatten_generated": True,
+            "read_only": True,
+            "current_exposure_owner_resolution": owner_resolution,
+        }
+
+    monkeypatch.setattr(managed_position_registry_module, "resolve_pre_restart_exposure_reconciliation", fake_resolver)
+    monkeypatch.setattr(
+        managed_position_registry_module,
+        "_merge_resolved_lifecycle_positions",
+        lambda *, lifecycle_positions, resolved_lifecycle_positions: list(lifecycle_positions),
+    )
+
+    payload = build_track_b_managed_position_registry(
+        config=TrackBManagedPositionRegistryConfig(repo_root=tmp_path),
+        now=NOW,
+    )
+
+    position = payload["managed_positions"][0]
+    assert position["lifecycle_id"] == current["lifecycle_id"]
+    assert position["trade_id"] == current["trade_id"]
+    assert position["projection_authority_owner_confirmed"] is True
+    assert stale["lifecycle_id"] not in {row.get("lifecycle_id") for row in payload["managed_positions"]}
+    assert payload["projection_authority_diagnostics"]["classification"] == PROJECTION_AUTHORITY_COHERENT
+
+
 def test_reconciled_owned_exposure_cannot_publish_no_managed_positions(
     tmp_path: Path,
     monkeypatch,

@@ -175,33 +175,41 @@ def resolve_current_exposure_ownership(
             )
             continue
         if lifecycle_report_owner.get("record") is not None:
-            owner_record = lifecycle_report_owner["record"]
-            lifecycle_row = lifecycle_report_owner["lifecycle_position"]
-            stale.extend(list(lifecycle_report_owner.get("expired_diagnostic_only") or []))
-            stale.extend(_stale_record_rows(tuple(record for record in registry_matches if record.trade_id != owner_record.trade_id)))
-            exit_due = _owner_exit_due(
-                record=owner_record,
-                lifecycle_row=lifecycle_row,
-                lifecycle_match=lifecycle_match,
-                managed_position_registry=managed_positions_payload,
+            newer_registry_owner, stale_lifecycle_report_owner = _newer_registry_owner_than_lifecycle_report_owner(
+                registry_matches=registry_matches,
+                lifecycle_report_owner=lifecycle_report_owner,
             )
-            classification = OWNED_MANAGED_EXIT_DUE if exit_due else OWNED_MANAGED_EXPOSURE
-            exposure = {
-                "classification": classification,
-                "reason_codes": list(lifecycle_report_owner.get("reason_codes") or []),
-                "broker_position": raw_broker_position,
-                "canonical_broker_position": broker_position,
-                "canonical_identity_resolution": identity.to_dict(),
-                "lifecycle_position": lifecycle_row,
-                "trade_id": owner_record.trade_id,
-                "lifecycle_id": lifecycle_row.get("lifecycle_id"),
-                "position_key": key,
-                "current_state": owner_record.current_state.value,
-                "exit_due": exit_due,
-            }
-            owned.append(exposure)
-            resolved_lifecycle_positions.append(lifecycle_row)
-            continue
+            if newer_registry_owner is not None:
+                stale.extend(stale_lifecycle_report_owner)
+                lifecycle_report_owner = {}
+            else:
+                owner_record = lifecycle_report_owner["record"]
+                lifecycle_row = lifecycle_report_owner["lifecycle_position"]
+                stale.extend(list(lifecycle_report_owner.get("expired_diagnostic_only") or []))
+                stale.extend(_stale_record_rows(tuple(record for record in registry_matches if record.trade_id != owner_record.trade_id)))
+                exit_due = _owner_exit_due(
+                    record=owner_record,
+                    lifecycle_row=lifecycle_row,
+                    lifecycle_match=lifecycle_match,
+                    managed_position_registry=managed_positions_payload,
+                )
+                classification = OWNED_MANAGED_EXIT_DUE if exit_due else OWNED_MANAGED_EXPOSURE
+                exposure = {
+                    "classification": classification,
+                    "reason_codes": list(lifecycle_report_owner.get("reason_codes") or []),
+                    "broker_position": raw_broker_position,
+                    "canonical_broker_position": broker_position,
+                    "canonical_identity_resolution": identity.to_dict(),
+                    "lifecycle_position": lifecycle_row,
+                    "trade_id": owner_record.trade_id,
+                    "lifecycle_id": lifecycle_row.get("lifecycle_id"),
+                    "position_key": key,
+                    "current_state": owner_record.current_state.value,
+                    "exit_due": exit_due,
+                }
+                owned.append(exposure)
+                resolved_lifecycle_positions.append(lifecycle_row)
+                continue
         lifecycle_identity_conflicts = _registry_lifecycle_identity_conflicts(
             registry_matches=registry_matches,
             lifecycle_rows=lifecycle_rows,
@@ -604,6 +612,53 @@ def _select_broker_backed_lifecycle_report_owner(
     }
 
 
+def _newer_registry_owner_than_lifecycle_report_owner(
+    *,
+    registry_matches: Sequence[TradeRegistryRecord],
+    lifecycle_report_owner: Mapping[str, Any],
+) -> tuple[TradeRegistryRecord | None, list[dict[str, Any]]]:
+    report = lifecycle_report_owner.get("report")
+    record = lifecycle_report_owner.get("record")
+    if not isinstance(report, Mapping) or not isinstance(record, TradeRegistryRecord):
+        return None, []
+    report_time = _parse_optional_datetime(_entry_fill(report).get("filled_at")) or _latest_broker_backed_entry_time(record)
+    if report_time is None:
+        return None, []
+    candidates = [
+        item
+        for item in registry_matches
+        if _registry_record_has_required_identity(item) and _latest_broker_backed_entry_time(item) is not None
+    ]
+    if not candidates:
+        return None, []
+    ranked = sorted(candidates, key=lambda item: _latest_broker_backed_entry_time(item) or datetime.min.replace(tzinfo=timezone.utc), reverse=True)
+    newest = ranked[0]
+    newest_time = _latest_broker_backed_entry_time(newest)
+    if newest_time is None or newest_time <= report_time:
+        return None, []
+    if sum(1 for item in ranked if _latest_broker_backed_entry_time(item) == newest_time) > 1:
+        return None, []
+    return newest, [
+        {
+            "classification": EXPIRED_DIAGNOSTIC_ONLY,
+            "reason_codes": [
+                "OLDER_LIFECYCLE_REPORT_OWNER_SUPERSEDED_BY_NEWER_BROKER_BACKED_REGISTRY_ENTRY",
+                "LIFECYCLE_REPORT_OWNER_SCOPED_FULL_AUDIT_ONLY",
+            ],
+            "trade_id": record.trade_id,
+            "lifecycle_id": _report_lifecycle_id(report),
+            "candidate_observed_at": report_time.isoformat(),
+            "winner_trade_id": newest.trade_id,
+            "winner_lifecycle_id": newest.ownership_identity.lifecycle_id
+            if newest.ownership_identity is not None
+            else None,
+            "winner_observed_at": newest_time.isoformat(),
+            "current_scope_authority": False,
+            "diagnostic_only": True,
+        }
+    ]
+
+
 def _dedupe_same_fill_lifecycle_report_owner_candidates(
     candidates: Sequence[Mapping[str, Any]],
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
@@ -860,6 +915,25 @@ def _lifecycle_position_from_registry_record(
     assert owner is not None
     report = _lifecycle_report_for_id(owner.lifecycle_id or "", lifecycle_reports)
     signed_qty = _signed_owner_qty(record)
+    entry_event = _latest_broker_backed_entry_event(record)
+    entry_time = _first_nonempty(
+        report.get("entry_timestamp"),
+        _entry_fill(report).get("filled_at"),
+        _event_generated_at(entry_event),
+    )
+    entry_price = _first_nonempty(
+        record.entry_price,
+        _entry_fill(report).get("price"),
+        getattr(entry_event, "price", None),
+    )
+    entry_order_id = _first_nonempty(_entry_fill(report).get("order_id"), getattr(entry_event, "order_id", None))
+    entry_perm_id = _first_nonempty(_entry_fill(report).get("perm_id"), getattr(entry_event, "perm_id", None))
+    entry_exec_id = _first_nonempty(_entry_fill(report).get("exec_id"), getattr(entry_event, "exec_id", None))
+    managed_exit_policy_id = _first_nonempty(
+        report.get("managed_exit_policy_id"),
+        _metadata_value(record, "managed_exit_policy_id"),
+        _managed_exit_policy_from_lane(owner.lane_id),
+    )
     unit = {
         "trade_id": record.trade_id,
         "lifecycle_id": owner.lifecycle_id,
@@ -872,15 +946,13 @@ def _lifecycle_position_from_registry_record(
         "quantity": str(owner.qty),
         "signed_qty": _decimal_display(signed_qty),
         "side": owner.side,
-        "entry_price": _first_nonempty(record.entry_price, _entry_fill(report).get("price")),
-        "entry_time": _first_nonempty(report.get("entry_timestamp"), _entry_fill(report).get("filled_at")),
-        "entry_order_id": _latest_event_value(record, "order_id"),
-        "entry_perm_id": _latest_event_value(record, "perm_id"),
-        "entry_exec_id": _latest_event_value(record, "exec_id"),
-        "managed_exit_policy_id": _first_nonempty(
-            report.get("managed_exit_policy_id"),
-            _metadata_value(record, "managed_exit_policy_id"),
-        ),
+        "entry_price": entry_price,
+        "entry_time": entry_time,
+        "entry_timestamp": entry_time,
+        "entry_order_id": entry_order_id,
+        "entry_perm_id": entry_perm_id,
+        "entry_exec_id": entry_exec_id,
+        "managed_exit_policy_id": managed_exit_policy_id,
         "paper_lifecycle_report_path": report.get("report_json_path"),
     }
     return {
@@ -908,21 +980,18 @@ def _lifecycle_position_from_registry_record(
         "pyramiding_allowed": False,
         "pyramiding_policy": "NOT_APPLICABLE",
         "side": owner.side,
-        "avg_entry_price": _first_nonempty(record.entry_price, _entry_fill(report).get("price")),
-        "entry_timestamp": _first_nonempty(report.get("entry_timestamp"), _entry_fill(report).get("filled_at")),
-        "managed_exit_policy_id": _first_nonempty(
-            report.get("managed_exit_policy_id"),
-            _metadata_value(record, "managed_exit_policy_id"),
-        ),
+        "avg_entry_price": entry_price,
+        "entry_timestamp": entry_time,
+        "managed_exit_policy_id": managed_exit_policy_id,
         "exit_due": _owner_exit_due(
             record=record,
             lifecycle_row=report,
             lifecycle_match={},
             managed_position_registry={},
         ),
-        "entry_perm_ids": [_latest_event_value(record, "perm_id")],
-        "entry_order_ids": [_latest_event_value(record, "order_id")],
-        "entry_exec_ids": [_latest_event_value(record, "exec_id")],
+        "entry_perm_ids": [entry_perm_id] if entry_perm_id else [],
+        "entry_order_ids": [entry_order_id] if entry_order_id else [],
+        "entry_exec_ids": [entry_exec_id] if entry_exec_id else [],
         "paper_lifecycle_report_path": report.get("report_json_path"),
     }
 
@@ -1149,12 +1218,17 @@ def _stale_record_rows(records: Sequence[TradeRegistryRecord]) -> list[dict[str,
 
 
 def _latest_broker_backed_entry_time(record: TradeRegistryRecord) -> datetime | None:
-    times = [
-        event.generated_at
+    event = _latest_broker_backed_entry_event(record)
+    return event.generated_at if event is not None else None
+
+
+def _latest_broker_backed_entry_event(record: TradeRegistryRecord) -> Any | None:
+    events = [
+        event
         for event in record.event_chain
         if str(event.event_type.value) == "ENTRY_FILL_BROKER_BACKED" and event.broker_backed
     ]
-    return max(times) if times else None
+    return max(events, key=lambda event: event.generated_at) if events else None
 
 
 def _lifecycle_report_for_id(lifecycle_id: str, lifecycle_reports: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
@@ -1293,6 +1367,18 @@ def _metadata_value(record: TradeRegistryRecord, key: str) -> str:
         if value:
             return str(value)
     return ""
+
+
+def _managed_exit_policy_from_lane(lane_id: object) -> str | None:
+    text = str(lane_id or "")
+    if "_active_participation_" in text:
+        return "GLOBEX_ACTIVE_EVIDENCE_TIMEBOX_15M_EXIT_V1"
+    return None
+
+
+def _event_generated_at(event: Any | None) -> str | None:
+    generated_at = getattr(event, "generated_at", None)
+    return generated_at.isoformat() if isinstance(generated_at, datetime) else None
 
 
 def _first_nonempty(*values: object) -> str | None:
