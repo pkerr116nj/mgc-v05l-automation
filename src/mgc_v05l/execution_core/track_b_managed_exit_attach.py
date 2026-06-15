@@ -27,12 +27,16 @@ from mgc_v05l.execution_core.track_b_control_plane_snapshot import (
     write_track_b_control_plane_snapshot,
 )
 from mgc_v05l.execution_core.track_b_live_trade_registry import resolve_live_trade_id_for_lifecycle_id
+from mgc_v05l.execution_core.track_b_exit_execution_policy import (
+    EXIT_CLASS_RISK_REDUCING,
+    build_exit_limit_policy,
+    classify_exit_execution,
+)
 from mgc_v05l.execution_core.track_b_exit_strategy_roster import (
     ACTIVE_EVIDENCE_MANAGED_CLOSE_STALE_AFTER_SECONDS,
     MNQ_SNAP_TURN_TIMEBOX_3X5M_V1,
     TIMEBOXED_3X5M_MANAGED_LIMIT_CLOSE_V1,
     close_action_for_position_side,
-    managed_close_limit_from_reference,
     resolve_track_b_exit_profile,
     resolve_track_b_exit_profile_for_position,
 )
@@ -94,8 +98,6 @@ MANAGED_EXIT_DUE_READY_FOR_APPLY = "MANAGED_EXIT_DUE_READY_FOR_APPLY"
 MANAGED_EXIT_BLOCKED_BROKER_UNAVAILABLE_RETRYABLE = "MANAGED_EXIT_BLOCKED_BROKER_UNAVAILABLE_RETRYABLE"
 MANAGED_EXIT_BLOCKED_BROKER_UNAVAILABLE_FATAL = "MANAGED_EXIT_BLOCKED_BROKER_UNAVAILABLE_FATAL"
 MANAGED_EXIT_BLOCKED_BROKER_AVAILABILITY_UNKNOWN = "MANAGED_EXIT_BLOCKED_BROKER_AVAILABILITY_UNKNOWN"
-PAPER_AGGRESSIVE_CLOSE_FALLBACK_MIN_TICKS = 400
-PAPER_AGGRESSIVE_CLOSE_FALLBACK_PERCENT = Decimal("0.02")
 
 
 @dataclass(frozen=True)
@@ -199,6 +201,11 @@ def build_track_b_managed_exit_attach_plan(
     completed_bars = _completed_bar_timestamps_after_entry(payload=bars_payload, entry_timestamp=entry_timestamp)
     completed_bar_count = len(completed_bars)
     close_action = close_action_for_position_side(config.side)
+    exit_execution_class = classify_exit_execution(
+        exit_type=exit_profile.exit_strategy_id,
+        reason="managed_position_maintenance",
+        policy_id=managed_exit_policy_id,
+    )
     runtime_pricing_reference = _runtime_pricing_reference(
         config=config,
         one_minute_payload=one_minute_payload,
@@ -210,6 +217,7 @@ def build_track_b_managed_exit_attach_plan(
         close_action=close_action,
         tick_size=exit_profile.tick_size,
         stale_reference_seconds=exit_profile.stale_reference_seconds or ACTIVE_EVIDENCE_MANAGED_CLOSE_STALE_AFTER_SECONDS,
+        execution_class=exit_execution_class,
     )
     close_limit_price = config.close_limit_price or (
         str(close_pricing_policy.get("limit_price"))
@@ -434,6 +442,8 @@ def build_track_b_managed_exit_attach_plan(
         "requested_exit_profile_id": config.exit_profile_id,
         "exit_roster_compatible": True,
         "exit_roster_role": "strategy_managed_position_close",
+        "exit_execution_class": exit_execution_class,
+        "risk_reducing_exit_execution": exit_execution_class == EXIT_CLASS_RISK_REDUCING,
         "required_completed_5m_bars": required_completed_5m_bars,
         "completed_5m_bars_since_entry": completed_bar_count,
         "completed_5m_bar_timestamps_since_entry": completed_bars,
@@ -2018,98 +2028,15 @@ def _paper_marketable_close_policy(
     close_action: str,
     tick_size: str,
     stale_reference_seconds: int,
+    execution_class: str = EXIT_CLASS_RISK_REDUCING,
 ) -> dict[str, Any]:
-    age_seconds = _float_or_none(reference.get("reference_age_seconds"))
-    action = str(close_action or "").strip().upper()
-    tick = _decimal(tick_size)
-    if action not in {"BUY", "SELL"} or tick is None or tick <= Decimal("0"):
-        return managed_close_limit_from_reference(
-            reference_price=None,
-            close_action=action,
-            tick_size=tick_size,
-            base_offset_ticks=0,
-            reference_age_seconds=age_seconds,
-            stale_reference_seconds=stale_reference_seconds,
-        )
-    if age_seconds is not None and age_seconds > float(stale_reference_seconds):
-        return managed_close_limit_from_reference(
-            reference_price=reference.get("reference_price"),
-            close_action=action,
-            tick_size=tick_size,
-            base_offset_ticks=0,
-            reference_age_seconds=age_seconds,
-            stale_reference_seconds=stale_reference_seconds,
-        )
-
-    preferred_key = "ask_price" if action == "BUY" else "bid_price"
-    preferred = _decimal(reference.get(preferred_key))
-    if preferred is not None:
-        return _paper_priced_close(
-            action=action,
-            reference_price=preferred,
-            reference_kind=preferred_key,
-            tick=tick,
-            offset_ticks=Decimal("0"),
-            age_seconds=age_seconds,
-            reference=reference,
-        )
-
-    last_price = _decimal(reference.get("last_price"))
-    close = _decimal(reference.get("close"))
-    fallback = last_price or close
-    if fallback is None:
-        return managed_close_limit_from_reference(
-            reference_price=None,
-            close_action=action,
-            tick_size=tick_size,
-            base_offset_ticks=0,
-            reference_age_seconds=age_seconds,
-            stale_reference_seconds=stale_reference_seconds,
-        )
-    percent_ticks = (fallback * PAPER_AGGRESSIVE_CLOSE_FALLBACK_PERCENT / tick).copy_abs()
-    offset_ticks = max(Decimal(PAPER_AGGRESSIVE_CLOSE_FALLBACK_MIN_TICKS), percent_ticks.to_integral_value())
-    return _paper_priced_close(
-        action=action,
-        reference_price=fallback,
-        reference_kind="last_price" if last_price is not None else "close",
-        tick=tick,
-        offset_ticks=offset_ticks,
-        age_seconds=age_seconds,
+    return build_exit_limit_policy(
         reference=reference,
+        close_action=close_action,
+        tick_size=tick_size,
+        stale_reference_seconds=stale_reference_seconds,
+        execution_class=execution_class,
     )
-
-
-def _paper_priced_close(
-    *,
-    action: str,
-    reference_price: Decimal,
-    reference_kind: str,
-    tick: Decimal,
-    offset_ticks: Decimal,
-    age_seconds: float | None,
-    reference: Mapping[str, Any],
-) -> dict[str, Any]:
-    offset = tick * offset_ticks
-    raw = reference_price + offset if action == "BUY" else reference_price - offset
-    rounded = (raw / tick).to_integral_value() * tick
-    return {
-        "classification": "MANAGED_CLOSE_PRICED",
-        "limit_price": format(rounded.normalize(), "f"),
-        "close_action": action,
-        "reference_price": format(reference_price.normalize(), "f"),
-        "reference_price_kind": reference_kind,
-        "reference_age_seconds": age_seconds,
-        "reference_source": reference.get("reference_source"),
-        "reference_source_type": reference.get("reference_source_type"),
-        "pricing_source": reference.get("pricing_source"),
-        "timeframe": reference.get("timeframe"),
-        "bar_end": reference.get("bar_end"),
-        "generated_at": reference.get("generated_at"),
-        "marketable_limit_offset_ticks": float(offset_ticks),
-        "aggressive_paper_fallback": reference_kind in {"last_price", "close"},
-        "aggressive_paper_fallback_percent": float(PAPER_AGGRESSIVE_CLOSE_FALLBACK_PERCENT),
-        "stale_reference_blocker": None,
-    }
 
 
 def _read_json(path: Path) -> dict[str, Any]:
@@ -2134,15 +2061,6 @@ def _parse_time(value: object) -> datetime | None:
     if parsed.tzinfo is None:
         return parsed.replace(tzinfo=UTC)
     return parsed.astimezone(UTC)
-
-
-def _float_or_none(value: object) -> float | None:
-    if value in {None, ""}:
-        return None
-    try:
-        return float(value)
-    except (TypeError, ValueError):
-        return None
 
 
 def _decimal(value: object) -> Decimal | None:

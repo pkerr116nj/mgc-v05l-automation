@@ -56,6 +56,8 @@ def test_clean_working_close_away_from_market_is_modify_in_place_eligible(tmp_pa
     assert plan["managed_close_reprice_policy"]["limit_price"] == "28958.75"
     assert plan["managed_close_reprice_policy"]["reference_price_kind"] == "close"
     assert plan["managed_close_reprice_policy"]["aggressive_paper_fallback"] is True
+    assert plan["managed_close_reprice_policy"]["marketable_execution_required"] is True
+    assert plan["managed_close_reprice_policy"]["passive_execution_allowed"] is False
     assert plan["managed_close_reprice_policy"]["marketable_limit_offset_ticks"] == 2364.0
 
 
@@ -159,6 +161,8 @@ def test_reprice_buy_to_close_uses_fresh_last_plus_aggressive_paper_offset(tmp_p
     assert policy["limit_price"] == "30140.75"
     assert policy["reference_price_kind"] == "close"
     assert policy["aggressive_paper_fallback"] is True
+    assert policy["marketable_execution_required"] is True
+    assert policy["passive_execution_allowed"] is False
     assert policy["marketable_limit_offset_ticks"] == 2364.0
 
 
@@ -183,6 +187,8 @@ def test_reprice_prefers_bid_ask_over_aggressive_fallback(tmp_path: Path) -> Non
     assert policy["limit_price"] == "29549.25"
     assert policy["reference_price_kind"] == "bid_price"
     assert policy["aggressive_paper_fallback"] is False
+    assert policy["marketable_execution_required"] is True
+    assert policy["passive_execution_allowed"] is False
 
 
 def test_suspicious_sentinel_order_requires_review_not_auto_replace(tmp_path: Path) -> None:

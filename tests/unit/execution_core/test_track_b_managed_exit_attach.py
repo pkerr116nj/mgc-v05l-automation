@@ -41,6 +41,10 @@ def test_plan_ready_when_3x5m_elapsed(tmp_path: Path) -> None:
     assert payload["runtime_pricing_reference"]["pricing_source"] == "DATABENTO_RUNTIME"
     assert payload["runtime_pricing_reference"]["reference_age_seconds"] == 60.0
     assert payload["close_pricing_policy"]["classification"] == "MANAGED_CLOSE_PRICED"
+    assert payload["close_pricing_policy"]["marketable_execution_required"] is True
+    assert payload["close_pricing_policy"]["passive_execution_allowed"] is False
+    assert payload["exit_execution_class"] == "EXIT_CLASS_RISK_REDUCING"
+    assert payload["risk_reducing_exit_execution"] is True
     assert payload["broker_state_mutated"] is False
     assert payload["exit_roster_compatible"] is True
     assert payload["exit_strategy_id"] == "timeboxed_3x5m_managed_limit_close_v1"
@@ -80,6 +84,8 @@ def test_buy_to_close_without_bid_ask_uses_fresh_close_plus_aggressive_paper_off
     assert policy["reference_price_kind"] == "close"
     assert policy["limit_price"] == "30564.75"
     assert policy["aggressive_paper_fallback"] is True
+    assert policy["marketable_execution_required"] is True
+    assert policy["passive_execution_allowed"] is False
     assert policy["marketable_limit_offset_ticks"] == 2397.0
     assert payload["close_intent_preview"]["close_limit_price"] == "30564.75"
 
@@ -95,6 +101,8 @@ def test_sell_to_close_without_bid_ask_uses_fresh_close_minus_aggressive_paper_o
     assert policy["reference_price_kind"] == "close"
     assert policy["limit_price"] == "29366.25"
     assert policy["aggressive_paper_fallback"] is True
+    assert policy["marketable_execution_required"] is True
+    assert policy["passive_execution_allowed"] is False
     assert policy["marketable_limit_offset_ticks"] == 2397.0
 
 
