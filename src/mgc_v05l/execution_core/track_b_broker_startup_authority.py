@@ -83,6 +83,12 @@ def classify_fresh_complete_clean_broker_truth(
 
     positions = _position_rows(positions_snapshot) or _position_rows(broker_truth_status)
     track_b_positions = tuple(row for row in positions if _is_track_b_future(row, roots) and _quantity(row) != 0.0)
+    open_orders = _open_order_rows(open_orders_snapshot) or _open_order_rows(broker_truth_status)
+    track_b_open_orders = tuple(row for row in open_orders if _is_track_b_future(row, roots))
+    same_contract_conflicts = _same_contract_order_conflicts(
+        broker_positions=track_b_positions,
+        open_orders=track_b_open_orders,
+    )
     known_managed_position_count = 0
     if track_b_positions:
         if allow_known_managed_positions:
@@ -97,9 +103,17 @@ def classify_fresh_complete_clean_broker_truth(
         else:
             blockers.append("track_b_futures_positions_present")
 
-    broker_open_order_count = _open_order_count(broker_truth_status, open_orders_snapshot, open_order_truth, reconciliation)
-    if broker_open_order_count != 0:
-        blockers.append("broker_open_orders_present")
+    broker_open_order_count = _open_order_count(
+        broker_truth_status,
+        open_orders_snapshot,
+        open_order_truth,
+        reconciliation,
+        roots=roots,
+    )
+    if same_contract_conflicts:
+        blockers.append("conflicting_same_contract_futures_open_order")
+    elif broker_open_order_count != 0:
+        blockers.append("track_b_futures_open_orders_present")
 
     unknown_open_order_count = _unknown_open_order_count(broker_truth_status, open_orders_snapshot, open_order_truth, reconciliation)
     if unknown_open_order_count != 0:
@@ -153,6 +167,11 @@ def _any_true(*payloads: Mapping[str, Any], key: str) -> bool:
 
 def _position_rows(payload: Mapping[str, Any]) -> tuple[Mapping[str, Any], ...]:
     rows = payload.get("positions") or payload.get("track_b_positions") or payload.get("futures_positions") or ()
+    return tuple(row for row in rows if isinstance(row, Mapping))
+
+
+def _open_order_rows(payload: Mapping[str, Any]) -> tuple[Mapping[str, Any], ...]:
+    rows = payload.get("open_orders") or payload.get("track_b_open_orders") or ()
     return tuple(row for row in rows if isinstance(row, Mapping))
 
 
@@ -318,17 +337,42 @@ def _text(value: Any) -> str:
     return str(value or "").strip().upper()
 
 
-def _open_order_count(*payloads: Mapping[str, Any]) -> int:
+def _open_order_count(*payloads: Mapping[str, Any], roots: frozenset[str]) -> int:
+    all_orders: list[Mapping[str, Any]] = []
+    for payload in payloads:
+        all_orders.extend(_open_order_rows(_mapping(payload)))
+    if all_orders:
+        return len([row for row in all_orders if _is_track_b_future(row, roots)])
+
     count = 0
     for payload in payloads:
         payload = _mapping(payload)
         for key in ("open_order_count", "broker_open_order_count", "track_b_broker_open_order_count"):
             if payload.get(key) not in {None, ""}:
                 count = max(count, _int(payload.get(key), default=1))
-        orders = payload.get("open_orders") or payload.get("track_b_open_orders")
-        if isinstance(orders, list):
-            count = max(count, len(orders))
     return count
+
+
+def _same_contract_order_conflicts(
+    *,
+    broker_positions: Sequence[Mapping[str, Any]],
+    open_orders: Sequence[Mapping[str, Any]],
+) -> tuple[Mapping[str, Any], ...]:
+    conflicts: list[Mapping[str, Any]] = []
+    for order in open_orders:
+        if any(_same_contract(position, order) for position in broker_positions):
+            conflicts.append(order)
+    return tuple(conflicts)
+
+
+def _same_contract(left: Mapping[str, Any], right: Mapping[str, Any]) -> bool:
+    left_con_id = _text(left.get("con_id") or left.get("conId"))
+    right_con_id = _text(right.get("con_id") or right.get("conId"))
+    if left_con_id and right_con_id:
+        return left_con_id == right_con_id
+    left_local = _text(left.get("local_symbol") or left.get("localSymbol"))
+    right_local = _text(right.get("local_symbol") or right.get("localSymbol"))
+    return bool(left_local and right_local and left_local == right_local)
 
 
 def _unknown_open_order_count(*payloads: Mapping[str, Any]) -> int:

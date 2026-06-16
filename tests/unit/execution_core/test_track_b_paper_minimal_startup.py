@@ -469,7 +469,45 @@ def test_fresh_ibkr_known_managed_position_allows_supervised_startup(tmp_path: P
     assert "broker_positions_known_managed_startup_diagnostic" in _warning_codes(result)
 
 
-def test_fresh_ibkr_open_order_truth_blocks_even_when_lease_count_is_zero(tmp_path: Path) -> None:
+def test_fresh_ibkr_managed_mnq_position_and_unrelated_equity_order_allow_startup(tmp_path: Path) -> None:
+    config = _seed_minimal_ready(tmp_path)
+    _seed_fresh_ibkr_read_only_truth(
+        tmp_path,
+        config,
+        mnq_qty="1.0",
+        open_orders=[
+            {
+                "account": "DUM882026",
+                "symbol": "ADBE",
+                "local_symbol": "ADBE",
+                "security_type": "STK",
+                "order_id": 129,
+                "status": "PreSubmitted",
+                "action": "SELL",
+                "quantity": "300",
+            }
+        ],
+    )
+    _seed_managed_position(
+        tmp_path,
+        config,
+        symbol="MNQ",
+        local_symbol="MNQU6",
+        con_id=793356225,
+        signed_qty="1",
+    )
+
+    result = _classification(tmp_path)
+
+    assert result["allowed"] is True
+    assert result["broker_position_count"] == 1
+    assert result["broker_open_order_count"] == 0
+    assert "broker_positions_present" not in _codes(result)
+    assert "broker_open_orders_present" not in _codes(result)
+    assert "unrelated_non_track_b_open_orders_diagnostic" in _warning_codes(result)
+
+
+def test_fresh_ibkr_track_b_futures_open_order_blocks_even_when_lease_count_is_zero(tmp_path: Path) -> None:
     config = _seed_minimal_ready(tmp_path)
     _seed_fresh_ibkr_read_only_truth(
         tmp_path,
@@ -479,6 +517,7 @@ def test_fresh_ibkr_open_order_truth_blocks_even_when_lease_count_is_zero(tmp_pa
                 "account": "DUM882026",
                 "symbol": "MNQ",
                 "local_symbol": "MNQU6",
+                "security_type": "FUT",
                 "order_id": 129,
                 "status": "Submitted",
             }
@@ -490,6 +529,42 @@ def test_fresh_ibkr_open_order_truth_blocks_even_when_lease_count_is_zero(tmp_pa
     assert result["allowed"] is False
     assert result["broker_open_order_count"] == 1
     assert "broker_open_orders_present" in _codes(result)
+
+
+def test_fresh_ibkr_conflicting_same_contract_futures_order_blocks(tmp_path: Path) -> None:
+    config = _seed_minimal_ready(tmp_path)
+    _seed_fresh_ibkr_read_only_truth(
+        tmp_path,
+        config,
+        mnq_qty="1.0",
+        open_orders=[
+            {
+                "account": "DUM882026",
+                "symbol": "MNQ",
+                "local_symbol": "MNQU6",
+                "security_type": "FUT",
+                "order_id": 130,
+                "status": "Submitted",
+                "action": "SELL",
+                "quantity": "1",
+            }
+        ],
+    )
+    _seed_managed_position(
+        tmp_path,
+        config,
+        symbol="MNQ",
+        local_symbol="MNQU6",
+        con_id=793356225,
+        signed_qty="1",
+    )
+
+    result = _classification(tmp_path)
+
+    assert result["allowed"] is False
+    assert result["broker_open_order_count"] == 1
+    assert "broker_positions_present" in _codes(result)
+    assert result["blockers"][0]["detail"] == "conflicting_same_contract_futures_open_order"
 
 
 def test_fresh_ibkr_unknown_order_truth_blocks_even_when_lease_count_is_zero(tmp_path: Path) -> None:

@@ -346,7 +346,7 @@ def classify_track_b_paper_broker_truth_authority(
     )
     if fresh_read_only_truth.get("available") is True:
         read_only_position_count = _int_first(fresh_read_only_truth.get("track_b_broker_position_count"))
-        read_only_open_order_count = _int_first(fresh_read_only_truth.get("broker_open_order_count"))
+        read_only_open_order_count = _int_first(fresh_read_only_truth.get("track_b_broker_open_order_count"))
         read_only_unknown_open_orders = _int_first(fresh_read_only_truth.get("unknown_open_order_count"))
         if broker_position_count != read_only_position_count:
             warn(
@@ -374,6 +374,14 @@ def classify_track_b_paper_broker_truth_authority(
         broker_position_count = read_only_position_count
         broker_open_order_count = read_only_open_order_count
         unknown_open_orders = read_only_unknown_open_orders
+        unrelated_open_order_count = _int_first(fresh_read_only_truth.get("unrelated_open_order_count"))
+        if unrelated_open_order_count:
+            warn(
+                "unrelated_non_track_b_open_orders_diagnostic",
+                f"Fresh IBKR read-only truth has {unrelated_open_order_count} non-Track-B/non-futures open order(s); "
+                "diagnostic unless they become unknown or tied to Track B order-control scope.",
+                source="broker_truth",
+            )
     if broker_positions_available and broker_position_count != 0:
         startup_authority = classify_fresh_complete_clean_broker_truth(
             broker_truth_status={
@@ -615,6 +623,8 @@ def _fresh_ibkr_read_only_broker_truth(
         if abs(quantity) > 0:
             track_b_positions.append(dict(row))
     open_orders = [dict(row) for row in list(open_orders_snapshot.get("open_orders") or []) if isinstance(row, Mapping)]
+    track_b_open_orders = [row for row in open_orders if _is_track_b_futures_position_row(row)]
+    unrelated_open_orders = [row for row in open_orders if not _is_track_b_futures_position_row(row)]
     open_order_count = _int_first(open_orders_snapshot.get("open_order_count"), len(open_orders))
     unknown_open_orders = 0
     for payload in (refresh_status, open_orders_snapshot):
@@ -625,8 +635,11 @@ def _fresh_ibkr_read_only_broker_truth(
         "source": "ibkr_read_only_verification",
         "track_b_broker_position_count": len(track_b_positions),
         "broker_open_order_count": max(open_order_count, len(open_orders)),
+        "track_b_broker_open_order_count": len(track_b_open_orders),
+        "unrelated_open_order_count": len(unrelated_open_orders),
         "unknown_open_order_count": unknown_open_orders,
         "track_b_futures_positions": track_b_positions,
+        "track_b_open_orders": track_b_open_orders,
         "open_orders": open_orders,
         "positions_generated_at": positions_snapshot.get("generated_at"),
         "open_orders_generated_at": open_orders_snapshot.get("generated_at"),

@@ -94,7 +94,7 @@ def test_unmanaged_broker_position_still_blocks_supervised_paper_startup() -> No
 
 
 def test_actual_open_order_blocks_startup_authority() -> None:
-    orders = _orders(open_orders=[{"account_id": "DUM882026", "symbol": "MNQ"}])
+    orders = _orders(open_orders=[{"account_id": "DUM882026", "security_type": "FUT", "symbol": "MNQ"}])
 
     authority = classify_fresh_complete_clean_broker_truth(
         broker_truth_status=_status(open_order_count=1),
@@ -103,7 +103,112 @@ def test_actual_open_order_blocks_startup_authority() -> None:
         expected_account_id="DUM882026",
     )
 
-    assert "broker_open_orders_present" in authority.blockers
+    assert "track_b_futures_open_orders_present" in authority.blockers
+
+
+def test_unrelated_equity_open_order_does_not_block_track_b_futures_startup_authority() -> None:
+    orders = _orders(
+        open_orders=[
+            {
+                "account_id": "DUM882026",
+                "security_type": "STK",
+                "symbol": "ADBE",
+                "local_symbol": "ADBE",
+                "status": "PreSubmitted",
+            }
+        ]
+    )
+
+    authority = classify_fresh_complete_clean_broker_truth(
+        broker_truth_status=_status(open_order_count=1),
+        positions_snapshot=_positions(),
+        open_orders_snapshot=orders,
+        expected_account_id="DUM882026",
+    )
+
+    assert authority.broker_truth_clean is True
+    assert authority.broker_open_order_count == 0
+    assert authority.blockers == ()
+
+
+def test_managed_mnq_position_with_unrelated_equity_order_allows_startup_authority() -> None:
+    positions = _positions()
+    positions["positions"][0]["quantity"] = "1"
+    positions["positions"][0]["con_id"] = 123
+    orders = _orders(open_orders=[{"account_id": "DUM882026", "security_type": "STK", "symbol": "ADBE"}])
+
+    authority = classify_fresh_complete_clean_broker_truth(
+        broker_truth_status=_status(open_order_count=1),
+        positions_snapshot=positions,
+        open_orders_snapshot=orders,
+        managed_positions={
+            "managed_positions": [
+                {
+                    "account_id": "DUM882026",
+                    "symbol": "MNQ",
+                    "local_symbol": "MNQU6",
+                    "con_id": 123,
+                    "classification": "OPEN_MANAGED_MATCHED",
+                    "projection_authority_owner_confirmed": True,
+                    "signed_broker_qty": "1",
+                    "lifecycle_id": "lc-1",
+                    "trade_id": "trade-1",
+                    "managed_exit_policy_id": "GLOBEX_ACTIVE_EVIDENCE_TIMEBOX_15M_EXIT_V1",
+                }
+            ]
+        },
+        allow_known_managed_positions=True,
+        expected_account_id="DUM882026",
+    )
+
+    assert authority.broker_truth_clean is True
+    assert authority.classification == FRESH_COMPLETE_MANAGED_BROKER_TRUTH
+    assert authority.broker_open_order_count == 0
+    assert authority.known_managed_position_count == 1
+
+
+def test_conflicting_same_contract_futures_order_blocks_startup_authority() -> None:
+    positions = _positions()
+    positions["positions"][0]["quantity"] = "1"
+    positions["positions"][0]["con_id"] = 123
+    orders = _orders(
+        open_orders=[
+            {
+                "account_id": "DUM882026",
+                "security_type": "FUT",
+                "symbol": "MNQ",
+                "local_symbol": "MNQU6",
+                "con_id": 123,
+                "status": "Submitted",
+            }
+        ]
+    )
+
+    authority = classify_fresh_complete_clean_broker_truth(
+        broker_truth_status=_status(open_order_count=1),
+        positions_snapshot=positions,
+        open_orders_snapshot=orders,
+        managed_positions={
+            "managed_positions": [
+                {
+                    "account_id": "DUM882026",
+                    "symbol": "MNQ",
+                    "local_symbol": "MNQU6",
+                    "con_id": 123,
+                    "classification": "OPEN_MANAGED_MATCHED",
+                    "projection_authority_owner_confirmed": True,
+                    "signed_broker_qty": "1",
+                    "lifecycle_id": "lc-1",
+                    "trade_id": "trade-1",
+                    "managed_exit_policy_id": "GLOBEX_ACTIVE_EVIDENCE_TIMEBOX_15M_EXIT_V1",
+                }
+            ]
+        },
+        allow_known_managed_positions=True,
+        expected_account_id="DUM882026",
+    )
+
+    assert "conflicting_same_contract_futures_open_order" in authority.blockers
 
 
 def test_unknown_order_blocks_startup_authority() -> None:
