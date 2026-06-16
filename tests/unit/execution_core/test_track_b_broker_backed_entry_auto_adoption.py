@@ -13,6 +13,9 @@ from mgc_v05l.execution_core.track_b_broker_backed_entry_auto_adoption import (
 from mgc_v05l.execution_core.track_b_lifecycle_state_transition import (
     BROKER_BACKED_FILL_EVIDENCE_INCOMPLETE,
 )
+from mgc_v05l.execution_core.track_b_position_management_manifest import (
+    create_or_update_position_management_manifest,
+)
 
 
 def aware_now() -> datetime:
@@ -20,7 +23,12 @@ def aware_now() -> datetime:
 
 
 def _filled_entry(symbol: str = "MGC") -> dict[str, object]:
-    is_mgc = symbol == "MGC"
+    contracts = {
+        "MGC": {"local_symbol": "MGCM6", "con_id": 712565978, "fill_price": "4522.0"},
+        "MNQ": {"local_symbol": "MNQM6", "con_id": 770561201, "fill_price": "29510.75"},
+        "ES": {"local_symbol": "ESU6", "con_id": 779841727, "fill_price": "5961.25"},
+    }
+    contract = contracts.get(symbol, contracts["MNQ"])
     return {
         "classification": "PAPER_STRATEGY_ORDER_FILLED_PERSISTED",
         "strategy_id": f"track_b_paper_execution_test_mule_v1__{symbol.lower()}",
@@ -34,13 +42,13 @@ def _filled_entry(symbol: str = "MGC") -> dict[str, object]:
         "decision_bar_timestamp": "2026-05-22T12:01:00+00:00",
         "broker_order_id": "1",
         "account_id": "DUM882026",
-        "perm_id": 347072597 if is_mgc else 347072610,
-        "client_id": 11086 if is_mgc else 11154,
+        "perm_id": 347072597,
+        "client_id": 11086,
         "exec_id": "exec-1",
-        "local_symbol": "MGCM6" if is_mgc else "MNQM6",
-        "con_id": 712565978 if is_mgc else 770561201,
+        "local_symbol": contract["local_symbol"],
+        "con_id": contract["con_id"],
         "contract_key": f"{symbol}-202606",
-        "fill_price": "4522.0" if is_mgc else "29510.75",
+        "fill_price": contract["fill_price"],
         "fill_timestamp": "2026-05-22T12:02:29.507461+00:00",
         "managed_exit_policy_id": "PAPER_DIAGNOSTIC_TIME_BOXED_3X5M_EXIT_V1",
         "paper_proof_invoked": False,
@@ -121,3 +129,48 @@ def test_incomplete_broker_evidence_does_not_open_managed(tmp_path: Path) -> Non
     assert result.classification == AUTO_ADOPTION_INCOMPLETE
     assert result.transition_classification == BROKER_BACKED_FILL_EVIDENCE_INCOMPLETE
     assert result.lifecycle_report_path is None
+
+
+def test_stale_manifest_status_cannot_veto_broker_effect_observed_entry(tmp_path: Path) -> None:
+    manifests = tmp_path / "manifests"
+    payload = {
+        **_filled_entry("ES"),
+        "action": "SELL",
+        "intent_type": "SELL_TO_OPEN",
+        "order_intent_id": "ES|1m|2026-06-16T10:30:00Z|SELL_TO_OPEN",
+        "broker_order_id": None,
+        "perm_id": None,
+        "exec_id": None,
+        "broker_effect_classification": "BROKER_EFFECT_OBSERVED_AFTER_REJECTION",
+        "broker_effect_observation_id": "broker-effect:ESU6:DUM882026:-1",
+    }
+    create_or_update_position_management_manifest(
+        entry_intent_id=str(payload["order_intent_id"]),
+        lane_id=str(payload["lane_id"]),
+        strategy_id=str(payload["strategy_id"]),
+        instrument_family="ES",
+        contract_key="ES-202609",
+        local_symbol="ESU6",
+        con_id=779841727,
+        side="SHORT",
+        quantity=1,
+        managed_exit_policy_id=None,
+        lifecycle_status=BROKER_BACKED_FILL_EVIDENCE_INCOMPLETE,
+        output_root=manifests,
+        now=aware_now(),
+    )
+
+    result = auto_adopt_broker_backed_entry(
+        entry_fill_evidence=payload,
+        paper_trade_ledger_output_root=tmp_path / "ledger",
+        position_management_manifest_root=manifests,
+        managed_lifecycle_output_root=tmp_path / "managed",
+        now=aware_now(),
+    )
+
+    assert result.classification == AUTO_ADOPTION_APPLIED
+    assert result.transition_classification == "OPEN_MANAGED"
+    assert result.ledger_result.trade_record["final_position_status"] == "OPEN_MANAGED"
+    assert result.manifest_path is not None
+    manifest = json.loads(result.manifest_path.read_text(encoding="utf-8"))
+    assert manifest["lifecycle_status"] == "OPEN_MANAGED"

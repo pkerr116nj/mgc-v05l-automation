@@ -432,6 +432,54 @@ def test_missing_fill_acknowledgement_triggers_reconciling(tmp_path: Path) -> No
     assert strategy_engine.state.entries_enabled is False
 
 
+def test_flat_rejected_local_state_adopts_fresh_broker_short_position(tmp_path: Path) -> None:
+    _, repositories, strategy_engine, execution_engine = _build_runtime(tmp_path)
+    now = datetime.now(timezone.utc)
+    rejected_intent = OrderIntent(
+        order_intent_id="ES|1m|2026-06-16T10:30:00Z|SELL_TO_OPEN",
+        bar_id="ES|1m|2026-06-16T10:30:00Z",
+        symbol="ES",
+        intent_type=OrderIntentType.SELL_TO_OPEN,
+        quantity=1,
+        created_at=now - timedelta(seconds=30),
+        reason_code="test_rejected_local_state",
+    )
+    repositories.order_intents.save(
+        rejected_intent,
+        order_status=OrderStatus.REJECTED,
+        broker_order_id=None,
+        broker_order_status="REJECTED",
+    )
+    strategy_engine._state = replace(  # noqa: SLF001
+        strategy_engine.state,
+        last_order_intent_id=rejected_intent.order_intent_id,
+    )
+    execution_engine.broker.restore_state(
+        position=PaperPosition(quantity=-1, average_price=Decimal("5961.25")),
+        open_order_ids=[],
+        order_status={},
+        last_fill_timestamp=now,
+    )
+
+    payload = strategy_engine.apply_reconciliation(
+        occurred_at=now,
+        trigger="broker_truth_after_local_rejection",
+        execution_engine=execution_engine,
+    )
+
+    assert payload["classification"] == "safe_repair"
+    assert "adopt_broker_position_from_fresh_broker_truth" in payload["repair_actions"]
+    assert strategy_engine.state.strategy_status is StrategyStatus.IN_SHORT_K
+    assert strategy_engine.state.position_side is PositionSide.SHORT
+    assert strategy_engine.state.internal_position_qty == 1
+    assert strategy_engine.state.broker_position_qty == 1
+    assert strategy_engine.state.entry_price == Decimal("5961.25")
+    assert strategy_engine.state.reconcile_required is False
+    assert strategy_engine.state.entries_enabled is True
+    assert len(strategy_engine.state.open_entry_legs) == 1
+    assert strategy_engine.state.open_entry_legs[0].order_intent_id == rejected_intent.order_intent_id
+
+
 def test_unresolved_open_order_ambiguity_stays_reconciling(tmp_path: Path) -> None:
     _, repositories, strategy_engine, execution_engine = _build_runtime(tmp_path)
     now = datetime.now(timezone.utc)

@@ -10,6 +10,7 @@ from typing import Any
 from sqlalchemy.exc import OperationalError
 
 from ..domain.enums import LongEntryFamily, PositionSide, ShortEntryFamily, StrategyStatus
+from ..domain.models import StrategyEntryLeg
 from ..domain.models import StrategyState
 from ..execution.execution_engine import ExecutionEngine
 from ..execution.reconciliation import (
@@ -19,6 +20,7 @@ from ..execution.reconciliation import (
     RECONCILIATION_CLASS_FILL_ACK_UNCERTAINTY,
     RECONCILIATION_CLASS_OPEN_ORDER_UNCERTAINTY,
     RECONCILIATION_CLASS_SAFE_REPAIR,
+    RECONCILIATION_REPAIR_ADOPT_BROKER_POSITION,
     RECONCILIATION_REPAIR_CLEAR_STALE_OPEN_ORDER,
     RECONCILIATION_REPAIR_CONFIRM_FLAT,
     RECONCILIATION_REPAIR_SYNC_BROKER_AVG_PRICE,
@@ -231,6 +233,12 @@ class StrategyReconciler:
                                 replace(leg, entry_price=broker_average_price) for leg in repaired.open_entry_legs
                             ),
                         )
+                elif repair == RECONCILIATION_REPAIR_ADOPT_BROKER_POSITION:
+                    repaired = self._adopt_broker_position_from_truth(
+                        repaired,
+                        outcome=outcome,
+                        occurred_at=occurred_at,
+                    )
             repaired = replace(
                 repaired,
                 entries_enabled=not repaired.operator_halt,
@@ -433,6 +441,70 @@ class StrategyReconciler:
             return None
         return parsed if parsed.is_finite() else None
 
+    def _adopt_broker_position_from_truth(
+        self,
+        state: StrategyState,
+        *,
+        outcome: ReconciliationOutcome,
+        occurred_at: datetime,
+    ) -> StrategyState:
+        broker_qty = int(outcome.broker_snapshot.position_quantity)
+        broker_average_price = self._decimal_or_none(outcome.broker_snapshot.average_price)
+        if broker_qty == 0 or broker_average_price is None:
+            return state
+        side = PositionSide.LONG if broker_qty > 0 else PositionSide.SHORT
+        quantity = abs(broker_qty)
+        fill_timestamp = _parse_aware_datetime(outcome.broker_snapshot.last_fill_timestamp) or occurred_at
+        order_intent_id = (
+            state.last_order_intent_id
+            or outcome.internal_snapshot.last_order_intent_id
+            or f"broker_truth_adoption::{fill_timestamp.isoformat()}"
+        )
+        signal_bar_id = state.entry_bar_id or str(order_intent_id)
+        long_family = state.long_entry_family if state.long_entry_family is not LongEntryFamily.NONE else LongEntryFamily.K
+        short_family = (
+            state.short_entry_family
+            if state.short_entry_family is not ShortEntryFamily.NONE
+            else ShortEntryFamily.BEAR_SNAP
+        )
+        leg = StrategyEntryLeg(
+            leg_id=f"{order_intent_id}:broker_truth_adopted",
+            order_intent_id=str(order_intent_id),
+            quantity=quantity,
+            entry_price=broker_average_price,
+            entry_timestamp=fill_timestamp,
+            signal_bar_id=signal_bar_id,
+            position_side=side,
+            long_entry_family=long_family if side is PositionSide.LONG else LongEntryFamily.NONE,
+            short_entry_family=short_family if side is PositionSide.SHORT else ShortEntryFamily.NONE,
+            short_entry_source=(
+                state.short_entry_source
+                or str(self._runtime_identity.get("short_entry_source") or "broker_truth_adoption")
+            )
+            if side is PositionSide.SHORT
+            else None,
+        )
+        return replace(
+            state,
+            strategy_status=self._clean_open_position_status(replace(state, position_side=side)),
+            position_side=side,
+            internal_position_qty=quantity,
+            broker_position_qty=quantity,
+            entry_price=broker_average_price,
+            entry_timestamp=fill_timestamp,
+            entry_bar_id=signal_bar_id,
+            long_entry_family=leg.long_entry_family,
+            short_entry_family=leg.short_entry_family,
+            short_entry_source=leg.short_entry_source,
+            bars_in_trade=max(1, state.bars_in_trade),
+            long_be_armed=False,
+            short_be_armed=False,
+            open_broker_order_id=None,
+            last_order_intent_id=str(order_intent_id),
+            open_entry_legs=(leg,),
+            updated_at=occurred_at,
+        )
+
 
 def _is_transient_sqlite_lock_error(error: OperationalError) -> bool:
     return "database is locked" in str(error).lower()
@@ -472,3 +544,18 @@ def _normalize_confirmed_flat_state(state: StrategyState, **overrides: Any) -> S
     }
     values.update(overrides)
     return replace(state, **values)
+
+
+def _parse_aware_datetime(value: object) -> datetime | None:
+    if value in (None, ""):
+        return None
+    text = str(value).strip()
+    if not text:
+        return None
+    try:
+        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        return None
+    return parsed

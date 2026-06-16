@@ -25,6 +25,7 @@ RECONCILIATION_REPAIR_CLEAR_STALE_OPEN_ORDER = "clear_stale_open_order_markers"
 RECONCILIATION_REPAIR_CONFIRM_FLAT = "confirm_flat_from_broker_fill"
 RECONCILIATION_REPAIR_SYNC_BROKER_QTY = "sync_internal_broker_position_qty"
 RECONCILIATION_REPAIR_SYNC_BROKER_AVG_PRICE = "sync_entry_price_from_broker_average_price"
+RECONCILIATION_REPAIR_ADOPT_BROKER_POSITION = "adopt_broker_position_from_fresh_broker_truth"
 
 
 @dataclass(frozen=True)
@@ -345,6 +346,33 @@ class ReconciliationCoordinator:
                 mismatches=tuple(mismatches),
                 repair_actions=tuple(repair_actions),
                 recommended_action="Safe flat repair will clear the internal position and return to READY if nothing else is blocking.",
+                notes=tuple(notes),
+                freeze_new_entries=False,
+                requires_review=False,
+                requires_fault=False,
+                clean=False,
+                internal_snapshot=internal,
+                broker_snapshot=broker,
+                state_hint="ready",
+            )
+
+        if (
+            internal.expected_signed_quantity == 0
+            and broker.position_quantity != 0
+            and not open_order_uncertainty
+            and broker.average_price is not None
+        ):
+            repair_actions.append(RECONCILIATION_REPAIR_ADOPT_BROKER_POSITION)
+            notes.append(
+                "Fresh broker truth shows an exact open PAPER position while local artifacts are flat or rejected; "
+                "broker exposure is authoritative and will be adopted instead of frozen as missing fill acknowledgement."
+            )
+            return ReconciliationOutcome(
+                trigger=trigger,
+                classification=RECONCILIATION_CLASS_SAFE_REPAIR,
+                mismatches=tuple(mismatches),
+                repair_actions=tuple(repair_actions),
+                recommended_action="Safe cleanup will adopt the broker-backed position into managed local state.",
                 notes=tuple(notes),
                 freeze_new_entries=False,
                 requires_review=False,
