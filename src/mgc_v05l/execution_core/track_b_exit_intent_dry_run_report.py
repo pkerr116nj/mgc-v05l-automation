@@ -42,6 +42,9 @@ DEFAULT_EXIT_INTENT_DRY_RUN_REPORT = (
 DEFAULT_RECONCILIATION_REPORT_PATH = (
     Path("outputs") / "reports" / "track_b_paper_broker_reconciliation" / "latest_track_b_paper_broker_reconciliation.json"
 )
+DEFAULT_IBKR_POSITIONS_SNAPSHOT_PATH = (
+    Path("outputs") / "reports" / "ibkr_read_only_verification" / "ibkr_positions_snapshot.json"
+)
 
 NO_BROKER_POSITIONS = "NO_BROKER_POSITIONS"
 EXIT_INTENT_DRY_RUN_READY = "EXIT_INTENT_DRY_RUN_READY"
@@ -54,6 +57,7 @@ class TrackBExitIntentDryRunReportConfig:
     repo_root: Path = REPO_ROOT
     output_path: Path = DEFAULT_EXIT_INTENT_DRY_RUN_REPORT
     reconciliation_path: Path = DEFAULT_RECONCILIATION_REPORT_PATH
+    ibkr_positions_snapshot_path: Path = DEFAULT_IBKR_POSITIONS_SNAPSHOT_PATH
     managed_position_registry_path: Path = DEFAULT_MANAGED_POSITION_REGISTRY_ARTIFACT
     managed_order_registry_path: Path = DEFAULT_MANAGED_ORDER_REGISTRY_ARTIFACT
     open_order_truth_path: Path = DEFAULT_OPEN_ORDER_TRUTH_ARTIFACT
@@ -74,13 +78,19 @@ def build_track_b_exit_intent_dry_run_report(
     actual_now = require_aware_datetime(now or datetime.now(UTC), "now")
     inputs = _inputs(config=config, overrides=input_overrides or {})
     source_refs = _source_artifact_refs(config=config, inputs=inputs)
+    fresh_broker_positions = _broker_positions_from_fresh_broker_snapshot(inputs["ibkr_positions_snapshot"])
+    fresh_broker_snapshot_authoritative = _fresh_broker_snapshot_authoritative(inputs["ibkr_positions_snapshot"])
     managed_broker_positions = _broker_positions_from_managed_positions(inputs["managed_positions"])
     reconciliation_broker_positions = [
         row
         for row in (_mapping(item) for item in _list(inputs["reconciliation"].get("track_b_broker_positions")))
         if abs(_decimal(row.get("quantity"))) > Decimal("0")
     ]
-    broker_positions = managed_broker_positions or reconciliation_broker_positions
+    broker_positions = (
+        fresh_broker_positions
+        if fresh_broker_snapshot_authoritative
+        else managed_broker_positions or reconciliation_broker_positions
+    )
     candidates = [
         _candidate_report(
             broker_position=position,
@@ -115,6 +125,8 @@ def build_track_b_exit_intent_dry_run_report(
         "candidate_exit_intents": candidates,
         "source_classifications": {
             "reconciliation": inputs["reconciliation"].get("classification"),
+            "ibkr_positions_snapshot": inputs["ibkr_positions_snapshot"].get("classification")
+            or inputs["ibkr_positions_snapshot"].get("source"),
             "managed_positions": inputs["managed_positions"].get("classification"),
             "managed_orders": inputs["managed_orders"].get("classification"),
             "open_order_truth": inputs["open_order_truth"].get("classification"),
@@ -124,6 +136,7 @@ def build_track_b_exit_intent_dry_run_report(
         },
         "source_artifact_paths": {
             "reconciliation": str(config.resolve(config.reconciliation_path)),
+            "ibkr_positions_snapshot": str(config.resolve(config.ibkr_positions_snapshot_path)),
             "managed_positions": str(config.resolve(config.managed_position_registry_path)),
             "managed_orders": str(config.resolve(config.managed_order_registry_path)),
             "open_order_truth": str(config.resolve(config.open_order_truth_path)),
@@ -132,6 +145,39 @@ def build_track_b_exit_intent_dry_run_report(
             "safe_state": str(config.resolve(config.safe_state_path)),
         },
     }
+
+
+def _fresh_broker_snapshot_authoritative(snapshot: Mapping[str, Any]) -> bool:
+    if not snapshot:
+        return False
+    if snapshot.get("positions_complete") is True:
+        return True
+    return snapshot.get("ok") is True and isinstance(snapshot.get("positions"), list)
+
+
+def _broker_positions_from_fresh_broker_snapshot(snapshot: Mapping[str, Any]) -> list[dict[str, Any]]:
+    positions: list[dict[str, Any]] = []
+    for row in (_mapping(item) for item in _list(snapshot.get("positions"))):
+        identity = _mapping(row.get("contract_identity"))
+        local_symbol = _text(row.get("local_symbol") or identity.get("local_symbol"))
+        con_id = _int(row.get("con_id") or row.get("qualified_contract_identifier") or identity.get("con_id"))
+        quantity = _decimal(row.get("quantity") or row.get("position"))
+        if not local_symbol or con_id <= 0 or abs(quantity) <= Decimal("0"):
+            continue
+        if _text(row.get("security_type") or row.get("secType")).upper() not in {"", "FUT"}:
+            continue
+        positions.append(
+            {
+                "account_id": row.get("account_id") or row.get("account") or snapshot.get("selected_account_id") or "DUM882026",
+                "local_symbol": local_symbol,
+                "con_id": con_id,
+                "quantity": str(quantity),
+                "symbol": row.get("symbol") or identity.get("symbol"),
+                "track_b_root": row.get("track_b_root") or identity.get("track_b_root") or identity.get("instrument_family"),
+                "expiry": row.get("expiry") or identity.get("expiry"),
+            }
+        )
+    return positions
 
 
 def _broker_positions_from_managed_positions(managed_positions: Mapping[str, Any]) -> list[dict[str, Any]]:
@@ -458,6 +504,7 @@ def _inputs(
 ) -> dict[str, Mapping[str, Any]]:
     paths = {
         "reconciliation": config.reconciliation_path,
+        "ibkr_positions_snapshot": config.ibkr_positions_snapshot_path,
         "managed_positions": config.managed_position_registry_path,
         "managed_orders": config.managed_order_registry_path,
         "open_order_truth": config.open_order_truth_path,
@@ -475,6 +522,7 @@ def _source_artifact_refs(
 ) -> tuple[SourceArtifactRef, ...]:
     paths = {
         "reconciliation": config.reconciliation_path,
+        "ibkr_positions_snapshot": config.ibkr_positions_snapshot_path,
         "managed_positions": config.managed_position_registry_path,
         "managed_orders": config.managed_order_registry_path,
         "open_order_truth": config.open_order_truth_path,

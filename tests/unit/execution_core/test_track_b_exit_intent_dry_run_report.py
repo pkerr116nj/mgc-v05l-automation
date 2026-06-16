@@ -181,6 +181,35 @@ def test_current_managed_positions_outrank_stale_reconciliation_positions(tmp_pa
     assert candidate["exit_due"] is True
 
 
+def test_complete_fresh_broker_snapshot_blocks_stale_managed_close_candidate(tmp_path: Path) -> None:
+    inputs = _inputs()
+    inputs["ibkr_positions_snapshot"] = {
+        "generated_at": NOW.isoformat(),
+        "ok": True,
+        "positions_complete": True,
+        "selected_account_id": "DUM882026",
+        "positions": [
+            {
+                "account_id": "DUM882026",
+                "local_symbol": "MESM6",
+                "con_id": 770561194,
+                "quantity": "0",
+                "security_type": "FUT",
+                "symbol": "MES",
+                "track_b_root": "MES",
+            }
+        ],
+        "live_money_eligible": False,
+        "paper_proof_invoked": False,
+    }
+
+    payload = _build(tmp_path, inputs)
+
+    assert payload["classification"] == NO_BROKER_POSITIONS
+    assert payload["candidate_count"] == 0
+    assert payload["candidate_exit_intents"] == []
+
+
 def test_run_can_write_report_without_broker_or_service_side_effects(tmp_path: Path) -> None:
     config = TrackBExitIntentDryRunReportConfig(repo_root=tmp_path, output_path=Path("report.json"))
 
