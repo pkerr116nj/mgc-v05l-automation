@@ -105,6 +105,32 @@ _ACTIVE_PROFILE_SUBMIT_PORTING_DIAGNOSTIC_REASONS = {
     "strategy_lane_not_yet_submit_ported",
     "strategy_exit_coverage_incomplete",
 }
+_CURRENT_STATE_QUARTET_DIAGNOSTIC_BLOCKERS = {
+    "canonical_readiness_artifact_stale",
+    "canonical_readiness_not_submit_capable",
+    "BROKER_SESSION_NEW_ENTRY_NOT_ALLOWED",
+    "broker_truth_lease_unavailable",
+    "broker_truth_lease_not_active",
+    "broker_truth_lease_stale",
+    "broker_truth_lease_not_reconciled",
+    "broker_truth_review_required_present",
+    "phase1_broker_reconciliation_stale",
+    "phase1_broker_reconciliation_not_reconciled",
+    "phase1_broker_reconciled_false",
+    "phase1_review_required_present",
+    "phase1_open_orders_present",
+    "control_plane_not_ready",
+    "shared_truth_not_coherent",
+    "safe_state_not_normal",
+    "safe_state_submit_not_allowed",
+    "safe_state_broker_mutation_not_allowed",
+    "shared_services_authority_not_ready",
+    "backend_readiness_artifact_missing",
+    "backend_readiness_artifact_stale",
+    "startup_control_plane_not_ready",
+    "supervised_paper_not_usable",
+    "paper_trade_not_allowed",
+}
 
 
 @dataclass(frozen=True)
@@ -1474,15 +1500,29 @@ def _backend_source_live_readiness(
             block_reasons.extend(shared_service_block_reasons)
 
     block_reasons = list(dict.fromkeys(block_reasons))
-    diagnostic_block_reasons = list(block_reasons)
+    current_state_quartet = _current_state_quartet_authority(
+        paper_minimal_startup=paper_minimal_startup,
+        phase1_market_data=shared_phase1_status,
+        paper_runtime_truth=paper_runtime_truth,
+        paper_runtime_truth_status=artifacts["paper_runtime_truth"],
+        required_instruments=required_instrument_list,
+    )
+    diagnostic_block_reasons: list[str] = []
+    if current_state_quartet.get("allowed") is True:
+        hard_block_reasons: list[str] = []
+        for reason in block_reasons:
+            if _current_state_quartet_diagnostic_blocker(reason):
+                diagnostic_block_reasons.append(reason)
+            else:
+                hard_block_reasons.append(reason)
+        block_reasons = list(dict.fromkeys(hard_block_reasons))
     paper_minimal_allowed = paper_minimal_startup.get("allowed") is True
-    if paper_minimal_allowed:
-        block_reasons = []
     live_ready = not block_reasons
-    if paper_minimal_allowed:
+    if current_state_quartet.get("allowed") is True and live_ready:
         detail = (
-            "backend/source readiness ready from PAPER_MINIMAL_STARTUP_V1; "
-            "legacy canonical/control-plane/dashboard/runtime-governance readiness is diagnostic only; "
+            "backend/source readiness ready from current-state quartet; "
+            "fresh broker truth, scoped runtime market data, exact PAPER identity, and risk gates authorize the loop; "
+            "legacy canonical/control-plane/reconciliation/lease readiness is diagnostic only; "
             f"required_instruments={required_instrument_list}; "
             f"minimal_profile={paper_minimal_startup.get('profile_overlay')} "
             f"minimal_instruments={paper_minimal_startup.get('configured_instruments')}"
@@ -1551,6 +1591,7 @@ def _backend_source_live_readiness(
         "canonical_readiness_authoritative": canonical_authoritative,
         **broker_session_diagnostic,
         "paper_stack_authority": paper_stack_authority,
+        "current_state_quartet_authority": current_state_quartet,
         "paper_minimal_startup": paper_minimal_startup,
         "paper_minimal_startup_allowed": paper_minimal_allowed,
         "canonical_readiness_artifact": artifacts["canonical_readiness"],
@@ -1692,6 +1733,104 @@ def _canonical_paper_stack_submit_authority(
         "broker_truth_lease_state": broker_truth_lease.get("lease_state"),
         "phase1_reconciliation_classification": canonical_reconciliation.get("classification"),
     }
+
+
+def _current_state_quartet_authority(
+    *,
+    paper_minimal_startup: dict[str, Any],
+    phase1_market_data: dict[str, Any],
+    paper_runtime_truth: dict[str, Any],
+    paper_runtime_truth_status: dict[str, Any],
+    required_instruments: list[str],
+) -> dict[str, Any]:
+    block_reasons: list[str] = []
+    if paper_minimal_startup.get("allowed") is not True:
+        block_reasons.append("fresh_broker_truth_not_authorized")
+    if required_instruments and phase1_market_data.get("ready") is not True:
+        block_reasons.append("phase1_runtime_market_data_not_ready")
+    if not paper_runtime_truth:
+        block_reasons.append("paper_runtime_truth_missing")
+    elif not bool(paper_runtime_truth_status.get("fresh")):
+        block_reasons.append("paper_runtime_truth_stale")
+    if paper_runtime_truth and str(paper_runtime_truth.get("writer_authority") or "").strip().upper() != "SINGLE_WRITER":
+        block_reasons.append("paper_runtime_truth_not_single_writer")
+    if paper_runtime_truth and paper_runtime_truth.get("paper_only") is not True:
+        block_reasons.append("paper_runtime_truth_paper_only_not_true")
+    if paper_runtime_truth.get("live_money_eligible") is True:
+        block_reasons.append("paper_runtime_truth_live_money_eligible_true")
+    if paper_runtime_truth.get("paper_proof_invoked") is True:
+        block_reasons.append("paper_runtime_truth_paper_proof_invoked_true")
+    if paper_runtime_truth and str(paper_runtime_truth.get("freshness_state") or "").strip().upper() not in {"", "FRESH"}:
+        block_reasons.append("paper_runtime_truth_not_fresh")
+    if paper_runtime_truth and str(paper_runtime_truth.get("heartbeat_state") or "").strip().upper() not in {"", "HEALTHY"}:
+        block_reasons.append("paper_runtime_truth_heartbeat_not_healthy")
+    duplicate_writer = dict(paper_runtime_truth.get("duplicate_writer_detection") or {})
+    duplicate_count = _int_or_none(duplicate_writer.get("duplicate_runtime_submitter_count")) or 0
+    if duplicate_writer.get("duplicate_writer_detected") is True or duplicate_count > 0:
+        block_reasons.append("paper_runtime_truth_duplicate_writer_detected")
+    minimal_blockers = [
+        str(row.get("code") or row.get("reason") or "")
+        for row in list(paper_minimal_startup.get("blockers") or [])
+        if isinstance(row, dict)
+    ]
+    concrete_risk_blockers = [
+        reason
+        for reason in minimal_blockers
+        if reason
+        and (
+            "unknown_open_order" in reason
+            or "broker_open_orders" in reason
+            or "broker_positions" in reason
+            or "account" in reason
+            or "live_money" in reason
+            or "paper_proof" in reason
+            or "contract" in reason
+        )
+    ]
+    block_reasons.extend(concrete_risk_blockers)
+    return {
+        "allowed": not block_reasons,
+        "classification": "CURRENT_STATE_QUARTET_ALLOWED" if not block_reasons else "CURRENT_STATE_QUARTET_BLOCKED",
+        "block_reasons": list(dict.fromkeys(block_reasons)),
+        "broker_truth_allowed": paper_minimal_startup.get("allowed") is True,
+        "market_data_ready": phase1_market_data.get("ready") is True if required_instruments else True,
+        "runtime_truth_ready": (
+            bool(paper_runtime_truth)
+            and bool(paper_runtime_truth_status.get("fresh"))
+            and str(paper_runtime_truth.get("writer_authority") or "").strip().upper() == "SINGLE_WRITER"
+            and str(paper_runtime_truth.get("freshness_state") or "").strip().upper() in {"", "FRESH"}
+            and str(paper_runtime_truth.get("heartbeat_state") or "").strip().upper() in {"", "HEALTHY"}
+        ),
+        "required_instruments": list(required_instruments),
+        "authority_hierarchy": (
+            "fresh_broker_truth",
+            "fresh_runtime_market_data",
+            "exact_contract_account_identity",
+            "passing_risk_gates",
+        ),
+        "stale_artifact_policy": "DIAGNOSTIC_ONLY_UNLESS_CONCRETE_LIVE_RISK",
+    }
+
+
+def _current_state_quartet_diagnostic_blocker(reason: str) -> bool:
+    normalized = str(reason or "").strip()
+    if not normalized:
+        return False
+    if normalized in _CURRENT_STATE_QUARTET_DIAGNOSTIC_BLOCKERS:
+        return True
+    lowered = normalized.lower()
+    return (
+        lowered.startswith("order_status_unreliable")
+        or lowered.startswith("broker_truth_review")
+        or lowered.startswith("phase1_review")
+        or lowered.startswith("control_plane")
+        or lowered.startswith("shared_truth")
+        or lowered.startswith("safe_state")
+        or lowered.startswith("canonical_readiness")
+        or lowered.startswith("phase1_broker_reconciliation")
+        or lowered.startswith("broker_truth_lease")
+        or lowered.startswith("broker_session")
+    )
 
 
 def _canonical_broker_session_diagnostic(canonical: dict[str, Any]) -> dict[str, Any]:

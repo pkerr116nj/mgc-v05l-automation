@@ -24,10 +24,21 @@ def _config(tmp_path: Path) -> IbkrPaperStrategyGovernanceConfig:
     )
 
 
-def test_backend_source_readiness_uses_minimal_startup_as_authority(
+def test_backend_source_readiness_uses_current_state_quartet_as_authority(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    _write_paper_runtime_truth(tmp_path)
+    _write_shared_services_authority(
+        tmp_path,
+        symbol="MES",
+        control_plane_classification="CONTROL_PLANE_STALE",
+        coherence="STALE",
+        safe_state_classification="SAFE_STATE_HARD_HOLD",
+        submit_allowed=False,
+        broker_mutation_allowed=False,
+    )
+    _patch_guarded_loop_process(monkeypatch, tmp_path)
     monkeypatch.setattr(
         governance_module,
         "build_track_b_paper_minimal_startup",
@@ -49,7 +60,70 @@ def test_backend_source_readiness_uses_minimal_startup_as_authority(
     assert readiness["live_ready"] is True
     assert readiness["block_reasons"] == []
     assert readiness["diagnostic_block_reasons"]
+    assert "control_plane_not_ready" in readiness["diagnostic_block_reasons"]
+    assert "safe_state_submit_not_allowed" in readiness["diagnostic_block_reasons"]
     assert readiness["paper_minimal_startup_allowed"] is True
+    assert readiness["current_state_quartet_authority"]["allowed"] is True
+
+
+def test_current_state_quartet_blocks_unknown_orders(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _write_paper_runtime_truth(tmp_path)
+    _write_shared_services_authority(tmp_path, symbol="MES")
+    _patch_guarded_loop_process(monkeypatch, tmp_path)
+    monkeypatch.setattr(
+        governance_module,
+        "build_track_b_paper_minimal_startup",
+        lambda **kwargs: {
+            "allowed": False,
+            "classification": "PAPER_MINIMAL_STARTUP_BLOCKED",
+            "profile_overlay": "/tmp/paper_stack_mnq_mes_full_session_active_evidence.yaml",
+            "configured_instruments": ["MES"],
+            "blockers": [{"code": "unknown_open_orders_present"}],
+            "warnings": [],
+        },
+    )
+
+    readiness = governance_module._backend_source_live_readiness(
+        config=_config(tmp_path),
+        required_instruments=["MES"],
+    )
+
+    assert readiness["live_ready"] is False
+    assert "fresh_broker_truth_not_authorized" in readiness["current_state_quartet_authority"]["block_reasons"]
+    assert readiness["diagnostic_block_reasons"] == []
+
+
+def test_current_state_quartet_blocks_stale_market_data(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _write_paper_runtime_truth(tmp_path)
+    _write_shared_services_authority(tmp_path, symbol="MES", candle_stale=True)
+    _patch_guarded_loop_process(monkeypatch, tmp_path)
+    monkeypatch.setattr(
+        governance_module,
+        "build_track_b_paper_minimal_startup",
+        lambda **kwargs: {
+            "allowed": True,
+            "classification": "PAPER_MINIMAL_STARTUP_ALLOWED",
+            "profile_overlay": "/tmp/paper_stack_mnq_mes_full_session_active_evidence.yaml",
+            "configured_instruments": ["MES"],
+            "blockers": [],
+            "warnings": [],
+        },
+    )
+
+    readiness = governance_module._backend_source_live_readiness(
+        config=_config(tmp_path),
+        required_instruments=["MES"],
+    )
+
+    assert readiness["live_ready"] is False
+    assert "phase1_runtime_market_data_not_ready" in readiness["block_reasons"]
+    assert readiness["current_state_quartet_authority"]["allowed"] is False
 
 
 def _write_monitor(tmp_path: Path, **overrides: object) -> None:
