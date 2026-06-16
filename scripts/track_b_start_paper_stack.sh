@@ -1676,7 +1676,7 @@ if progress:
             progress_pid == pid
             and (not progress_runtime or not truth_runtime or progress_runtime == truth_runtime)
             and progress_state in {"STARTED", "IN_PROGRESS", "COMPLETED"}
-            and progress_stage in {"authority_refresh", "watchdog_liveness_refresh"}
+            and progress_stage in {"authority_refresh", "watchdog_liveness_refresh", "lane_restore", "runtime_cycle"}
             and (datetime.now(timezone.utc) - progress_generated).total_seconds() <= 15
         )
 
@@ -1763,7 +1763,7 @@ progress_state = str(progress.get("state") or "").strip().upper()
 progress_stage = str(progress.get("stage") or "").strip()
 if progress_state not in {"STARTED", "IN_PROGRESS", "COMPLETED"}:
     raise SystemExit(1)
-if progress_stage not in {"authority_refresh", "watchdog_liveness_refresh"}:
+if progress_stage not in {"authority_refresh", "watchdog_liveness_refresh", "lane_restore", "runtime_cycle"}:
     raise SystemExit(1)
 generated_at = str(progress.get("heartbeat_at") or progress.get("generated_at") or "").strip()
 try:
@@ -2011,7 +2011,9 @@ set +e
 wait "\${runtime_pid}"
 runtime_exit_code="\$?"
 set -e
-"${PYTHON_BIN}" - <<'PY' "${LAUNCH_STATUS_FILE}" "${PID_FILE}" "${RUNTIME_LOG}" "${CONFIG_PATHS_FILE}" "${RUNTIME_DIR}/paper_runtime_truth.json" "\${runtime_pid}" "\${runtime_exit_code}" "${REPO_ROOT}" "${PYTHON_BIN}"
+runtime_exit_observed_at="\$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+printf '%s\n' "track_b_paper_stack_wrapper_child_exit generated_at=\${runtime_exit_observed_at} runtime_pid=\${runtime_pid} exit_code=\${runtime_exit_code}" >> "${RUNTIME_LOG}"
+if ! "${PYTHON_BIN}" - <<'PY' "${LAUNCH_STATUS_FILE}" "${PID_FILE}" "${RUNTIME_LOG}" "${CONFIG_PATHS_FILE}" "${RUNTIME_DIR}/paper_runtime_truth.json" "\${runtime_pid}" "\${runtime_exit_code}" "${REPO_ROOT}" "${PYTHON_BIN}" "\${runtime_exit_observed_at}"
 import json
 import os
 import sys
@@ -2027,6 +2029,7 @@ runtime_pid = int(sys.argv[6])
 exit_code = int(sys.argv[7])
 repo_root = sys.argv[8]
 python_bin = sys.argv[9]
+observed_at = sys.argv[10]
 truth = {}
 try:
     truth = json.loads(truth_path.read_text(encoding="utf-8"))
@@ -2040,7 +2043,7 @@ except (TypeError, ValueError):
 first_truth = truth.get("generated_at") if truth_pid == runtime_pid else None
 classification = "RUNTIME_EXITED_AFTER_INITIAL_TRUTH" if first_truth else "RUNTIME_EXITED_BEFORE_RUNTIME_TRUTH"
 payload = {
-    "generated_at": datetime.now(timezone.utc).isoformat(),
+    "generated_at": observed_at or datetime.now(timezone.utc).isoformat(),
     "classification": classification,
     "pid": runtime_pid,
     "pid_file": pid_file,
@@ -2060,7 +2063,7 @@ payload = {
     "termination_signal": None,
     "termination_reason": "runtime_exited_after_initial_truth" if first_truth else "runtime_exited_before_runtime_truth",
     "stop_source": "runtime_internal",
-    "stop_observed_at": datetime.now(timezone.utc).isoformat(),
+    "stop_observed_at": observed_at or datetime.now(timezone.utc).isoformat(),
     "paper_only": True,
     "live_money_eligible": False,
     "paper_proof_invoked": False,
@@ -2071,6 +2074,25 @@ tmp = status_path.with_name(f".{status_path.name}.{runtime_pid}.tmp")
 tmp.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 tmp.replace(status_path)
 PY
+then
+  status_tmp="${LAUNCH_STATUS_FILE}.\$\$.tmp"
+  printf '{\n' > "\${status_tmp}"
+  printf '  "classification": "RUNTIME_EXIT_STATUS_CAPTURE_FAILED",\n' >> "\${status_tmp}"
+  printf '  "child_exit_code": %s,\n' "\${runtime_exit_code}" >> "\${status_tmp}"
+  printf '  "detail": "foreground child exited, but Python launch-status writer failed; shell fallback captured exit status",\n' >> "\${status_tmp}"
+  printf '  "final_pid_alive": false,\n' >> "\${status_tmp}"
+  printf '  "generated_at": "%s",\n' "\${runtime_exit_observed_at}" >> "\${status_tmp}"
+  printf '  "live_money_eligible": false,\n' >> "\${status_tmp}"
+  printf '  "paper_only": true,\n' >> "\${status_tmp}"
+  printf '  "paper_proof_invoked": false,\n' >> "\${status_tmp}"
+  printf '  "pid": %s,\n' "\${runtime_pid}" >> "\${status_tmp}"
+  printf '  "stop_observed_at": "%s",\n' "\${runtime_exit_observed_at}" >> "\${status_tmp}"
+  printf '  "stop_source": "runtime_internal",\n' >> "\${status_tmp}"
+  printf '  "submit_authority": false,\n' >> "\${status_tmp}"
+  printf '  "termination_reason": "runtime_exit_status_capture_failed"\n' >> "\${status_tmp}"
+  printf '}\n' >> "\${status_tmp}"
+  mv "\${status_tmp}" "${LAUNCH_STATUS_FILE}"
+fi
 exit "\${runtime_exit_code}"
 WRAPPER
 chmod +x "${wrapper_tmp}"

@@ -1238,6 +1238,74 @@ def _effective_reconciliation_clean(payload: dict[str, Any] | None) -> bool:
     return bool(payload.get("clean")) or classification in RECONCILIATION_SAFE_CLASSES
 
 
+_PAPER_RUNTIME_RECONCILIATION_HARD_RISK_TOKENS = (
+    "unknown_order",
+    "unknown orders",
+    "conflicting_order",
+    "conflicting orders",
+    "order_conflict",
+    "unresolved_identity",
+    "unresolved current exposure",
+    "unmanaged_exposure",
+    "ambiguous_exposure",
+    "ambiguous current exposure",
+    "incomplete_broker_truth",
+    "broker_unavailable",
+    "unavailable_broker_truth",
+    "unsafe_broker_state",
+    "live_money",
+    "paper_proof",
+)
+
+_PAPER_RUNTIME_RECONCILIATION_DIAGNOSTIC_TOKENS = (
+    "stale",
+    "diagnostic",
+    "dirty_reconciliation",
+    "broker_reconciliation_dirty",
+    "reconciliation_freshness_lag",
+    "legacy reconciliation",
+    "lifecycle_broker_position_mismatch",
+    "track_b_paper_broker_reconciliation_blocked",
+    "review_required_current_scope",
+)
+
+
+def _paper_runtime_reconciliation_hard_live_risk(payload: dict[str, Any] | None) -> bool:
+    if _effective_reconciliation_clean(payload):
+        return False
+    if not payload:
+        return False
+
+    evidence: list[str] = []
+    for key in (
+        "classification",
+        "reason",
+        "primary_blocker",
+        "blocker",
+        "detail",
+        "message",
+        "failure_kind",
+        "status",
+    ):
+        value = payload.get(key)
+        if value is not None:
+            evidence.append(str(value))
+    for key in ("reason_codes", "blockers", "warnings", "mismatches", "review_required", "diagnostics"):
+        value = payload.get(key)
+        if value is not None:
+            try:
+                evidence.append(json.dumps(value, sort_keys=True, default=str))
+            except TypeError:
+                evidence.append(str(value))
+
+    joined = " ".join(evidence).lower()
+    if any(token in joined for token in _PAPER_RUNTIME_RECONCILIATION_HARD_RISK_TOKENS):
+        return True
+    if any(token in joined for token in _PAPER_RUNTIME_RECONCILIATION_DIAGNOSTIC_TOKENS):
+        return False
+    return True
+
+
 def _initial_reconciliation_heartbeat_status(interval_seconds: int) -> dict[str, Any]:
     cadence = max(int(interval_seconds or 0), 1)
     return {
@@ -7708,6 +7776,14 @@ class ProbationaryPaperSupervisor:
             )
             risk_state = _load_probationary_paper_risk_state(self._settings)
 
+            _write_paper_post_truth_startup_progress(
+                settings=self._settings,
+                runtime_instance_id=self._runtime_instance_id,
+                runtime_started_at=self._runtime_started_at,
+                stage="lane_restore",
+                state="STARTED",
+                payload={"lane_count": len(self._lanes)},
+            )
             for lane in self._lanes:
                 startup_reason = lane.restore_startup()
                 if startup_reason is not None:
@@ -7731,6 +7807,25 @@ class ProbationaryPaperSupervisor:
                     )
                     return self._finalize_summary(new_bars=0, reconciliation_clean=False, stop_reason=stop_reason)
 
+            _write_probationary_paper_runtime_truth(
+                settings=self._settings,
+                lanes=self._lanes,
+                runtime_instance_id=self._runtime_instance_id,
+                runtime_started_at=self._runtime_started_at,
+            )
+            _write_paper_post_truth_startup_progress(
+                settings=self._settings,
+                runtime_instance_id=self._runtime_instance_id,
+                runtime_started_at=self._runtime_started_at,
+                stage="lane_restore",
+                state="COMPLETED",
+                payload={
+                    "lane_count": len(self._lanes),
+                    "healthy_lane_count": len(self._healthy_lanes()),
+                    "quarantined_lane_count": len(self._lane_quarantine),
+                },
+            )
+
             if not self._healthy_lanes():
                 stop_reason = "all_lanes_quarantined_startup_reconciliation"
                 _write_probationary_supervisor_operator_status(
@@ -7752,6 +7847,20 @@ class ProbationaryPaperSupervisor:
             new_bars = 0
             while True:
                 cycle_started_at = time_module.perf_counter()
+                _write_probationary_paper_runtime_truth(
+                    settings=self._settings,
+                    lanes=self._lanes,
+                    runtime_instance_id=self._runtime_instance_id,
+                    runtime_started_at=self._runtime_started_at,
+                )
+                _write_paper_post_truth_startup_progress(
+                    settings=self._settings,
+                    runtime_instance_id=self._runtime_instance_id,
+                    runtime_started_at=self._runtime_started_at,
+                    stage="runtime_cycle",
+                    state="STARTED",
+                    payload={"cycle": cycles + 1},
+                )
                 risk_state = _ensure_probationary_paper_risk_state_session(
                     risk_state,
                     _resolve_probationary_supervisor_session_date(self._settings, self._lanes),
@@ -7879,6 +7988,8 @@ class ProbationaryPaperSupervisor:
                                     ),
                                 }
                             )
+                        if isinstance(reconciliation, dict):
+                            setattr(lane, "_last_reconciliation_payload", dict(reconciliation))
                         new_bars += lane_new_bars
                         if not _effective_reconciliation_clean(reconciliation):
                             reconciliation_clean = False
@@ -8058,6 +8169,24 @@ class ProbationaryPaperSupervisor:
                         "duration_seconds": round(float(slowest_stage_duration), 6),
                     },
                 }
+                hard_reconciliation_live_risk = False
+                reconciliation_diagnostics: list[dict[str, Any]] = []
+                if not reconciliation_clean:
+                    for lane in active_lanes:
+                        payload = getattr(lane, "_last_reconciliation_payload", None)
+                        if not isinstance(payload, dict) or _effective_reconciliation_clean(payload):
+                            continue
+                        diagnostic = {
+                            "lane_id": lane.spec.lane_id,
+                            "symbol": lane.spec.symbol,
+                            "classification": payload.get("classification"),
+                            "hard_live_risk": _paper_runtime_reconciliation_hard_live_risk(payload),
+                        }
+                        reconciliation_diagnostics.append(diagnostic)
+                        if diagnostic["hard_live_risk"]:
+                            hard_reconciliation_live_risk = True
+                runtime_cycle_observability["reconciliation_diagnostics"] = reconciliation_diagnostics
+                runtime_cycle_observability["reconciliation_hard_live_risk"] = hard_reconciliation_live_risk
                 status_publication_started_at = time_module.perf_counter()
                 status_path = _write_probationary_supervisor_operator_status(
                     settings=self._settings,
@@ -8107,6 +8236,19 @@ class ProbationaryPaperSupervisor:
                 self._structured_logger._write_json(status_path, status_payload)  # noqa: SLF001
 
                 if not reconciliation_clean:
+                    _write_paper_post_truth_startup_progress(
+                        settings=self._settings,
+                        runtime_instance_id=self._runtime_instance_id,
+                        runtime_started_at=self._runtime_started_at,
+                        stage="runtime_cycle",
+                        state="COMPLETED",
+                        payload={
+                            "cycle": cycles + 1,
+                            "reconciliation_clean": False,
+                            "hard_live_risk": hard_reconciliation_live_risk,
+                        },
+                    )
+                if not reconciliation_clean and hard_reconciliation_live_risk:
                     stop_reason = "paper_reconciliation_mismatch"
                     return ProbationaryPaperSummary(
                         processed_bars=sum(lane.repositories.processed_bars.count() for lane in self._lanes),
@@ -8126,6 +8268,19 @@ class ProbationaryPaperSupervisor:
                     )
 
                 cycles += 1
+                if reconciliation_clean:
+                    _write_paper_post_truth_startup_progress(
+                        settings=self._settings,
+                        runtime_instance_id=self._runtime_instance_id,
+                        runtime_started_at=self._runtime_started_at,
+                        stage="runtime_cycle",
+                        state="COMPLETED",
+                        payload={
+                            "cycle": cycles,
+                            "reconciliation_clean": True,
+                            "hard_live_risk": False,
+                        },
+                    )
                 if (
                     poll_once
                     or (max_cycles is not None and cycles >= max_cycles)
@@ -8162,7 +8317,7 @@ class ProbationaryPaperSupervisor:
                         last_processed_bar_end_ts=_latest_probationary_lane_processed_ts(self._lanes),
                         operator_status_path=str(status_path),
                         artifacts_dir=str(self._structured_logger.artifact_dir),
-                        reconciliation_clean=True,
+                        reconciliation_clean=reconciliation_clean,
                         stop_reason=stop_reason,
                         stop_provenance=(
                             _build_probationary_runtime_stop_provenance(

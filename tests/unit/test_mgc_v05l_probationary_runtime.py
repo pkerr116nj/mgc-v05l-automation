@@ -10527,6 +10527,68 @@ def test_probationary_supervisor_unsafe_reconciliation_stop_has_provenance(
     assert summary.stop_provenance["broker_safe_at_stop"] is False
 
 
+def test_probationary_supervisor_dirty_diagnostic_reconciliation_stays_alive_after_restore(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = _build_probationary_paper_settings(tmp_path)
+    root_logger = StructuredLogger(tmp_path / "root")
+    lane = _prepare_supervisor_test_lane(
+        _seed_test_lane(
+            tmp_path,
+            lane_id="mnq_lane",
+            symbol="MNQ",
+            source="usLatePauseResumeLongTurn",
+            session_restriction="US_LATE",
+            point_value=Decimal("2"),
+        )
+    )
+    lane.restore_startup = lambda: None
+    lane.poll_and_process = lambda: (
+        0,
+        {
+            "clean": False,
+            "classification": "TRACK_B_PAPER_BROKER_RECONCILIATION_BLOCKED",
+            "reason_codes": ["broker_reconciliation_dirty_diagnostic"],
+        },
+        None,
+    )
+    supervisor = probationary_runtime_module.ProbationaryPaperSupervisor(
+        settings=settings,
+        lanes=[lane],
+        structured_logger=root_logger,
+        alert_dispatcher=AlertDispatcher(root_logger),
+    )
+    monkeypatch.setattr(supervisor, "_install_signal_handlers", lambda: {})
+    monkeypatch.setattr(supervisor, "_restore_signal_handlers", lambda _previous: None)
+    monkeypatch.setattr(
+        probationary_runtime_module,
+        "_start_track_b_async_diagnostic_authority_refresh_for_active_paper_runtime",
+        lambda _settings: None,
+    )
+
+    summary = supervisor.run(poll_once=True)
+
+    assert summary.stop_reason is None
+    assert summary.reconciliation_clean is False
+    status_payload = json.loads(Path(summary.operator_status_path).read_text(encoding="utf-8"))
+    assert status_payload["health"]["reconciliation_clean"] is False
+    observability = status_payload["runtime_cycle_observability"]
+    assert observability["reconciliation_hard_live_risk"] is False
+    assert observability["reconciliation_diagnostics"] == [
+        {
+            "classification": "TRACK_B_PAPER_BROKER_RECONCILIATION_BLOCKED",
+            "hard_live_risk": False,
+            "lane_id": "mnq_lane",
+            "symbol": "MNQ",
+        }
+    ]
+    events_path = settings.probationary_artifacts_path / "runtime" / "paper_post_truth_startup_progress_events.jsonl"
+    events = [json.loads(line) for line in events_path.read_text(encoding="utf-8").splitlines()]
+    assert any(event["stage"] == "lane_restore" and event["state"] == "COMPLETED" for event in events)
+    assert any(event["stage"] == "runtime_cycle" and event["state"] == "COMPLETED" for event in events)
+
+
 def test_probationary_supervisor_runs_managed_maintenance_without_lane_candidates(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -11734,6 +11796,12 @@ def _prepare_supervisor_test_lane(lane: SimpleNamespace, *, source: str = "usLat
     lane.spec.strategy_family = "unit_test_family"
     lane.spec.strategy_identity_root = lane.spec.lane_id
     lane.spec.shared_strategy_identity = lane.spec.lane_id
+    lane.spec.execution_mode = None
+    lane.spec.current_order_destination = None
+    lane.spec.local_symbol = None
+    lane.spec.con_id = None
+    lane.spec.contract_key = None
+    lane.spec.managed_exit_policy_id = None
     return lane
 
 

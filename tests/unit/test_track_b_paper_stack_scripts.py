@@ -32,6 +32,8 @@ def test_paper_stack_start_launches_foreground_runtime_inside_screen() -> None:
     assert 'runtime_pid="\\$!"' in source
     assert 'wait "\\${runtime_pid}"' in source
     assert "RUNTIME_EXITED_AFTER_INITIAL_TRUTH" in source
+    assert "track_b_paper_stack_wrapper_child_exit" in source
+    assert "RUNTIME_EXIT_STATUS_CAPTURE_FAILED" in source
     assert "--background" not in source
     assert "run_probationary_paper_soak.sh" in source
 
@@ -113,7 +115,11 @@ def test_paper_minimal_start_accepts_post_truth_progress_heartbeat_without_first
     assert "progress_fresh_for_post_truth_startup" in verifier_block
     assert "and not progress_fresh_for_post_truth_startup" in verifier_block
     assert 'progress_state not in {"STARTED", "IN_PROGRESS", "COMPLETED"}' in progress_block
-    assert 'progress_stage not in {"authority_refresh", "watchdog_liveness_refresh"}' in progress_block
+    assert (
+        'progress_stage not in {"authority_refresh", "watchdog_liveness_refresh", "lane_restore", "runtime_cycle"}'
+        in progress_block
+    )
+    assert 'progress_stage in {"authority_refresh", "watchdog_liveness_refresh", "lane_restore", "runtime_cycle"}' in verifier_block
     assert "progress_pid != pid" in progress_block
     assert "RUNTIME_RUNNING_POST_TRUTH_AUTHORITY_REFRESH" in minimal_wait_block
     assert "deadline=$((SECONDS + WAIT_SECONDS))" in minimal_wait_block
