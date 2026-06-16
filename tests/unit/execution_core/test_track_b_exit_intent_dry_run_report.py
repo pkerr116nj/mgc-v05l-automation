@@ -91,15 +91,16 @@ def test_same_contract_unknown_order_blocks_when_over_close_not_ruled_out(tmp_pa
     assert "same_contract_unknown_order_over_close_risk" in candidate["block_reasons"]
 
 
-def test_safe_state_hard_halt_blocks(tmp_path: Path) -> None:
+def test_safe_state_hard_halt_is_diagnostic_for_exact_paper_risk_reducing_close(tmp_path: Path) -> None:
     inputs = _inputs()
     inputs["safe_state"]["classification"] = "SAFE_STATE_HARD_HOLD"
 
     payload = _build(tmp_path, inputs)
 
     candidate = payload["candidate_exit_intents"][0]
-    assert candidate["authority_decision"]["decision"] == "BLOCKED"
-    assert "safe_state_hard_halt" in candidate["block_reasons"]
+    assert candidate["authority_decision"]["decision"] == "ALLOWED"
+    assert candidate["authority_decision"]["hard_required_checks"]["safe_state_no_hard_halt"]["passed"] is True
+    assert candidate["block_reasons"] == []
 
 
 def test_no_broker_positions_reports_no_candidates(tmp_path: Path) -> None:

@@ -71,6 +71,12 @@ DEFAULT_MANAGED_EXIT_PIPELINE_DRY_RUN_REPORT = (
 DEFAULT_RECONCILIATION_REPORT_PATH = (
     Path("outputs") / "reports" / "track_b_paper_broker_reconciliation" / "latest_track_b_paper_broker_reconciliation.json"
 )
+DEFAULT_BROKER_POSITIONS_SNAPSHOT = (
+    Path("outputs") / "reports" / "ibkr_read_only_verification" / "ibkr_positions_snapshot.json"
+)
+DEFAULT_BROKER_OPEN_ORDERS_SNAPSHOT = (
+    Path("outputs") / "reports" / "ibkr_read_only_verification" / "ibkr_open_orders_snapshot.json"
+)
 
 
 class ManagedExitPipelineDryRunClassification(str, Enum):
@@ -89,6 +95,8 @@ class TrackBManagedExitPipelineDryRunConfig:
     managed_position_registry_path: Path = DEFAULT_MANAGED_POSITION_REGISTRY_ARTIFACT
     managed_order_registry_path: Path = DEFAULT_MANAGED_ORDER_REGISTRY_ARTIFACT
     open_order_truth_path: Path = DEFAULT_OPEN_ORDER_TRUTH_ARTIFACT
+    broker_positions_snapshot_path: Path = DEFAULT_BROKER_POSITIONS_SNAPSHOT
+    broker_open_orders_snapshot_path: Path = DEFAULT_BROKER_OPEN_ORDERS_SNAPSHOT
     broker_session_authority_path: Path = DEFAULT_BROKER_SESSION_AUTHORITY_ARTIFACT
     guardian_path: Path = DEFAULT_BROKER_POSITION_GUARDIAN_ARTIFACT
     safe_state_path: Path = DEFAULT_RUNTIME_SAFE_STATE_ENVELOPE_ARTIFACT
@@ -176,7 +184,7 @@ def build_track_b_managed_exit_pipeline_dry_run_report(
         )
         authority_decisions = _authority_decisions(
             intents=_list(intent_factory.get("exit_intents")),
-            inputs=inputs,
+            inputs={**inputs, "position_state": position_state},
             config=config,
             now=actual_now,
         )
@@ -265,7 +273,7 @@ def _authority_decisions(
     source_refs = _source_refs(config=config, inputs=inputs)
     for intent_payload in (_mapping(row) for row in intents):
         intent = _exit_intent_from_payload(intent_payload)
-        broker_position = _broker_position_for_intent(intent=intent, reconciliation=inputs["reconciliation"])
+        broker_position = _broker_position_for_intent(intent=intent, inputs=inputs)
         current_state = _current_state_for_intent(
             intent=intent,
             broker_position=broker_position,
@@ -403,7 +411,7 @@ def _classification(
         return ManagedExitPipelineDryRunClassification.EXIT_INTENT_BLOCKED
     if not position_state:
         return ManagedExitPipelineDryRunClassification.PIPELINE_ERROR
-    if int(position_state.get("position_count") or 0) == 0:
+    if int(position_state.get("position_count") or 0) == 0 and not _list(intent_factory.get("exit_intents")):
         return ManagedExitPipelineDryRunClassification.NO_POSITIONS
     selector_classification = str(selector.get("classification") or "")
     factory_classification = str(intent_factory.get("classification") or "")
@@ -429,6 +437,8 @@ def _inputs(
         "managed_positions": config.managed_position_registry_path,
         "managed_orders": config.managed_order_registry_path,
         "open_order_truth": config.open_order_truth_path,
+        "broker_positions_snapshot": config.broker_positions_snapshot_path,
+        "broker_open_orders_snapshot": config.broker_open_orders_snapshot_path,
         "broker_session_authority": config.broker_session_authority_path,
         "guardian": config.guardian_path,
         "safe_state": config.safe_state_path,
@@ -442,6 +452,8 @@ def _source_artifact_paths(config: TrackBManagedExitPipelineDryRunConfig) -> dic
         "managed_positions": str(config.resolve(config.managed_position_registry_path)),
         "managed_orders": str(config.resolve(config.managed_order_registry_path)),
         "open_order_truth": str(config.resolve(config.open_order_truth_path)),
+        "broker_positions_snapshot": str(config.resolve(config.broker_positions_snapshot_path)),
+        "broker_open_orders_snapshot": str(config.resolve(config.broker_open_orders_snapshot_path)),
         "broker_session_authority": str(config.resolve(config.broker_session_authority_path)),
         "guardian": str(config.resolve(config.guardian_path)),
         "safe_state": str(config.resolve(config.safe_state_path)),
@@ -473,26 +485,142 @@ def _source_refs(
     return tuple(refs)
 
 
-def _broker_position_for_intent(*, intent: ExitIntent, reconciliation: Mapping[str, Any]) -> dict[str, Any]:
+def _broker_position_for_intent(
+    *,
+    intent: ExitIntent,
+    inputs: Mapping[str, Mapping[str, Any]] | None = None,
+    reconciliation: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    payloads = inputs or {"reconciliation": reconciliation or {}}
+    for row in _position_state_broker_position_candidates(intent=intent, position_state=payloads.get("position_state") or {}):
+        return row
+    for row in _managed_projection_broker_position_candidates(
+        intent=intent,
+        managed_positions=payloads.get("managed_positions") or {},
+    ):
+        return row
+    for row in _fresh_broker_snapshot_candidates(
+        intent=intent,
+        positions_snapshot=payloads.get("broker_positions_snapshot") or {},
+    ):
+        return row
+
+    reconciliation_payload = reconciliation or payloads.get("reconciliation") or {}
     fallback_candidates: list[dict[str, Any]] = []
-    for row in (_mapping(item) for item in _list(reconciliation.get("track_b_broker_positions"))):
-        account = str(row.get("account_id") or row.get("account") or intent.account_id)
-        local_symbol = str(row.get("local_symbol") or "").upper()
-        row_con_id = _int(row.get("con_id"))
-        quantity = _decimal(row.get("quantity"))
-        if account != intent.account_id or abs(quantity) <= Decimal("0"):
+    for row in (_mapping(item) for item in _list(reconciliation_payload.get("track_b_broker_positions"))):
+        normalized = _normalize_broker_position_candidate(row=row, intent=intent)
+        if not normalized:
             continue
-        if (
-            local_symbol == intent.local_symbol
-            and (row_con_id == intent.con_id or row_con_id == 0)
-        ):
-            return row
-        row_instrument = str(row.get("track_b_root") or row.get("symbol") or "").upper()
+        local_symbol = str(normalized.get("local_symbol") or "").upper()
+        row_con_id = _int(normalized.get("con_id"))
+        if local_symbol == intent.local_symbol and row_con_id == intent.con_id:
+            return normalized
+        row_instrument = str(normalized.get("track_b_root") or normalized.get("symbol") or "").upper()
         if not local_symbol and row_con_id == 0 and row_instrument == intent.instrument:
-            fallback_candidates.append(row)
+            fallback_candidates.append(normalized)
     if len(fallback_candidates) == 1:
         return fallback_candidates[0]
     return {}
+
+
+def _position_state_broker_position_candidates(
+    *,
+    intent: ExitIntent,
+    position_state: Mapping[str, Any],
+) -> list[dict[str, Any]]:
+    candidates: list[dict[str, Any]] = []
+    for row in (_mapping(item) for item in _list(position_state.get("positions"))):
+        normalized = _normalize_position_state_candidate(row=row, intent=intent)
+        if normalized:
+            candidates.append(normalized)
+    return candidates
+
+
+def _managed_projection_broker_position_candidates(
+    *,
+    intent: ExitIntent,
+    managed_positions: Mapping[str, Any],
+) -> list[dict[str, Any]]:
+    candidates: list[dict[str, Any]] = []
+    for row in (_mapping(item) for item in _list(managed_positions.get("managed_positions"))):
+        broker_position = _mapping(row.get("broker_position"))
+        source = broker_position or row
+        normalized = _normalize_broker_position_candidate(row=source, intent=intent)
+        if normalized:
+            candidates.append(normalized)
+    return candidates
+
+
+def _fresh_broker_snapshot_candidates(
+    *,
+    intent: ExitIntent,
+    positions_snapshot: Mapping[str, Any],
+) -> list[dict[str, Any]]:
+    if not _broker_positions_snapshot_complete(positions_snapshot):
+        return []
+    candidates: list[dict[str, Any]] = []
+    for row in (_mapping(item) for item in _list(positions_snapshot.get("positions"))):
+        normalized = _normalize_broker_position_candidate(row=row, intent=intent)
+        if normalized:
+            candidates.append(normalized)
+    return candidates
+
+
+def _normalize_position_state_candidate(*, row: Mapping[str, Any], intent: ExitIntent) -> dict[str, Any]:
+    quantity = _decimal(row.get("qty") or row.get("owned_qty"))
+    if quantity <= 0:
+        return {}
+    side = str(row.get("side") or "").upper()
+    signed = -quantity if side == "SHORT" else quantity
+    candidate = {
+        "account_id": row.get("account_id"),
+        "local_symbol": row.get("local_symbol"),
+        "con_id": row.get("con_id"),
+        "symbol": row.get("instrument") or row.get("symbol") or row.get("track_b_root"),
+        "track_b_root": row.get("instrument") or row.get("track_b_root") or row.get("symbol"),
+        "quantity": str(signed),
+    }
+    return _normalize_broker_position_candidate(row=candidate, intent=intent)
+
+
+def _normalize_broker_position_candidate(*, row: Mapping[str, Any], intent: ExitIntent) -> dict[str, Any]:
+    account = str(row.get("account_id") or row.get("account") or intent.account_id)
+    local_symbol = str(row.get("local_symbol") or row.get("localSymbol") or "").upper()
+    con_id = _int(
+        row.get("con_id")
+        or row.get("conId")
+        or row.get("qualified_contract_identifier")
+        or row.get("qualified_con_id")
+    )
+    quantity = _decimal(row.get("quantity") or row.get("position") or row.get("signed_qty"))
+    if account != intent.account_id or abs(quantity) <= Decimal("0"):
+        return {}
+    if local_symbol and local_symbol != intent.local_symbol:
+        return {}
+    if con_id > 0 and con_id != intent.con_id:
+        return {}
+    row_instrument = str(row.get("track_b_root") or row.get("symbol") or row.get("instrument") or "").upper()
+    if not local_symbol and con_id == 0 and row_instrument and row_instrument != intent.instrument:
+        return {}
+    return {
+        **dict(row),
+        "account_id": account,
+        "local_symbol": local_symbol or intent.local_symbol,
+        "con_id": con_id or intent.con_id,
+        "symbol": row.get("symbol") or row.get("instrument") or row.get("track_b_root") or intent.instrument,
+        "track_b_root": row.get("track_b_root") or row.get("instrument") or row.get("symbol") or intent.instrument,
+        "quantity": str(quantity),
+    }
+
+
+def _broker_positions_snapshot_complete(snapshot: Mapping[str, Any]) -> bool:
+    if not snapshot:
+        return False
+    return (
+        snapshot.get("positions_complete") is True
+        or snapshot.get("complete") is True
+        or str(snapshot.get("classification") or "") in {"BROKER_TRUTH_REFRESH_READY", "IBKR_READ_ONLY_CONNECTED"}
+    )
 
 
 def _same_contract_working_close_qty(*, intent: ExitIntent, inputs: Mapping[str, Mapping[str, Any]]) -> Decimal:

@@ -161,6 +161,215 @@ def test_missing_attribution_produces_broker_scoped_degraded_allowed_exit(tmp_pa
     assert decision["block_reasons"] == []
 
 
+def test_stale_reconciliation_missing_row_uses_managed_projection_for_exact_close(tmp_path: Path) -> None:
+    inputs = _inputs(broker_positions=[])
+    es_broker = _broker_position(local_symbol="ESU6", con_id=649180671, symbol="ES", quantity="1")
+    inputs["reconciliation"].update(
+        {
+            "classification": "TRACK_B_PAPER_BROKER_RECONCILIATION_BLOCKED",
+            "broker_reconciled": False,
+            "track_b_broker_positions": [],
+            "track_b_broker_position_count": 0,
+        }
+    )
+    inputs["managed_positions"].update(
+        {
+            "classification": "OPEN_MANAGED_EXIT_DUE",
+            "managed_positions": [
+                _managed_position(
+                    local_symbol="ESU6",
+                    con_id=649180671,
+                    symbol="ES",
+                    side="LONG",
+                    quantity="1",
+                    broker_position=es_broker,
+                    lifecycle_id="life-es",
+                    trade_id="trade-es",
+                    strategy_id="es_strategy",
+                    lane_id="es_lane",
+                )
+            ],
+        }
+    )
+    inputs["managed_orders"].update(
+        {
+            "classification": "POSITION_WITHOUT_CLOSE_ORDER",
+            "managed_orders": [
+                _managed_order(
+                    local_symbol="ESU6",
+                    con_id=649180671,
+                    quantity="1",
+                    lifecycle_id="life-es",
+                    trade_id="trade-es",
+                    strategy_id="es_strategy",
+                    lane_id="es_lane",
+                )
+            ],
+        }
+    )
+    inputs["broker_session_authority"]["allowed_uses"] = {"managed_risk_reducing_close": False}
+    inputs["broker_session_authority"]["degraded_exact_risk_reducing_close_context"] = {"ready": False}
+    inputs["guardian"] = {
+        "generated_at": NOW.isoformat(),
+        "classification": "BROKER_POSITION_GUARDIAN_HARD_HOLD",
+        "managed_close_authority": {"allowed": False},
+        "live_money_eligible": False,
+        "paper_proof_invoked": False,
+    }
+    inputs["safe_state"] = {
+        "generated_at": NOW.isoformat(),
+        "classification": "SAFE_STATE_HARD_HOLD",
+        "close_authority": {"allowed": False},
+        "live_money_eligible": False,
+        "paper_proof_invoked": False,
+    }
+
+    payload = _build(tmp_path, inputs, decision_inputs={"life-es": {"timebox_due": True}})
+
+    assert payload["classification"] == ManagedExitPipelineDryRunClassification.EXIT_INTENT_ALLOWED.value
+    decision = payload["exit_authority_decisions"][0]
+    assert decision["decision"] == "ALLOWED"
+    assert decision["authority_decision"]["hard_required_checks"]["known_current_broker_position"]["passed"] is True
+    assert decision["authority_decision"]["hard_required_checks"]["safe_state_no_hard_halt"]["passed"] is True
+    assert decision["authority_decision"]["diagnostic_checks"]["reconciliation_clean"]["passed"] is False
+    assert decision["authority_decision"]["diagnostic_checks"]["guardian_allows_exact_close"]["passed"] is False
+    assert decision["authority_decision"]["diagnostic_checks"]["bsa_close_authority"]["passed"] is False
+
+
+def test_reconciliation_missing_row_uses_fresh_broker_snapshot_fallback(tmp_path: Path) -> None:
+    inputs = _inputs(broker_positions=[])
+    inputs["reconciliation"].update(
+        {
+            "classification": "TRACK_B_PAPER_BROKER_RECONCILIATION_BLOCKED",
+            "broker_reconciled": False,
+            "track_b_broker_positions": [],
+            "track_b_broker_position_count": 0,
+        }
+    )
+    inputs["broker_positions_snapshot"] = {
+        "generated_at": NOW.isoformat(),
+        "positions_complete": True,
+        "positions": [
+            _broker_position(local_symbol="GCQ6", con_id=732156872, symbol="GC", quantity="1")
+        ],
+        "live_money_eligible": False,
+        "paper_proof_invoked": False,
+    }
+    exit_decision = {
+        "schema_version": "track_b_exit_decision_report_v1",
+        "generated_at": NOW.isoformat(),
+        "classification": "EXIT_DECISION_READY",
+        "decisions": [
+            _decision(
+                decision_id="gc_due",
+                reason="timebox_exit_due",
+                local_symbol="GCQ6",
+                con_id=732156872,
+                instrument="GC",
+                side="LONG",
+                lifecycle_id="life-gc",
+                trade_id="trade-gc",
+                strategy_id="gc_strategy",
+                lane_id="gc_lane",
+            )
+        ],
+        "live_money_eligible": False,
+        "paper_proof_invoked": False,
+    }
+
+    payload = _build(tmp_path, inputs, input_overrides={"exit_decision": exit_decision})
+
+    assert payload["classification"] == ManagedExitPipelineDryRunClassification.EXIT_INTENT_ALLOWED.value
+    decision = payload["exit_authority_decisions"][0]
+    assert decision["local_symbol"] == "GCQ6"
+    assert decision["decision"] == "ALLOWED"
+    assert decision["authority_decision"]["hard_required_checks"]["known_current_broker_position"]["passed"] is True
+
+
+def test_unknown_same_contract_order_still_blocks_after_broker_snapshot_fallback(tmp_path: Path) -> None:
+    inputs = _inputs(broker_positions=[])
+    inputs["broker_positions_snapshot"] = {
+        "generated_at": NOW.isoformat(),
+        "positions_complete": True,
+        "positions": [
+            _broker_position(local_symbol="NQU6", con_id=770561204, symbol="NQ", quantity="1")
+        ],
+        "live_money_eligible": False,
+        "paper_proof_invoked": False,
+    }
+    inputs["open_order_truth"]["unknown_open_order_count"] = 1
+    inputs["open_order_truth"]["unknown_open_orders"] = [
+        {"account_id": "DUM882026", "local_symbol": "NQU6", "con_id": 770561204, "quantity": "1"}
+    ]
+    exit_decision = {
+        "schema_version": "track_b_exit_decision_report_v1",
+        "generated_at": NOW.isoformat(),
+        "classification": "EXIT_DECISION_READY",
+        "decisions": [
+            _decision(
+                decision_id="nq_due",
+                reason="timebox_exit_due",
+                local_symbol="NQU6",
+                con_id=770561204,
+                instrument="NQ",
+                side="LONG",
+                lifecycle_id="life-nq",
+                trade_id="trade-nq",
+                strategy_id="nq_strategy",
+                lane_id="nq_lane",
+            )
+        ],
+        "live_money_eligible": False,
+        "paper_proof_invoked": False,
+    }
+
+    payload = _build(tmp_path, inputs, input_overrides={"exit_decision": exit_decision})
+
+    assert payload["classification"] == ManagedExitPipelineDryRunClassification.EXIT_INTENT_BLOCKED.value
+    assert payload["exit_authority_decisions"][0]["decision"] == "BLOCKED"
+    assert "same_contract_unknown_order_over_close_risk" in payload["exit_authority_decisions"][0]["block_reasons"]
+
+
+def test_wrong_broker_snapshot_identity_still_blocks(tmp_path: Path) -> None:
+    inputs = _inputs(broker_positions=[])
+    inputs["broker_positions_snapshot"] = {
+        "generated_at": NOW.isoformat(),
+        "positions_complete": True,
+        "positions": [
+            _broker_position(local_symbol="GCQ6", con_id=732156872, symbol="GC", quantity="1")
+        ],
+        "live_money_eligible": False,
+        "paper_proof_invoked": False,
+    }
+    exit_decision = {
+        "schema_version": "track_b_exit_decision_report_v1",
+        "generated_at": NOW.isoformat(),
+        "classification": "EXIT_DECISION_READY",
+        "decisions": [
+            _decision(
+                decision_id="es_due",
+                reason="timebox_exit_due",
+                local_symbol="ESU6",
+                con_id=649180671,
+                instrument="ES",
+                side="LONG",
+                lifecycle_id="life-es",
+                trade_id="trade-es",
+                strategy_id="es_strategy",
+                lane_id="es_lane",
+            )
+        ],
+        "live_money_eligible": False,
+        "paper_proof_invoked": False,
+    }
+
+    payload = _build(tmp_path, inputs, input_overrides={"exit_decision": exit_decision})
+
+    assert payload["classification"] == ManagedExitPipelineDryRunClassification.EXIT_INTENT_BLOCKED.value
+    assert payload["pipeline_blockers"][0]["reason"] == "pipeline_contract_blocked"
+    assert "broker_position_qty must be a positive whole-number quantity" in payload["pipeline_blockers"][0]["detail"]
+
+
 def test_over_close_partial_policy_blocks_before_authority(tmp_path: Path) -> None:
     payload = _build(
         tmp_path,
@@ -317,34 +526,54 @@ def _managed_position(
     account_id: str = "DUM882026",
     local_symbol: str = "MESM6",
     con_id: int = 770561194,
+    symbol: str = "MES",
     side: str = "SHORT",
     quantity: str = "1",
+    broker_position: dict | None = None,
+    lifecycle_id: str = "life-mes",
+    trade_id: str = "trade-mes",
+    strategy_id: str = "mes_strategy",
+    lane_id: str = "mes_lane",
 ) -> dict:
-    return {
+    row = {
         "classification": "OPEN_MANAGED_MATCHED",
         "account_id": account_id,
         "local_symbol": local_symbol,
         "con_id": con_id,
+        "symbol": symbol,
+        "track_b_root": symbol,
         "side": side,
         "quantity": quantity,
-        "lifecycle_id": "life-mes",
-        "trade_id": "trade-mes",
-        "strategy_id": "mes_strategy",
-        "lane_id": "mes_lane",
+        "lifecycle_id": lifecycle_id,
+        "trade_id": trade_id,
+        "strategy_id": strategy_id,
+        "lane_id": lane_id,
     }
+    if broker_position is not None:
+        row["broker_position"] = broker_position
+    return row
 
 
-def _managed_order(*, quantity: str = "1") -> dict:
+def _managed_order(
+    *,
+    local_symbol: str = "MESM6",
+    con_id: int = 770561194,
+    quantity: str = "1",
+    lifecycle_id: str = "life-mes",
+    trade_id: str = "trade-mes",
+    strategy_id: str = "mes_strategy",
+    lane_id: str = "mes_lane",
+) -> dict:
     return {
         "classification": "POSITION_WITHOUT_CLOSE_ORDER",
         "account_id": "DUM882026",
-        "local_symbol": "MESM6",
-        "con_id": 770561194,
+        "local_symbol": local_symbol,
+        "con_id": con_id,
         "quantity": quantity,
-        "lifecycle_id": "life-mes",
-        "trade_id": "trade-mes",
-        "strategy_id": "mes_strategy",
-        "lane_id": "mes_lane",
+        "lifecycle_id": lifecycle_id,
+        "trade_id": trade_id,
+        "strategy_id": strategy_id,
+        "lane_id": lane_id,
         "required_close_action": "BUY",
         "required_close_quantity": quantity,
         "working": False,
@@ -365,8 +594,29 @@ def _exit_decision_with_tie() -> dict:
     return base
 
 
-def _decision(*, decision_id: str, reason: str) -> dict:
-    position = _managed_position()
+def _decision(
+    *,
+    decision_id: str,
+    reason: str,
+    local_symbol: str = "MESM6",
+    con_id: int = 770561194,
+    instrument: str = "MES",
+    side: str = "SHORT",
+    lifecycle_id: str = "life-mes",
+    trade_id: str = "trade-mes",
+    strategy_id: str = "mes_strategy",
+    lane_id: str = "mes_lane",
+) -> dict:
+    position = _managed_position(
+        local_symbol=local_symbol,
+        con_id=con_id,
+        symbol=instrument,
+        side=side,
+        lifecycle_id=lifecycle_id,
+        trade_id=trade_id,
+        strategy_id=strategy_id,
+        lane_id=lane_id,
+    )
     position.update(
         {
             "schema_version": "track_b_position_state_v1",
@@ -385,10 +635,10 @@ def _decision(*, decision_id: str, reason: str) -> dict:
         "action": "FULL_CLOSE",
         "execution_domain": "TRACK_B_PAPER",
         "account_id": "DUM882026",
-        "con_id": 770561194,
-        "local_symbol": "MESM6",
-        "instrument": "MES",
-        "side": "SHORT",
+        "con_id": con_id,
+        "local_symbol": local_symbol,
+        "instrument": instrument,
+        "side": side,
         "qty": "1",
         "reason": reason,
         "priority": 50,
