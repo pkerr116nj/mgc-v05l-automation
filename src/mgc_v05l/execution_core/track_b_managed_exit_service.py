@@ -32,6 +32,7 @@ from mgc_v05l.execution_core.track_b_managed_exit_actuator import (
     MANAGED_EXIT_ACTUATOR_PARTIAL,
     TrackBManagedExitActuatorConfig,
 )
+from mgc_v05l.execution_core.track_b_broker_effect_recognition import BROKER_EFFECT_OBSERVED
 from mgc_v05l.execution_core.track_b_managed_order_modify_in_place import (
     IbkrPaperManagedOrderModifyAdapter,
     ManagedOrderModifyInPlaceConfig,
@@ -335,11 +336,10 @@ def run_track_b_managed_exit_service_once(
             break
 
         submitted = int(actuator_report.get("submitted_count") or 0)
-        should_refresh_after = (
-            config.authority_refresh_after_attempt
-            and not _managed_paper_exit_authority_allowed(mutation_authority)
-        ) and (
-            submitted > 0 or actuator_report.get("submit_attempted") is True
+        should_refresh_after = config.authority_refresh_after_attempt and (
+            submitted > 0
+            or actuator_report.get("submit_attempted") is True
+            or _actuator_broker_effect_observed(actuator_report)
         )
         if should_refresh_after:
             phase_started = time.monotonic()
@@ -675,6 +675,8 @@ def _final_cycle_classification(*, classification: str, actuator_reports: Sequen
         return MANAGED_EXIT_SERVICE_PIPELINE_UNAVAILABLE
     if classification == MANAGED_EXIT_SERVICE_NO_ELIGIBLE_EXITS:
         return MANAGED_EXIT_SERVICE_NO_ELIGIBLE_EXITS
+    if classification == MANAGED_EXIT_SERVICE_REFRESH_DEGRADED_ACTUATOR_ATTEMPTED:
+        return MANAGED_EXIT_SERVICE_REFRESH_DEGRADED_ACTUATOR_ATTEMPTED
     if classification in {MANAGED_EXIT_SERVICE_REFRESH_FAILED, MANAGED_EXIT_SERVICE_ERROR}:
         return MANAGED_EXIT_SERVICE_ERROR if classification == MANAGED_EXIT_SERVICE_ERROR else classification
     if any(str(report.get("classification") or "") == MANAGED_EXIT_SERVICE_ACTUATOR_TIMEOUT for report in actuator_reports):
@@ -697,9 +699,25 @@ def _final_cycle_classification(*, classification: str, actuator_reports: Sequen
 def _should_stop_after_actuator(report: Mapping[str, Any]) -> bool:
     classification = str(report.get("classification") or "")
     submitted = int(report.get("submitted_count") or 0)
-    if submitted > 0 and classification in {MANAGED_EXIT_ACTUATOR_APPLIED_OR_PENDING, MANAGED_EXIT_ACTUATOR_PARTIAL}:
-        return False
+    if submitted > 0 or report.get("submit_attempted") is True or _actuator_broker_effect_observed(report):
+        return True
+    if classification in {MANAGED_EXIT_ACTUATOR_APPLIED_OR_PENDING, MANAGED_EXIT_ACTUATOR_PARTIAL}:
+        return True
     return True
+
+
+def _actuator_broker_effect_observed(report: Mapping[str, Any]) -> bool:
+    if int(report.get("broker_effect_observed_count") or 0) > 0:
+        return True
+    for row in report.get("attempted_closes") or []:
+        if not isinstance(row, Mapping):
+            continue
+        if row.get("broker_effect_observed") is True:
+            return True
+        close_submit = row.get("close_submit_attempt") if isinstance(row.get("close_submit_attempt"), Mapping) else {}
+        if close_submit.get("classification") == BROKER_EFFECT_OBSERVED:
+            return True
+    return False
 
 
 def _next_action(classification: str) -> str:

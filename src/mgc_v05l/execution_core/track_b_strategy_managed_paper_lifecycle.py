@@ -79,6 +79,12 @@ from .track_b_paper_trade_ledger import DEFAULT_TRACK_B_PAPER_TRADE_LEDGER_OUTPU
 from .track_b_runtime_safe_state_envelope import DEFAULT_RUNTIME_SAFE_STATE_ENVELOPE_ARTIFACT
 from .track_b_runtime_supervisor_authority import DEFAULT_RUNTIME_SUPERVISOR_AUTHORITY_ARTIFACT
 from .track_b_broker_session_authority import DEFAULT_BROKER_SESSION_AUTHORITY_ARTIFACT
+from .track_b_broker_effect_recognition import (
+    BROKER_EFFECT_BLOCKED,
+    BROKER_EFFECT_OBSERVED,
+    BROKER_EFFECT_ORIGINAL_EXPOSURE_PRESENT,
+    recognize_managed_close_broker_effect,
+)
 
 
 DEFAULT_TRACK_B_STRATEGY_MANAGED_PAPER_LIFECYCLE_OUTPUT_ROOT = Path(
@@ -392,7 +398,7 @@ def maintain_open_track_b_strategy_managed_paper_lifecycle(
     close_submit: Mapping[str, Any] | None = None
     close_fill: Mapping[str, Any] | None = None
     open_state: Mapping[str, Any] | None = None
-    submit_attempted = bool((entry_submit or {}).get("submitted") or (entry_submit or {}).get("submit_attempted"))
+    submit_attempted = False
     broker_state_mutated = False
     primary_blocker: str | None = None
     required_next_action = "Position is open under strategy-managed PAPER state; wait for strategy exit policy."
@@ -459,6 +465,12 @@ def maintain_open_track_b_strategy_managed_paper_lifecycle(
                     classification = TrackBManagedPaperLifecycleClassification.OPEN_MANAGED
                     primary_blocker = str(close_submit.get("primary_blocker") or "")
                     required_next_action = "Existing managed close submit is fill-pending/working; do not submit another close."
+                elif close_submit.get("classification") == BROKER_EFFECT_OBSERVED:
+                    classification = TrackBManagedPaperLifecycleClassification.CLOSED_FLAT
+                    primary_blocker = None
+                    required_next_action = (
+                        "Broker effect observed from fresh broker truth; do not submit another managed close."
+                    )
                 elif close_submit.get("review_required") is True and _close_submit_has_working_broker_order(close_submit):
                     classification = TrackBManagedPaperLifecycleClassification.OPEN_MANAGED
                     primary_blocker = None
@@ -2405,23 +2417,46 @@ def _managed_close_position_guard(
         }
     expected_signed_quantity = _signed_position_quantity(config)
     observed_signed_quantity = int(position.signed_quantity)
-    blocker = _managed_close_broker_position_blocker(
+    recognition = recognize_managed_close_broker_effect(
         expected_signed_quantity=expected_signed_quantity,
         observed_signed_quantity=observed_signed_quantity,
+        close_action=str(close_intent.get("order_action") or ""),
+        close_quantity=close_intent.get("quantity") or config.quantity,
     )
-    if blocker:
+    if recognition.get("classification") == BROKER_EFFECT_ORIGINAL_EXPOSURE_PRESENT:
+        return None
+    if recognition.get("classification") == BROKER_EFFECT_OBSERVED:
         return {
             "submitted": False,
             "submit_attempted": False,
             "broker_state_mutated": False,
-            "classification": blocker,
+            "classification": BROKER_EFFECT_OBSERVED,
+            "broker_effect_observed": True,
+            "primary_blocker": (
+                "Managed PAPER close stopped because fresh broker truth shows the intended "
+                f"exposure is already {recognition.get('effect_state')}; "
+                f"expected_signed_quantity={expected_signed_quantity}; "
+                f"observed_signed_quantity={observed_signed_quantity}."
+            ),
+            "required_next_action": "Reconcile lifecycle from broker truth/fill evidence; do not submit another close.",
+            "close_intent": dict(close_intent),
+            "broker_position": position.to_json_dict(),
+            "broker_effect_recognition": recognition,
+        }
+    if recognition.get("classification") == BROKER_EFFECT_BLOCKED:
+        return {
+            "submitted": False,
+            "submit_attempted": False,
+            "broker_state_mutated": False,
+            "classification": _broker_effect_blocker_classification(recognition),
             "primary_blocker": (
                 "Managed PAPER close blocked because the refreshed broker position is not "
                 f"risk-reducing for this lifecycle: expected_signed_quantity={expected_signed_quantity}; "
-                f"observed_signed_quantity={observed_signed_quantity}; reason={blocker}."
+                f"observed_signed_quantity={observed_signed_quantity}; reason={recognition.get('effect_state')}."
             ),
             "close_intent": dict(close_intent),
             "broker_position": position.to_json_dict(),
+            "broker_effect_recognition": recognition,
         }
     return None
 
@@ -2466,25 +2501,46 @@ def _managed_close_pre_submit_guard(
             "close_intent": dict(close_intent),
             "broker_position": dict(broker_position),
         }
-    blocker = _managed_close_broker_position_blocker(
+    recognition = recognize_managed_close_broker_effect(
         expected_signed_quantity=_signed_position_quantity(config),
         observed_signed_quantity=observed_signed_quantity,
+        close_action=str(close_intent.get("order_action") or ""),
+        close_quantity=close_intent.get("quantity") or config.quantity,
     )
-    if not blocker:
+    if recognition.get("classification") == BROKER_EFFECT_ORIGINAL_EXPOSURE_PRESENT:
         return {}
+    if recognition.get("classification") == BROKER_EFFECT_OBSERVED:
+        return {
+            "submitted": False,
+            "submit_attempted": False,
+            "broker_state_mutated": False,
+            "classification": BROKER_EFFECT_OBSERVED,
+            "broker_effect_observed": True,
+            "primary_blocker": (
+                "Managed PAPER close stopped before submit because broker position freshness "
+                f"shows the intended exposure is already {recognition.get('effect_state')}; "
+                f"observed_signed_quantity={observed_signed_quantity}; "
+                f"expected_signed_quantity={_signed_position_quantity(config)}."
+            ),
+            "required_next_action": "Reconcile lifecycle from broker truth/fill evidence; do not submit another close.",
+            "close_intent": dict(close_intent),
+            "broker_position": dict(broker_position),
+            "broker_effect_recognition": recognition,
+        }
     return {
         "submitted": False,
         "submit_attempted": False,
         "broker_state_mutated": False,
         "review_required": True,
-        "classification": blocker,
+        "classification": _broker_effect_blocker_classification(recognition),
         "primary_blocker": (
             "Managed PAPER close blocked before submit because broker position freshness "
             f"shows observed_signed_quantity={observed_signed_quantity}; "
-            f"expected_signed_quantity={_signed_position_quantity(config)}; reason={blocker}."
+            f"expected_signed_quantity={_signed_position_quantity(config)}; reason={recognition.get('effect_state')}."
         ),
         "close_intent": dict(close_intent),
         "broker_position": dict(broker_position),
+        "broker_effect_recognition": recognition,
     }
 
 
@@ -2500,6 +2556,15 @@ def _managed_close_broker_position_blocker(
     if expected_signed_quantity > 0 and observed_signed_quantity < 0:
         return CLOSE_WOULD_INCREASE_REVERSE_EXPOSURE
     if expected_signed_quantity < 0 and observed_signed_quantity > 0:
+        return CLOSE_WOULD_INCREASE_REVERSE_EXPOSURE
+    return "BROKER_POSITION_NOT_OPEN_FOR_MANAGED_CLOSE"
+
+
+def _broker_effect_blocker_classification(recognition: Mapping[str, Any]) -> str:
+    state = str(recognition.get("effect_state") or "")
+    if state == "EXPOSURE_FLAT":
+        return CLOSE_NOT_RISK_REDUCING_BROKER_FLAT
+    if state in {"EXPOSURE_OPPOSITE", "CLOSE_ACTION_NOT_RISK_REDUCING"}:
         return CLOSE_WOULD_INCREASE_REVERSE_EXPOSURE
     return "BROKER_POSITION_NOT_OPEN_FOR_MANAGED_CLOSE"
 

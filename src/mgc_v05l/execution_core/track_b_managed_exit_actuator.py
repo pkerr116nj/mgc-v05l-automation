@@ -34,6 +34,7 @@ from mgc_v05l.execution_core.track_b_managed_exit_recovery import (
     TrackBManagedExitRecoveryConfig,
     build_track_b_managed_exit_recovery_plan,
 )
+from mgc_v05l.execution_core.track_b_broker_effect_recognition import BROKER_EFFECT_OBSERVED
 from mgc_v05l.execution_core.models import require_aware_datetime, to_jsonable
 
 
@@ -192,19 +193,26 @@ def run_track_b_managed_exit_actuator(
             _write_phase_status(config=config, now=actual_now, phase="guarded_attach", phase_timings=phase_timings)
         attach_result = dict(attach_runner(attach_config, actual_now))
         _record_phase(phase_timings, "guarded_attach", actual_now)
+        close_submit_attempt = _nested(attach_result, "apply_result", "close_submit_attempt") or _nested(
+            attach_result, "close_submit_attempt"
+        )
+        close_submitted = _close_submit_attempted(close_submit_attempt)
+        close_mutated = _close_broker_state_mutated(close_submit_attempt)
         attempted_row = {
             "classification": attach_result.get("classification"),
             "identity": latest.get("identity"),
             "close_candidate": latest.get("close_candidate"),
-            "submitted": attach_result.get("submit_attempted") is True,
-            "submit_attempted": attach_result.get("submit_attempted") is True,
-            "broker_state_mutated": attach_result.get("broker_state_mutated") is True,
+            "submitted": close_submitted,
+            "submit_attempted": close_submitted,
+            "broker_state_mutated": close_mutated,
             "order_id": _nested(attach_result, "apply_result", "close_submit_attempt", "broker_order_id")
             or _nested(attach_result, "close_submit_attempt", "broker_order_id"),
             "perm_id": _nested(attach_result, "apply_result", "close_submit_attempt", "perm_id")
             or _nested(attach_result, "close_submit_attempt", "perm_id"),
             "fill": attach_result.get("close_fill") or _nested(attach_result, "apply_result", "close_fill"),
             "primary_blocker": attach_result.get("primary_blocker") or _nested(attach_result, "apply_result", "primary_blocker"),
+            "broker_effect_observed": _attach_broker_effect_observed(attach_result),
+            "close_submit_attempt": dict(close_submit_attempt) if isinstance(close_submit_attempt, Mapping) else None,
             "attach_output_path": str(attach_config.resolve(attach_config.output_path)),
             "rechecked": True,
         }
@@ -279,6 +287,7 @@ def _base_report(
         "blocked_count": int(recovery.get("blocked_count") or 0),
         "attempted_count": len(attempted),
         "submitted_count": sum(1 for row in attempted if row.get("submit_attempted") is True),
+        "broker_effect_observed_count": sum(1 for row in attempted if row.get("broker_effect_observed") is True),
         "eligible_positions": eligible,
         "blocked_positions": [
             *[dict(row) for row in recovery.get("blocked_positions") or [] if isinstance(row, Mapping)],
@@ -725,7 +734,7 @@ def _tail(value: str | None, limit: int = 4000) -> str:
 
 
 def _unsafe_after_attempt(row: Mapping[str, Any]) -> bool:
-    return row.get("submit_attempted") is not True
+    return row.get("submit_attempted") is not True or row.get("broker_effect_observed") is True
 
 
 def _nested(payload: Mapping[str, Any], *keys: str) -> Any:
@@ -735,6 +744,30 @@ def _nested(payload: Mapping[str, Any], *keys: str) -> Any:
             return None
         current = current.get(key)
     return current
+
+
+def _close_submit_attempted(close_submit_attempt: Any) -> bool:
+    close_submit = close_submit_attempt if isinstance(close_submit_attempt, Mapping) else {}
+    return bool(
+        close_submit.get("submitted") is True
+        or close_submit.get("broker_state_mutated") is True
+        or str(close_submit.get("broker_order_id") or "").strip()
+    )
+
+
+def _close_broker_state_mutated(close_submit_attempt: Any) -> bool:
+    close_submit = close_submit_attempt if isinstance(close_submit_attempt, Mapping) else {}
+    return close_submit.get("broker_state_mutated") is True
+
+
+def _attach_broker_effect_observed(attach_result: Mapping[str, Any]) -> bool:
+    classifications = {
+        str(attach_result.get("classification") or ""),
+        str(_nested(attach_result, "apply_result", "classification") or ""),
+        str(_nested(attach_result, "apply_result", "close_submit_attempt", "classification") or ""),
+        str(_nested(attach_result, "close_submit_attempt", "classification") or ""),
+    }
+    return BROKER_EFFECT_OBSERVED in classifications
 
 
 def _mapping(value: Any) -> dict[str, Any]:

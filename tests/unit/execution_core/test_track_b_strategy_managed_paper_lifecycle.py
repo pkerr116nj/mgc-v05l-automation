@@ -578,6 +578,54 @@ def open_managed_report() -> dict[str, object]:
     }
 
 
+def open_managed_report_for_config(
+    config: TrackBStrategyManagedPaperLifecycleConfig,
+    *,
+    lifecycle_id: str = "open-managed-existing",
+    trade_id: str | None = None,
+) -> dict[str, object]:
+    report = open_managed_report()
+    side = lifecycle_module._position_side(config)
+    entry_action = "SELL" if side == "SHORT" else "BUY"
+    trade = trade_id or f"{config.strategy_id}:{lifecycle_id}"
+    report.update(
+        {
+            "lifecycle_id": lifecycle_id,
+            "trade_id": trade,
+            "strategy_id": config.strategy_id,
+            "lane_id": config.lane_id,
+            "instrument_family": config.instrument_family,
+            "contract_key": config.contract_key,
+            "local_symbol": config.local_symbol,
+            "con_id": config.con_id,
+            "account_id": config.account_id,
+            "expected_account_id": config.expected_account_id,
+            "managed_exit_policy_id": config.managed_exit_policy_id,
+        }
+    )
+    entry_intent = dict(report["entry_intent"])
+    entry_intent.update(
+        {
+            "lifecycle_id": lifecycle_id,
+            "trade_id": trade,
+            "strategy_id": config.strategy_id,
+            "lane_id": config.lane_id,
+            "instrument_family": config.instrument_family,
+            "contract_key": config.contract_key,
+            "local_symbol": config.local_symbol,
+            "con_id": config.con_id,
+            "account_id": config.account_id,
+            "expected_account_id": config.expected_account_id,
+            "side": side,
+            "order_action": entry_action,
+            "quantity": config.quantity,
+            "managed_exit_policy_id": config.managed_exit_policy_id,
+        }
+    )
+    report["entry_intent"] = entry_intent
+    return report
+
+
 def _broker_order(order_id: str, perm_id: str) -> BrokerOrder:
     return BrokerOrder(
         broker_order_event_id=f"broker-order-{order_id}",
@@ -2051,6 +2099,219 @@ def test_maintenance_with_no_open_orders_continues_to_close_submit(tmp_path: Pat
     )
 
 
+def test_broker_effect_observed_stops_second_sell_for_flattened_long_mgc(tmp_path: Path, monkeypatch) -> None:
+    class FlatAfterCloseAdapter:
+        def __init__(self, **_kwargs: Any) -> None: ...
+
+        def connect(self) -> None: ...
+
+        def disconnect(self) -> None: ...
+
+        def managed_accounts(self) -> tuple[str, ...]:
+            return ("DUM882026",)
+
+        def require_configured_account(self) -> str:
+            return "DUM882026"
+
+        def refresh_open_orders(self, *, contract_key: str | None = None) -> tuple[BrokerOrder, ...]:
+            assert contract_key == "MGC-202608"
+            return ()
+
+        def refresh_positions(self, *, contract_key: str) -> PositionState:
+            assert contract_key == "MGC-202608"
+            return PositionState(
+                position_state_id="position-mgc-flat",
+                run_id="run",
+                source=PositionSource.BROKER,
+                account_id="DUM882026",
+                contract_key="MGC-202608",
+                signed_quantity=0,
+                average_price="43333.0",
+                open_order_ids=(),
+                observed_at=aware_now(),
+            )
+
+        def submit_limit_order(self, **_kwargs: Any) -> int:
+            raise AssertionError("flat broker state must prevent second SELL")
+
+    monkeypatch.setattr(lifecycle_module, "IbkrPaperAdapter", FlatAfterCloseAdapter)
+    config = base_config(
+        tmp_path,
+        strategy_id="mgc_globex_active_participation_long",
+        lane_id="mgc_globex_active_participation_long",
+        instrument_family="MGC",
+        contract_key="MGC-202608",
+        local_symbol="MGCQ6",
+        con_id=732156883,
+        side="LONG",
+        entry_limit_price="4332.7",
+        close_limit_price="4331.7",
+        managed_exit_policy_id=TrackBManagedExitPolicy.GLOBEX_ACTIVE_EVIDENCE_TIMEBOX_15M_EXIT_V1.value,
+        completed_5m_bars_since_entry=3,
+        submit_enabled=True,
+    )
+    seed_strategy_submit_authority(
+        tmp_path,
+        config=config,
+        intent_payload={
+            "lifecycle_id": "life-mgc-long",
+            "trade_id": "trade-mgc-long",
+            "order_action": "SELL",
+            "quantity": 1,
+            "close_limit_price": "4331.7",
+        },
+        intent_kind=IntentKind.CLOSE,
+        limit_price="4331.7",
+    )
+
+    result = maintain_open_track_b_strategy_managed_paper_lifecycle(
+        config=config,
+        existing_lifecycle_report=open_managed_report_for_config(
+            config,
+            lifecycle_id="life-mgc-long",
+            trade_id="trade-mgc-long",
+        ),
+        now=aware_now(),
+    )
+
+    close_attempt = result.report["close_submit_attempt"]
+    assert result.classification == TrackBManagedPaperLifecycleClassification.CLOSED_FLAT
+    assert close_attempt["classification"] == lifecycle_module.BROKER_EFFECT_OBSERVED
+    assert close_attempt["broker_effect_observed"] is True
+    assert close_attempt["submit_attempted"] is False
+    assert close_attempt["broker_state_mutated"] is False
+    assert result.report["submit_attempted"] is False
+    assert result.report["broker_state_mutated"] is False
+
+
+def test_broker_effect_observed_stops_second_buy_for_flattened_short_mes(tmp_path: Path, monkeypatch) -> None:
+    class FlatAfterShortCloseAdapter:
+        def __init__(self, **_kwargs: Any) -> None: ...
+
+        def connect(self) -> None: ...
+
+        def disconnect(self) -> None: ...
+
+        def managed_accounts(self) -> tuple[str, ...]:
+            return ("DUM882026",)
+
+        def require_configured_account(self) -> str:
+            return "DUM882026"
+
+        def refresh_open_orders(self, *, contract_key: str | None = None) -> tuple[BrokerOrder, ...]:
+            assert contract_key == "MES-202609"
+            return ()
+
+        def refresh_positions(self, *, contract_key: str) -> PositionState:
+            assert contract_key == "MES-202609"
+            return PositionState(
+                position_state_id="position-mes-flat",
+                run_id="run",
+                source=PositionSource.BROKER,
+                account_id="DUM882026",
+                contract_key="MES-202609",
+                signed_quantity=0,
+                average_price="7605.0",
+                open_order_ids=(),
+                observed_at=aware_now(),
+            )
+
+        def submit_limit_order(self, **_kwargs: Any) -> int:
+            raise AssertionError("flat broker state must prevent second BUY")
+
+    def short_exit_policy(config: TrackBStrategyManagedPaperLifecycleConfig, open_state: Mapping[str, Any]) -> Mapping[str, Any]:
+        return {
+            "order_action": "BUY",
+            "quantity": 1,
+            "close_limit_price": "7604.25",
+            "exit_family": "DIAGNOSTIC_TIME",
+            "close_reason": "TIME_BOXED_EXIT",
+            "managed_exit_policy_id": config.managed_exit_policy_id,
+            "hard_exit": False,
+            "discretionary_exit": False,
+            "risk_control_exit": True,
+            "maintenance_exit": True,
+            "elapsed_completed_5m_bars": config.completed_5m_bars_since_entry,
+            "required_completed_5m_bars": 3,
+            "bars_since_fill": int(config.completed_5m_bars_since_entry or 0),
+            "bars_since_signal": None,
+            "fill_timestamp_source": config.fill_timestamp_source or "BROKER_ENTRY_FILL",
+            "mfe": None,
+            "mae": None,
+            "data_freshness_state": config.data_freshness_state,
+            "broker_truth_state": config.broker_truth_state,
+            "suppressed_due_to_stale_data": False,
+        }
+
+    monkeypatch.setattr(lifecycle_module, "IbkrPaperAdapter", FlatAfterShortCloseAdapter)
+    config = base_config(
+        tmp_path,
+        strategy_id="mes_globex_active_participation_short",
+        lane_id="mes_globex_active_participation_short",
+        instrument_family="MES",
+        contract_key="MES-202609",
+        local_symbol="MESU6",
+        con_id=793356217,
+        side="SHORT",
+        entry_limit_price="7605.0",
+        close_limit_price="7604.25",
+        managed_exit_policy_id=TrackBManagedExitPolicy.GLOBEX_ACTIVE_EVIDENCE_TIMEBOX_15M_EXIT_V1.value,
+        completed_5m_bars_since_entry=3,
+        submit_enabled=True,
+    )
+    seed_strategy_submit_authority(
+        tmp_path,
+        config=config,
+        intent_payload={
+            "lifecycle_id": "life-mes-short",
+            "trade_id": "trade-mes-short",
+            "order_action": "BUY",
+            "quantity": 1,
+            "close_limit_price": "7604.25",
+        },
+        intent_kind=IntentKind.CLOSE,
+        limit_price="7604.25",
+    )
+    def guarded_close_submitter(
+        config: TrackBStrategyManagedPaperLifecycleConfig,
+        close_intent: Mapping[str, Any],
+    ) -> Mapping[str, Any]:
+        adapter = FlatAfterShortCloseAdapter()
+        return (
+            lifecycle_module._managed_close_position_guard(  # noqa: SLF001 - explicit unit coverage for retry gate.
+                config=config,
+                close_intent=close_intent,
+                adapter=adapter,
+            )
+            or {}
+        )
+
+    default_stages = lifecycle_module.default_managed_lifecycle_stages()
+    stages = TrackBStrategyManagedPaperLifecycleStages(
+        entry_submitter=default_stages.entry_submitter,
+        exit_policy=short_exit_policy,
+        close_submitter=guarded_close_submitter,
+    )
+
+    result = maintain_open_track_b_strategy_managed_paper_lifecycle(
+        config=config,
+        existing_lifecycle_report=open_managed_report_for_config(
+            config,
+            lifecycle_id="life-mes-short",
+            trade_id="trade-mes-short",
+        ),
+        stages=stages,
+        now=aware_now(),
+    )
+
+    close_attempt = result.report["close_submit_attempt"]
+    assert result.classification == TrackBManagedPaperLifecycleClassification.CLOSED_FLAT
+    assert close_attempt["classification"] == lifecycle_module.BROKER_EFFECT_OBSERVED
+    assert close_attempt["broker_effect_recognition"]["effect_state"] == "EXPOSURE_FLAT"
+    assert close_attempt["submit_attempted"] is False
+    assert close_attempt["broker_state_mutated"] is False
+
+
 def test_managed_cleanup_close_allows_prior_runtime_generation_owner(tmp_path: Path) -> None:
     config = base_config(
         tmp_path,
@@ -3082,7 +3343,9 @@ def test_maintenance_blocks_close_when_broker_position_direction_mismatches(
     )
 
     close_attempt = result.report["close_submit_attempt"]
-    assert close_attempt["classification"] == "CLOSE_WOULD_INCREASE_REVERSE_EXPOSURE"
+    assert result.classification == TrackBManagedPaperLifecycleClassification.CLOSED_FLAT
+    assert close_attempt["classification"] == lifecycle_module.BROKER_EFFECT_OBSERVED
+    assert close_attempt["broker_effect_recognition"]["effect_state"] == "EXPOSURE_OPPOSITE"
     assert close_attempt["broker_position"]["signed_quantity"] == -1
     assert close_attempt["submitted"] is False
     assert close_attempt["broker_state_mutated"] is False

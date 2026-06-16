@@ -19,19 +19,28 @@ from mgc_v05l.execution_core.track_b_managed_exit_actuator import (
 NOW = datetime(2026, 6, 8, 15, 5, tzinfo=UTC)
 
 
+def _submitted_attach_result(order_id: str = "91") -> dict:
+    return {
+        "classification": "TRACK_B_STRATEGY_PAPER_CLOSE_SUBMITTED",
+        "submit_attempted": True,
+        "broker_state_mutated": True,
+        "apply_result": {
+            "close_submit_attempt": {
+                "submitted": True,
+                "broker_state_mutated": True,
+                "broker_order_id": order_id,
+                "perm_id": 123456,
+            },
+        },
+    }
+
+
 def test_runtime_down_exact_exit_due_position_applies_via_guarded_attach(tmp_path: Path) -> None:
     calls = []
 
     def _attach(config, now):
         calls.append((config, now))
-        return {
-            "classification": "TRACK_B_STRATEGY_PAPER_CLOSE_SUBMITTED",
-            "submit_attempted": True,
-            "broker_state_mutated": True,
-            "apply_result": {
-                "close_submit_attempt": {"broker_order_id": "91", "perm_id": 123456},
-            },
-        }
+        return _submitted_attach_result()
 
     payload = run_track_b_managed_exit_actuator(
         config=TrackBManagedExitActuatorConfig(repo_root=tmp_path, apply=True, operator_authorized_managed_exit=True),
@@ -75,11 +84,7 @@ def test_actuator_writes_phase_progress_before_candidate_discovery(tmp_path: Pat
 
     def _attach(config, now):
         seen.append(json.loads(output_path.read_text()))
-        return {
-            "classification": "TRACK_B_STRATEGY_PAPER_CLOSE_SUBMITTED",
-            "submit_attempted": True,
-            "broker_state_mutated": True,
-        }
+        return _submitted_attach_result()
 
     payload = run_track_b_managed_exit_actuator(
         config=TrackBManagedExitActuatorConfig(
@@ -192,7 +197,7 @@ def test_multiple_positions_are_processed_one_at_a_time_with_refresh_between(tmp
 
     def _attach(config, now):
         attach_symbols.append(config.local_symbol)
-        return {"classification": "TRACK_B_STRATEGY_PAPER_CLOSE_SUBMITTED", "submit_attempted": True, "broker_state_mutated": True}
+        return _submitted_attach_result()
 
     payload = run_track_b_managed_exit_actuator(
         config=TrackBManagedExitActuatorConfig(repo_root=tmp_path, apply=True, operator_authorized_managed_exit=True),
@@ -238,7 +243,7 @@ def test_open_orders_block_before_attach(tmp_path: Path) -> None:
         config=TrackBManagedExitActuatorConfig(repo_root=tmp_path, apply=True, operator_authorized_managed_exit=True),
         now=NOW,
         input_overrides=inputs,
-        attach_runner=lambda config, now: {"submit_attempted": True},
+        attach_runner=lambda config, now: _submitted_attach_result(),
         write=False,
     )
 
@@ -256,7 +261,7 @@ def test_unknown_open_orders_block_before_attach(tmp_path: Path) -> None:
         config=TrackBManagedExitActuatorConfig(repo_root=tmp_path, apply=True, operator_authorized_managed_exit=True),
         now=NOW,
         input_overrides=inputs,
-        attach_runner=lambda config, now: {"submit_attempted": True},
+        attach_runner=lambda config, now: _submitted_attach_result(),
         write=False,
     )
 
@@ -275,7 +280,7 @@ def test_dirty_reconciliation_is_legacy_diagnostic_when_v11_allows(tmp_path: Pat
         config=TrackBManagedExitActuatorConfig(repo_root=tmp_path, apply=True, operator_authorized_managed_exit=True),
         now=NOW,
         input_overrides=inputs,
-        attach_runner=lambda config, now: calls.append(config) or {"classification": "TRACK_B_STRATEGY_PAPER_CLOSE_SUBMITTED", "submit_attempted": True, "broker_state_mutated": True},
+        attach_runner=lambda config, now: calls.append(config) or _submitted_attach_result(),
         write=False,
     )
 
@@ -299,7 +304,7 @@ def test_stale_due_projection_is_diagnostic_when_broker_risk_exit_allowed(tmp_pa
         config=TrackBManagedExitActuatorConfig(repo_root=tmp_path, apply=True, operator_authorized_managed_exit=True),
         now=NOW,
         input_overrides=inputs,
-        attach_runner=lambda config, now: {"submit_attempted": True},
+        attach_runner=lambda config, now: _submitted_attach_result(),
         write=False,
     )
 
@@ -323,7 +328,7 @@ def test_ambiguous_ownership_blocks_before_attach(tmp_path: Path) -> None:
         config=TrackBManagedExitActuatorConfig(repo_root=tmp_path, apply=True, operator_authorized_managed_exit=True),
         now=NOW,
         input_overrides=inputs,
-        attach_runner=lambda config, now: {"submit_attempted": True},
+        attach_runner=lambda config, now: _submitted_attach_result(),
         write=False,
     )
 
@@ -343,7 +348,7 @@ def test_guardian_safe_state_and_bsa_are_diagnostic_when_v11_exact_close_allows(
         config=TrackBManagedExitActuatorConfig(repo_root=tmp_path, apply=True, operator_authorized_managed_exit=True),
         now=NOW,
         input_overrides=inputs,
-        attach_runner=lambda config, now: {"submit_attempted": True},
+        attach_runner=lambda config, now: _submitted_attach_result(),
         write=False,
     )
 
@@ -364,7 +369,7 @@ def test_live_money_or_paper_proof_blocks_before_attach(tmp_path: Path) -> None:
         config=TrackBManagedExitActuatorConfig(repo_root=tmp_path, apply=True, operator_authorized_managed_exit=True),
         now=NOW,
         input_overrides=inputs,
-        attach_runner=lambda config, now: {"submit_attempted": True},
+        attach_runner=lambda config, now: _submitted_attach_result(),
         write=False,
     )
 
@@ -382,7 +387,7 @@ def test_guardian_close_candidate_mismatch_is_diagnostic_when_v11_allows(tmp_pat
         config=TrackBManagedExitActuatorConfig(repo_root=tmp_path, apply=True, operator_authorized_managed_exit=True),
         now=NOW,
         input_overrides=inputs,
-        attach_runner=lambda config, now: {"submit_attempted": True},
+        attach_runner=lambda config, now: _submitted_attach_result(),
         write=False,
     )
 

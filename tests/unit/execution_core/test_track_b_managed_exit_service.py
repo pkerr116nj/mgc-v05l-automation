@@ -23,6 +23,7 @@ from mgc_v05l.execution_core.track_b_managed_exit_service import (
     MANAGED_EXIT_SERVICE_DRY_RUN_READY,
     MANAGED_EXIT_SERVICE_NO_ELIGIBLE_EXITS,
     MANAGED_EXIT_SERVICE_PIPELINE_UNAVAILABLE,
+    MANAGED_EXIT_SERVICE_REFRESH_DEGRADED_ACTUATOR_ATTEMPTED,
     MANAGED_PAPER_RISK_REDUCING_EXIT_AUTHORITY_ALLOWED,
     MANAGED_PAPER_RISK_REDUCING_EXIT_AUTHORITY_BLOCKED,
     TrackBManagedExitServiceConfig,
@@ -601,24 +602,17 @@ def test_service_dry_run_uses_v1_allowed_plan_without_apply(tmp_path: Path) -> N
     assert call_order == ["actuator"]
 
 
-def test_apply_service_processes_v1_executable_intents_one_at_a_time_with_refresh_between(tmp_path: Path) -> None:
-    classifications = [
-        MANAGED_EXIT_ACTUATOR_APPLIED_OR_PENDING,
-        MANAGED_EXIT_ACTUATOR_APPLIED_OR_PENDING,
-        MANAGED_EXIT_ACTUATOR_NOOP,
-    ]
+def test_apply_service_processes_one_v1_executable_intent_then_refreshes_broker_truth(tmp_path: Path) -> None:
     refresh_phases = []
     actuator_calls = []
 
     def _actuator(config, now, timeout):
-        index = len(actuator_calls)
         actuator_calls.append(config)
-        submitted = 1 if classifications[index] == MANAGED_EXIT_ACTUATOR_APPLIED_OR_PENDING else 0
         return _actuator_report(
-            classifications[index],
-            eligible=max(0, 2 - index),
-            submitted=submitted,
-            local_symbol=("MESM6", "MNQM6", None)[index],
+            MANAGED_EXIT_ACTUATOR_APPLIED_OR_PENDING,
+            eligible=3,
+            submitted=1,
+            local_symbol="MESM6",
         )
 
     def _refresh(config, phase):
@@ -640,19 +634,24 @@ def test_apply_service_processes_v1_executable_intents_one_at_a_time_with_refres
     )
 
     assert payload["classification"] == MANAGED_EXIT_SERVICE_APPLY_SUCCEEDED
-    assert payload["submitted_count"] == 2
+    assert payload["submitted_count"] == 1
     assert payload["operator_authorized_managed_exit"] is False
-    assert [call.apply for call in actuator_calls] == [True, True, True]
-    assert [call.operator_authorized_managed_exit for call in actuator_calls] == [True, True, True]
-    assert [call.max_closes_per_run for call in actuator_calls] == [1, 1, 1]
-    assert refresh_phases == []
+    assert [call.apply for call in actuator_calls] == [True]
+    assert [call.operator_authorized_managed_exit for call in actuator_calls] == [True]
+    assert [call.max_closes_per_run for call in actuator_calls] == [1]
+    assert refresh_phases == ["after_actuator_attempt"]
 
 
 def test_apply_service_treats_stale_publication_as_diagnostic_when_v11_broker_risk_is_clear(tmp_path: Path) -> None:
     actuator_calls = []
 
     payload = run_track_b_managed_exit_service_once(
-        config=TrackBManagedExitServiceConfig(repo_root=tmp_path, apply=True, max_cycles_per_tick=1),
+        config=TrackBManagedExitServiceConfig(
+            repo_root=tmp_path,
+            apply=True,
+            max_cycles_per_tick=1,
+            authority_refresh_after_attempt=True,
+        ),
         now=NOW,
         actuator_runner=lambda config, now, timeout: actuator_calls.append(config)
         or _actuator_report(MANAGED_EXIT_ACTUATOR_APPLIED_OR_PENDING, eligible=1, submitted=1),
@@ -717,7 +716,12 @@ def test_refresh_failure_is_diagnostic_for_v1_allowed_paper_risk_reducing_close(
     refresh_calls = []
 
     payload = run_track_b_managed_exit_service_once(
-        config=TrackBManagedExitServiceConfig(repo_root=tmp_path, apply=True, max_cycles_per_tick=1),
+        config=TrackBManagedExitServiceConfig(
+            repo_root=tmp_path,
+            apply=True,
+            max_cycles_per_tick=1,
+            authority_refresh_after_attempt=True,
+        ),
         now=NOW,
         actuator_runner=lambda config, now, timeout: calls.append(config)
         or _actuator_report(MANAGED_EXIT_ACTUATOR_APPLIED_OR_PENDING, eligible=2, submitted=1, local_symbol="MESM6"),
@@ -741,10 +745,10 @@ def test_refresh_failure_is_diagnostic_for_v1_allowed_paper_risk_reducing_close(
     )
 
     assert calls
-    assert payload["classification"] == MANAGED_EXIT_SERVICE_APPLY_SUCCEEDED
-    assert refresh_calls == []
-    assert payload["authority_refresh_failed"] is False
-    assert payload["authority_refresh_degraded_actuator_attempted"] is False
+    assert payload["classification"] == MANAGED_EXIT_SERVICE_REFRESH_DEGRADED_ACTUATOR_ATTEMPTED
+    assert refresh_calls == ["after_actuator_attempt"]
+    assert payload["authority_refresh_failed"] is True
+    assert payload["authority_refresh_degraded_actuator_attempted"] is True
     assert payload["service_diagnostics"][0]["code"] == "LEGACY_OPERATOR_READINESS_REFRESH_DIAGNOSTIC_ONLY"
     assert (
         payload["service_diagnostics"][0]["managed_paper_risk_reducing_exit_authority"]["classification"]
