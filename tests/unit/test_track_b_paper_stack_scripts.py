@@ -67,7 +67,7 @@ def test_paper_stack_start_requires_sustained_readiness() -> None:
     assert "submit remains disabled" in source
 
 
-def test_paper_minimal_start_verifies_shape_without_sustained_readiness_wait() -> None:
+def test_paper_minimal_start_requires_durable_liveness_and_truth_advancement() -> None:
     source = START_SCRIPT.read_text(encoding="utf-8")
     minimal_wait_block = source[
         source.index("if paper_minimal_startup_enabled; then", source.index('if [[ "${carrier}" == "screen" ]]'))
@@ -77,8 +77,54 @@ def test_paper_minimal_start_verifies_shape_without_sustained_readiness_wait() -
     assert "verify_direct_paper_runtime_shape" in minimal_wait_block
     assert "READY_SUBMIT_CAPABLE" in minimal_wait_block
     assert "direct PAPER_MINIMAL_STARTUP_V1 process path" in minimal_wait_block
-    assert "RUNTIME_RUNNING_WAITING_FOR_MINIMAL_STARTUP_STABILITY" not in minimal_wait_block
-    assert "STABLE_SECONDS" not in minimal_wait_block
+    assert "RUNTIME_RUNNING_WAITING_FOR_MINIMAL_STARTUP_STABILITY" in minimal_wait_block
+    assert "RUNTIME_RUNNING_WAITING_FOR_MINIMAL_RUNTIME_SHAPE" in minimal_wait_block
+    assert "BLOCKED_RUNTIME_EXITED_DURING_STARTUP" in minimal_wait_block
+    assert "STABLE_SECONDS" in minimal_wait_block
+    assert "candidate_pid" in minimal_wait_block
+    assert "first_truth_generated_at" in minimal_wait_block
+    assert "last_truth_generated_at" in minimal_wait_block
+    assert "truth_advanced" in minimal_wait_block
+    assert '[[ "${truth_advanced}" == "true" ]]' in minimal_wait_block
+    assert "same-PID liveness" in minimal_wait_block
+    assert 'elif [[ -n "${pid}" ]]; then' in minimal_wait_block
+    assert "Runtime wrote PID" in minimal_wait_block
+
+
+def test_paper_minimal_shape_verifier_checks_commit_profile_lane_count_and_truth_freshness() -> None:
+    source = START_SCRIPT.read_text(encoding="utf-8")
+    verifier_block = source[
+        source.index("\nverify_direct_paper_runtime_shape() {")
+        : source.index("\nwrite_runtime_config_paths_file() {")
+    ]
+
+    assert 'truth.get("source_commit") != expected_commit' in verifier_block
+    assert 'config.get("profile") != expected_profile' in verifier_block
+    assert 'expected_lane_count = 43' in verifier_block
+    assert 'truth.get("lane_count")' in verifier_block
+    assert 'execution_modes != {"IBKR_PAPER_BRIDGE"}' in verifier_block
+    assert 'truth.get("freshness_state")' in verifier_block
+    assert 'truth.get("heartbeat_state")' in verifier_block
+    assert "datetime.now(timezone.utc)" in verifier_block
+    assert "print(generated_at)" in verifier_block
+
+
+def test_paper_stack_startup_artifact_carries_launch_exit_status_when_available() -> None:
+    source = START_SCRIPT.read_text(encoding="utf-8")
+    writer_block = source[
+        source.index("\nwrite_startup_artifact() {")
+        : source.index("\nrun_startup_preflight_evidence_refresh() {")
+    ]
+
+    assert "launch_status_file" in writer_block
+    assert '"runtime_launch_status": launch_status or None' in writer_block
+    assert '"runtime_exit_status"' in writer_block
+    assert 'launch_status.get("child_exit_code")' in writer_block
+    assert 'launch_status.get("termination_reason")' in writer_block
+    assert source.index('rm -f "${LAUNCH_STATUS_FILE}"') < source.index('if [[ "${carrier}" == "screen" ]]; then')
+    assert source.index('rm -f "${PID_FILE}" "${PID_METADATA_FILE}"') < source.index(
+        'if [[ "${carrier}" == "screen" ]]; then'
+    )
 
 
 def test_paper_stack_start_refreshes_authority_evidence_before_carrier_launch() -> None:

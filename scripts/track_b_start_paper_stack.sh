@@ -530,19 +530,23 @@ write_startup_artifact() {
   MGC_STARTUP_PREFLIGHT_DEPENDENCY_REFRESH_FAILURES_JSON="${STARTUP_PREFLIGHT_DEPENDENCY_REFRESH_FAILURES_JSON}" \
   MGC_TRACK_B_PAPER_STACK_STARTUP_MODE="${STARTUP_MODE}" \
   MGC_TRACK_B_PAPER_STACK_OWNED_MANAGED_EXPOSURE_RESTORE_JSON="${STARTUP_OWNED_MANAGED_EXPOSURE_RESTORE_JSON}" \
-  "${PYTHON_BIN}" - "$STARTUP_ARTIFACT" "$classification" "$detail" "$pid" "$REPO_ROOT" "$CONFIG_PATHS_FILE" "$STACK_PROFILE" <<'PY'
+  "${PYTHON_BIN}" - "$STARTUP_ARTIFACT" "$classification" "$detail" "$pid" "$REPO_ROOT" "$CONFIG_PATHS_FILE" "$STACK_PROFILE" "$LAUNCH_STATUS_FILE" <<'PY'
 import json
 import os
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
-artifact, classification, detail, pid, repo_root, config_paths_file, stack_profile = sys.argv[1:]
+artifact, classification, detail, pid, repo_root, config_paths_file, stack_profile, launch_status_file = sys.argv[1:]
 paths = []
 try:
     paths = [line.strip() for line in Path(config_paths_file).read_text(encoding="utf-8").splitlines() if line.strip()]
 except OSError:
     pass
+try:
+    launch_status = json.loads(Path(launch_status_file).read_text(encoding="utf-8"))
+except (OSError, json.JSONDecodeError):
+    launch_status = {}
 
 def env_json_list(name):
     try:
@@ -565,6 +569,13 @@ payload = {
     "paper_proof_invoked": False,
     "broker_mutation": False,
     "dashboard_authority": False,
+    "runtime_launch_status": launch_status or None,
+    "runtime_exit_status": {
+        "classification": launch_status.get("classification"),
+        "child_exit_code": launch_status.get("child_exit_code"),
+        "final_pid_alive": launch_status.get("final_pid_alive"),
+        "termination_reason": launch_status.get("termination_reason"),
+    } if launch_status else None,
     "startup_mode": os.environ.get("MGC_TRACK_B_PAPER_STACK_STARTUP_MODE") or "STANDARD_START",
     "owned_managed_exposure_maintenance_restore": json.loads(
         os.environ.get("MGC_TRACK_B_PAPER_STACK_OWNED_MANAGED_EXPOSURE_RESTORE_JSON") or "{}"
@@ -1603,6 +1614,7 @@ verify_direct_paper_runtime_shape() {
 import json
 import subprocess
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 
 repo_root = Path(sys.argv[1])
@@ -1628,6 +1640,19 @@ if truth_pid != pid:
 if truth.get("source_commit") != expected_commit:
     raise SystemExit(1)
 if config.get("profile") != expected_profile:
+    raise SystemExit(1)
+generated_at = str(truth.get("generated_at") or "").strip()
+try:
+    generated = datetime.fromisoformat(generated_at.replace("Z", "+00:00"))
+except ValueError:
+    raise SystemExit(1)
+if generated.tzinfo is None:
+    generated = generated.replace(tzinfo=timezone.utc)
+if (datetime.now(timezone.utc) - generated).total_seconds() > 90:
+    raise SystemExit(1)
+if str(truth.get("freshness_state") or "").strip().upper() not in {"", "FRESH"}:
+    raise SystemExit(1)
+if str(truth.get("heartbeat_state") or "").strip().upper() not in {"", "HEALTHY"}:
     raise SystemExit(1)
 
 lanes = [row for row in config.get("lanes") or [] if isinstance(row, dict)]
@@ -1672,6 +1697,7 @@ for line in ps.stdout.splitlines():
         runtime_pids.append(int(row_pid))
 if runtime_pids != [pid]:
     raise SystemExit(1)
+print(generated_at)
 PY
 }
 
@@ -1951,6 +1977,10 @@ elif ! screen_available; then
   fi
 fi
 
+rm -f "${LAUNCH_STATUS_FILE}"
+if paper_minimal_startup_enabled; then
+  rm -f "${PID_FILE}" "${PID_METADATA_FILE}"
+fi
 if [[ "${carrier}" == "screen" ]]; then
   screen -wipe >/dev/null 2>&1 || true
   printf '%s\n' "${session_name}" > "${PID_FILE}.screen_session"
@@ -1976,7 +2006,12 @@ fi
 
 if paper_minimal_startup_enabled; then
   deadline=$((SECONDS + WAIT_SECONDS))
-  ready_pid=""
+  candidate_pid=""
+  stable_since=0
+  first_truth_generated_at=""
+  last_truth_generated_at=""
+  truth_advanced="false"
+  observed_runtime_pid=""
   while [[ "${SECONDS}" -lt "${deadline}" ]]; do
     sleep 2
     pid=""
@@ -1984,19 +2019,52 @@ if paper_minimal_startup_enabled; then
       pid="$(tr -dc '0-9' < "${PID_FILE}" || true)"
     fi
     if [[ -n "${pid}" ]] && ps -p "${pid}" >/dev/null 2>&1; then
+      observed_runtime_pid="${pid}"
+      if [[ "${candidate_pid}" != "${pid}" ]]; then
+        candidate_pid="${pid}"
+        stable_since=0
+        first_truth_generated_at=""
+        last_truth_generated_at=""
+        truth_advanced="false"
+      fi
       if run_paper_minimal_startup_preflight >/dev/null; then
-        if verify_direct_paper_runtime_shape "${pid}" "${source_commit}" >/dev/null 2>&1; then
-          write_startup_artifact "READY_SUBMIT_CAPABLE" "Track B PAPER runtime started through direct PAPER_MINIMAL_STARTUP_V1 process path and matched required runtime shape." "${pid}"
+        truth_generated_at="$(verify_direct_paper_runtime_shape "${pid}" "${source_commit}" 2>/dev/null || true)"
+        if [[ -n "${truth_generated_at}" ]]; then
+          if [[ "${stable_since}" -eq 0 ]]; then
+            stable_since="${SECONDS}"
+            first_truth_generated_at="${truth_generated_at}"
+            last_truth_generated_at="${truth_generated_at}"
+            write_startup_artifact "RUNTIME_RUNNING_WAITING_FOR_MINIMAL_STARTUP_STABILITY" "Runtime matched PAPER_MINIMAL_STARTUP_V1 shape; waiting for ${STABLE_SECONDS}s same-PID liveness and advancing runtime truth." "${pid}" >/dev/null
+            continue
+          fi
+          if [[ "${truth_generated_at}" != "${last_truth_generated_at}" ]]; then
+            last_truth_generated_at="${truth_generated_at}"
+            if [[ "${truth_generated_at}" != "${first_truth_generated_at}" ]]; then
+              truth_advanced="true"
+            fi
+          fi
+          if (( SECONDS - stable_since >= STABLE_SECONDS )) && [[ "${truth_advanced}" == "true" ]]; then
+            write_startup_artifact "READY_SUBMIT_CAPABLE" "Track B PAPER runtime started through direct PAPER_MINIMAL_STARTUP_V1 process path, matched required runtime shape, survived ${STABLE_SECONDS}s, and advanced runtime truth." "${pid}"
           exit 0
+          fi
+          write_startup_artifact "RUNTIME_RUNNING_WAITING_FOR_MINIMAL_STARTUP_STABILITY" "Runtime matched PAPER_MINIMAL_STARTUP_V1 shape; waiting for ${STABLE_SECONDS}s same-PID liveness and advancing runtime truth." "${pid}" >/dev/null
+        else
+          stable_since=0
+          first_truth_generated_at=""
+          last_truth_generated_at=""
+          truth_advanced="false"
+          write_startup_artifact "RUNTIME_RUNNING_WAITING_FOR_MINIMAL_RUNTIME_SHAPE" "Runtime process is alive; waiting for commit/profile/lane-count/runtime-truth shape to match PAPER_MINIMAL_STARTUP_V1." "${pid}" >/dev/null
         fi
       fi
-      ready_pid="${pid}"
-    elif [[ -n "${ready_pid}" ]]; then
-      write_startup_artifact "BLOCKED_RUNTIME_EXITED_DURING_STARTUP" "Runtime reached initial minimal process ownership, then exited before required runtime shape was verified." "${ready_pid}"
+    elif [[ -n "${pid}" ]]; then
+      write_startup_artifact "BLOCKED_RUNTIME_EXITED_DURING_STARTUP" "Runtime wrote PID ${pid}, then exited before ${STABLE_SECONDS}s same-PID liveness and advancing runtime truth were verified." "${pid}"
+      exit 1
+    elif [[ -n "${observed_runtime_pid}" ]]; then
+      write_startup_artifact "BLOCKED_RUNTIME_EXITED_DURING_STARTUP" "Runtime reached initial minimal process ownership, then exited before ${STABLE_SECONDS}s same-PID liveness and advancing runtime truth were verified." "${observed_runtime_pid}"
       exit 1
     fi
   done
-  write_startup_artifact "BLOCKED_START_TIMEOUT" "Runtime did not reach the required PAPER_MINIMAL_STARTUP_V1 direct-process runtime shape before timeout." ""
+  write_startup_artifact "BLOCKED_START_TIMEOUT" "Runtime did not reach the required PAPER_MINIMAL_STARTUP_V1 direct-process runtime shape, same-PID liveness, and advancing runtime truth before timeout." ""
   exit 1
 fi
 
