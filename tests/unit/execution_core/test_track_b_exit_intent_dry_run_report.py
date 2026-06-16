@@ -3,6 +3,8 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from pathlib import Path
 
+import pytest
+
 from mgc_v05l.execution_core.track_b_exit_intent_dry_run_report import (
     EXIT_INTENT_DRY_RUN_BLOCKED,
     EXIT_INTENT_DRY_RUN_DEGRADED,
@@ -208,6 +210,124 @@ def test_complete_fresh_broker_snapshot_blocks_stale_managed_close_candidate(tmp
     assert payload["classification"] == NO_BROKER_POSITIONS
     assert payload["candidate_count"] == 0
     assert payload["candidate_exit_intents"] == []
+
+
+@pytest.mark.parametrize(
+    ("symbol", "local_symbol", "expiry", "con_id", "quantity", "side", "close_action"),
+    (
+        ("MGC", "MGCQ6", "20260827", 732156883, "-1", "SHORT", "BUY"),
+        ("GC", "GCQ6", "20260827", 732156872, "-1", "SHORT", "BUY"),
+        ("ES", "ESU6", "20260918", 649180671, "-1", "SHORT", "BUY"),
+        ("NQ", "NQU6", "20260918", 770561204, "-1", "SHORT", "BUY"),
+        ("MES", "MESU6", "20260918", 793356217, "-1", "SHORT", "BUY"),
+        ("MNQ", "MNQU6", "20260918", 793356225, "1", "LONG", "SELL"),
+    ),
+)
+def test_fresh_broker_snapshot_local_symbol_expiry_without_con_id_normalizes_through_shared_identity(
+    tmp_path: Path,
+    symbol: str,
+    local_symbol: str,
+    expiry: str,
+    con_id: int,
+    quantity: str,
+    side: str,
+    close_action: str,
+) -> None:
+    inputs = _inputs()
+    lifecycle_id = f"life-{symbol.lower()}"
+    trade_id = f"trade-{symbol.lower()}"
+    inputs["ibkr_positions_snapshot"] = {
+        "generated_at": NOW.isoformat(),
+        "ok": True,
+        "positions_complete": True,
+        "selected_account_id": "DUM882026",
+        "positions": [
+            {
+                "account_id": "DUM882026",
+                "local_symbol": local_symbol,
+                "expiry": expiry,
+                "quantity": quantity,
+                "security_type": "FUT",
+                "symbol": symbol,
+            }
+        ],
+        "live_money_eligible": False,
+        "paper_proof_invoked": False,
+    }
+    inputs["managed_positions"]["managed_positions"] = [
+        {
+            "classification": "OPEN_MANAGED_EXIT_DUE",
+            "account_id": "DUM882026",
+            "local_symbol": local_symbol,
+            "con_id": con_id,
+            "quantity": "1",
+            "side": side,
+            "lifecycle_id": lifecycle_id,
+            "trade_id": trade_id,
+            "strategy_id": f"{symbol.lower()}_strategy",
+            "lane_id": f"{symbol.lower()}_lane",
+            "exit_due": True,
+            "projection_authority_owner_confirmed": True,
+        }
+    ]
+    inputs["managed_orders"]["managed_orders"] = [
+        {
+            "classification": "POSITION_WITHOUT_CLOSE_ORDER",
+            "account_id": "DUM882026",
+            "local_symbol": local_symbol,
+            "con_id": con_id,
+            "quantity": "1",
+            "lifecycle_id": lifecycle_id,
+            "trade_id": trade_id,
+            "strategy_id": f"{symbol.lower()}_strategy",
+            "lane_id": f"{symbol.lower()}_lane",
+            "required_close_action": close_action,
+            "required_close_quantity": "1",
+            "working": False,
+        }
+    ]
+
+    payload = _build(tmp_path, inputs)
+
+    assert payload["classification"] == EXIT_INTENT_DRY_RUN_READY
+    assert payload["candidate_count"] == 1
+    candidate = payload["candidate_exit_intents"][0]
+    assert candidate["local_symbol"] == local_symbol
+    assert candidate["con_id"] == con_id
+    assert candidate["candidate_close_action"] == close_action
+    assert candidate["authority_decision"]["decision"] == "ALLOWED"
+
+
+def test_fresh_broker_snapshot_unresolved_identity_blocks_instead_of_disappearing(tmp_path: Path) -> None:
+    inputs = _inputs()
+    inputs["ibkr_positions_snapshot"] = {
+        "generated_at": NOW.isoformat(),
+        "ok": True,
+        "positions_complete": True,
+        "selected_account_id": "DUM882026",
+        "positions": [
+            {
+                "account_id": "DUM882026",
+                "local_symbol": "ZTU6",
+                "expiry": "20260930",
+                "quantity": "-1",
+                "security_type": "FUT",
+                "symbol": "ZT",
+            }
+        ],
+        "live_money_eligible": False,
+        "paper_proof_invoked": False,
+    }
+    inputs["managed_positions"]["managed_positions"] = []
+    inputs["managed_orders"]["managed_orders"] = []
+
+    payload = _build(tmp_path, inputs)
+
+    assert payload["classification"] == EXIT_INTENT_DRY_RUN_BLOCKED
+    assert payload["candidate_count"] == 1
+    candidate = payload["candidate_exit_intents"][0]
+    assert candidate["authority_decision"]["decision"] == "BLOCKED"
+    assert candidate["block_reasons"] == ["contract_identity_not_in_validated_registry"]
 
 
 def test_run_can_write_report_without_broker_or_service_side_effects(tmp_path: Path) -> None:

@@ -19,6 +19,7 @@ from mgc_v05l.execution_core.models import require_aware_datetime, to_jsonable
 from mgc_v05l.execution_core.track_b_atomic_io import write_json_atomic
 from mgc_v05l.execution_core.track_b_broker_position_guardian import DEFAULT_BROKER_POSITION_GUARDIAN_ARTIFACT
 from mgc_v05l.execution_core.track_b_broker_session_authority import DEFAULT_BROKER_SESSION_AUTHORITY_ARTIFACT
+from mgc_v05l.execution_core.track_b_contract_identity import normalize_track_b_contract_row
 from mgc_v05l.execution_core.track_b_exit_authority_contract import (
     AttributionStatus,
     CloseQtySource,
@@ -158,23 +159,43 @@ def _fresh_broker_snapshot_authoritative(snapshot: Mapping[str, Any]) -> bool:
 def _broker_positions_from_fresh_broker_snapshot(snapshot: Mapping[str, Any]) -> list[dict[str, Any]]:
     positions: list[dict[str, Any]] = []
     for row in (_mapping(item) for item in _list(snapshot.get("positions"))):
-        identity = _mapping(row.get("contract_identity"))
-        local_symbol = _text(row.get("local_symbol") or identity.get("local_symbol"))
-        con_id = _int(row.get("con_id") or row.get("qualified_contract_identifier") or identity.get("con_id"))
         quantity = _decimal(row.get("quantity") or row.get("position"))
-        if not local_symbol or con_id <= 0 or abs(quantity) <= Decimal("0"):
+        if abs(quantity) <= Decimal("0"):
             continue
         if _text(row.get("security_type") or row.get("secType")).upper() not in {"", "FUT"}:
             continue
+        account_id = _text(row.get("account_id") or row.get("account") or snapshot.get("selected_account_id") or "DUM882026")
+        normalized = normalize_track_b_contract_row(row, account_id=account_id)
+        identity = _mapping(normalized.get("contract_identity"))
+        local_symbol = _text(normalized.get("local_symbol") or identity.get("local_symbol") or row.get("local_symbol"))
+        con_id = _int(normalized.get("con_id") or identity.get("con_id") or row.get("con_id") or row.get("qualified_contract_identifier"))
+        if identity.get("resolved") is not True or not local_symbol or con_id <= 0:
+            positions.append(
+                {
+                    "account_id": account_id,
+                    "local_symbol": local_symbol,
+                    "con_id": con_id,
+                    "quantity": str(quantity),
+                    "symbol": normalized.get("symbol") or identity.get("symbol") or row.get("symbol"),
+                    "track_b_root": normalized.get("track_b_root") or identity.get("track_b_root") or row.get("track_b_root"),
+                    "expiry": normalized.get("expiry") or identity.get("expiry") or row.get("expiry"),
+                    "contract_identity": identity,
+                    "identity_resolved": False,
+                    "identity_blockers": list(identity.get("blockers") or ["contract_identity_unresolved"]),
+                }
+            )
+            continue
         positions.append(
             {
-                "account_id": row.get("account_id") or row.get("account") or snapshot.get("selected_account_id") or "DUM882026",
+                "account_id": account_id,
                 "local_symbol": local_symbol,
                 "con_id": con_id,
                 "quantity": str(quantity),
-                "symbol": row.get("symbol") or identity.get("symbol"),
-                "track_b_root": row.get("track_b_root") or identity.get("track_b_root") or identity.get("instrument_family"),
-                "expiry": row.get("expiry") or identity.get("expiry"),
+                "symbol": normalized.get("symbol") or identity.get("symbol"),
+                "track_b_root": normalized.get("track_b_root") or identity.get("track_b_root") or identity.get("instrument_family"),
+                "expiry": normalized.get("expiry") or identity.get("expiry"),
+                "contract_identity": identity,
+                "identity_resolved": True,
             }
         )
     return positions
@@ -244,6 +265,8 @@ def _candidate_report(
     source_refs: Sequence[SourceArtifactRef],
     now: datetime,
 ) -> dict[str, Any]:
+    if broker_position.get("identity_resolved") is False:
+        return _unresolved_identity_candidate(broker_position=broker_position, inputs=inputs, now=now)
     managed_position = _matching_managed_position(broker_position=broker_position, managed_positions=inputs["managed_positions"])
     managed_order = _matching_managed_order(
         broker_position=broker_position,
@@ -285,6 +308,53 @@ def _candidate_report(
         "authority_decision": decision.to_json_dict(),
         "block_reasons": list(decision.block_reasons),
         "degraded_reasons": _degraded_reasons(decision.to_json_dict()),
+    }
+
+
+def _unresolved_identity_candidate(
+    *,
+    broker_position: Mapping[str, Any],
+    inputs: Mapping[str, Mapping[str, Any]],
+    now: datetime,
+) -> dict[str, Any]:
+    quantity = _decimal(broker_position.get("quantity"))
+    side = "LONG" if quantity > 0 else "SHORT"
+    action = "SELL" if side == "LONG" else "BUY"
+    blockers = list(broker_position.get("identity_blockers") or ["contract_identity_unresolved"])
+    return {
+        "instrument": _text(broker_position.get("track_b_root") or broker_position.get("symbol") or broker_position.get("local_symbol")),
+        "local_symbol": _text(broker_position.get("local_symbol")),
+        "con_id": _int(broker_position.get("con_id")),
+        "account_id": _text(broker_position.get("account_id") or "DUM882026"),
+        "position_side": side,
+        "broker_position_qty": str(abs(quantity)),
+        "candidate_close_action": action,
+        "candidate_close_qty": str(abs(quantity)),
+        "close_qty_source": CloseQtySource.RISK_POLICY.value,
+        "price_policy": {
+            "type": "BLOCKED_UNRESOLVED_CONTRACT_IDENTITY",
+            "source": "fresh_broker_snapshot_identity_normalization",
+        },
+        "attribution_status": AttributionStatus.UNATTRIBUTED.value,
+        "attribution": {},
+        "managed_position_classification": inputs["managed_positions"].get("classification"),
+        "managed_order_classification": inputs["managed_orders"].get("classification"),
+        "exit_due": None,
+        "required_close_action": None,
+        "exit_intent": {},
+        "authority_decision": {
+            "schema_version": "track_b_exit_authority_decision_v1_1",
+            "exit_intent_id": "blocked_unresolved_contract_identity",
+            "decision": "BLOCKED",
+            "attribution_status": AttributionStatus.UNATTRIBUTED.value,
+            "block_reasons": blockers,
+            "validated_at": now.isoformat(),
+            "live_money_eligible": False,
+            "paper_proof_invoked": False,
+            "diagnostics": {"contract_identity": _mapping(broker_position.get("contract_identity"))},
+        },
+        "block_reasons": blockers,
+        "degraded_reasons": [],
     }
 
 
