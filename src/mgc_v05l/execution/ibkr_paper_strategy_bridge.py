@@ -79,6 +79,7 @@ from ..execution_core.track_b_exit_safety import (
     classify_exit_attempt_policy,
     classify_exit_urgency,
 )
+from ..execution_core.track_b_futures_tick_metadata import round_price_to_tick_float
 from ..execution_core.track_b_futures_contract_resolver import (
     CONTRACT_ALLOWED,
     FuturesContractResolverInput,
@@ -6805,8 +6806,7 @@ def _float_or_none(value: Any) -> float | None:
 def _round_price_to_tick(price: float, min_tick: float) -> float:
     if min_tick <= 0.0:
         return float(price)
-    ticks = round(float(price) / float(min_tick))
-    return round(ticks * float(min_tick), 8)
+    return round_price_to_tick_float(price, min_tick)
 
 
 def _signed_limit_distance(*, action: str, limit_price: float, reference_price: float) -> float:

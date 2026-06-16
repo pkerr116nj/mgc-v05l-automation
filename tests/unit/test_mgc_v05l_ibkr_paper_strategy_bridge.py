@@ -879,6 +879,38 @@ def test_entry_pricing_prefers_fresh_runtime_candle_when_delayed_ask_is_too_low(
     assert pricing["live_money_eligible"] is False
 
 
+def test_entry_pricing_supports_rates_fractional_tick_rounding(tmp_path: Path) -> None:
+    _write_runtime_1m_candle(tmp_path, symbol="ZB", close=121.15625)
+    config = _config(
+        tmp_path,
+        strategy_id="zb_readiness_probe__us_active_participation_long",
+        symbol="ZB",
+        contract_month="202609",
+        caller_metadata={
+            "source_instrument": "ZB",
+            "executable_proxy": "ZB",
+            "entry_execution_policy": "MARKETABLE_LIMIT_FROM_RUNTIME_TAPE",
+            "entry_execution_intent": "PARTICIPATE_NOW",
+            "live_money_eligible": False,
+            "paper_only": True,
+        },
+    )
+
+    pricing = _entry_execution_pricing_for_bridge(
+        config=config,
+        intent=_intent_from_config(config),
+        quote_context=_quote_context(ask=121.125),
+        qualified_contract_report=_qualified_contract_report(min_tick=0.03125),
+        now=datetime(2026, 5, 14, 12, 25, 30, tzinfo=timezone.utc),
+    )
+
+    assert pricing["execution_price_source"] == "RUNTIME_DATABENTO_1M_CLOSE"
+    assert pricing["runtime_last_or_close"] == 121.15625
+    assert pricing["limit_price"] == 121.1875
+    assert pricing["limit_vs_runtime_price_points"] == 0.03125
+    assert pricing["block_submit"] is False
+
+
 def test_entry_pricing_honors_bounded_runtime_marketable_offset_metadata(tmp_path: Path) -> None:
     _write_runtime_1m_candle(tmp_path, symbol="MNQ", close=29752.0)
     config = _config(

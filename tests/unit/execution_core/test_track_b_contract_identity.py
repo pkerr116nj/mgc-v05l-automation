@@ -64,6 +64,24 @@ def test_normalizer_fails_closed_on_identity_contradiction() -> None:
     assert "con_id_mismatch" in identity["blockers"]
 
 
+@pytest.mark.parametrize("symbol", ("ZT", "ZF", "ZN", "ZB"))
+def test_rates_contract_identity_fails_closed_until_ibkr_qualification_is_validated(symbol: str) -> None:
+    identity = normalize_track_b_contract_identity(
+        {
+            "account_id": "DUM882026",
+            "security_type": "FUT",
+            "symbol": symbol,
+            "local_symbol": f"{symbol}U6",
+            "expiry": "20260930",
+            "quantity": "1.0",
+        }
+    )
+
+    assert identity["classification"] == "TRACK_B_CONTRACT_IDENTITY_UNRESOLVED"
+    assert identity["resolved"] is False
+    assert identity["blockers"] == ["contract_identity_not_in_validated_registry"]
+
+
 def test_broker_position_identity_uses_shared_validated_contract_registry() -> None:
     result = canonicalize_broker_position_identity(
         broker_position={
