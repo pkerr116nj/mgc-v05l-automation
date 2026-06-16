@@ -255,6 +255,8 @@ def update_manifest_from_filled_bridge_result(
     contract = filled_bridge_result.get("contract") if isinstance(filled_bridge_result.get("contract"), Mapping) else {}
     identity = {
         "broker_order_id": filled_bridge_result.get("broker_order_id"),
+        "broker_effect_classification": filled_bridge_result.get("broker_effect_classification"),
+        "broker_effect_observation_id": filled_bridge_result.get("broker_effect_observation_id"),
         "perm_id": filled_bridge_result.get("perm_id"),
         "client_id": filled_bridge_result.get("client_id"),
         "exec_id": filled_bridge_result.get("exec_id") or filled_bridge_result.get("execution_id"),

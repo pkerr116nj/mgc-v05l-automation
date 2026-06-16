@@ -30,7 +30,7 @@ from ..domain.events import (
     OrderIntentCreatedEvent,
 )
 from ..domain.models import Bar, FeaturePacket, SignalPacket, StrategyState
-from ..execution.execution_engine import ExecutionEngine
+from ..execution.execution_engine import ExecutionEngine, PendingExecution
 from ..execution.order_models import FillEvent, OrderIntent
 from ..execution.paper_broker import PaperBroker
 from ..execution_core.track_b_no_trade_diagnostics import (
@@ -789,7 +789,14 @@ class StrategyEngine:
                                 intent=maybe_intent,
                                 occurred_at=execution_bar.end_ts,
                                 default_reason="Execution engine rejected the intent due to an existing pending or opposite-side conflict.",
+                                signal_bar_id=execution_bar.bar_id if maybe_intent.is_entry else None,
+                                long_entry_family=long_entry_family,
+                                short_entry_family=short_entry_family,
+                                short_entry_source=short_entry_source,
                             )
+                            if self._submit_failure_broker_effect_observed_for_intent(maybe_intent):
+                                diagnostic_order_intent_created = True
+                                diagnostic_blocker_reason = None
             elif diagnostic_blocker_reason is None:
                 diagnostic_blocker_reason = self._infer_no_trade_blocker_reason(
                     bar=execution_bar,
@@ -1316,7 +1323,17 @@ class StrategyEngine:
                 intent=intent,
                 occurred_at=bar.end_ts,
                 default_reason="Execution engine rejected the runtime entry intent.",
+                signal_bar_id=bar.bar_id,
+                long_entry_family=long_entry_family if normalized_side == "LONG" else LongEntryFamily.NONE,
+                short_entry_family=short_entry_family if normalized_side == "SHORT" else ShortEntryFamily.NONE,
+                short_entry_source=signal_source if normalized_side == "SHORT" else None,
             )
+            if self._submit_failure_broker_effect_observed_for_intent(intent):
+                self._persist_state(
+                    self._state,
+                    transition_label="runtime_entry_broker_effect_observed_after_rejection",
+                )
+                return intent
             self._persist_state(
                 self._state,
                 transition_label="runtime_entry_intent_rejected_long" if normalized_side == "LONG" else "runtime_entry_intent_rejected_short",
@@ -2239,8 +2256,24 @@ class StrategyEngine:
         intent: OrderIntent,
         occurred_at: datetime,
         default_reason: str,
+        signal_bar_id: str | None = None,
+        long_entry_family: LongEntryFamily = LongEntryFamily.NONE,
+        short_entry_family: ShortEntryFamily = ShortEntryFamily.NONE,
+        short_entry_source: str | None = None,
     ) -> StrategyState:
         failure = self._execution_engine.last_submit_failure()
+        broker_effect_state = self._handle_submit_failure_broker_effect_observed(
+            state=state,
+            intent=intent,
+            occurred_at=occurred_at,
+            failure=failure,
+            signal_bar_id=signal_bar_id,
+            long_entry_family=long_entry_family,
+            short_entry_family=short_entry_family,
+            short_entry_source=short_entry_source,
+        )
+        if broker_effect_state is not None:
+            return broker_effect_state
         reason = default_reason
         if failure is not None and failure.order_intent_id == intent.order_intent_id:
             reason = f"{default_reason} Broker stage={failure.failure_stage}: {failure.error}"
@@ -2274,6 +2307,110 @@ class StrategyEngine:
             execution_engine=self._execution_engine,
         )
         return next_state
+
+    def _handle_submit_failure_broker_effect_observed(
+        self,
+        *,
+        state: StrategyState,
+        intent: OrderIntent,
+        occurred_at: datetime,
+        failure,
+        signal_bar_id: str | None,
+        long_entry_family: LongEntryFamily,
+        short_entry_family: ShortEntryFamily,
+        short_entry_source: str | None,
+    ) -> StrategyState | None:
+        if not intent.is_entry:
+            return None
+        if failure is None or failure.order_intent_id != intent.order_intent_id:
+            return None
+        submit_attempt = self._execution_engine.last_submit_attempt() or {}
+        effect = dict(submit_attempt.get("submit_failure_broker_effect") or {})
+        if str(effect.get("classification") or "").strip().upper() != "BROKER_EFFECT_OBSERVED_AFTER_REJECTION":
+            return None
+        fill_price = _parse_fill_price(
+            effect.get("fill_price")
+            or effect.get("average_price")
+            or submit_attempt.get("fill_price")
+        )
+        fill_timestamp = (
+            _parse_fill_timestamp(effect.get("fill_timestamp") or effect.get("observed_at"))
+            or occurred_at
+        )
+        broker_order_id = effect.get("broker_order_id") or submit_attempt.get("broker_order_id")
+        fill_event = FillEvent(
+            order_intent_id=intent.order_intent_id,
+            intent_type=intent.intent_type,
+            order_status=OrderStatus.FILLED,
+            fill_timestamp=fill_timestamp,
+            fill_price=fill_price,
+            broker_order_id=str(broker_order_id) if broker_order_id not in (None, "") else None,
+            quantity=int(intent.quantity),
+        )
+        try:
+            self._persist_order_intent(
+                intent,
+                fill_event.broker_order_id,
+                order_status=OrderStatus.FILLED,
+                submitted_at=failure.submit_attempted_at,
+                acknowledged_at=fill_event.fill_timestamp,
+                broker_order_status="BROKER_EFFECT_OBSERVED_AFTER_REJECTION",
+                last_status_checked_at=occurred_at,
+                timeout_classification="BROKER_EFFECT_OBSERVED_AFTER_REJECTION",
+                timeout_status_updated_at=occurred_at,
+                retry_count=0,
+            )
+            self.apply_fill(
+                fill_event=fill_event,
+                signal_bar_id=signal_bar_id or intent.bar_id,
+                long_entry_family=long_entry_family,
+                short_entry_family=short_entry_family,
+                short_entry_source=short_entry_source,
+            )
+            self._execution_engine.clear_intent(intent.order_intent_id)
+            payload = self._persist_filled_bridge_result(
+                pending=PendingExecution(
+                    intent=intent,
+                    broker_order_id=fill_event.broker_order_id,
+                    submitted_at=failure.submit_attempted_at,
+                    acknowledged_at=fill_event.fill_timestamp,
+                    broker_order_status="BROKER_EFFECT_OBSERVED_AFTER_REJECTION",
+                    last_status_checked_at=occurred_at,
+                    retry_count=0,
+                    signal_bar_id=signal_bar_id or intent.bar_id,
+                    long_entry_family=long_entry_family,
+                    short_entry_family=short_entry_family,
+                    short_entry_source=short_entry_source,
+                    submit_attempt_id=failure.submit_attempt_id,
+                ),
+                fill_event=fill_event,
+                classification="BROKER_EFFECT_OBSERVED_AFTER_REJECTION",
+                review_required=False,
+            )
+            self._latest_live_intent_summary = {
+                **self._latest_live_intent_summary,
+                "filled_bridge_result": payload,
+                "submit_failure_broker_effect": effect,
+            }
+            return self._state
+        except Exception as exc:  # noqa: BLE001 - exposure exists; stop duplicate entry and force review.
+            next_state = transition_to_fault(
+                replace(state, entries_enabled=False, updated_at=occurred_at),
+                occurred_at,
+                f"BROKER_EFFECT_OBSERVED_AFTER_REJECTION_REVIEW_REQUIRED: {exc}",
+            )
+            self._state = next_state
+            self._execution_engine.clear_intent(intent.order_intent_id)
+            self._persist_state(next_state, transition_label="broker_effect_after_rejection_review_required")
+            return next_state
+
+    def _submit_failure_broker_effect_observed_for_intent(self, intent: OrderIntent) -> bool:
+        submit_attempt = self._execution_engine.last_submit_attempt() or {}
+        effect = dict(submit_attempt.get("submit_failure_broker_effect") or {})
+        return (
+            str(effect.get("order_intent_id") or submit_attempt.get("order_intent_id") or "") == intent.order_intent_id
+            and str(effect.get("classification") or "").strip().upper() == "BROKER_EFFECT_OBSERVED_AFTER_REJECTION"
+        )
 
     def _broker_fill_event_from_pending(self, pending) -> FillEvent:
         status_payload = self._execution_engine.broker.get_order_status(pending.broker_order_id) or {}
@@ -2309,6 +2446,7 @@ class StrategyEngine:
         manifest_update = update_manifest_from_filled_bridge_result(
             filled_bridge_result={
                 "order_intent_id": pending.intent.order_intent_id,
+                "lifecycle_id": submit_attempt.get("lifecycle_id") or f"bridge_fill_{pending.intent.order_intent_id}",
                 "strategy_id": self._runtime_identity.get("standalone_strategy_id") or self._runtime_identity.get("strategy_id"),
                 "lane_id": self._runtime_identity.get("lane_id"),
                 "instrument": self._runtime_identity.get("instrument") or pending.intent.symbol,
@@ -2322,7 +2460,14 @@ class StrategyEngine:
                 "exec_id": status_payload.get("execution_id") or submit_attempt.get("execution_id"),
                 "local_symbol": status_payload.get("local_symbol") or submit_attempt.get("local_symbol"),
                 "con_id": status_payload.get("con_id") or submit_attempt.get("con_id"),
+                "contract_key": submit_attempt.get("contract_key"),
+                "contract_month": submit_attempt.get("contract_month") or submit_attempt.get("bridge_contract_month"),
+                "expiry": submit_attempt.get("expiry"),
                 "contract": status_payload.get("contract") or dict(submit_attempt.get("bridge_order_metadata") or {}).get("contract"),
+                "broker_effect_classification": submit_attempt.get("broker_effect_classification"),
+                "broker_effect_observation_id": submit_attempt.get("broker_effect_observation_id"),
+                "fill_price": str(fill_event.fill_price) if fill_event is not None and fill_event.fill_price is not None else status_payload.get("fill_price") or submit_attempt.get("fill_price"),
+                "fill_timestamp": fill_event.fill_timestamp.isoformat() if fill_event is not None else status_payload.get("fill_timestamp") or submit_attempt.get("fill_timestamp"),
                 "managed_exit_policy_id": self._runtime_identity.get("managed_exit_policy_id"),
                 "position_management_manifest_path": submit_attempt.get("position_management_manifest_path"),
             },
@@ -2354,6 +2499,7 @@ class StrategyEngine:
             "action": _intent_side(pending.intent),
             "quantity": pending.intent.quantity,
             "order_intent_id": pending.intent.order_intent_id,
+            "lifecycle_id": submit_attempt.get("lifecycle_id") or f"bridge_fill_{pending.intent.order_intent_id}",
             "intent_type": pending.intent.intent_type.value,
             "decision_bar_timestamp": pending.intent.created_at.isoformat(),
             "bar_id": pending.intent.bar_id,
@@ -2364,7 +2510,13 @@ class StrategyEngine:
             "exec_id": status_payload.get("execution_id") or submit_attempt.get("execution_id"),
             "local_symbol": status_payload.get("local_symbol") or submit_attempt.get("local_symbol"),
             "con_id": status_payload.get("con_id") or submit_attempt.get("con_id"),
+            "contract_key": submit_attempt.get("contract_key"),
+            "contract_month": submit_attempt.get("contract_month") or submit_attempt.get("bridge_contract_month"),
+            "expiry": submit_attempt.get("expiry"),
             "contract": status_payload.get("contract") or dict(submit_attempt.get("bridge_order_metadata") or {}).get("contract"),
+            "broker_effect_classification": submit_attempt.get("broker_effect_classification"),
+            "broker_effect_observation_id": submit_attempt.get("broker_effect_observation_id"),
+            "broker_effect_observed_after_rejection": submit_attempt.get("submit_failure_broker_effect"),
             "fill_price": str(fill_event.fill_price) if fill_event is not None and fill_event.fill_price is not None else status_payload.get("fill_price") or submit_attempt.get("fill_price"),
             "fill_timestamp": fill_event.fill_timestamp.isoformat() if fill_event is not None else status_payload.get("fill_timestamp") or submit_attempt.get("fill_timestamp"),
             "bridge_classification": submit_attempt.get("bridge_classification"),

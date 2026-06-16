@@ -174,11 +174,20 @@ def validate_open_managed_evidence(evidence: Mapping[str, Any]) -> TrackBLifecyc
 
 
 def broker_backed_fill_evidence_blockers(evidence: Mapping[str, Any]) -> tuple[str, ...]:
+    broker_effect_observation_id = None
+    effect = str(evidence.get("broker_effect_classification") or "").strip().upper()
+    broker_identity = evidence.get("broker_ownership_identity") if isinstance(evidence.get("broker_ownership_identity"), Mapping) else {}
+    if effect == "BROKER_EFFECT_OBSERVED_AFTER_REJECTION":
+        broker_effect_observation_id = _text(
+            evidence.get("broker_effect_observation_id"),
+            broker_identity.get("broker_effect_observation_id"),
+        )
     required = {
         "broker_order_id_or_perm_id": _text(
             evidence.get("broker_order_id"),
             evidence.get("order_id"),
             evidence.get("perm_id"),
+            broker_effect_observation_id,
         ),
         "fill_price": _text(evidence.get("fill_price"), evidence.get("entry_fill_price"), evidence.get("price")),
         "fill_timestamp": _text(

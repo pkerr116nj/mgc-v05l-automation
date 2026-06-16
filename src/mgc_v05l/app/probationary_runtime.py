@@ -824,6 +824,7 @@ class ProbationaryPaperLaneSpec:
     local_symbol: str | None = None
     con_id: int | str | None = None
     contract_key: str | None = None
+    bridge_execution_target: dict[str, Any] = field(default_factory=dict)
     allow_pre_5m_context_participation: bool = False
     atp_context_timeframe: str = "5m"
 
@@ -872,12 +873,11 @@ def _active_evidence_bridge_adapter_for_spec(spec: ProbationaryPaperLaneSpec) ->
     ).upper()
     if "ACTIVE_EVIDENCE" not in lane_tokens and "_ACTIVE_PARTICIPATION_" not in spec.lane_id:
         return None
-    from ..execution.ibkr_phase1_futures_scope import phase1_execution_target_for_source
-
+    target = _bridge_execution_target_for_probationary_spec(spec, source_instrument)
     return {
         "lane_id": spec.lane_id,
         "source_instrument": source_instrument,
-        "bridge_execution_target": dict(phase1_execution_target_for_source(source_instrument) or {}),
+        "bridge_execution_target": target,
         "current_order_destination": PAPER_EXECUTION_ROUTE_IBKR_BRIDGE,
         "bridge_proxy_mode": f"{source_instrument}_SIGNAL_DIRECT_PHASE1",
         "entry_execution_intent": "PARTICIPATE_NOW",
@@ -891,6 +891,11 @@ def _active_evidence_bridge_adapter_for_spec(spec: ProbationaryPaperLaneSpec) ->
 
 
 def _contract_month_from_probationary_spec(spec: ProbationaryPaperLaneSpec) -> str | None:
+    configured_target = dict(spec.bridge_execution_target or {})
+    for key in ("contract_month", "expiry"):
+        value = str(configured_target.get(key) or "").strip()
+        if len(value) >= 6 and value[:6].isdigit():
+            return value[:6]
     contract_key = str(spec.contract_key or "").strip()
     if "-" in contract_key:
         suffix = contract_key.rsplit("-", 1)[-1].strip()
@@ -919,20 +924,16 @@ def _contract_month_from_probationary_spec(spec: ProbationaryPaperLaneSpec) -> s
     return None
 
 
-def _promoted_paper_bridge_adapter_for_spec(spec: ProbationaryPaperLaneSpec) -> dict[str, Any] | None:
-    destination = str(
-        spec.current_order_destination
-        or (spec.runtime_overlay_params or {}).get("current_order_destination")
-        or ""
-    ).strip()
-    if destination != PAPER_EXECUTION_ROUTE_IBKR_BRIDGE:
-        return None
-    source_instrument = _source_instrument_from_lane_spec(spec)
-    if not source_instrument:
-        return None
+def _bridge_execution_target_for_probationary_spec(
+    spec: ProbationaryPaperLaneSpec,
+    source_instrument: str,
+) -> dict[str, Any]:
     from ..execution.ibkr_phase1_futures_scope import phase1_execution_target_for_source
 
     target = dict(phase1_execution_target_for_source(source_instrument) or {})
+    configured_target = dict(spec.bridge_execution_target or {})
+    if configured_target:
+        target.update({key: value for key, value in configured_target.items() if value not in (None, "")})
     contract_month = _contract_month_from_probationary_spec(spec)
     if contract_month:
         target["contract_month"] = contract_month
@@ -951,7 +952,32 @@ def _promoted_paper_bridge_adapter_for_spec(spec: ProbationaryPaperLaneSpec) -> 
     if target.get("currency") in (None, ""):
         target["currency"] = "USD"
     if target.get("multiplier") in (None, ""):
-        target["multiplier"] = "2" if source_instrument in {"MNQ", "NQ"} else "5" if source_instrument in {"MES", "ES"} else target.get("multiplier")
+        target["multiplier"] = (
+            "2"
+            if source_instrument == "MNQ"
+            else "20"
+            if source_instrument == "NQ"
+            else "5"
+            if source_instrument == "MES"
+            else "50"
+            if source_instrument == "ES"
+            else target.get("multiplier")
+        )
+    return target
+
+
+def _promoted_paper_bridge_adapter_for_spec(spec: ProbationaryPaperLaneSpec) -> dict[str, Any] | None:
+    destination = str(
+        spec.current_order_destination
+        or (spec.runtime_overlay_params or {}).get("current_order_destination")
+        or ""
+    ).strip()
+    if destination != PAPER_EXECUTION_ROUTE_IBKR_BRIDGE:
+        return None
+    source_instrument = _source_instrument_from_lane_spec(spec)
+    if not source_instrument:
+        return None
+    target = _bridge_execution_target_for_probationary_spec(spec, source_instrument)
     return {
         "lane_id": spec.lane_id,
         "source_instrument": source_instrument,
@@ -987,6 +1013,18 @@ def _bridge_adapter_for_probationary_lane(spec: ProbationaryPaperLaneSpec) -> di
         adapter = _promoted_paper_bridge_adapter_for_spec(spec)
     if adapter is None:
         return None
+    source_instrument = _source_instrument_from_lane_spec(spec)
+    if source_instrument and (
+        spec.bridge_execution_target
+        or spec.local_symbol
+        or spec.con_id not in (None, "")
+        or spec.contract_key
+    ):
+        adapter = {
+            **adapter,
+            "source_instrument": source_instrument,
+            "bridge_execution_target": _bridge_execution_target_for_probationary_spec(spec, source_instrument),
+        }
     return {
         **adapter,
         "managed_exit_policy_id": spec.managed_exit_policy_id,
@@ -9093,6 +9131,7 @@ def _coerce_probationary_paper_lane_specs(
                     else raw_spec.get("qualified_contract_identifier")
                 ),
                 contract_key=str(raw_spec["contract_key"]) if raw_spec.get("contract_key") else None,
+                bridge_execution_target=dict(raw_spec.get("bridge_execution_target") or {}),
                 allow_pre_5m_context_participation=bool(
                     raw_spec.get("allow_pre_5m_context_participation", False)
                 ),
@@ -13457,6 +13496,104 @@ class _IbkrPaperBridgeRuntimeBroker:
             "pending_state_reconciliation": dict(result),
         }
         return result
+
+    def recognize_submit_failure_broker_effect(
+        self,
+        *,
+        intent: OrderIntent,
+        exception: BaseException,
+    ) -> dict[str, Any]:
+        snapshot = self.load_snapshot(force_refresh=True)
+        health = dict(snapshot.get("health") or {})
+        orders_fresh = _ibkr_runtime_health_ok(health, "orders_fresh")
+        positions_fresh = _ibkr_runtime_health_ok(health, "positions_fresh")
+        unknown_open_order_count = _ibkr_runtime_unknown_open_order_count(snapshot)
+        matching_open_orders = self._matching_broker_truth_open_orders(snapshot=snapshot)
+        matching_position = self._matching_broker_truth_position(snapshot=snapshot)
+        signed_quantity = _signed_ibkr_runtime_position_quantity(matching_position or {})
+        expected_sign = 1 if intent.intent_type in {OrderIntentType.BUY_TO_OPEN, OrderIntentType.BUY_TO_CLOSE} else -1
+        exposure_in_intended_direction = signed_quantity * expected_sign >= int(intent.quantity)
+        observed_at = datetime.now(timezone.utc)
+        base: dict[str, Any] = {
+            "route_destination": self.route_destination,
+            "lane_id": self._lane_id,
+            "source_symbol": self._source_symbol,
+            "order_intent_id": intent.order_intent_id,
+            "intent_type": intent.intent_type.value,
+            "submit_exception_type": type(exception).__name__,
+            "submit_exception_message": str(exception),
+            "orders_fresh": orders_fresh,
+            "positions_fresh": positions_fresh,
+            "unknown_open_order_count": unknown_open_order_count,
+            "matching_open_order_count": len(matching_open_orders),
+            "matching_broker_position_quantity": signed_quantity,
+            "observed_at": observed_at.isoformat(),
+        }
+        if not orders_fresh or not positions_fresh:
+            return {
+                **base,
+                "classification": "SUBMIT_FAILURE_BROKER_TRUTH_INCOMPLETE",
+                "broker_effect_observed": False,
+            }
+        if unknown_open_order_count:
+            return {
+                **base,
+                "classification": "SUBMIT_FAILURE_UNKNOWN_OPEN_ORDERS_BLOCK",
+                "broker_effect_observed": False,
+            }
+        if matching_open_orders:
+            return {
+                **base,
+                "classification": "SUBMIT_FAILURE_CONFLICTING_OPEN_ORDER_BLOCK",
+                "broker_effect_observed": False,
+                "matching_open_orders": [dict(row) for row in matching_open_orders],
+            }
+        if not exposure_in_intended_direction:
+            return {
+                **base,
+                "classification": "PRE_SUBMIT_BLOCKED_NO_BROKER_EFFECT",
+                "broker_effect_observed": False,
+            }
+        position_row = dict(matching_position or {})
+        fill_price = _ibkr_runtime_average_price(position_row)
+        fill_timestamp = _ibkr_runtime_latest_position_timestamp(position_row) or observed_at.isoformat()
+        observation_material = {
+            "lane_id": self._lane_id,
+            "order_intent_id": intent.order_intent_id,
+            "symbol": self._target_symbol(),
+            "local_symbol": position_row.get("local_symbol") or position_row.get("localSymbol"),
+            "con_id": position_row.get("con_id") or position_row.get("conId") or position_row.get("qualified_contract_identifier"),
+            "quantity": signed_quantity,
+            "observed_at": observed_at.isoformat(),
+        }
+        observation_id = "broker_effect_" + hashlib.sha256(
+            json.dumps(observation_material, sort_keys=True, default=str).encode("utf-8")
+        ).hexdigest()[:24]
+        target = self._bridge_target()
+        return {
+            **base,
+            "classification": "BROKER_EFFECT_OBSERVED_AFTER_REJECTION",
+            "broker_effect_observed": True,
+            "broker_effect_observation_id": observation_id,
+            "account_id": position_row.get("account_id") or position_row.get("account") or snapshot.get("selected_account_id"),
+            "symbol": self._target_symbol(),
+            "local_symbol": position_row.get("local_symbol") or position_row.get("localSymbol") or target.get("local_symbol"),
+            "con_id": (
+                position_row.get("con_id")
+                or position_row.get("conId")
+                or position_row.get("qualified_contract_identifier")
+                or target.get("con_id")
+                or target.get("qualified_contract_identifier")
+            ),
+            "contract_key": position_row.get("contract_key") or target.get("contract_key") or target.get("contract_month"),
+            "contract_month": position_row.get("contract_month") or target.get("contract_month"),
+            "expiry": position_row.get("expiry") or target.get("expiry"),
+            "broker_position": position_row,
+            "fill_price": fill_price,
+            "average_price": fill_price,
+            "fill_timestamp": fill_timestamp,
+            "broker_order_id": None,
+        }
 
     def restore_state(
         self,

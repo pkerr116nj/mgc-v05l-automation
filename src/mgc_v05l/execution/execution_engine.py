@@ -110,6 +110,7 @@ class ExecutionEngine:
             broker_order_id = self._broker.submit_order(intent)
         except Exception as exc:
             broker_submit_context = _optional_broker_submit_context(self._broker)
+            broker_effect_context = _optional_submit_failure_broker_effect_context(self._broker, intent, exc)
             self._clear_registration(intent.order_intent_id, intent.intent_type)
             self._last_submit_failure = SubmitFailure(
                 submit_attempt_id=submit_attempt_id,
@@ -125,6 +126,13 @@ class ExecutionEngine:
                 self._last_submit_attempt = {
                     **dict(self._last_submit_attempt or {}),
                     **broker_submit_context,
+                }
+            if broker_effect_context:
+                self._last_submit_attempt = {
+                    **dict(self._last_submit_attempt or {}),
+                    **broker_effect_context,
+                    "submit_failure_broker_effect": broker_effect_context,
+                    "broker_effect_classification": broker_effect_context.get("classification"),
                 }
             return None
         try:
@@ -305,6 +313,21 @@ def _optional_broker_submit_context(broker: BrokerInterface) -> dict[str, object
         return {}
     try:
         payload = broker.last_submit_context()  # type: ignore[attr-defined]
+    except Exception:
+        return {}
+    return dict(payload or {}) if isinstance(payload, dict) else {}
+
+
+def _optional_submit_failure_broker_effect_context(
+    broker: BrokerInterface,
+    intent: OrderIntent,
+    exc: BaseException,
+) -> dict[str, object]:
+    hook = getattr(broker, "recognize_submit_failure_broker_effect", None)
+    if not callable(hook):
+        return {}
+    try:
+        payload = hook(intent=intent, exception=exc)
     except Exception:
         return {}
     return dict(payload or {}) if isinstance(payload, dict) else {}

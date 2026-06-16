@@ -8416,7 +8416,7 @@ def test_pre_submit_no_broker_effect_bridge_block_does_not_escape_execution_engi
     assert failure.error.startswith("BLOCKED_NOT_SENT_TO_BROKER")
     submit_attempt = engine.last_submit_attempt()
     assert submit_attempt is not None
-    assert submit_attempt["broker_effect_classification"] == "PRE_SUBMIT_BLOCKED_NO_BROKER_EFFECT"
+    assert submit_attempt["broker_effect_classification"] == "SUBMIT_FAILURE_BROKER_TRUTH_INCOMPLETE"
     assert broker.get_open_orders() == []
     assert broker.get_position()["quantity"] == 0
     manifest_files = list(
@@ -8426,6 +8426,263 @@ def test_pre_submit_no_broker_effect_bridge_block_does_not_escape_execution_engi
     manifest = json.loads(manifest_files[0].read_text(encoding="utf-8"))
     assert manifest["lifecycle_status"] == "INTENT_CREATED"
     assert not manifest["broker_ownership_identity"]
+
+
+def test_active_evidence_adapter_preserves_validated_contract_identity() -> None:
+    spec = ProbationaryPaperLaneSpec(
+        lane_id="es_london_late_active_participation_short",
+        display_name="ES London late short",
+        symbol="ES",
+        long_sources=(),
+        short_sources=("PAPER_ACTIVE_EVIDENCE_ES_LONDON_LATE_PARTICIPATION_SHORT_V1",),
+        session_restriction="LONDON_LATE",
+        point_value=Decimal("50"),
+        strategy_family="paper_active_evidence",
+        strategy_identity_root="PAPER_ACTIVE_EVIDENCE_ES_LONDON_LATE_PARTICIPATION_SHORT_V1",
+        managed_exit_policy_id="LONDON_LATE_ACTIVE_EVIDENCE_TIMEBOX_60M_EXIT_V1",
+        current_order_destination="ibkr_paper_bridge_submit_capable",
+        bridge_execution_target={
+            "symbol": "ES",
+            "contract_month": "202609",
+            "expiry": "20260918",
+            "con_id": 649180671,
+            "local_symbol": "ESU6",
+            "exchange": "CME",
+            "currency": "USD",
+            "multiplier": "50",
+        },
+    )
+
+    adapter = probationary_runtime_module._active_evidence_bridge_adapter_for_spec(spec)  # noqa: SLF001
+
+    assert adapter is not None
+    target = adapter["bridge_execution_target"]
+    assert target["symbol"] == "ES"
+    assert target["contract_month"] == "202609"
+    assert target["expiry"] == "20260918"
+    assert target["local_symbol"] == "ESU6"
+    assert target["con_id"] == 649180671
+
+
+def test_rejected_submit_with_broker_exposure_is_adopted_after_fresh_truth(tmp_path: Path) -> None:
+    settings = _build_probationary_settings(tmp_path).model_copy(update={"symbol": "ES"})
+    repositories = RepositorySet(build_engine(settings.database_url))
+    structured_logger = StructuredLogger(settings.probationary_artifacts_path)
+    alert_dispatcher = AlertDispatcher(structured_logger, repositories.alerts, source_subsystem="submit_effect_test")
+    truth_root = tmp_path / "outputs" / "reports" / "ibkr_read_only_verification"
+    truth_root.mkdir(parents=True)
+    generated_at = datetime.now(timezone.utc).isoformat()
+    (truth_root / "ibkr_positions_snapshot.json").write_text(
+        json.dumps(
+            {
+                "ok": True,
+                "generated_at": generated_at,
+                "selected_account_id": "DUM882026",
+                "positions": [
+                    {
+                        "account_id": "DUM882026",
+                        "symbol": "ES",
+                        "security_type": "FUT",
+                        "expiry": "20260918",
+                        "local_symbol": "ESU6",
+                        "con_id": 649180671,
+                        "multiplier": "50",
+                        "quantity": "-1.0",
+                        "average_cost": "381272.75",
+                        "updated_at": generated_at,
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    (truth_root / "ibkr_open_orders_snapshot.json").write_text(
+        json.dumps(
+            {
+                "ok": True,
+                "generated_at": generated_at,
+                "selected_account_id": "DUM882026",
+                "open_orders": [],
+                "unknown_open_order_count": 0,
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    def fake_bridge_runner(*, config):
+        assert config.symbol == "ES"
+        assert config.contract_month == "202609"
+        return probationary_runtime_module.IbkrPaperStrategyBridgeArtifacts(
+            classification="PAPER_STRATEGY_INTENT_BLOCKED",
+            report={"detail": "broker_submit: expiry is required"},
+            audit_events=[],
+        )
+
+    broker = probationary_runtime_module._IbkrPaperBridgeRuntimeBroker(  # noqa: SLF001
+        lane_id="es_london_late_active_participation_short",
+        source_symbol="ES",
+        bridge_adapter={
+            "current_order_destination": "ibkr_paper_bridge_submit_capable",
+            "bridge_proxy_mode": "ES_SIGNAL_DIRECT_PHASE1",
+            "bridge_execution_target": {
+                "symbol": "ES",
+                "contract_month": "202609",
+                "expiry": "20260918",
+                "con_id": 649180671,
+                "local_symbol": "ESU6",
+                "multiplier": "50",
+            },
+            "managed_exit_policy_id": "LONDON_LATE_ACTIVE_EVIDENCE_TIMEBOX_60M_EXIT_V1",
+        },
+        repo_root=tmp_path,
+        bridge_runner=fake_bridge_runner,
+    )
+    broker.connect()
+    execution_engine = ExecutionEngine(broker=broker)
+    strategy_engine = StrategyEngine(
+        settings=settings,
+        repositories=repositories,
+        execution_engine=execution_engine,
+        structured_logger=structured_logger,
+        alert_dispatcher=alert_dispatcher,
+        runtime_identity={
+            "standalone_strategy_id": "es_london_late_active_participation_short",
+            "strategy_family": "paper_active_evidence",
+            "instrument": "ES",
+            "lane_id": "es_london_late_active_participation_short",
+            "managed_exit_policy_id": "LONDON_LATE_ACTIVE_EVIDENCE_TIMEBOX_60M_EXIT_V1",
+        },
+    )
+    bar = _build_bar(datetime(2026, 6, 16, 10, 30, tzinfo=timezone.utc), symbol="ES")
+
+    intent = strategy_engine.submit_runtime_entry_intent(
+        bar,
+        side="SHORT",
+        signal_source="PAPER_ACTIVE_EVIDENCE_ES_LONDON_LATE_PARTICIPATION_SHORT_V1",
+        reason_code="PAPER_ACTIVE_EVIDENCE_ES_LONDON_LATE_PARTICIPATION_SHORT_V1",
+        short_entry_family=ShortEntryFamily.LONDON_LATE_PAUSE_RESUME_SHORT,
+    )
+
+    assert intent is not None
+    submit_attempt = execution_engine.last_submit_attempt()
+    assert submit_attempt["broker_effect_classification"] == "BROKER_EFFECT_OBSERVED_AFTER_REJECTION"
+    assert submit_attempt["local_symbol"] == "ESU6"
+    intent_rows = repositories.order_intents.list_all()
+    assert intent_rows[0]["order_status"] == OrderStatus.FILLED.value
+    assert intent_rows[0]["broker_order_status"] == "BROKER_EFFECT_OBSERVED_AFTER_REJECTION"
+    assert intent_rows[0]["broker_order_id"] is None
+    assert strategy_engine.state.position_side == PositionSide.SHORT
+    assert strategy_engine.state.internal_position_qty == 1
+    fills = repositories.fills.list_all()
+    assert fills[0]["fill_price"] == "7625.455"
+    filled_latest = json.loads((structured_logger.artifact_dir / "filled_bridge_result_latest.json").read_text(encoding="utf-8"))
+    assert filled_latest["classification"] == "BROKER_EFFECT_OBSERVED_AFTER_REJECTION"
+    assert filled_latest["broker_backed_entry_auto_adoption"] == "BROKER_BACKED_ENTRY_AUTO_ADOPTED_OPEN_MANAGED"
+    assert filled_latest["local_symbol"] == "ESU6"
+    assert filled_latest["con_id"] == 649180671
+
+
+def test_rejected_submit_without_broker_exposure_remains_rejected(tmp_path: Path) -> None:
+    settings = _build_probationary_settings(tmp_path).model_copy(update={"symbol": "MNQ"})
+    repositories = RepositorySet(build_engine(settings.database_url))
+    structured_logger = StructuredLogger(settings.probationary_artifacts_path)
+    alert_dispatcher = AlertDispatcher(structured_logger, repositories.alerts, source_subsystem="submit_effect_test")
+    truth_root = tmp_path / "outputs" / "reports" / "ibkr_read_only_verification"
+    truth_root.mkdir(parents=True)
+    generated_at = datetime.now(timezone.utc).isoformat()
+    (truth_root / "ibkr_positions_snapshot.json").write_text(
+        json.dumps(
+            {
+                "ok": True,
+                "generated_at": generated_at,
+                "selected_account_id": "DUM882026",
+                "positions": [
+                    {
+                        "account_id": "DUM882026",
+                        "symbol": "MNQ",
+                        "security_type": "FUT",
+                        "expiry": "20260918",
+                        "local_symbol": "MNQU6",
+                        "con_id": 793356225,
+                        "multiplier": "2",
+                        "quantity": "0.0",
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    (truth_root / "ibkr_open_orders_snapshot.json").write_text(
+        json.dumps(
+            {
+                "ok": True,
+                "generated_at": generated_at,
+                "selected_account_id": "DUM882026",
+                "open_orders": [],
+                "unknown_open_order_count": 0,
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    def fake_bridge_runner(*, config):
+        return probationary_runtime_module.IbkrPaperStrategyBridgeArtifacts(
+            classification="PAPER_STRATEGY_INTENT_BLOCKED",
+            report={"detail": "broker_submit: expiry is required"},
+            audit_events=[],
+        )
+
+    broker = probationary_runtime_module._IbkrPaperBridgeRuntimeBroker(  # noqa: SLF001
+        lane_id="mnq_london_late_active_participation_short",
+        source_symbol="MNQ",
+        bridge_adapter={
+            "current_order_destination": "ibkr_paper_bridge_submit_capable",
+            "bridge_proxy_mode": "MNQ_SIGNAL_DIRECT_PHASE1",
+            "bridge_execution_target": {
+                "symbol": "MNQ",
+                "contract_month": "202609",
+                "expiry": "20260918",
+                "con_id": 793356225,
+                "local_symbol": "MNQU6",
+            },
+            "managed_exit_policy_id": "LONDON_LATE_ACTIVE_EVIDENCE_TIMEBOX_60M_EXIT_V1",
+        },
+        repo_root=tmp_path,
+        bridge_runner=fake_bridge_runner,
+    )
+    broker.connect()
+    execution_engine = ExecutionEngine(broker=broker)
+    strategy_engine = StrategyEngine(
+        settings=settings,
+        repositories=repositories,
+        execution_engine=execution_engine,
+        structured_logger=structured_logger,
+        alert_dispatcher=alert_dispatcher,
+        runtime_identity={
+            "standalone_strategy_id": "mnq_london_late_active_participation_short",
+            "strategy_family": "paper_active_evidence",
+            "instrument": "MNQ",
+            "lane_id": "mnq_london_late_active_participation_short",
+            "managed_exit_policy_id": "LONDON_LATE_ACTIVE_EVIDENCE_TIMEBOX_60M_EXIT_V1",
+        },
+    )
+    bar = _build_bar(datetime(2026, 6, 16, 10, 30, tzinfo=timezone.utc), symbol="MNQ")
+
+    result = strategy_engine.submit_runtime_entry_intent(
+        bar,
+        side="LONG",
+        signal_source="PAPER_ACTIVE_EVIDENCE_MNQ_LONDON_LATE_PARTICIPATION_LONG_V1",
+        reason_code="PAPER_ACTIVE_EVIDENCE_MNQ_LONDON_LATE_PARTICIPATION_LONG_V1",
+        long_entry_family=LongEntryFamily.K,
+    )
+
+    assert result is None
+    submit_attempt = execution_engine.last_submit_attempt()
+    assert submit_attempt["broker_effect_classification"] == "PRE_SUBMIT_BLOCKED_NO_BROKER_EFFECT"
+    intent_rows = repositories.order_intents.list_all()
+    assert intent_rows[0]["order_status"] == OrderStatus.REJECTED.value
+    assert intent_rows[0]["broker_order_id"] is None
+    assert strategy_engine.state.position_side == PositionSide.FLAT
 
 
 def test_midday_runtime_bridge_success_writes_route_proof_traces(tmp_path: Path) -> None:
