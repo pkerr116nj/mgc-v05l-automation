@@ -18,6 +18,10 @@ from typing import Any, Mapping, Sequence
 
 from mgc_v05l.execution_core.phase1_runtime_ticker_registry import PHASE1_RUNTIME_TICKER_ORDER
 from mgc_v05l.execution_core.track_b_atomic_io import write_json_atomic
+from mgc_v05l.execution_core.track_b_contract_identity import (
+    normalize_track_b_contract_identity,
+    normalize_track_b_contract_row,
+)
 from mgc_v05l.execution_core.track_b_broker_session_authority import (
     DEFAULT_BROKER_SESSION_AUTHORITY_ARTIFACT,
 )
@@ -4856,7 +4860,7 @@ def _track_b_broker_positions(snapshot: Mapping[str, Any], symbols: Sequence[str
         qty = _decimal_value(row.get("quantity"))
         if qty is None or qty == 0:
             continue
-        item = dict(row)
+        item = normalize_track_b_contract_row(row)
         item["track_b_root"] = root
         matches.append(item)
     return matches
@@ -4881,6 +4885,11 @@ def _track_b_broker_open_orders(snapshot: Mapping[str, Any], symbols: Sequence[s
 
 
 def _track_b_root(row: Mapping[str, Any], symbols: Sequence[str]) -> str | None:
+    normalized_identity = normalize_track_b_contract_identity(row)
+    if normalized_identity.get("resolved") is True:
+        root = str(normalized_identity.get("symbol") or "").strip().upper()
+        if root and root in {symbol.upper() for symbol in symbols}:
+            return root
     ordered = sorted((symbol.upper() for symbol in symbols), key=len, reverse=True)
     fields = (
         row.get("symbol"),

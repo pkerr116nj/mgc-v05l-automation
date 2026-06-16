@@ -121,7 +121,11 @@ def build_track_b_position_state_report(
     diagnostics = _historical_diagnostics(inputs["managed_positions"])
     positions: list[TrackBPositionState] = []
     wrong_scope_rows: list[dict[str, Any]] = []
-    for broker_position in _current_broker_positions(inputs["reconciliation"]):
+    broker_positions = _merge_current_broker_positions(
+        _current_broker_positions(inputs["reconciliation"]),
+        _current_broker_positions_from_managed_positions(inputs["managed_positions"]),
+    )
+    for broker_position in broker_positions:
         if not _position_in_scope(broker_position=broker_position, config=config):
             wrong_scope_rows.append(
                 {
@@ -272,6 +276,74 @@ def _current_broker_positions(reconciliation: Mapping[str, Any]) -> list[dict[st
         for row in (_mapping(item) for item in _list(reconciliation.get("track_b_broker_positions")))
         if abs(_decimal(row.get("quantity") or row.get("position") or row.get("signed_qty"))) > Decimal("0")
     ]
+
+
+def _current_broker_positions_from_managed_positions(managed_positions: Mapping[str, Any]) -> list[dict[str, Any]]:
+    positions: list[dict[str, Any]] = []
+    for row in (_mapping(item) for item in _list(managed_positions.get("managed_positions"))):
+        if _row_is_diagnostic_only(row):
+            continue
+        broker_position = _mapping(row.get("broker_position"))
+        if not broker_position:
+            continue
+        quantity = _decimal(broker_position.get("quantity") or broker_position.get("position") or broker_position.get("signed_qty"))
+        if quantity == 0:
+            continue
+        enriched = _enriched_broker_position_identity(
+            broker_position=broker_position,
+            managed_match=row,
+            diagnostics=[],
+        )
+        if not str(enriched.get("account_id") or enriched.get("account") or "").strip():
+            account = row.get("account_id") or row.get("account")
+            if str(account or "").strip():
+                enriched["account_id"] = account
+        positions.append(enriched)
+    return positions
+
+
+def _merge_current_broker_positions(
+    reconciliation_positions: list[dict[str, Any]],
+    managed_positions: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    merged: dict[tuple[str, int, str, str], dict[str, Any]] = {}
+    order: list[tuple[str, int, str, str]] = []
+    for position in [*reconciliation_positions, *managed_positions]:
+        key = _broker_position_key(position)
+        if key not in merged:
+            order.append(key)
+        existing = merged.get(key)
+        merged[key] = _prefer_richer_broker_position(existing, position)
+    return [merged[key] for key in order]
+
+
+def _broker_position_key(position: Mapping[str, Any]) -> tuple[str, int, str, str]:
+    return (
+        str(position.get("account_id") or position.get("account") or "").upper(),
+        _int(position.get("con_id")),
+        str(position.get("local_symbol") or "").upper(),
+        str(position.get("symbol") or position.get("track_b_root") or "").upper(),
+    )
+
+
+def _prefer_richer_broker_position(existing: Mapping[str, Any] | None, candidate: Mapping[str, Any]) -> dict[str, Any]:
+    if existing is None:
+        return dict(candidate)
+    existing_score = _broker_position_identity_score(existing)
+    candidate_score = _broker_position_identity_score(candidate)
+    if candidate_score > existing_score:
+        return dict(candidate)
+    return dict(existing)
+
+
+def _broker_position_identity_score(position: Mapping[str, Any]) -> int:
+    score = 0
+    if _int(position.get("con_id")) > 0:
+        score += 2
+    for field in ("local_symbol", "symbol", "track_b_root", "expiry", "account_id", "account"):
+        if str(position.get(field) or "").strip():
+            score += 1
+    return score
 
 
 def _position_state(

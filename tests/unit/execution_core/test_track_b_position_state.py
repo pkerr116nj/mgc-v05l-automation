@@ -213,6 +213,80 @@ def test_multiple_current_positions_are_independent_rows(tmp_path: Path) -> None
     assert rows["MNQM6"]["attribution_status"] == "ATTRIBUTED"
 
 
+def test_complete_managed_registry_extends_narrow_reconciliation_broker_positions(tmp_path: Path) -> None:
+    symbols = [
+        ("MGCQ6", 732156883, "MGC", "mgc_lifecycle"),
+        ("GCQ6", 732156872, "GC", "gc_lifecycle"),
+        ("ESU6", 649180671, "ES", "es_lifecycle"),
+        ("NQU6", 770561204, "NQ", "nq_lifecycle"),
+        ("MNQU6", 793356225, "MNQ", "mnq_lifecycle"),
+        ("MESU6", 793356217, "MES", "mes_current_long_lifecycle"),
+    ]
+    report = _report(
+        tmp_path,
+        broker_positions=[_broker_position(local_symbol="MNQU6", con_id=793356225, symbol="MNQ", quantity="1")],
+        managed_positions=[
+            _managed_position(
+                local_symbol=local_symbol,
+                con_id=con_id,
+                symbol=symbol,
+                side="LONG",
+                quantity="1",
+                lifecycle_id=lifecycle_id,
+                trade_id=f"{symbol.lower()}_trade",
+                strategy_id=f"{symbol.lower()}_strategy",
+                lane_id=f"{symbol.lower()}_globex_active_participation_long",
+                broker_position=_broker_position(
+                    local_symbol=local_symbol,
+                    con_id=con_id,
+                    symbol=symbol,
+                    quantity="1",
+                ),
+            )
+            for local_symbol, con_id, symbol, lifecycle_id in symbols
+        ],
+    )
+
+    assert report["classification"] == "POSITION_STATE_CURRENT_POSITIONS"
+    assert report["position_count"] == 6
+    rows = {row["local_symbol"]: row for row in report["positions"]}
+    assert set(rows) == {"MGCQ6", "GCQ6", "ESU6", "NQU6", "MNQU6", "MESU6"}
+    assert rows["MESU6"]["lifecycle_id"] == "mes_current_long_lifecycle"
+    assert all(row["attribution_status"] == "ATTRIBUTED" for row in rows.values())
+
+
+def test_wrong_account_from_managed_registry_broker_position_blocks_publication(tmp_path: Path) -> None:
+    report = _report(
+        tmp_path,
+        broker_positions=[],
+        managed_positions=[
+            _managed_position(
+                local_symbol="MGCQ6",
+                con_id=732156883,
+                symbol="MGC",
+                side="LONG",
+                quantity="1",
+                lifecycle_id="mgc_lifecycle",
+                trade_id="mgc_trade",
+                strategy_id="mgc_strategy",
+                lane_id="mgc_lane",
+                broker_position=_broker_position(
+                    account_id="OTHER",
+                    local_symbol="MGCQ6",
+                    con_id=732156883,
+                    symbol="MGC",
+                    quantity="1",
+                ),
+            )
+        ],
+    )
+
+    assert report["classification"] == "POSITION_STATE_BLOCKED_WRONG_SCOPE"
+    assert report["position_count"] == 0
+    assert report["wrong_scope_row_count"] == 1
+    assert report["diagnostic_rows"][0]["account_id"] == "OTHER"
+
+
 def test_source_refs_and_diagnostics_are_preserved(tmp_path: Path) -> None:
     report = _report(
         tmp_path,
@@ -291,17 +365,21 @@ def _managed_position(
     account_id: str = "DUM882026",
     local_symbol: str = "MESM6",
     con_id: int = 770561194,
+    symbol: str = "MES",
     side: str = "LONG",
     quantity: str = "1",
     lifecycle_id: str | None = None,
     trade_id: str | None = None,
     strategy_id: str | None = None,
     lane_id: str | None = None,
+    broker_position: dict | None = None,
 ) -> dict:
-    return {
+    row = {
         "account_id": account_id,
         "local_symbol": local_symbol,
         "con_id": con_id,
+        "symbol": symbol,
+        "track_b_root": symbol,
         "side": side,
         "quantity": quantity,
         "lifecycle_id": lifecycle_id,
@@ -310,3 +388,6 @@ def _managed_position(
         "lane_id": lane_id,
         "classification": "OPEN_MANAGED_MATCHED",
     }
+    if broker_position is not None:
+        row["broker_position"] = broker_position
+    return row

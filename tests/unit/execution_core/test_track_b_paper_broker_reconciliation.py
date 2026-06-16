@@ -7,6 +7,7 @@ from pathlib import Path
 from mgc_v05l.execution_core.track_b_paper_broker_reconciliation import (
     ReconciliationConfig,
     _broker_lifecycle_position_match,
+    _track_b_broker_positions,
     reconcile_track_b_paper_broker_truth,
 )
 from mgc_v05l.execution_core.track_b_central_trade_registry import TradeEventType
@@ -23,6 +24,40 @@ from mgc_v05l.execution_core.track_b_submit_intent_ownership import (
 
 
 NOW = datetime(2026, 5, 11, 12, 0, tzinfo=timezone.utc)
+
+
+def test_track_b_broker_positions_normalize_validated_expanded_futures_identity() -> None:
+    snapshot = {
+        "positions": [
+            {
+                "account_id": "DUM882026",
+                "security_type": "FUT",
+                "symbol": symbol,
+                "local_symbol": local_symbol,
+                "expiry": expiry,
+                "quantity": "1.0",
+            }
+            for symbol, local_symbol, expiry in (
+                ("MGC", "MGCQ6", "20260827"),
+                ("GC", "GCQ6", "20260827"),
+                ("NQ", "NQU6", "20260918"),
+                ("ES", "ESU6", "20260918"),
+                ("MNQ", "MNQU6", "20260918"),
+                ("MES", "MESU6", "20260918"),
+            )
+        ]
+    }
+
+    rows = _track_b_broker_positions(snapshot, ["ES", "MES", "NQ", "MNQ", "GC", "MGC"])
+
+    by_symbol = {row["symbol"]: row for row in rows}
+    assert set(by_symbol) == {"ES", "MES", "NQ", "MNQ", "GC", "MGC"}
+    assert by_symbol["MGC"]["con_id"] == 732156883
+    assert by_symbol["GC"]["contract_key"] == "GC-202608"
+    assert by_symbol["NQ"]["local_symbol"] == "NQU6"
+    assert by_symbol["ES"]["contract_identity"]["source"] == "VALIDATED_TRACK_B_FUTURES_CONTRACT_REGISTRY"
+    assert by_symbol["MNQ"]["con_id"] == 793356225
+    assert by_symbol["MES"]["contract_key"] == "MES-202609"
 
 
 def test_broker_lifecycle_match_accepts_aggregate_same_lane_units() -> None:

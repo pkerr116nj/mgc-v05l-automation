@@ -20,6 +20,7 @@ from mgc_v05l.execution_core.track_b_broker_position_identity import (
     canonicalize_broker_position_identity,
 )
 from mgc_v05l.execution_core.track_b_central_trade_registry import TradeCurrentState, TradeRegistryRecord
+from mgc_v05l.execution_core.track_b_contract_identity import normalize_track_b_contract_row
 from mgc_v05l.execution_core.track_b_fresh_truth_contract import (
     EXPIRED_DIAGNOSTIC_ONLY,
     expire_superseded_same_scope_candidates,
@@ -76,7 +77,12 @@ def resolve_current_exposure_ownership(
 ) -> dict[str, Any]:
     """Resolve current broker exposure to exactly one canonical owner when provable."""
 
-    broker_rows = [dict(row) for row in broker_positions if _position_key(row) and _broker_position_qty(row)]
+    broker_rows = [
+        _normalize_broker_position_row(row)
+        for row in broker_positions
+        if _broker_position_qty(row)
+    ]
+    broker_rows = [row for row in broker_rows if _position_key(row)]
     open_order_rows = [dict(row) for row in broker_open_orders]
     if not broker_rows:
         return {
@@ -1271,7 +1277,20 @@ def _signed_report_qty(report: Mapping[str, Any]) -> Decimal | None:
 
 
 def _position_key(row: Mapping[str, Any]) -> str:
-    return str(row.get("local_symbol") or row.get("localSymbol") or row.get("contract_key") or row.get("position_key") or "").upper()
+    identity = row.get("contract_identity") if isinstance(row.get("contract_identity"), Mapping) else {}
+    return str(
+        row.get("local_symbol")
+        or row.get("localSymbol")
+        or row.get("contract_key")
+        or row.get("position_key")
+        or identity.get("local_symbol")
+        or identity.get("contract_key")
+        or ""
+    ).upper()
+
+
+def _normalize_broker_position_row(row: Mapping[str, Any]) -> dict[str, Any]:
+    return normalize_track_b_contract_row(row, account_id=str(row.get("account_id") or row.get("account") or "") or None)
 
 
 def _broker_position_qty(row: Mapping[str, Any]) -> Decimal | None:

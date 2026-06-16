@@ -337,16 +337,17 @@ def _classify_order(
         lifecycle_positions=lifecycle_positions,
         known_managed_exit_orders=known_managed_exit_orders,
     )
+    is_unknown = _order_in(order, unknown_orders)
     diagnostic_status_gaps: list[str] = []
     if _tolerated_risk_reducing_status_gaps(
         order=order,
         reasons=reasons,
         is_close_order=is_close_order,
+        is_unknown=is_unknown,
         broker_positions=broker_positions,
     ):
         diagnostic_status_gaps = sorted(set(reasons))
         reasons = []
-    is_unknown = _order_in(order, unknown_orders)
     age_seconds = _order_age_seconds(order, now)
     close_attempt = _mapping(lifecycle_report.get("close_submit_attempt"))
     close_attempt_age = _age_seconds(close_attempt.get("submitted_at"), now)
@@ -459,6 +460,7 @@ def _tolerated_risk_reducing_status_gaps(
     order: Mapping[str, Any],
     reasons: list[str],
     is_close_order: bool,
+    is_unknown: bool,
     broker_positions: list[dict[str, Any]],
 ) -> bool:
     reason_set = {str(reason) for reason in reasons if str(reason)}
@@ -466,6 +468,7 @@ def _tolerated_risk_reducing_status_gaps(
         reason_set
         and reason_set <= _TOLERABLE_IBKR_STATUS_GAPS
         and is_close_order
+        and not is_unknown
         and _order_working(order)
         and _risk_reducing_order_matches_broker(order=order, broker_positions=broker_positions)
     )

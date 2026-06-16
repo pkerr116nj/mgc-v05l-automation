@@ -13,6 +13,7 @@ from decimal import Decimal, InvalidOperation
 from typing import Any, Mapping, Sequence
 
 from mgc_v05l.execution_core.track_b_central_trade_registry import TradeRegistryRecord
+from mgc_v05l.execution_core.track_b_contract_identity import normalize_track_b_contract_row
 
 
 IDENTITY_READY = "BROKER_POSITION_IDENTITY_READY"
@@ -53,15 +54,17 @@ def canonicalize_broker_position_identity(
 ) -> BrokerPositionIdentityResolution:
     """Return broker position with canonical ``con_id`` when exact evidence exists."""
 
-    canonical = dict(broker_position)
+    canonical = normalize_track_b_contract_row(broker_position)
     current_con_id = _int_or_none(canonical.get("con_id") or canonical.get("conId"))
     if current_con_id is not None:
         canonical["con_id"] = current_con_id
+        resolved_from_registry = _contract_identity_ready(canonical)
+        reason_code = "VALIDATED_CONTRACT_IDENTITY_RESOLVED" if resolved_from_registry else "BROKER_POSITION_CON_ID_PRESENT"
         return BrokerPositionIdentityResolution(
             classification=IDENTITY_READY,
             canonical_position=canonical,
-            reason_codes=("BROKER_POSITION_CON_ID_PRESENT",),
-            source="BROKER_POSITION",
+            reason_codes=(reason_code,),
+            source="VALIDATED_TRACK_B_FUTURES_CONTRACT_REGISTRY" if resolved_from_registry else "BROKER_POSITION",
         )
 
     candidates = _dedupe_candidates(
@@ -130,6 +133,11 @@ def _registry_record_candidates(
         if _candidate_matches_broker_position(candidate=row, broker_position=broker_position):
             rows.append(row)
     return rows
+
+
+def _contract_identity_ready(row: Mapping[str, Any]) -> bool:
+    identity = row.get("contract_identity")
+    return isinstance(identity, Mapping) and identity.get("resolved") is True
 
 
 def _row_candidates(

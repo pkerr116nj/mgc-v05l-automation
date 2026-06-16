@@ -19,6 +19,7 @@ from ..brokers.ibkr import (
     IbkrSession,
     build_default_ibkr_order_id_policy,
 )
+from ..execution_core.track_b_contract_identity import normalize_track_b_contract_row
 from .ibkr_execution_provider import IbkrExecutionProvider
 
 _EXPECTED_MODE = "PAPER"
@@ -1166,19 +1167,23 @@ def _build_positions_snapshot(*, config: IbkrReadOnlyVerificationConfig, client:
         if position.account_id != selected_account_id:
             continue
         rows.append(
-            {
-                "account_id": position.account_id,
-                "symbol": position.contract.symbol,
-                "local_symbol": position.contract.local_symbol,
-                "security_type": position.contract.security_type,
-                "exchange": position.contract.exchange,
-                "currency": position.contract.currency,
-                "expiry": position.contract.expiry,
-                "multiplier": position.contract.multiplier,
-                "quantity": position.quantity,
-                "average_cost": position.average_cost,
-                "updated_at": position.updated_at.isoformat() if position.updated_at is not None else None,
-            }
+            normalize_track_b_contract_row(
+                {
+                    "account_id": position.account_id,
+                    "symbol": position.contract.symbol,
+                    "local_symbol": position.contract.local_symbol,
+                    "con_id": position.contract.con_id,
+                    "security_type": position.contract.security_type,
+                    "exchange": position.contract.exchange,
+                    "currency": position.contract.currency,
+                    "expiry": position.contract.expiry,
+                    "multiplier": position.contract.multiplier,
+                    "quantity": position.quantity,
+                    "average_cost": position.average_cost,
+                    "updated_at": position.updated_at.isoformat() if position.updated_at is not None else None,
+                },
+                account_id=selected_account_id,
+            )
         )
     return {
         "generated_at": datetime.now(timezone.utc).isoformat(),

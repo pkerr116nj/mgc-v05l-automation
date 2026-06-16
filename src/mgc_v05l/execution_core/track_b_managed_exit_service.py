@@ -21,6 +21,7 @@ from typing import Any, Callable, Mapping, Sequence
 
 from mgc_v05l.execution_core.models import require_aware_datetime, to_jsonable
 from mgc_v05l.execution_core.track_b_atomic_io import write_json_atomic
+from mgc_v05l.execution_core.track_b_contract_identity import normalize_track_b_contract_row
 from mgc_v05l.execution_core.track_b_managed_exit_pipeline_dry_run import (
     TrackBManagedExitPipelineDryRunConfig,
     build_track_b_managed_exit_pipeline_dry_run_report,
@@ -1399,12 +1400,13 @@ def _run_broker_truth_sweeper(
     visible_positions: list[dict[str, Any]] = []
     for broker_position in broker_positions:
         identity = _broker_position_identity(broker_position)
-        if not identity.get("local_symbol"):
+        if not identity.get("local_symbol") or not identity.get("con_id"):
             diagnostics.append(
                 {
                     "classification": "MANAGED_EXIT_SERVICE_RESTART_OR_SCHEMA_REPAIR_REQUIRED",
                     "reason": "broker_contract_identity_unparseable",
                     "broker_position": broker_position,
+                    "contract_identity": identity,
                 }
             )
             continue
@@ -1414,13 +1416,18 @@ def _run_broker_truth_sweeper(
             terminal_records=terminal_records,
         )
         if existing is None:
-            lifecycle = _best_lifecycle_for_broker_position(config=config, broker_position=broker_position)
+            lifecycle = _best_lifecycle_for_broker_position(
+                config=config,
+                broker_position=broker_position,
+                terminal_records=terminal_records,
+            )
             if not identity.get("con_id") and not _int_or_none(_mapping(lifecycle).get("con_id")):
                 diagnostics.append(
                     {
                         "classification": "MANAGED_EXIT_SERVICE_RESTART_OR_SCHEMA_REPAIR_REQUIRED",
                         "reason": "broker_contract_identity_unparseable",
                         "broker_position": broker_position,
+                        "contract_identity": identity,
                     }
                 )
                 continue
@@ -1516,12 +1523,13 @@ def _current_track_b_broker_positions(snapshot: Mapping[str, Any]) -> list[dict[
     for row in (_mapping(item) for item in _list(snapshot.get("positions"))):
         if str(row.get("account_id") or row.get("account") or snapshot.get("account") or "") != _PAPER_ACCOUNT_ID:
             continue
-        if not _is_track_b_futures_broker_position(row):
+        normalized = normalize_track_b_contract_row(row, account_id=_PAPER_ACCOUNT_ID)
+        if not _is_track_b_futures_broker_position(normalized):
             continue
-        quantity = _decimal(row.get("quantity") or row.get("position") or row.get("signed_qty")) or Decimal("0")
+        quantity = _decimal(normalized.get("quantity") or normalized.get("position") or normalized.get("signed_qty")) or Decimal("0")
         if quantity == 0:
             continue
-        positions.append(row)
+        positions.append(normalized)
     return positions
 
 
@@ -1533,7 +1541,15 @@ def _is_track_b_futures_broker_position(row: Mapping[str, Any]) -> bool:
 
 
 def _instrument_from_position(row: Mapping[str, Any]) -> str:
-    symbol = str(row.get("symbol") or row.get("track_b_root") or row.get("instrument") or row.get("instrument_family") or "").strip().upper()
+    contract_identity = _mapping(row.get("contract_identity"))
+    symbol = str(
+        row.get("symbol")
+        or row.get("track_b_root")
+        or row.get("instrument")
+        or row.get("instrument_family")
+        or contract_identity.get("symbol")
+        or ""
+    ).strip().upper()
     if symbol:
         return symbol
     local_symbol = str(row.get("local_symbol") or row.get("localSymbol") or "").strip().upper()
@@ -1541,12 +1557,18 @@ def _instrument_from_position(row: Mapping[str, Any]) -> str:
 
 
 def _broker_position_identity(row: Mapping[str, Any]) -> dict[str, Any]:
+    contract_identity = _mapping(row.get("contract_identity"))
+    resolved = contract_identity if contract_identity.get("resolved") is True else {}
     return {
-        "account_id": str(row.get("account_id") or row.get("account") or _PAPER_ACCOUNT_ID),
-        "con_id": _int_or_none(row.get("con_id") or row.get("conId")),
-        "local_symbol": _string_or_none(row.get("local_symbol") or row.get("localSymbol")),
-        "expiry": _string_or_none(row.get("expiry") or row.get("lastTradeDateOrContractMonth")),
+        "account_id": str(row.get("account_id") or row.get("account") or resolved.get("account_id") or _PAPER_ACCOUNT_ID),
+        "con_id": _int_or_none(row.get("con_id") or row.get("conId") or resolved.get("con_id")),
+        "local_symbol": _string_or_none(row.get("local_symbol") or row.get("localSymbol") or resolved.get("local_symbol")),
+        "expiry": _string_or_none(row.get("expiry") or row.get("lastTradeDateOrContractMonth") or resolved.get("expiry")),
+        "contract_key": _string_or_none(row.get("contract_key") or resolved.get("contract_key")),
         "instrument_family": _instrument_from_position(row),
+        "classification": contract_identity.get("classification"),
+        "resolved": contract_identity.get("resolved") is True,
+        "blockers": _list(contract_identity.get("blockers")),
     }
 
 
@@ -1811,42 +1833,85 @@ def _best_lifecycle_for_broker_position(
     *,
     config: TrackBManagedExitServiceConfig,
     broker_position: Mapping[str, Any],
+    terminal_records: Sequence[Any] = (),
 ) -> dict[str, Any] | None:
     identity = _broker_position_identity(broker_position)
     lifecycle_root = config.resolve(DEFAULT_STRATEGY_LIFECYCLE_ROOT)
     candidates: list[dict[str, Any]] = []
-    if not lifecycle_root.exists():
-        return None
-    for report_path in lifecycle_root.glob("*/track_b_strategy_managed_paper_lifecycle_report.json"):
-        report = _read_json(report_path)
-        if not report or report.get("close_fill"):
-            continue
-        local_symbol = _string_or_none(report.get("local_symbol") or _mapping(report.get("entry_intent")).get("local_symbol"))
-        con_id = _int_or_none(report.get("con_id") or _mapping(report.get("entry_intent")).get("con_id"))
-        if identity["local_symbol"] and local_symbol and local_symbol != identity["local_symbol"]:
-            continue
-        if identity["con_id"] and con_id and con_id != identity["con_id"]:
-            continue
-        if not local_symbol and not con_id:
-            continue
-        entry_fill = _mapping(report.get("entry_fill"))
-        entry_intent = _mapping(report.get("entry_intent"))
-        candidates.append(
-            {
-                "lifecycle_id": report.get("lifecycle_id"),
-                "trade_id": report.get("trade_id"),
-                "lane_id": report.get("lane_id") or report.get("strategy_id") or entry_intent.get("lane_id"),
-                "strategy_id": report.get("strategy_id") or entry_intent.get("strategy_id"),
-                "managed_exit_policy_id": report.get("managed_exit_policy_id") or entry_intent.get("managed_exit_policy_id"),
-                "entry_timestamp": entry_fill.get("filled_at") or _mapping(report.get("open_state")).get("entry_timestamp"),
-                "entry_price": entry_fill.get("price") or _mapping(report.get("open_state")).get("entry_price"),
-                "entry_order_id": entry_fill.get("broker_order_id"),
-                "entry_perm_id": entry_fill.get("perm_id"),
-                "entry_exec_id": entry_fill.get("execution_id") or entry_fill.get("exec_id"),
-                "report_path": str(report_path),
-            }
+    if lifecycle_root.exists():
+        for report_path in lifecycle_root.glob("*/track_b_strategy_managed_paper_lifecycle_report.json"):
+            report = _read_json(report_path)
+            if not report or report.get("close_fill"):
+                continue
+            local_symbol = _string_or_none(report.get("local_symbol") or _mapping(report.get("entry_intent")).get("local_symbol"))
+            con_id = _int_or_none(report.get("con_id") or _mapping(report.get("entry_intent")).get("con_id"))
+            if identity["local_symbol"] and local_symbol and local_symbol != identity["local_symbol"]:
+                continue
+            if identity["con_id"] and con_id and con_id != identity["con_id"]:
+                continue
+            if not local_symbol and not con_id:
+                continue
+            entry_fill = _mapping(report.get("entry_fill"))
+            entry_intent = _mapping(report.get("entry_intent"))
+            candidates.append(
+                {
+                    "lifecycle_id": report.get("lifecycle_id"),
+                    "trade_id": report.get("trade_id"),
+                    "lane_id": report.get("lane_id") or report.get("strategy_id") or entry_intent.get("lane_id"),
+                    "strategy_id": report.get("strategy_id") or entry_intent.get("strategy_id"),
+                    "managed_exit_policy_id": report.get("managed_exit_policy_id") or entry_intent.get("managed_exit_policy_id"),
+                    "entry_timestamp": entry_fill.get("filled_at") or _mapping(report.get("open_state")).get("entry_timestamp"),
+                    "entry_price": entry_fill.get("price") or _mapping(report.get("open_state")).get("entry_price"),
+                    "entry_order_id": entry_fill.get("broker_order_id"),
+                    "entry_perm_id": entry_fill.get("perm_id"),
+                    "entry_exec_id": entry_fill.get("execution_id") or entry_fill.get("exec_id"),
+                    "report_path": str(report_path),
+                }
+            )
+    candidates.extend(
+        _registry_lifecycle_candidates_for_broker_position(
+            broker_position=broker_position,
+            terminal_records=terminal_records,
         )
+    )
     return max(candidates, key=lambda row: str(row.get("entry_timestamp") or "")) if candidates else None
+
+
+def _registry_lifecycle_candidates_for_broker_position(
+    *,
+    broker_position: Mapping[str, Any],
+    terminal_records: Sequence[Any],
+) -> list[dict[str, Any]]:
+    identity = _broker_position_identity(broker_position)
+    candidates: list[dict[str, Any]] = []
+    for record in terminal_records:
+        state = str(getattr(getattr(record, "current_state", None), "value", getattr(record, "current_state", "")))
+        if state == "CLOSED_FLAT":
+            continue
+        for event in getattr(record, "event_chain", ()) or ():
+            if str(getattr(getattr(event, "event_type", ""), "value", getattr(event, "event_type", ""))) != "ENTRY_FILL_BROKER_BACKED":
+                continue
+            if not _event_matches_broker_position(event, identity, None):
+                continue
+            lane_id = _string_or_none(getattr(event, "lane_id", None) or getattr(event, "thesis_strategy_id", None))
+            candidates.append(
+                {
+                    "lifecycle_id": _string_or_none(getattr(event, "lifecycle_id", None)),
+                    "trade_id": _string_or_none(getattr(event, "trade_id", None)),
+                    "lane_id": lane_id,
+                    "strategy_id": lane_id,
+                    "managed_exit_policy_id": _managed_exit_policy_from_lane(lane_id),
+                    "entry_timestamp": getattr(event, "generated_at", None).isoformat()
+                    if getattr(event, "generated_at", None) is not None
+                    else None,
+                    "entry_price": str(getattr(event, "price", "")) if getattr(event, "price", None) is not None else None,
+                    "entry_order_id": _string_or_none(getattr(event, "order_id", None)),
+                    "entry_perm_id": _string_or_none(getattr(event, "perm_id", None)),
+                    "entry_exec_id": _string_or_none(getattr(event, "exec_id", None)),
+                    "source": "TRACK_B_LIVE_TRADE_REGISTRY_ENTRY_FILL",
+                }
+            )
+    return candidates
 
 
 def _entry_fill_event_from_registry(

@@ -12,9 +12,10 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any, Mapping, Sequence
 
 from mgc_v05l.execution_core.track_b_atomic_io import write_json_atomic
+from mgc_v05l.execution_core.track_b_contract_identity import normalize_track_b_contract_row
 from mgc_v05l.execution_core.track_b_lifecycle_state_transition import (
     is_registry_eligible,
     normalize_lifecycle_state,
@@ -74,6 +75,12 @@ DEFAULT_RECONCILIATION_ARTIFACT = (
     / "reports"
     / "track_b_paper_broker_reconciliation"
     / "latest_track_b_paper_broker_reconciliation.json"
+)
+DEFAULT_BROKER_POSITIONS_SNAPSHOT = (
+    Path("outputs") / "reports" / "ibkr_read_only_verification" / "ibkr_positions_snapshot.json"
+)
+DEFAULT_BROKER_OPEN_ORDERS_SNAPSHOT = (
+    Path("outputs") / "reports" / "ibkr_read_only_verification" / "ibkr_open_orders_snapshot.json"
 )
 DEFAULT_LIVE_POSITION_STATUS_ARTIFACT = (
     Path("outputs")
@@ -138,19 +145,43 @@ def build_track_b_managed_position_registry(
     open_order_truth = _read_json(config.resolve(config.open_order_truth_path))
     managed_order_registry = _read_json(config.resolve(config.managed_order_registry_path))
     reconciliation = _read_json(config.resolve(config.reconciliation_path))
+    positions_snapshot = _read_json(config.resolve(DEFAULT_BROKER_POSITIONS_SNAPSHOT))
+    open_orders_snapshot = _read_json(config.resolve(DEFAULT_BROKER_OPEN_ORDERS_SNAPSHOT))
     live_position_status = _read_json(config.resolve(config.live_position_status_path))
     lifecycle_reports = _load_lifecycle_reports(config.resolve(config.lifecycle_root))
     manifests = _load_manifests(config.resolve(config.manifest_root))
+    terminal_records = load_live_trade_registry_records(repo_root=config.repo_root)
 
-    broker_positions = _reconciliation_broker_positions(reconciliation)
+    fresh_broker_positions = _fresh_complete_broker_positions(positions_snapshot)
+    broker_positions = (
+        fresh_broker_positions
+        if fresh_broker_positions is not None
+        else [_normalize_contract_row(row) for row in _reconciliation_broker_positions(reconciliation)]
+    )
+    fresh_broker_open_orders = _fresh_complete_broker_open_orders(open_orders_snapshot)
+    broker_open_orders = (
+        fresh_broker_open_orders
+        if fresh_broker_open_orders is not None
+        else _list(reconciliation.get("track_b_broker_open_orders"))
+    )
     lifecycle_positions = [
-        item for item in _reconciliation_lifecycle_positions(reconciliation) if _lifecycle_position_registry_eligible(item)
+        _normalize_contract_row(item)
+        for item in _reconciliation_lifecycle_positions(reconciliation)
+        if _lifecycle_position_registry_eligible(item)
     ]
+    lifecycle_positions = _merge_resolved_lifecycle_positions(
+        lifecycle_positions=lifecycle_positions,
+        resolved_lifecycle_positions=_registry_lifecycle_candidates_for_broker_positions(
+            broker_positions=broker_positions,
+            lifecycle_positions=lifecycle_positions,
+            terminal_records=terminal_records,
+        ),
+    )
     pre_restart_exposure_resolution = resolve_pre_restart_exposure_reconciliation(
         config=PreRestartExposureResolverConfig(repo_root=config.repo_root),
         broker_positions=broker_positions,
         lifecycle_positions=lifecycle_positions,
-        broker_open_orders=_list(reconciliation.get("track_b_broker_open_orders")),
+        broker_open_orders=broker_open_orders,
         lifecycle_reports=lifecycle_reports,
     )
     owner_resolution = _current_owner_resolution_for_projection(
@@ -166,8 +197,6 @@ def build_track_b_managed_position_registry(
         resolved_lifecycle_positions=_list(owner_resolution.get("resolved_lifecycle_positions"))
         or _list(pre_restart_exposure_resolution.get("resolved_lifecycle_positions")),
     )
-    broker_open_orders = _list(reconciliation.get("track_b_broker_open_orders"))
-    terminal_records = load_live_trade_registry_records(repo_root=config.repo_root)
     lifecycle_positions_tuple, superseded_lifecycle_positions = filter_terminal_superseded_current_rows(
         rows=lifecycle_positions,
         records=terminal_records,
@@ -947,6 +976,146 @@ def _reconciliation_broker_positions(reconciliation: Mapping[str, Any]) -> list[
     ]
 
 
+def _fresh_complete_broker_positions(snapshot: Mapping[str, Any]) -> list[dict[str, Any]] | None:
+    if snapshot.get("positions_complete") is not True and snapshot.get("ok") is not True:
+        return None
+    positions: list[dict[str, Any]] = []
+    for row in _list(snapshot.get("positions")):
+        account_id = str(row.get("account_id") or row.get("account") or snapshot.get("account") or "").strip()
+        if account_id and account_id != "DUM882026":
+            continue
+        normalized = _normalize_contract_row({**row, "account_id": account_id or row.get("account_id")})
+        if not _validated_track_b_futures_position(normalized):
+            continue
+        qty = _decimal(normalized.get("quantity") or normalized.get("position") or normalized.get("signed_qty"))
+        if qty is None or qty == 0:
+            continue
+        positions.append(normalized)
+    return positions
+
+
+def _fresh_complete_broker_open_orders(snapshot: Mapping[str, Any]) -> list[dict[str, Any]] | None:
+    if snapshot.get("open_orders_complete") is not True and snapshot.get("ok") is not True:
+        return None
+    rows: list[dict[str, Any]] = []
+    for row in _list(snapshot.get("open_orders")):
+        account_id = str(row.get("account_id") or row.get("account") or snapshot.get("account") or "").strip()
+        if account_id and account_id != "DUM882026":
+            continue
+        contract = _mapping(row.get("contract"))
+        normalized_contract = _normalize_contract_row({**contract, "account_id": account_id or contract.get("account_id")})
+        normalized = dict(row)
+        normalized["contract"] = normalized_contract
+        if normalized_contract.get("contract_identity", {}).get("resolved") is True:
+            normalized.setdefault("symbol", normalized_contract.get("symbol"))
+            normalized.setdefault("track_b_root", normalized_contract.get("track_b_root"))
+            normalized.setdefault("instrument_family", normalized_contract.get("instrument_family"))
+            normalized.setdefault("local_symbol", normalized_contract.get("local_symbol"))
+            normalized.setdefault("con_id", normalized_contract.get("con_id"))
+            normalized.setdefault("contract_key", normalized_contract.get("contract_key"))
+        rows.append(normalized)
+    return rows
+
+
+def _validated_track_b_futures_position(row: Mapping[str, Any]) -> bool:
+    sec_type = str(row.get("security_type") or row.get("secType") or "").strip().upper()
+    if sec_type and sec_type != "FUT":
+        return False
+    identity = _mapping(row.get("contract_identity"))
+    symbol = str(
+        row.get("symbol")
+        or row.get("track_b_root")
+        or row.get("instrument_family")
+        or identity.get("symbol")
+        or ""
+    ).strip().upper()
+    return identity.get("resolved") is True and symbol in {"MGC", "GC", "ES", "NQ", "MNQ", "MES"}
+
+
+def _registry_lifecycle_candidates_for_broker_positions(
+    *,
+    broker_positions: Sequence[Mapping[str, Any]],
+    lifecycle_positions: Sequence[Mapping[str, Any]],
+    terminal_records: tuple[Any, ...],
+) -> list[dict[str, Any]]:
+    candidates: list[dict[str, Any]] = []
+    for broker in broker_positions:
+        if _best_lifecycle_match([dict(item) for item in lifecycle_positions if isinstance(item, Mapping)], _position_key(broker), broker):
+            continue
+        candidate = _registry_lifecycle_candidate_for_broker_position(
+            broker_position=broker,
+            terminal_records=terminal_records,
+        )
+        if candidate:
+            candidates.append(candidate)
+    return candidates
+
+
+def _registry_lifecycle_candidate_for_broker_position(
+    *,
+    broker_position: Mapping[str, Any],
+    terminal_records: tuple[Any, ...],
+) -> dict[str, Any] | None:
+    candidates: list[dict[str, Any]] = []
+    for record in terminal_records:
+        state = str(getattr(getattr(record, "current_state", None), "value", getattr(record, "current_state", "")))
+        if state == "CLOSED_FLAT":
+            continue
+        for event in getattr(record, "event_chain", ()) or ():
+            if _event_type_value(getattr(event, "event_type", "")) != "ENTRY_FILL_BROKER_BACKED":
+                continue
+            if not _event_matches_broker_position(event, broker_position=broker_position):
+                continue
+            lane_id = str(getattr(event, "lane_id", None) or getattr(event, "thesis_strategy_id", None) or "").strip()
+            signed_qty = _decimal(broker_position.get("quantity")) or Decimal("0")
+            candidates.append(
+                _normalize_contract_row(
+                    {
+                        "account_id": getattr(event, "account_id", None) or broker_position.get("account_id"),
+                        "instrument_family": getattr(event, "symbol", None) or _symbol(broker_position),
+                        "symbol": getattr(event, "symbol", None) or _symbol(broker_position),
+                        "local_symbol": getattr(event, "local_symbol", None) or broker_position.get("local_symbol"),
+                        "con_id": getattr(event, "con_id", None) or broker_position.get("con_id"),
+                        "expiry": getattr(event, "expiry", None) or broker_position.get("expiry"),
+                        "contract_key": broker_position.get("contract_key"),
+                        "quantity": _decimal_display(abs(signed_qty)),
+                        "aggregate_qty": _decimal_display(signed_qty),
+                        "side": "LONG" if signed_qty > 0 else "SHORT",
+                        "strategy_id": lane_id,
+                        "lane_id": lane_id,
+                        "lifecycle_id": getattr(event, "lifecycle_id", None),
+                        "trade_id": getattr(event, "trade_id", None),
+                        "entry_timestamp": getattr(event, "generated_at", None).isoformat()
+                        if getattr(event, "generated_at", None) is not None
+                        else None,
+                        "avg_entry_price": str(getattr(event, "price", "")) if getattr(event, "price", None) is not None else None,
+                        "managed_exit_policy_id": _managed_exit_policy_from_lane(lane_id),
+                        "entry_order_ids": [str(getattr(event, "order_id", ""))] if getattr(event, "order_id", None) else [],
+                        "entry_perm_ids": [str(getattr(event, "perm_id", ""))] if getattr(event, "perm_id", None) else [],
+                        "entry_exec_ids": [str(getattr(event, "exec_id", ""))] if getattr(event, "exec_id", None) else [],
+                        "source": "TRACK_B_LIVE_TRADE_REGISTRY_ENTRY_FILL",
+                    }
+                )
+            )
+    return max(candidates, key=lambda row: str(row.get("entry_timestamp") or "")) if candidates else None
+
+
+def _event_matches_broker_position(event: Any, *, broker_position: Mapping[str, Any]) -> bool:
+    broker = _normalize_contract_row(broker_position)
+    event_row = _normalize_contract_row(
+        {
+            "symbol": getattr(event, "symbol", None),
+            "local_symbol": getattr(event, "local_symbol", None),
+            "con_id": getattr(event, "con_id", None),
+            "expiry": getattr(event, "expiry", None),
+            "account_id": getattr(event, "account_id", None),
+        }
+    )
+    if not _account_matches(event_row, broker):
+        return False
+    return _contract_identity_matches(event_row, broker)
+
+
 def _reconciliation_lifecycle_positions(reconciliation: Mapping[str, Any]) -> list[dict[str, Any]]:
     rows = _list(reconciliation.get("track_b_lifecycle_positions"))
     if rows:
@@ -1695,6 +1864,7 @@ def _merge_resolved_lifecycle_positions(
         if str(item.get("lifecycle_id") or "").strip()
     }
     for row in resolved_lifecycle_positions:
+        row = _normalize_contract_row(row)
         key = _position_key(row)
         lifecycle_id = str(row.get("lifecycle_id") or "").strip()
         if lifecycle_id and lifecycle_id in existing_lifecycle_ids:
@@ -2102,10 +2272,11 @@ def _exit_due_state(exit_due: bool) -> str:
 
 
 def _position_key(row: Mapping[str, Any]) -> str:
-    local_symbol = str(row.get("local_symbol") or "").upper()
+    identity = _mapping(row.get("contract_identity"))
+    local_symbol = str(row.get("local_symbol") or row.get("localSymbol") or identity.get("local_symbol") or "").upper()
     if local_symbol:
         return local_symbol
-    contract_key = str(row.get("contract_key") or row.get("position_key") or "").upper()
+    contract_key = str(row.get("contract_key") or row.get("position_key") or identity.get("contract_key") or "").upper()
     return contract_key
 
 
@@ -2137,11 +2308,15 @@ def _lifecycle_broker_match_score(row: Mapping[str, Any], broker: Mapping[str, A
 
 
 def _account_matches(row: Mapping[str, Any], broker: Mapping[str, Any]) -> bool:
-    expected = str(broker.get("account_id") or broker.get("account") or "").strip()
+    broker_identity = _mapping(broker.get("contract_identity"))
+    expected = str(broker.get("account_id") or broker.get("account") or broker_identity.get("account_id") or "").strip()
     if not expected:
         return False
+    row_identity = _mapping(row.get("contract_identity"))
     candidates = [
         row.get("account_id"),
+        row.get("account"),
+        row_identity.get("account_id"),
         _mapping(row.get("entry_broker_identity")).get("account_id"),
     ]
     candidates.extend(unit.get("account_id") for unit in _list(row.get("lifecycle_units")))
@@ -2149,13 +2324,32 @@ def _account_matches(row: Mapping[str, Any], broker: Mapping[str, Any]) -> bool:
 
 
 def _contract_identity_matches(row: Mapping[str, Any], broker: Mapping[str, Any]) -> bool:
-    broker_con_id = str(broker.get("con_id") or broker.get("conId") or "").strip()
-    row_con_id = str(row.get("con_id") or row.get("conId") or _mapping(row.get("entry_broker_identity")).get("con_id") or "").strip()
-    broker_local = str(broker.get("local_symbol") or broker.get("localSymbol") or "").strip().upper()
-    row_local = str(row.get("local_symbol") or row.get("localSymbol") or _mapping(row.get("entry_broker_identity")).get("local_symbol") or "").strip().upper()
+    row_identity = _mapping(row.get("contract_identity"))
+    broker_identity = _mapping(broker.get("contract_identity"))
+    broker_con_id = str(broker.get("con_id") or broker.get("conId") or broker_identity.get("con_id") or "").strip()
+    row_con_id = str(
+        row.get("con_id")
+        or row.get("conId")
+        or row_identity.get("con_id")
+        or _mapping(row.get("entry_broker_identity")).get("con_id")
+        or ""
+    ).strip()
+    broker_local = str(
+        broker.get("local_symbol") or broker.get("localSymbol") or broker_identity.get("local_symbol") or ""
+    ).strip().upper()
+    row_local = str(
+        row.get("local_symbol")
+        or row.get("localSymbol")
+        or row_identity.get("local_symbol")
+        or _mapping(row.get("entry_broker_identity")).get("local_symbol")
+        or ""
+    ).strip().upper()
+    broker_key = str(broker.get("contract_key") or broker_identity.get("contract_key") or "").strip().upper()
+    row_key = str(row.get("contract_key") or row_identity.get("contract_key") or "").strip().upper()
     con_id_matches = bool(broker_con_id and row_con_id and broker_con_id == row_con_id)
     local_matches = bool(broker_local and row_local and broker_local == row_local)
-    return con_id_matches or local_matches
+    key_matches = bool(broker_key and row_key and broker_key == row_key)
+    return con_id_matches or local_matches or key_matches
 
 
 def _negative_price_distance(row: Mapping[str, Any], broker: Mapping[str, Any]) -> Decimal:
@@ -2182,13 +2376,37 @@ def _broker_average_price(row: Mapping[str, Any]) -> Decimal | None:
 def _symbol(row: Mapping[str, Any] | None) -> str | None:
     if not row:
         return None
-    return str(row.get("symbol") or row.get("track_b_root") or row.get("instrument_family") or "").upper() or None
+    identity = _mapping(row.get("contract_identity"))
+    return (
+        str(
+            row.get("symbol")
+            or row.get("track_b_root")
+            or row.get("instrument_family")
+            or row.get("instrument")
+            or identity.get("symbol")
+            or identity.get("track_b_root")
+            or ""
+        ).upper()
+        or None
+    )
 
 
 def _contract_key_from_broker(row: Mapping[str, Any]) -> str | None:
+    identity = _mapping(row.get("contract_identity"))
+    if identity.get("resolved") is True and identity.get("contract_key"):
+        return str(identity.get("contract_key"))
+    if row.get("contract_key"):
+        return str(row.get("contract_key"))
     symbol = _symbol(row)
-    expiry = str(row.get("expiry") or "").strip()
+    expiry = str(row.get("expiry") or identity.get("expiry") or "").strip()
     return f"{symbol}-{expiry[:6]}" if symbol and expiry else None
+
+
+def _normalize_contract_row(row: Mapping[str, Any]) -> dict[str, Any]:
+    return normalize_track_b_contract_row(
+        row,
+        account_id=str(row.get("account_id") or row.get("account") or "").strip() or None,
+    )
 
 
 def _side_from_broker(row: Mapping[str, Any]) -> str | None:

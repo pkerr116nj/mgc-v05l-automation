@@ -986,10 +986,7 @@ def test_registry_backed_broker_position_repairs_stale_lifecycle_projection(tmp_
     assert payload["managed_positions"][0]["trade_id"] == "trade_mnq"
     assert payload["managed_positions"][0]["lifecycle_id"] == "bridge_fill_mnq_short"
     assert payload["managed_positions"][0]["attention_required"] is False
-    assert (
-        payload["pre_restart_exposure_resolution"]["classification"]
-        == "PROJECTION_STALE_MANAGED_EXPOSURE_RESOLVED"
-    )
+    assert payload["pre_restart_exposure_resolution"]["resolved_managed_exposure_count"] == 1
 
 
 def test_owner_resolution_overlay_repairs_missing_managed_position_projection(
@@ -1373,6 +1370,219 @@ def test_reconciliation_match_report_owner_cannot_disappear_from_managed_positio
     assert payload["managed_positions"][0]["lifecycle_id"] == lifecycle["lifecycle_id"]
 
 
+def test_validated_expanded_futures_project_from_normalized_contract_identity(tmp_path: Path) -> None:
+    contracts = (
+        ("MGC", "MGCQ6", 732156883, "20260827", "MGC-202608"),
+        ("GC", "GCQ6", 732156872, "20260827", "GC-202608"),
+        ("ES", "ESU6", 649180671, "20260918", "ES-202609"),
+        ("NQ", "NQU6", 770561204, "20260918", "NQ-202609"),
+        ("MNQ", "MNQU6", 793356225, "20260918", "MNQ-202609"),
+        ("MES", "MESU6", 793356217, "20260918", "MES-202609"),
+    )
+    broker_positions = [
+        {
+            "account_id": "DUM882026",
+            "security_type": "FUT",
+            "symbol": symbol,
+            "local_symbol": local_symbol,
+            "expiry": expiry,
+            "quantity": "1.0",
+            "average_cost": "1000",
+        }
+        for symbol, local_symbol, _con_id, expiry, _contract_key in contracts
+    ]
+    lifecycle_positions = [
+        {
+            "account_id": "DUM882026",
+            "instrument_family": symbol,
+            "local_symbol": local_symbol,
+            "quantity": "1",
+            "aggregate_qty": "1",
+            "side": "LONG",
+            "strategy_id": f"{symbol.lower()}_globex_active_participation_long",
+            "lane_id": f"{symbol.lower()}_globex_active_participation_long",
+            "lifecycle_id": f"life_{symbol.lower()}_current",
+            "trade_id": f"trade_{symbol.lower()}_current",
+            "entry_timestamp": "2026-05-22T16:20:00+00:00",
+            "managed_exit_policy_id": "GLOBEX_ACTIVE_EVIDENCE_TIMEBOX_15M_EXIT_V1",
+            "bars_since_fill": 2,
+        }
+        for symbol, local_symbol, _con_id, _expiry, _contract_key in contracts
+    ]
+    _seed_base(tmp_path, broker_positions=broker_positions, lifecycle_positions=lifecycle_positions)
+
+    payload = build_track_b_managed_position_registry(
+        config=TrackBManagedPositionRegistryConfig(repo_root=tmp_path),
+        now=NOW,
+    )
+
+    by_symbol = {row["symbol"]: row for row in payload["managed_positions"]}
+    assert set(by_symbol) == {symbol for symbol, *_rest in contracts}
+    assert payload["classification"] == OPEN_MANAGED_MATCHED
+    for symbol, local_symbol, con_id, expiry, contract_key in contracts:
+        row = by_symbol[symbol]
+        assert row["classification"] == OPEN_MANAGED_MATCHED
+        assert row["local_symbol"] == local_symbol
+        assert row["con_id"] == con_id
+        assert row["contract_key"] == contract_key
+        assert row["broker_position"]["expiry"] == expiry
+        assert row["broker_position"]["contract_identity"]["source"] == "VALIDATED_TRACK_B_FUTURES_CONTRACT_REGISTRY"
+
+
+def test_current_owner_overlay_replaces_stale_mes_short_with_current_long(tmp_path: Path) -> None:
+    broker = {
+        "account_id": "DUM882026",
+        "security_type": "FUT",
+        "symbol": "MES",
+        "local_symbol": "MESU6",
+        "expiry": "20260918",
+        "quantity": "1.0",
+        "average_cost": "38108.12",
+    }
+    stale_short = {
+        "account_id": "DUM882026",
+        "instrument_family": "MES",
+        "local_symbol": "MESU6",
+        "quantity": "1",
+        "aggregate_qty": "-1",
+        "side": "SHORT",
+        "strategy_id": "mes_globex_active_participation_short",
+        "lane_id": "mes_globex_active_participation_short",
+        "lifecycle_id": "old_mes_short",
+        "trade_id": "old_mes_short_trade",
+        "entry_timestamp": "2026-05-22T15:20:00+00:00",
+        "managed_exit_policy_id": "GLOBEX_ACTIVE_EVIDENCE_TIMEBOX_60M_EXIT_V1",
+    }
+    current_long = {
+        "account_id": "DUM882026",
+        "instrument_family": "MES",
+        "local_symbol": "MESU6",
+        "quantity": "1",
+        "aggregate_qty": "1",
+        "side": "LONG",
+        "strategy_id": "mes_globex_active_participation_long",
+        "lane_id": "mes_globex_active_participation_long",
+        "lifecycle_id": "current_mes_long",
+        "trade_id": "current_mes_long_trade",
+        "entry_timestamp": "2026-05-22T16:20:00+00:00",
+        "managed_exit_policy_id": "GLOBEX_ACTIVE_EVIDENCE_TIMEBOX_15M_EXIT_V1",
+    }
+    _seed_base(tmp_path, broker_positions=[broker], lifecycle_positions=[stale_short])
+    reconciliation_path = (
+        tmp_path
+        / "outputs"
+        / "reports"
+        / "track_b_paper_broker_reconciliation"
+        / "latest_track_b_paper_broker_reconciliation.json"
+    )
+    reconciliation = json.loads(reconciliation_path.read_text(encoding="utf-8"))
+    reconciliation["current_exposure_owner_resolution"] = {
+        "classification": "OWNED_MANAGED_EXPOSURE",
+        "broker_position_count": 1,
+        "broker_open_order_count": 0,
+        "owned_exposure_count": 1,
+        "owned_exposures": [
+            {
+                "classification": "OWNED_MANAGED_EXPOSURE",
+                "broker_position": broker,
+                "canonical_broker_position": broker,
+                "lifecycle_position": current_long,
+                "trade_id": current_long["trade_id"],
+                "lifecycle_id": current_long["lifecycle_id"],
+                "reason_codes": ["NEWEST_EXACT_BROKER_BACKED_LIFECYCLE_REPORT_SELECTED"],
+            }
+        ],
+        "resolved_lifecycle_positions": [current_long],
+        "read_only": True,
+    }
+    reconciliation_path.write_text(json.dumps(reconciliation), encoding="utf-8")
+
+    payload = build_track_b_managed_position_registry(
+        config=TrackBManagedPositionRegistryConfig(repo_root=tmp_path),
+        now=NOW,
+    )
+
+    assert len(payload["managed_positions"]) == 1
+    position = payload["managed_positions"][0]
+    assert position["lifecycle_id"] == "current_mes_long"
+    assert position["trade_id"] == "current_mes_long_trade"
+    assert position["side"] == "LONG"
+    assert position["signed_broker_qty"] == "1"
+    assert position["signed_lifecycle_qty"] == "1"
+    assert position["projection_authority_owner_confirmed"] is True
+
+
+def test_fresh_broker_snapshot_registry_fill_projects_validated_futures_when_reconciliation_is_narrow(
+    tmp_path: Path,
+) -> None:
+    contracts = (
+        ("MGC", "MGCQ6", 732156883, "20260827"),
+        ("GC", "GCQ6", 732156872, "20260827"),
+        ("ES", "ESU6", 649180671, "20260918"),
+        ("NQ", "NQU6", 770561204, "20260918"),
+        ("MNQ", "MNQU6", 793356225, "20260918"),
+        ("MES", "MESU6", 793356217, "20260918"),
+    )
+    _seed_base(tmp_path)
+    _write_json(
+        tmp_path / "outputs" / "reports" / "ibkr_read_only_verification" / "ibkr_positions_snapshot.json",
+        {
+            "account": "DUM882026",
+            "selected_account_id": "DUM882026",
+            "positions_complete": True,
+            "positions": [
+                {
+                    "account_id": "DUM882026",
+                    "security_type": "FUT",
+                    "symbol": symbol,
+                    "local_symbol": local_symbol,
+                    "expiry": expiry,
+                    "quantity": "1.0",
+                }
+                for symbol, local_symbol, _con_id, expiry in contracts
+            ],
+        },
+    )
+    _write_json(
+        tmp_path / "outputs" / "reports" / "ibkr_read_only_verification" / "ibkr_open_orders_snapshot.json",
+        {
+            "account": "DUM882026",
+            "selected_account_id": "DUM882026",
+            "open_orders_complete": True,
+            "open_orders": [],
+        },
+    )
+    for index, (symbol, local_symbol, con_id, expiry) in enumerate(contracts):
+        _write_live_entry_fill_event(
+            tmp_path,
+            symbol=symbol,
+            local_symbol=local_symbol,
+            con_id=con_id,
+            expiry=expiry,
+            lifecycle_id=f"life_{symbol.lower()}_registry",
+            trade_id=f"trade_{symbol.lower()}_registry",
+            lane_id=f"{symbol.lower()}_globex_active_participation_long",
+            generated_at=NOW + timedelta(minutes=index),
+            append=index > 0,
+        )
+
+    payload = build_track_b_managed_position_registry(
+        config=TrackBManagedPositionRegistryConfig(repo_root=tmp_path),
+        now=NOW + timedelta(minutes=10),
+    )
+
+    by_symbol = {row["symbol"]: row for row in payload["managed_positions"]}
+    assert set(by_symbol) == {symbol for symbol, *_rest in contracts}
+    assert payload["classification"] == OPEN_MANAGED_MATCHED
+    for symbol, local_symbol, con_id, _expiry in contracts:
+        row = by_symbol[symbol]
+        assert row["classification"] == OPEN_MANAGED_MATCHED
+        assert row["local_symbol"] == local_symbol
+        assert row["con_id"] == con_id
+        assert row["lifecycle_id"] == f"life_{symbol.lower()}_registry"
+        assert row["managed_exit_policy_id"] == "GLOBEX_ACTIVE_EVIDENCE_TIMEBOX_15M_EXIT_V1"
+
+
 def test_lifecycle_missing_policy_is_metadata_incomplete(tmp_path: Path) -> None:
     lifecycle = _lifecycle_position(policy="")
     _seed_base(tmp_path, broker_positions=[_broker_position()], lifecycle_positions=[lifecycle])
@@ -1673,6 +1883,49 @@ def _write_phase1_5m_bars(root: Path, *, symbol: str, bar_ends: list[str]) -> No
             "bars": [{"bar_end": value, "close": "100.0"} for value in bar_ends],
         },
     )
+
+
+def _write_live_entry_fill_event(
+    root: Path,
+    *,
+    symbol: str,
+    local_symbol: str,
+    con_id: int,
+    expiry: str,
+    lifecycle_id: str,
+    trade_id: str,
+    lane_id: str,
+    generated_at: datetime,
+    append: bool = False,
+) -> None:
+    path = root / "outputs" / "track_b_execution_core" / "trade_registry" / "live_trade_events.jsonl"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    event = TradeEvent(
+        event_id=f"{trade_id}_entry_fill",
+        event_type=TradeEventType.ENTRY_FILL_BROKER_BACKED,
+        generated_at=generated_at,
+        trade_id=trade_id,
+        lifecycle_id=lifecycle_id,
+        lane_id=lane_id,
+        thesis_strategy_id=lane_id,
+        account_id="DUM882026",
+        symbol=symbol,
+        con_id=con_id,
+        local_symbol=local_symbol,
+        expiry=expiry,
+        side="LONG",
+        action="BUY",
+        qty=Decimal("1"),
+        source_artifact_path="outputs/track_b_execution_core/test_entry.json",
+        order_id="1",
+        client_id="10110",
+        perm_id=f"perm_{symbol.lower()}",
+        exec_id=f"exec_{symbol.lower()}",
+        price=Decimal("100"),
+    )
+    mode = "a" if append and path.exists() else "w"
+    with path.open(mode, encoding="utf-8") as handle:
+        handle.write(json.dumps(event.to_dict(), sort_keys=True) + "\n")
 
 
 def _write_registry_open_managed_events(root: Path) -> None:

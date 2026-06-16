@@ -1,0 +1,82 @@
+from __future__ import annotations
+
+import pytest
+
+from mgc_v05l.execution_core.track_b_broker_position_identity import (
+    IDENTITY_READY,
+    canonicalize_broker_position_identity,
+)
+from mgc_v05l.execution_core.track_b_contract_identity import normalize_track_b_contract_identity
+
+
+@pytest.mark.parametrize(
+    ("symbol", "local_symbol", "expiry", "con_id", "contract_key"),
+    (
+        ("MGC", "MGCQ6", "20260827", 732156883, "MGC-202608"),
+        ("GC", "GCQ6", "20260827", 732156872, "GC-202608"),
+        ("NQ", "NQU6", "20260918", 770561204, "NQ-202609"),
+        ("ES", "ESU6", "20260918", 649180671, "ES-202609"),
+        ("MNQ", "MNQU6", "20260918", 793356225, "MNQ-202609"),
+        ("MES", "MESU6", "20260918", 793356217, "MES-202609"),
+    ),
+)
+def test_validated_track_b_futures_normalize_from_broker_local_symbol(
+    symbol: str,
+    local_symbol: str,
+    expiry: str,
+    con_id: int,
+    contract_key: str,
+) -> None:
+    identity = normalize_track_b_contract_identity(
+        {
+            "account_id": "DUM882026",
+            "security_type": "FUT",
+            "symbol": symbol,
+            "local_symbol": local_symbol,
+            "expiry": expiry,
+            "quantity": "1.0",
+        }
+    )
+
+    assert identity["classification"] == "TRACK_B_CONTRACT_IDENTITY_RESOLVED"
+    assert identity["symbol"] == symbol
+    assert identity["local_symbol"] == local_symbol
+    assert identity["con_id"] == con_id
+    assert identity["expiry"] == expiry
+    assert identity["contract_key"] == contract_key
+
+
+def test_normalizer_fails_closed_on_identity_contradiction() -> None:
+    identity = normalize_track_b_contract_identity(
+        {
+            "account_id": "DUM882026",
+            "security_type": "FUT",
+            "symbol": "MGC",
+            "local_symbol": "MGCQ6",
+            "con_id": 732156872,
+            "expiry": "20260827",
+            "quantity": "1.0",
+        }
+    )
+
+    assert identity["classification"] == "TRACK_B_CONTRACT_IDENTITY_CONTRADICTION"
+    assert identity["resolved"] is False
+    assert "con_id_mismatch" in identity["blockers"]
+
+
+def test_broker_position_identity_uses_shared_validated_contract_registry() -> None:
+    result = canonicalize_broker_position_identity(
+        broker_position={
+            "account_id": "DUM882026",
+            "security_type": "FUT",
+            "symbol": "GC",
+            "local_symbol": "GCQ6",
+            "expiry": "20260827",
+            "quantity": "1.0",
+        }
+    )
+
+    assert result.classification == IDENTITY_READY
+    assert result.source == "VALIDATED_TRACK_B_FUTURES_CONTRACT_REGISTRY"
+    assert result.canonical_position["con_id"] == 732156872
+    assert result.canonical_position["contract_key"] == "GC-202608"

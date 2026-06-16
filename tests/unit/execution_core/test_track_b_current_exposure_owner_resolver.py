@@ -564,6 +564,65 @@ def test_distinct_mnq_mes_current_positions_resolve_as_separate_owned_exposures(
     }
 
 
+def test_validated_futures_positions_without_broker_con_id_resolve_current_owners(tmp_path: Path) -> None:
+    contracts = (
+        ("MGC", "MGCQ6", "20260827", 732156883),
+        ("GC", "GCQ6", "20260827", 732156872),
+        ("NQ", "NQU6", "20260918", 770561204),
+        ("ES", "ESU6", "20260918", 649180671),
+        ("MNQ", "MNQU6", "20260918", 793356225),
+        ("MES", "MESU6", "20260918", 793356217),
+    )
+    records = [
+        _registry_record(
+            trade_id=f"trade_current_{symbol.lower()}",
+            lifecycle_id=f"reserved_submit_{symbol.lower()}_globex_active_participation_long",
+            generated_at=NOW,
+            exit_due=False,
+            symbol=symbol,
+            local_symbol=local_symbol,
+            con_id=con_id,
+            lane_id=f"{symbol.lower()}_globex_active_participation_long",
+            managed_exit_policy_id=None if symbol == "ES" else "GLOBEX_ACTIVE_EVIDENCE_TIMEBOX_15M_EXIT_V1",
+            side="LONG",
+            action="BUY",
+        )
+        for symbol, local_symbol, _expiry, con_id in contracts
+    ]
+    broker_positions = [
+        {
+            "account_id": "DUM882026",
+            "security_type": "FUT",
+            "symbol": symbol,
+            "local_symbol": local_symbol,
+            "expiry": expiry,
+            "quantity": "1",
+        }
+        for symbol, local_symbol, expiry, _con_id in contracts
+    ]
+
+    payload = resolve_current_exposure_ownership(
+        config=CurrentExposureOwnerResolverConfig(repo_root=tmp_path),
+        broker_positions=broker_positions,
+        registry_records=records,
+    )
+
+    assert payload["classification"] == OWNED_MANAGED_EXPOSURE
+    assert payload["owned_exposure_count"] == 6
+    assert payload["review_required_exposure_count"] == 0
+    exposures = {row["canonical_broker_position"]["symbol"]: row for row in payload["owned_exposures"]}
+    assert set(exposures) == {symbol for symbol, *_rest in contracts}
+    for symbol, local_symbol, expiry, con_id in contracts:
+        exposure = exposures[symbol]
+        assert exposure["canonical_identity_resolution"]["source"] == "VALIDATED_TRACK_B_FUTURES_CONTRACT_REGISTRY"
+        assert exposure["canonical_broker_position"]["con_id"] == con_id
+        assert exposure["canonical_broker_position"]["local_symbol"] == local_symbol
+        assert exposure["canonical_broker_position"]["expiry"] == expiry
+        assert exposure["lifecycle_position"]["local_symbol"] == local_symbol
+        assert exposure["lifecycle_position"]["con_id"] == con_id
+        assert exposure["lifecycle_position"]["managed_exit_policy_id"] == "GLOBEX_ACTIVE_EVIDENCE_TIMEBOX_15M_EXIT_V1"
+
+
 def _registry_record(
     *,
     trade_id: str,
@@ -575,6 +634,8 @@ def _registry_record(
     con_id: int = 770561201,
     lane_id: str = "mnq_globex_active_participation_short",
     managed_exit_policy_id: str | None = "GLOBEX_ACTIVE_EVIDENCE_TIMEBOX_60M_EXIT_V1",
+    side: str = "SHORT",
+    action: str = "SELL",
 ):
     events = [
         _event(
@@ -591,6 +652,8 @@ def _registry_record(
             con_id=con_id,
             lane_id=lane_id,
             managed_exit_policy_id=managed_exit_policy_id,
+            side=side,
+            action=action,
         ),
         _event(
             event_type=TradeEventType.LIFECYCLE_OPEN_MANAGED,
@@ -602,6 +665,8 @@ def _registry_record(
             con_id=con_id,
             lane_id=lane_id,
             managed_exit_policy_id=managed_exit_policy_id,
+            side=side,
+            action=action,
         ),
     ]
     if exit_due:
@@ -613,11 +678,13 @@ def _registry_record(
                 generated_at=generated_at + timedelta(minutes=60),
                 symbol=symbol,
                 local_symbol=local_symbol,
-                con_id=con_id,
-                lane_id=lane_id,
-                managed_exit_policy_id=managed_exit_policy_id,
+                    con_id=con_id,
+                    lane_id=lane_id,
+                    managed_exit_policy_id=managed_exit_policy_id,
+                    side=side,
+                    action=action,
+                )
             )
-        )
     return reduce_trade_events(events)
 
 
@@ -739,6 +806,8 @@ def _event(
     con_id: int = 770561201,
     lane_id: str = "mnq_globex_active_participation_short",
     managed_exit_policy_id: str | None = "GLOBEX_ACTIVE_EVIDENCE_TIMEBOX_60M_EXIT_V1",
+    side: str = "SHORT",
+    action: str = "SELL",
 ) -> TradeEvent:
     return TradeEvent(
         event_id=f"{trade_id}_{event_type.value}_{generated_at.timestamp()}",
@@ -753,8 +822,8 @@ def _event(
         con_id=con_id,
         local_symbol=local_symbol,
         expiry="20260618",
-        side="SHORT",
-        action="SELL",
+        side=side,
+        action=action,
         qty=Decimal("1"),
         source_artifact_path="outputs/test.json",
         order_id=order_id,

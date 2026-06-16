@@ -50,6 +50,7 @@ def _broker_truth(
     symbol: str = "MES",
     local_symbol: str = "MESU6",
     con_id: int = 793356217,
+    expiry: str = "20260918",
     quantity: str = "-1.0",
 ) -> None:
     _write_json(
@@ -65,7 +66,7 @@ def _broker_truth(
                     "symbol": symbol,
                     "local_symbol": local_symbol,
                     "con_id": con_id,
-                    "expiry": "20260918",
+                    "expiry": expiry,
                     "quantity": quantity,
                 }
             ],
@@ -428,8 +429,119 @@ def test_broker_truth_sweeper_marks_missing_policy_for_review(tmp_path: Path) ->
     assert registry["managed_positions"][0]["review_reason"] == "managed_exit_policy_unresolved"
 
 
+def test_broker_truth_sweeper_projects_validated_futures_without_broker_con_id(tmp_path: Path) -> None:
+    symbols = (
+        ("MGC", "MGCQ6", "20260827", 732156883, "MGC-202608"),
+        ("GC", "GCQ6", "20260827", 732156872, "GC-202608"),
+        ("NQ", "NQU6", "20260918", 770561204, "NQ-202609"),
+        ("ES", "ESU6", "20260918", 649180671, "ES-202609"),
+        ("MNQ", "MNQU6", "20260918", 793356225, "MNQ-202609"),
+        ("MES", "MESU6", "20260918", 793356217, "MES-202609"),
+    )
+    _write_json(
+        tmp_path / "outputs/reports/ibkr_read_only_verification/ibkr_positions_snapshot.json",
+        {
+            "account": "DUM882026",
+            "selected_account_id": "DUM882026",
+            "positions_complete": True,
+            "positions": [
+                {
+                    "account_id": "DUM882026",
+                    "security_type": "FUT",
+                    "symbol": symbol,
+                    "local_symbol": local_symbol,
+                    "con_id": 0,
+                    "expiry": expiry,
+                    "quantity": "1.0",
+                }
+                for symbol, local_symbol, expiry, _con_id, _contract_key in symbols
+            ],
+        },
+    )
+    _write_json(
+        tmp_path / "outputs/reports/ibkr_read_only_verification/ibkr_open_orders_snapshot.json",
+        {
+            "account": "DUM882026",
+            "selected_account_id": "DUM882026",
+            "open_orders_complete": True,
+            "open_orders": [],
+        },
+    )
+    registry_path = tmp_path / "outputs/track_b_execution_core/managed_positions/latest_managed_positions.json"
+    _write_json(registry_path, {"classification": "NO_MANAGED_POSITIONS", "managed_positions": []})
+
+    report = _run_broker_truth_sweeper(
+        config=TrackBManagedExitServiceConfig(repo_root=tmp_path),
+        now=NOW,
+        write=True,
+    )
+
+    registry = json.loads(registry_path.read_text(encoding="utf-8"))
+    by_symbol = {row["symbol"]: row for row in registry["managed_positions"]}
+    assert report["classification"] == "MANAGED_EXIT_BROKER_TRUTH_SWEEP_REVIEW_REQUIRED"
+    assert set(by_symbol) == {symbol for symbol, *_rest in symbols}
+    assert not any(
+        row.get("reason") == "broker_contract_identity_unparseable" for row in report["diagnostics"]
+    )
+    for symbol, local_symbol, expiry, con_id, contract_key in symbols:
+        row = by_symbol[symbol]
+        assert row["classification"] == "STRAY_POSITION_REVIEW_REQUIRED"
+        assert row["review_reason"] == "managed_exit_policy_unresolved"
+        assert row["local_symbol"] == local_symbol
+        assert row["con_id"] == con_id
+        assert row["expiry"] == expiry
+        assert row["broker_position"]["contract_key"] == contract_key
+        assert row["broker_position"]["contract_identity"]["source"] == "VALIDATED_TRACK_B_FUTURES_CONTRACT_REGISTRY"
+
+
+def test_broker_truth_sweeper_recovers_lifecycle_from_registry_fill_when_report_missing(tmp_path: Path) -> None:
+    _broker_truth(
+        tmp_path,
+        symbol="ES",
+        local_symbol="ESU6",
+        con_id=0,
+        expiry="20260918",
+        quantity="1.0",
+    )
+    _write_live_entry_fill(
+        tmp_path,
+        trade_id="trade_es_registry",
+        lifecycle_id="life_es_registry",
+        lane_id="es_globex_active_participation_long",
+        generated_at=datetime(2026, 6, 8, 14, 50, tzinfo=UTC),
+        symbol="ES",
+        local_symbol="ESU6",
+        con_id=649180671,
+        side="LONG",
+        action="BUY",
+        price="7616.0",
+    )
+    registry_path = tmp_path / "outputs/track_b_execution_core/managed_positions/latest_managed_positions.json"
+    _write_json(registry_path, {"classification": "NO_MANAGED_POSITIONS", "managed_positions": []})
+
+    report = _run_broker_truth_sweeper(
+        config=TrackBManagedExitServiceConfig(repo_root=tmp_path),
+        now=NOW,
+        write=True,
+    )
+
+    registry = json.loads(registry_path.read_text(encoding="utf-8"))
+    position = registry["managed_positions"][0]
+    assert report["classification"] == "MANAGED_EXIT_BROKER_TRUTH_SWEEP_ADOPTED"
+    assert report["submit_attempted"] is False
+    assert report["broker_state_mutated"] is False
+    assert position["classification"] == "OPEN_MANAGED_MATCHED"
+    assert position["symbol"] == "ES"
+    assert position["local_symbol"] == "ESU6"
+    assert position["con_id"] == 649180671
+    assert position["lifecycle_id"] == "life_es_registry"
+    assert position["trade_id"] == "trade_es_registry"
+    assert position["managed_exit_policy_id"] == "GLOBEX_ACTIVE_EVIDENCE_TIMEBOX_15M_EXIT_V1"
+    assert position["entry_time"] == "2026-06-08T14:50:00+00:00"
+
+
 def test_broker_truth_sweeper_flags_unparseable_contract_identity(tmp_path: Path) -> None:
-    _broker_truth(tmp_path, con_id=0, local_symbol="")
+    _broker_truth(tmp_path, con_id=0, local_symbol="", expiry="")
 
     report = _run_broker_truth_sweeper(
         config=TrackBManagedExitServiceConfig(repo_root=tmp_path),
