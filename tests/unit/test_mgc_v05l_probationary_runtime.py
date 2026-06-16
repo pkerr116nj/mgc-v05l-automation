@@ -136,6 +136,32 @@ def _build_probationary_settings(tmp_path: Path):
     )
 
 
+def test_paper_post_truth_startup_progress_marker_is_diagnostic_only(tmp_path: Path) -> None:
+    settings = SimpleNamespace(probationary_artifacts_path=tmp_path / "paper_session")
+    runtime_started_at = datetime(2026, 6, 16, 8, 4, tzinfo=timezone.utc)
+
+    path = probationary_runtime_module._write_paper_post_truth_startup_progress(
+        settings=settings,
+        runtime_instance_id="track-b-paper-stack-test",
+        runtime_started_at=runtime_started_at,
+        stage="authority_refresh",
+        state="IN_PROGRESS",
+        detail="unit test",
+    )
+
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    assert payload["schema_version"] == "track_b_paper_post_truth_startup_progress_v1"
+    assert payload["stage"] == "authority_refresh"
+    assert payload["state"] == "IN_PROGRESS"
+    assert payload["producer_pid"] > 0
+    assert payload["paper_only"] is True
+    assert payload["live_money_eligible"] is False
+    assert payload["paper_proof_invoked"] is False
+    assert payload["submit_authority"] is False
+    assert payload["broker_mutation_allowed"] is False
+    assert path.with_name("paper_post_truth_startup_progress_events.jsonl").exists()
+
+
 def test_paper_runtime_truth_artifact_schema_contains_operational_fields(tmp_path: Path) -> None:
     settings = SimpleNamespace(
         probationary_artifacts_path=tmp_path / "paper_session",

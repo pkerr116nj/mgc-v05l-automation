@@ -29,7 +29,9 @@ def test_paper_stack_start_launches_foreground_runtime_inside_screen() -> None:
     source = START_SCRIPT.read_text(encoding="utf-8")
 
     assert "screen -dmS" in source
-    assert "exec bash" in source
+    assert 'runtime_pid="\\$!"' in source
+    assert 'wait "\\${runtime_pid}"' in source
+    assert "RUNTIME_EXITED_AFTER_INITIAL_TRUTH" in source
     assert "--background" not in source
     assert "run_probationary_paper_soak.sh" in source
 
@@ -91,6 +93,36 @@ def test_paper_minimal_start_requires_durable_liveness_and_truth_advancement() -
     assert "Runtime wrote PID" in minimal_wait_block
 
 
+def test_paper_minimal_start_accepts_post_truth_progress_heartbeat_without_first_truth_ready() -> None:
+    source = START_SCRIPT.read_text(encoding="utf-8")
+    verifier_block = source[
+        source.index("\nverify_direct_paper_runtime_shape() {")
+        : source.index("\npost_truth_startup_progress_heartbeat() {")
+    ]
+    progress_block = source[
+        source.index("\npost_truth_startup_progress_heartbeat() {")
+        : source.index("\nwrite_runtime_config_paths_file() {")
+    ]
+    minimal_wait_block = source[
+        source.index("if paper_minimal_startup_enabled; then", source.index('if [[ "${carrier}" == "screen" ]]'))
+        : source.index("\ndeadline=$((SECONDS + WAIT_SECONDS))", source.index("if paper_minimal_startup_enabled; then", source.index('if [[ "${carrier}" == "screen" ]]')))
+    ]
+
+    assert "POST_TRUTH_PROGRESS_FILE" in source
+    assert "paper_post_truth_startup_progress.json" in source
+    assert "progress_fresh_for_post_truth_startup" in verifier_block
+    assert "and not progress_fresh_for_post_truth_startup" in verifier_block
+    assert 'progress_state not in {"STARTED", "IN_PROGRESS", "COMPLETED"}' in progress_block
+    assert 'progress_stage not in {"authority_refresh", "watchdog_liveness_refresh"}' in progress_block
+    assert "progress_pid != pid" in progress_block
+    assert "RUNTIME_RUNNING_POST_TRUTH_AUTHORITY_REFRESH" in minimal_wait_block
+    assert "deadline=$((SECONDS + WAIT_SECONDS))" in minimal_wait_block
+    assert "waiting for runtime truth to advance before readiness" in minimal_wait_block
+    assert "truth_advanced=\"false\"" in minimal_wait_block
+    assert '[[ "${truth_advanced}" == "true" ]]' in minimal_wait_block
+    assert "advanced runtime truth after post-truth startup progress" in minimal_wait_block
+
+
 def test_paper_minimal_shape_verifier_checks_commit_profile_lane_count_and_truth_freshness() -> None:
     source = START_SCRIPT.read_text(encoding="utf-8")
     verifier_block = source[
@@ -125,6 +157,8 @@ def test_paper_stack_startup_artifact_carries_launch_exit_status_when_available(
     assert source.index('rm -f "${PID_FILE}" "${PID_METADATA_FILE}"') < source.index(
         'if [[ "${carrier}" == "screen" ]]; then'
     )
+    assert '"child_exit_code": exit_code' in source
+    assert '"termination_reason": "runtime_exited_after_initial_truth" if first_truth else "runtime_exited_before_runtime_truth"' in source
 
 
 def test_paper_stack_start_refreshes_authority_evidence_before_carrier_launch() -> None:

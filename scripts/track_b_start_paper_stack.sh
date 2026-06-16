@@ -24,6 +24,7 @@ RUNTIME_LOG="${RUNTIME_DIR}/probationary_paper.log"
 PID_FILE="${RUNTIME_DIR}/probationary_paper.pid"
 PID_METADATA_FILE="${RUNTIME_DIR}/probationary_paper.pid.json"
 CONFIG_PATHS_FILE="${RUNTIME_DIR}/paper_runtime_config_paths.txt"
+POST_TRUTH_PROGRESS_FILE="${RUNTIME_DIR}/paper_post_truth_startup_progress.json"
 LAUNCH_STATUS_FILE="${RUNTIME_DIR}/probationary_paper_launch_status.json"
 WRAPPER_PATH="${RUNTIME_DIR}/track_b_paper_stack_runtime_wrapper.sh"
 LAUNCHCTL_LABEL_FILE="${PID_FILE}.launchctl_label"
@@ -1648,7 +1649,38 @@ except ValueError:
     raise SystemExit(1)
 if generated.tzinfo is None:
     generated = generated.replace(tzinfo=timezone.utc)
-if (datetime.now(timezone.utc) - generated).total_seconds() > 90:
+
+progress_fresh_for_post_truth_startup = False
+try:
+    progress = json.loads((runtime_dir / "paper_post_truth_startup_progress.json").read_text(encoding="utf-8"))
+except (OSError, json.JSONDecodeError):
+    progress = {}
+if progress:
+    try:
+        progress_pid = int(progress.get("producer_pid") or progress.get("pid"))
+    except (TypeError, ValueError):
+        progress_pid = None
+    progress_runtime = str(progress.get("runtime_instance_id") or "").strip()
+    truth_runtime = str(truth.get("runtime_instance_id") or "").strip()
+    progress_state = str(progress.get("state") or "").strip().upper()
+    progress_stage = str(progress.get("stage") or "").strip()
+    progress_generated_at = str(progress.get("heartbeat_at") or progress.get("generated_at") or "").strip()
+    try:
+        progress_generated = datetime.fromisoformat(progress_generated_at.replace("Z", "+00:00"))
+    except ValueError:
+        progress_generated = None
+    if progress_generated is not None:
+        if progress_generated.tzinfo is None:
+            progress_generated = progress_generated.replace(tzinfo=timezone.utc)
+        progress_fresh_for_post_truth_startup = (
+            progress_pid == pid
+            and (not progress_runtime or not truth_runtime or progress_runtime == truth_runtime)
+            and progress_state in {"STARTED", "IN_PROGRESS", "COMPLETED"}
+            and progress_stage in {"authority_refresh", "watchdog_liveness_refresh"}
+            and (datetime.now(timezone.utc) - progress_generated).total_seconds() <= 15
+        )
+
+if (datetime.now(timezone.utc) - generated).total_seconds() > 90 and not progress_fresh_for_post_truth_startup:
     raise SystemExit(1)
 if str(truth.get("freshness_state") or "").strip().upper() not in {"", "FRESH"}:
     raise SystemExit(1)
@@ -1696,6 +1728,51 @@ for line in ps.stdout.splitlines():
     ):
         runtime_pids.append(int(row_pid))
 if runtime_pids != [pid]:
+    raise SystemExit(1)
+print(generated_at)
+PY
+}
+
+post_truth_startup_progress_heartbeat() {
+  local pid="$1"
+  "${PYTHON_BIN}" - "${RUNTIME_DIR}/paper_runtime_truth.json" "${POST_TRUTH_PROGRESS_FILE}" "${pid}" <<'PY'
+import json
+import sys
+from datetime import datetime, timezone
+from pathlib import Path
+
+truth_path = Path(sys.argv[1])
+progress_path = Path(sys.argv[2])
+pid = int(sys.argv[3])
+try:
+    truth = json.loads(truth_path.read_text(encoding="utf-8"))
+    progress = json.loads(progress_path.read_text(encoding="utf-8"))
+except (OSError, json.JSONDecodeError):
+    raise SystemExit(1)
+try:
+    progress_pid = int(progress.get("producer_pid") or progress.get("pid"))
+except (TypeError, ValueError):
+    raise SystemExit(1)
+if progress_pid != pid:
+    raise SystemExit(1)
+progress_runtime = str(progress.get("runtime_instance_id") or "").strip()
+truth_runtime = str(truth.get("runtime_instance_id") or "").strip()
+if progress_runtime and truth_runtime and progress_runtime != truth_runtime:
+    raise SystemExit(1)
+progress_state = str(progress.get("state") or "").strip().upper()
+progress_stage = str(progress.get("stage") or "").strip()
+if progress_state not in {"STARTED", "IN_PROGRESS", "COMPLETED"}:
+    raise SystemExit(1)
+if progress_stage not in {"authority_refresh", "watchdog_liveness_refresh"}:
+    raise SystemExit(1)
+generated_at = str(progress.get("heartbeat_at") or progress.get("generated_at") or "").strip()
+try:
+    generated = datetime.fromisoformat(generated_at.replace("Z", "+00:00"))
+except ValueError:
+    raise SystemExit(1)
+if generated.tzinfo is None:
+    generated = generated.replace(tzinfo=timezone.utc)
+if (datetime.now(timezone.utc) - generated).total_seconds() > 15:
     raise SystemExit(1)
 print(generated_at)
 PY
@@ -1892,8 +1969,16 @@ then
   printf '%s\n' "track_b_paper_stack_wrapper_existing_runtime_detected generated_at=\$(date -u +%Y-%m-%dT%H:%M:%SZ) repo_root=${REPO_ROOT}" >> "${RUNTIME_LOG}"
   exit 0
 fi
-echo "\$\$" > "${PID_FILE}"
-"${PYTHON_BIN}" - <<'PY' "${PID_METADATA_FILE}" "\$\$" "${runtime_instance_id}" "${REPO_ROOT}" "${source_commit}"
+printf '%s\n' "track_b_paper_stack_wrapper_start generated_at=\$(date -u +%Y-%m-%dT%H:%M:%SZ) repo_root=${REPO_ROOT} config_stack=${config_stack}" >> "${RUNTIME_LOG}"
+bash "${SCRIPT_DIR}/run_probationary_paper_soak.sh" \
+  --pid-file "${PID_FILE}" \
+  --log-file "${RUNTIME_LOG}" \
+  --config-paths-file "${CONFIG_PATHS_FILE}" \
+  --launch-status-file "${LAUNCH_STATUS_FILE}" \
+  --schwab-config "${REPO_ROOT}/config/schwab.local.json" >> "${RUNTIME_LOG}" 2>&1 &
+runtime_pid="\$!"
+echo "\${runtime_pid}" > "${PID_FILE}"
+"${PYTHON_BIN}" - <<'PY' "${PID_METADATA_FILE}" "\${runtime_pid}" "${runtime_instance_id}" "${REPO_ROOT}" "${source_commit}"
 import json
 import sys
 from datetime import datetime, timezone
@@ -1922,13 +2007,71 @@ tmp = path.with_name(f".{path.name}.{sys.argv[2]}.tmp")
 tmp.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\\n", encoding="utf-8")
 tmp.replace(path)
 PY
-printf '%s\n' "track_b_paper_stack_wrapper_start generated_at=\$(date -u +%Y-%m-%dT%H:%M:%SZ) repo_root=${REPO_ROOT} config_stack=${config_stack}" >> "${RUNTIME_LOG}"
-exec bash "${SCRIPT_DIR}/run_probationary_paper_soak.sh" \
-  --pid-file "${PID_FILE}" \
-  --log-file "${RUNTIME_LOG}" \
-  --config-paths-file "${CONFIG_PATHS_FILE}" \
-  --launch-status-file "${LAUNCH_STATUS_FILE}" \
-  --schwab-config "${REPO_ROOT}/config/schwab.local.json" >> "${RUNTIME_LOG}" 2>&1
+set +e
+wait "\${runtime_pid}"
+runtime_exit_code="\$?"
+set -e
+"${PYTHON_BIN}" - <<'PY' "${LAUNCH_STATUS_FILE}" "${PID_FILE}" "${RUNTIME_LOG}" "${CONFIG_PATHS_FILE}" "${RUNTIME_DIR}/paper_runtime_truth.json" "\${runtime_pid}" "\${runtime_exit_code}" "${REPO_ROOT}" "${PYTHON_BIN}"
+import json
+import os
+import sys
+from datetime import datetime, timezone
+from pathlib import Path
+
+status_path = Path(sys.argv[1])
+pid_file = sys.argv[2]
+log_file = sys.argv[3]
+config_paths_file = sys.argv[4]
+truth_path = Path(sys.argv[5])
+runtime_pid = int(sys.argv[6])
+exit_code = int(sys.argv[7])
+repo_root = sys.argv[8]
+python_bin = sys.argv[9]
+truth = {}
+try:
+    truth = json.loads(truth_path.read_text(encoding="utf-8"))
+except (OSError, json.JSONDecodeError):
+    truth = {}
+truth_pid = truth.get("producer_pid") or truth.get("pid")
+try:
+    truth_pid = int(truth_pid)
+except (TypeError, ValueError):
+    truth_pid = None
+first_truth = truth.get("generated_at") if truth_pid == runtime_pid else None
+classification = "RUNTIME_EXITED_AFTER_INITIAL_TRUTH" if first_truth else "RUNTIME_EXITED_BEFORE_RUNTIME_TRUTH"
+payload = {
+    "generated_at": datetime.now(timezone.utc).isoformat(),
+    "classification": classification,
+    "pid": runtime_pid,
+    "pid_file": pid_file,
+    "log_file": log_file,
+    "config_paths_file": config_paths_file,
+    "runtime_truth_file": str(truth_path),
+    "repo_root": repo_root,
+    "cwd": os.getcwd(),
+    "python_bin": python_bin,
+    "detail": "foreground child exited; wrapper captured exit status",
+    "child_exit_code": exit_code,
+    "first_truth_generated_at": first_truth,
+    "second_truth_generated_at": None,
+    "sustained_convergence_confirmed": False,
+    "final_pid_alive": False,
+    "terminated_by_launch_verifier": False,
+    "termination_signal": None,
+    "termination_reason": "runtime_exited_after_initial_truth" if first_truth else "runtime_exited_before_runtime_truth",
+    "stop_source": "runtime_internal",
+    "stop_observed_at": datetime.now(timezone.utc).isoformat(),
+    "paper_only": True,
+    "live_money_eligible": False,
+    "paper_proof_invoked": False,
+    "submit_authority": False,
+}
+status_path.parent.mkdir(parents=True, exist_ok=True)
+tmp = status_path.with_name(f".{status_path.name}.{runtime_pid}.tmp")
+tmp.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+tmp.replace(status_path)
+PY
+exit "\${runtime_exit_code}"
 WRAPPER
 chmod +x "${wrapper_tmp}"
 mv "${wrapper_tmp}" "${WRAPPER_PATH}"
@@ -2034,7 +2177,7 @@ if paper_minimal_startup_enabled; then
             stable_since="${SECONDS}"
             first_truth_generated_at="${truth_generated_at}"
             last_truth_generated_at="${truth_generated_at}"
-            write_startup_artifact "RUNTIME_RUNNING_WAITING_FOR_MINIMAL_STARTUP_STABILITY" "Runtime matched PAPER_MINIMAL_STARTUP_V1 shape; waiting for ${STABLE_SECONDS}s same-PID liveness and advancing runtime truth." "${pid}" >/dev/null
+            write_startup_artifact "RUNTIME_RUNNING_WAITING_FOR_MINIMAL_STARTUP_STABILITY" "Runtime matched PAPER_MINIMAL_STARTUP_V1 shape; waiting for ${STABLE_SECONDS}s same-PID liveness and advancing runtime truth or post-truth startup progress." "${pid}" >/dev/null
             continue
           fi
           if [[ "${truth_generated_at}" != "${last_truth_generated_at}" ]]; then
@@ -2043,11 +2186,17 @@ if paper_minimal_startup_enabled; then
               truth_advanced="true"
             fi
           fi
+          progress_generated_at="$(post_truth_startup_progress_heartbeat "${pid}" 2>/dev/null || true)"
+          if [[ -n "${progress_generated_at}" && "${truth_advanced}" != "true" ]]; then
+            deadline=$((SECONDS + WAIT_SECONDS))
+            write_startup_artifact "RUNTIME_RUNNING_POST_TRUTH_AUTHORITY_REFRESH" "Runtime PID ${pid} is alive and publishing post-truth startup progress at ${progress_generated_at}; waiting for runtime truth to advance before readiness." "${pid}" >/dev/null
+            continue
+          fi
           if (( SECONDS - stable_since >= STABLE_SECONDS )) && [[ "${truth_advanced}" == "true" ]]; then
-            write_startup_artifact "READY_SUBMIT_CAPABLE" "Track B PAPER runtime started through direct PAPER_MINIMAL_STARTUP_V1 process path, matched required runtime shape, survived ${STABLE_SECONDS}s, and advanced runtime truth." "${pid}"
+            write_startup_artifact "READY_SUBMIT_CAPABLE" "Track B PAPER runtime started through direct PAPER_MINIMAL_STARTUP_V1 process path, matched required runtime shape, survived ${STABLE_SECONDS}s, and advanced runtime truth after post-truth startup progress." "${pid}"
           exit 0
           fi
-          write_startup_artifact "RUNTIME_RUNNING_WAITING_FOR_MINIMAL_STARTUP_STABILITY" "Runtime matched PAPER_MINIMAL_STARTUP_V1 shape; waiting for ${STABLE_SECONDS}s same-PID liveness and advancing runtime truth." "${pid}" >/dev/null
+          write_startup_artifact "RUNTIME_RUNNING_WAITING_FOR_MINIMAL_STARTUP_STABILITY" "Runtime matched PAPER_MINIMAL_STARTUP_V1 shape; waiting for ${STABLE_SECONDS}s same-PID liveness and advancing runtime truth or post-truth startup progress." "${pid}" >/dev/null
         else
           stable_since=0
           first_truth_generated_at=""
@@ -2057,14 +2206,14 @@ if paper_minimal_startup_enabled; then
         fi
       fi
     elif [[ -n "${pid}" ]]; then
-      write_startup_artifact "BLOCKED_RUNTIME_EXITED_DURING_STARTUP" "Runtime wrote PID ${pid}, then exited before ${STABLE_SECONDS}s same-PID liveness and advancing runtime truth were verified." "${pid}"
+      write_startup_artifact "BLOCKED_RUNTIME_EXITED_DURING_STARTUP" "Runtime wrote PID ${pid}, then exited before ${STABLE_SECONDS}s same-PID liveness and advancing runtime truth or post-truth startup progress were verified." "${pid}"
       exit 1
     elif [[ -n "${observed_runtime_pid}" ]]; then
-      write_startup_artifact "BLOCKED_RUNTIME_EXITED_DURING_STARTUP" "Runtime reached initial minimal process ownership, then exited before ${STABLE_SECONDS}s same-PID liveness and advancing runtime truth were verified." "${observed_runtime_pid}"
+      write_startup_artifact "BLOCKED_RUNTIME_EXITED_DURING_STARTUP" "Runtime reached initial minimal process ownership, then exited before ${STABLE_SECONDS}s same-PID liveness and advancing runtime truth or post-truth startup progress were verified." "${observed_runtime_pid}"
       exit 1
     fi
   done
-  write_startup_artifact "BLOCKED_START_TIMEOUT" "Runtime did not reach the required PAPER_MINIMAL_STARTUP_V1 direct-process runtime shape, same-PID liveness, and advancing runtime truth before timeout." ""
+  write_startup_artifact "BLOCKED_START_TIMEOUT" "Runtime did not reach the required PAPER_MINIMAL_STARTUP_V1 direct-process runtime shape, same-PID liveness, and advancing runtime truth or post-truth startup progress before timeout." ""
   exit 1
 fi
 

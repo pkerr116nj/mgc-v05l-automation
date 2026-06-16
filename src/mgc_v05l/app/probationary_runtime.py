@@ -10,6 +10,7 @@ import signal
 import socket
 import sys
 import tempfile
+import threading
 import time as time_module
 import csv
 from collections import Counter, deque
@@ -7667,8 +7668,38 @@ class ProbationaryPaperSupervisor:
                 runtime_instance_id=self._runtime_instance_id,
                 runtime_started_at=self._runtime_started_at,
             )
-            _refresh_track_b_authority_for_active_paper_runtime(self._settings)
-            _write_track_b_live_runtime_environment_watchdog_for_active_paper_runtime(self._settings)
+            with _PaperPostTruthProgressHeartbeat(
+                settings=self._settings,
+                runtime_instance_id=self._runtime_instance_id,
+                runtime_started_at=self._runtime_started_at,
+                stage="authority_refresh",
+            ):
+                authority_refresh_payload = _refresh_track_b_authority_for_active_paper_runtime(self._settings)
+            _write_paper_post_truth_startup_progress(
+                settings=self._settings,
+                runtime_instance_id=self._runtime_instance_id,
+                runtime_started_at=self._runtime_started_at,
+                stage="authority_refresh",
+                state="COMPLETED",
+                payload=authority_refresh_payload,
+            )
+            with _PaperPostTruthProgressHeartbeat(
+                settings=self._settings,
+                runtime_instance_id=self._runtime_instance_id,
+                runtime_started_at=self._runtime_started_at,
+                stage="watchdog_liveness_refresh",
+            ):
+                watchdog_payload = _write_track_b_live_runtime_environment_watchdog_for_active_paper_runtime(
+                    self._settings
+                )
+            _write_paper_post_truth_startup_progress(
+                settings=self._settings,
+                runtime_instance_id=self._runtime_instance_id,
+                runtime_started_at=self._runtime_started_at,
+                stage="watchdog_liveness_refresh",
+                state="COMPLETED",
+                payload=watchdog_payload,
+            )
             risk_state = _load_probationary_paper_risk_state(self._settings)
 
             for lane in self._lanes:
@@ -9971,6 +10002,101 @@ def _write_probationary_paper_runtime_truth(
     tmp.replace(path)
     _write_probationary_paper_pid_metadata(settings=settings, runtime_truth=payload)
     return path
+
+
+def _paper_post_truth_startup_progress_path(settings: StrategySettings) -> Path:
+    return Path(settings.probationary_artifacts_path) / "runtime" / "paper_post_truth_startup_progress.json"
+
+
+def _write_paper_post_truth_startup_progress(
+    *,
+    settings: StrategySettings,
+    runtime_instance_id: str,
+    runtime_started_at: datetime,
+    stage: str,
+    state: str,
+    detail: str | None = None,
+    payload: Mapping[str, Any] | None = None,
+) -> Path:
+    path = _paper_post_truth_startup_progress_path(settings)
+    now = datetime.now(timezone.utc)
+    record: dict[str, Any] = {
+        "schema_version": "track_b_paper_post_truth_startup_progress_v1",
+        "generated_at": now.isoformat(),
+        "heartbeat_at": now.isoformat(),
+        "producer_pid": os.getpid(),
+        "runtime_instance_id": runtime_instance_id,
+        "runtime_started_at": runtime_started_at.isoformat(),
+        "stage": stage,
+        "state": state,
+        "detail": detail,
+        "paper_only": True,
+        "live_money_eligible": False,
+        "paper_proof_invoked": False,
+        "submit_authority": False,
+        "broker_mutation_allowed": False,
+    }
+    if payload:
+        record["payload"] = dict(payload)
+    tmp = path.with_name(f".{path.name}.tmp")
+    tmp.parent.mkdir(parents=True, exist_ok=True)
+    tmp.write_text(json.dumps(record, indent=2, sort_keys=True, default=str) + "\n", encoding="utf-8")
+    tmp.replace(path)
+    events_path = path.with_name("paper_post_truth_startup_progress_events.jsonl")
+    with events_path.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(record, sort_keys=True, default=str) + "\n")
+    return path
+
+
+class _PaperPostTruthProgressHeartbeat:
+    def __init__(
+        self,
+        *,
+        settings: StrategySettings,
+        runtime_instance_id: str,
+        runtime_started_at: datetime,
+        stage: str,
+        interval_seconds: float = 5.0,
+    ) -> None:
+        self._settings = settings
+        self._runtime_instance_id = runtime_instance_id
+        self._runtime_started_at = runtime_started_at
+        self._stage = stage
+        self._interval_seconds = interval_seconds
+        self._stop = threading.Event()
+        self._thread: threading.Thread | None = None
+
+    def __enter__(self) -> "_PaperPostTruthProgressHeartbeat":
+        _write_paper_post_truth_startup_progress(
+            settings=self._settings,
+            runtime_instance_id=self._runtime_instance_id,
+            runtime_started_at=self._runtime_started_at,
+            stage=self._stage,
+            state="STARTED",
+        )
+
+        def _loop() -> None:
+            while not self._stop.wait(self._interval_seconds):
+                _write_paper_post_truth_startup_progress(
+                    settings=self._settings,
+                    runtime_instance_id=self._runtime_instance_id,
+                    runtime_started_at=self._runtime_started_at,
+                    stage=self._stage,
+                    state="IN_PROGRESS",
+                )
+
+        self._thread = threading.Thread(
+            target=_loop,
+            name=f"paper-post-truth-{self._stage}-heartbeat",
+            daemon=True,
+        )
+        self._thread.start()
+        return self
+
+    def __exit__(self, exc_type, exc, tb) -> None:  # type: ignore[no-untyped-def]
+        self._stop.set()
+        if self._thread is not None:
+            self._thread.join(timeout=1.0)
 
 
 def _refresh_track_b_authority_for_active_paper_runtime(settings: StrategySettings) -> dict[str, Any]:
