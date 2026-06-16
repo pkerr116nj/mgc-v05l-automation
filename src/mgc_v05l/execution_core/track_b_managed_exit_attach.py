@@ -776,29 +776,47 @@ def _entry_fill_from_selected_managed_position(selected_position: Mapping[str, A
     if not selected:
         return {}
     lifecycle_position = _mapping(selected.get("lifecycle_position"))
+    broker_position = _mapping(selected.get("broker_position"))
     units = [
         _mapping(item)
         for item in (selected.get("lifecycle_units") or lifecycle_position.get("lifecycle_units") or [])
         if isinstance(item, Mapping)
     ]
-    sources = [selected, lifecycle_position, *units]
+    sources = [selected, lifecycle_position, broker_position, *units]
+    recovered = {
+        "entry_time": "",
+        "entry_price": "",
+        "order_id": "",
+        "perm_id": "",
+        "exec_id": "",
+        "quantity": "",
+    }
     for source in sources:
         entry_time = source.get("entry_time") or source.get("entry_timestamp")
-        entry_price = source.get("entry_price") or source.get("avg_entry_price")
+        entry_price = source.get("entry_price") or source.get("avg_entry_price") or source.get("average_cost") or source.get("avg_cost")
         order_id = source.get("entry_order_id") or _first(source.get("entry_order_ids"))
         perm_id = source.get("entry_perm_id") or _first(source.get("entry_perm_ids"))
         exec_id = source.get("entry_exec_id") or _first(source.get("entry_exec_ids"))
         quantity = source.get("quantity") or source.get("aggregate_qty")
-        if entry_time and entry_price and (exec_id or perm_id or order_id):
-            return {
-                "broker_order_id": str(order_id or ""),
-                "perm_id": str(perm_id or ""),
-                "execution_id": str(exec_id or ""),
-                "exec_id": str(exec_id or ""),
-                "price": str(entry_price),
-                "quantity": str(quantity or ""),
-                "filled_at": str(entry_time),
-            }
+        recovered["entry_time"] = recovered["entry_time"] or str(entry_time or "")
+        recovered["entry_price"] = recovered["entry_price"] or str(entry_price or "")
+        recovered["order_id"] = recovered["order_id"] or str(order_id or "")
+        recovered["perm_id"] = recovered["perm_id"] or str(perm_id or "")
+        recovered["exec_id"] = recovered["exec_id"] or str(exec_id or "")
+        recovered["quantity"] = recovered["quantity"] or str(quantity or "")
+    if recovered["entry_time"] and recovered["entry_price"] and (
+        recovered["exec_id"] or recovered["perm_id"] or recovered["order_id"]
+    ):
+        return {
+            "broker_order_id": recovered["order_id"],
+            "perm_id": recovered["perm_id"],
+            "execution_id": recovered["exec_id"],
+            "exec_id": recovered["exec_id"],
+            "price": recovered["entry_price"],
+            "quantity": recovered["quantity"],
+            "filled_at": recovered["entry_time"],
+            "source": "MANAGED_POSITION_CURRENT_SCOPE_ENTRY_EVIDENCE",
+        }
     return {}
 
 

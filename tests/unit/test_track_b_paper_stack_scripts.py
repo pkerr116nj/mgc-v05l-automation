@@ -761,7 +761,7 @@ def test_paper_stack_start_preflight_refresh_still_blocks_non_flat_broker_state(
 
     codes = {row["code"] for row in result["remaining_start_blockers"]}
     assert result["classification"] == "STARTUP_PREFLIGHT_REFRESH_BLOCKED"
-    assert "broker_startup_authority_track_b_futures_positions_present" in codes
+    assert "broker_startup_authority_track_b_futures_positions_unmanaged_or_ambiguous" in codes
 
 
 def test_paper_stack_start_preflight_blocks_actual_open_order_from_fresh_broker_truth(tmp_path: Path) -> None:

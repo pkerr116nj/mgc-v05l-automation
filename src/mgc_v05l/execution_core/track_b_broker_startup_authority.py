@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from decimal import Decimal, InvalidOperation
 from typing import Any, Mapping, Sequence
 
 
 TRACK_B_FUTURES_ROOTS = frozenset({"MES", "MNQ", "MGC", "GC", "NQ", "ES"})
 FRESH_COMPLETE_CLEAN_BROKER_TRUTH = "FRESH_COMPLETE_CLEAN_BROKER_TRUTH"
+FRESH_COMPLETE_MANAGED_BROKER_TRUTH = "FRESH_COMPLETE_MANAGED_BROKER_TRUTH"
 BROKER_TRUTH_NOT_STARTUP_CLEAN = "BROKER_TRUTH_NOT_STARTUP_CLEAN"
 
 
@@ -20,6 +22,7 @@ class BrokerStartupAuthority:
     track_b_futures_positions: tuple[Mapping[str, Any], ...]
     broker_open_order_count: int
     unknown_open_order_count: int
+    known_managed_position_count: int = 0
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -30,6 +33,7 @@ class BrokerStartupAuthority:
             "track_b_futures_positions": [dict(row) for row in self.track_b_futures_positions],
             "broker_open_order_count": self.broker_open_order_count,
             "unknown_open_order_count": self.unknown_open_order_count,
+            "known_managed_position_count": self.known_managed_position_count,
         }
 
 
@@ -42,6 +46,8 @@ def classify_fresh_complete_clean_broker_truth(
     open_order_truth: Mapping[str, Any] | None = None,
     status: Mapping[str, Any] | None = None,
     safety: Mapping[str, Any] | None = None,
+    managed_positions: Mapping[str, Any] | Sequence[Mapping[str, Any]] | None = None,
+    allow_known_managed_positions: bool = False,
     expected_account_id: str | None = None,
     track_b_roots: Sequence[str] = tuple(sorted(TRACK_B_FUTURES_ROOTS)),
 ) -> BrokerStartupAuthority:
@@ -77,8 +83,19 @@ def classify_fresh_complete_clean_broker_truth(
 
     positions = _position_rows(positions_snapshot) or _position_rows(broker_truth_status)
     track_b_positions = tuple(row for row in positions if _is_track_b_future(row, roots) and _quantity(row) != 0.0)
+    known_managed_position_count = 0
     if track_b_positions:
-        blockers.append("track_b_futures_positions_present")
+        if allow_known_managed_positions:
+            managed_classification = _classify_known_managed_positions(
+                broker_positions=track_b_positions,
+                managed_positions=managed_positions,
+                expected_account_id=expected_account_id,
+            )
+            known_managed_position_count = int(managed_classification["known_count"])
+            blockers.extend(managed_classification["blockers"])
+            diagnostics.extend(managed_classification["diagnostics"])
+        else:
+            blockers.append("track_b_futures_positions_present")
 
     broker_open_order_count = _open_order_count(broker_truth_status, open_orders_snapshot, open_order_truth, reconciliation)
     if broker_open_order_count != 0:
@@ -103,7 +120,12 @@ def classify_fresh_complete_clean_broker_truth(
     if order_class and order_class not in {"NO_OPEN_ORDERS", "BROKER_OPEN_ORDER_TRUTH_CLEAN"}:
         diagnostics.append(f"open_order_truth_classification:{order_class}")
 
-    classification = BROKER_TRUTH_NOT_STARTUP_CLEAN if blockers else FRESH_COMPLETE_CLEAN_BROKER_TRUTH
+    if blockers:
+        classification = BROKER_TRUTH_NOT_STARTUP_CLEAN
+    elif track_b_positions and allow_known_managed_positions:
+        classification = FRESH_COMPLETE_MANAGED_BROKER_TRUTH
+    else:
+        classification = FRESH_COMPLETE_CLEAN_BROKER_TRUTH
     return BrokerStartupAuthority(
         classification=classification,
         broker_truth_clean=not blockers,
@@ -112,6 +134,7 @@ def classify_fresh_complete_clean_broker_truth(
         track_b_futures_positions=track_b_positions,
         broker_open_order_count=broker_open_order_count,
         unknown_open_order_count=unknown_open_order_count,
+        known_managed_position_count=known_managed_position_count,
     )
 
 
@@ -147,6 +170,152 @@ def _quantity(row: Mapping[str, Any]) -> float:
         return float(row.get("quantity") if row.get("quantity") is not None else row.get("position") or 0)
     except (TypeError, ValueError):
         return 1.0
+
+
+def _classify_known_managed_positions(
+    *,
+    broker_positions: Sequence[Mapping[str, Any]],
+    managed_positions: Mapping[str, Any] | Sequence[Mapping[str, Any]] | None,
+    expected_account_id: str | None,
+) -> dict[str, Any]:
+    blockers: list[str] = []
+    diagnostics: list[str] = []
+    managed_rows = _managed_position_rows(managed_positions)
+    if not managed_rows:
+        return {
+            "known_count": 0,
+            "blockers": ["track_b_futures_positions_unmanaged_or_ambiguous"],
+            "diagnostics": [],
+        }
+
+    known_count = 0
+    for broker_position in broker_positions:
+        matches = [
+            row
+            for row in managed_rows
+            if _managed_position_matches_broker_position(
+                managed_position=row,
+                broker_position=broker_position,
+                expected_account_id=expected_account_id,
+            )
+        ]
+        if len(matches) == 1:
+            known_count += 1
+            continue
+        if len(matches) > 1:
+            blockers.append("track_b_futures_position_managed_identity_ambiguous")
+        else:
+            blockers.append("track_b_futures_positions_unmanaged_or_ambiguous")
+    if known_count:
+        diagnostics.append(f"track_b_futures_positions_known_managed:{known_count}")
+    return {
+        "known_count": known_count,
+        "blockers": blockers,
+        "diagnostics": diagnostics,
+    }
+
+
+def _managed_position_rows(payload: Mapping[str, Any] | Sequence[Mapping[str, Any]] | None) -> tuple[Mapping[str, Any], ...]:
+    if isinstance(payload, Mapping):
+        rows = payload.get("managed_positions") or payload.get("positions") or ()
+    elif isinstance(payload, (list, tuple)):
+        rows = payload
+    else:
+        rows = ()
+    return tuple(row for row in rows if isinstance(row, Mapping))
+
+
+def _managed_position_matches_broker_position(
+    *,
+    managed_position: Mapping[str, Any],
+    broker_position: Mapping[str, Any],
+    expected_account_id: str | None,
+) -> bool:
+    broker_account = _text(broker_position.get("account_id") or broker_position.get("account"))
+    managed_broker = _mapping(managed_position.get("broker_position"))
+    lifecycle = _mapping(managed_position.get("lifecycle_position"))
+    managed_account = _text(
+        managed_position.get("account_id")
+        or managed_broker.get("account_id")
+        or lifecycle.get("account_id")
+        or managed_position.get("account")
+        or managed_broker.get("account")
+        or lifecycle.get("account")
+    )
+    if expected_account_id and broker_account != expected_account_id:
+        return False
+    if broker_account and managed_account and broker_account != managed_account:
+        return False
+
+    broker_con_id = _text(broker_position.get("con_id") or broker_position.get("conId"))
+    managed_con_id = _text(managed_position.get("con_id") or managed_broker.get("con_id") or lifecycle.get("con_id"))
+    broker_local_symbol = _text(broker_position.get("local_symbol") or broker_position.get("localSymbol"))
+    managed_local_symbol = _text(
+        managed_position.get("local_symbol")
+        or managed_position.get("localSymbol")
+        or managed_broker.get("local_symbol")
+        or managed_broker.get("localSymbol")
+        or lifecycle.get("local_symbol")
+        or lifecycle.get("localSymbol")
+    )
+    if broker_con_id and managed_con_id:
+        identity_matches = broker_con_id == managed_con_id
+    else:
+        identity_matches = bool(broker_local_symbol and managed_local_symbol and broker_local_symbol == managed_local_symbol)
+    if not identity_matches:
+        return False
+
+    if not _managed_position_is_current_open(managed_position):
+        return False
+    if managed_position.get("projection_authority_owner_confirmed") is not True:
+        return False
+    if not _text(managed_position.get("lifecycle_id") or lifecycle.get("lifecycle_id")):
+        return False
+    if not _text(managed_position.get("trade_id") or lifecycle.get("trade_id")):
+        return False
+    if not _text(managed_position.get("managed_exit_policy_id") or lifecycle.get("managed_exit_policy_id")):
+        return False
+
+    return _signed_quantity(managed_position) == _decimal_quantity(broker_position)
+
+
+def _managed_position_is_current_open(row: Mapping[str, Any]) -> bool:
+    classification = _text(row.get("classification"))
+    return classification in {"OPEN_MANAGED", "OPEN_MANAGED_MATCHED", "OPEN_MANAGED_EXIT_DUE"} or row.get("exit_due") is True
+
+
+def _signed_quantity(row: Mapping[str, Any]) -> Decimal:
+    for key in ("signed_broker_qty", "signed_lifecycle_qty", "signed_quantity"):
+        if row.get(key) not in {None, ""}:
+            return _decimal(row.get(key))
+    broker_position = _mapping(row.get("broker_position"))
+    lifecycle = _mapping(row.get("lifecycle_position"))
+    for payload in (broker_position, lifecycle, row):
+        qty = _decimal(payload.get("quantity") if payload.get("quantity") is not None else payload.get("position"))
+        if qty == 0:
+            continue
+        side = _text(payload.get("side")).upper()
+        if side == "SHORT":
+            return -abs(qty)
+        if side == "LONG":
+            return abs(qty)
+        return qty
+    return Decimal("0")
+
+
+def _decimal_quantity(row: Mapping[str, Any]) -> Decimal:
+    return _decimal(row.get("quantity") if row.get("quantity") is not None else row.get("position"))
+
+
+def _decimal(value: Any) -> Decimal:
+    try:
+        return Decimal(str(value))
+    except (InvalidOperation, ValueError):
+        return Decimal("0")
+
+
+def _text(value: Any) -> str:
+    return str(value or "").strip().upper()
 
 
 def _open_order_count(*payloads: Mapping[str, Any]) -> int:

@@ -2093,6 +2093,78 @@ def test_selected_current_scope_position_recovers_entry_fill_for_review_lifecycl
     assert report["entry_timestamp"] == "2026-06-15T16:26:41.211227+00:00"
 
 
+def test_selected_current_scope_position_recovers_entry_price_from_broker_average_cost(tmp_path: Path) -> None:
+    config = TrackBManagedExitAttachConfig(
+        repo_root=tmp_path,
+        account_id="DUM882026",
+        strategy_id="es_globex_active_participation_long",
+        lane_id="es_globex_active_participation_long",
+        instrument_family="ES",
+        contract_key="ES-202609",
+        local_symbol="ESU6",
+        con_id=649180671,
+        quantity=1,
+        side="LONG",
+        lifecycle_id="life-es",
+    )
+    selected_position = {
+        "classification": "OPEN_MANAGED_EXIT_DUE",
+        "exit_due": True,
+        "projection_authority_owner_confirmed": True,
+        "account_id": "DUM882026",
+        "strategy_id": "es_globex_active_participation_long",
+        "local_symbol": "ESU6",
+        "con_id": 649180671,
+        "lifecycle_id": "life-es",
+        "trade_id": "trade-es",
+        "managed_exit_policy_id": "GLOBEX_ACTIVE_EVIDENCE_TIMEBOX_15M_EXIT_V1",
+        "broker_position": {
+            "account_id": "DUM882026",
+            "local_symbol": "ESU6",
+            "con_id": 649180671,
+            "quantity": "1.0",
+            "average_cost": "380802.25",
+        },
+        "lifecycle_position": {
+            "lifecycle_id": "life-es",
+            "trade_id": "trade-es",
+            "account_id": "DUM882026",
+            "strategy_id": "es_globex_active_participation_long",
+            "local_symbol": "ESU6",
+            "con_id": 649180671,
+            "quantity": "1",
+            "managed_exit_policy_id": "GLOBEX_ACTIVE_EVIDENCE_TIMEBOX_15M_EXIT_V1",
+            "entry_order_ids": ["1"],
+            "entry_perm_ids": ["1211135404"],
+            "entry_exec_ids": ["0000e1a7.6a44d505.01.01"],
+            "entry_timestamp": "2026-06-15T23:48:19.319190+00:00",
+        },
+    }
+
+    report = attach_module._with_registry_trade_id_for_managed_exit(  # noqa: SLF001
+        config=config,
+        lifecycle_report={
+            "lifecycle_id": "life-es",
+            "strategy_id": "es_globex_active_participation_long",
+            "account_id": "DUM882026",
+            "contract_key": "ES-202609",
+            "local_symbol": "ESU6",
+            "con_id": 649180671,
+            "entry_intent": {"lifecycle_id": "life-es"},
+            "managed_exit_policy_id": "GLOBEX_ACTIVE_EVIDENCE_TIMEBOX_15M_EXIT_V1",
+            "paper_lifecycle_classification": "TRACK_B_STRATEGY_PAPER_REVIEW_REQUIRED",
+            "broker_state_mutated": False,
+            "primary_blocker": "Existing OPEN_MANAGED lifecycle has no broker-confirmed entry fill.",
+        },
+        selected_position=selected_position,
+        managed_exit_policy_id="GLOBEX_ACTIVE_EVIDENCE_TIMEBOX_15M_EXIT_V1",
+    )
+
+    assert report["entry_fill"]["execution_id"] == "0000e1a7.6a44d505.01.01"
+    assert report["entry_fill"]["price"] == "380802.25"
+    assert report["entry_fill"]["source"] == "MANAGED_POSITION_CURRENT_SCOPE_ENTRY_EVIDENCE"
+
+
 def _write_reconciliation(
     repo_root: Path,
     *,

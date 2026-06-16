@@ -201,6 +201,37 @@ def _seed_fresh_ibkr_read_only_truth(
     )
 
 
+def _seed_managed_position(
+    tmp_path: Path,
+    config: TrackBPaperMinimalStartupConfig,
+    *,
+    symbol: str,
+    local_symbol: str,
+    con_id: int,
+    signed_qty: str,
+) -> None:
+    _write_json(
+        tmp_path / config.managed_position_registry_path,
+        {
+            "classification": "MANAGED_POSITION_REGISTRY_READY",
+            "managed_positions": [
+                {
+                    "account_id": "DUM882026",
+                    "symbol": symbol,
+                    "local_symbol": local_symbol,
+                    "con_id": con_id,
+                    "classification": "OPEN_MANAGED_EXIT_DUE",
+                    "projection_authority_owner_confirmed": True,
+                    "signed_broker_qty": signed_qty,
+                    "lifecycle_id": f"lc-{symbol.lower()}",
+                    "trade_id": f"trade-{symbol.lower()}",
+                    "managed_exit_policy_id": "GLOBEX_ACTIVE_EVIDENCE_TIMEBOX_15M_EXIT_V1",
+                }
+            ],
+        },
+    )
+
+
 def _classification(tmp_path: Path) -> dict:
     config = TrackBPaperMinimalStartupConfig(repo_root=tmp_path)
     return build_track_b_paper_minimal_startup(config=config, now=NOW)
@@ -349,6 +380,39 @@ def test_fresh_ibkr_nonflat_truth_blocks_even_when_lease_count_is_zero(tmp_path:
     assert result["allowed"] is False
     assert result["broker_position_count"] == 1
     assert "broker_positions_present" in _codes(result)
+
+
+def test_fresh_ibkr_known_managed_position_allows_supervised_startup(tmp_path: Path) -> None:
+    config = _seed_minimal_ready(tmp_path)
+    _seed_fresh_ibkr_read_only_truth(
+        tmp_path,
+        config,
+        extra_positions=[
+            {
+                "account_id": "DUM882026",
+                "symbol": "MGC",
+                "local_symbol": "MGCQ6",
+                "con_id": 456,
+                "security_type": "FUT",
+                "quantity": "-1.0",
+            }
+        ],
+    )
+    _seed_managed_position(
+        tmp_path,
+        config,
+        symbol="MGC",
+        local_symbol="MGCQ6",
+        con_id=456,
+        signed_qty="-1",
+    )
+
+    result = _classification(tmp_path)
+
+    assert result["allowed"] is True
+    assert result["broker_position_count"] == 1
+    assert "broker_positions_present" not in _codes(result)
+    assert "broker_positions_known_managed_startup_diagnostic" in _warning_codes(result)
 
 
 def test_fresh_ibkr_open_order_truth_blocks_even_when_lease_count_is_zero(tmp_path: Path) -> None:

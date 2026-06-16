@@ -2,8 +2,10 @@
 
 This planner is a backstop for broker-backed managed positions that are already
 exit-due but have no working managed close order. It never submits, cancels, or
-flattens; it only reports exact scoped close candidates that are already allowed
-by Guardian/Safe-State authority.
+flattens; it only reports exact scoped close candidates. For PAPER exact
+risk-reducing closes, stale Guardian/Safe-State/reconciliation diagnostics are
+diagnostic only when current broker/order truth proves the close is scoped and
+exposure-reducing.
 """
 
 from __future__ import annotations
@@ -396,14 +398,10 @@ def _risk_reducing_close_hard_apply_blockers(
         "RECONCILIATION_UNKNOWN_OPEN_ORDERS_PRESENT",
         "BROKER_OPEN_ORDER_CONFLICT",
         "MANAGED_ORDER_STATE_NOT_CLOSE_REQUIRED",
-        "GUARDIAN_EXACT_CLOSE_CANDIDATE_MISSING",
-        "GUARDIAN_CLOSE_AUTHORITY_NOT_ALLOWED",
-        "SAFE_STATE_CLOSE_NOT_ALLOWED",
         "LIVE_MONEY_ELIGIBLE_TRUE",
         "PAPER_PROOF_INVOKED_TRUE",
         "BROAD_FLATTEN_AVAILABLE_UNSAFE",
         "GLOBAL_FLATTEN_AVAILABLE_UNSAFE",
-        "MANAGED_POSITION_APPLY_AUTHORITY_DEGRADED",
         "BROKER_SESSION_AUTHORITY_MISSING",
         "BROKER_SESSION_CLOSE_AUTHORITY_BLOCKED_POSITION_TRUTH_ONLY",
         "BROKER_SESSION_CLOSE_AUTHORITY_BLOCKED_NOT_SUBMIT_CAPABLE",

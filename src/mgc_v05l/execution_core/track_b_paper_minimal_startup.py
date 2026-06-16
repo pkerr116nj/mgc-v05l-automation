@@ -15,7 +15,10 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
-from mgc_v05l.execution_core.track_b_broker_startup_authority import TRACK_B_FUTURES_ROOTS
+from mgc_v05l.execution_core.track_b_broker_startup_authority import (
+    TRACK_B_FUTURES_ROOTS,
+    classify_fresh_complete_clean_broker_truth,
+)
 
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
@@ -77,6 +80,9 @@ DEFAULT_IBKR_OPEN_ORDERS_SNAPSHOT_PATH = (
 DEFAULT_IBKR_BROKER_TRUTH_REFRESH_STATUS_PATH = (
     Path("outputs") / "reports" / "ibkr_read_only_verification" / "ibkr_broker_truth_refresh_status.json"
 )
+DEFAULT_MANAGED_POSITION_REGISTRY_PATH = (
+    Path("outputs") / "track_b_execution_core" / "managed_positions" / "latest_managed_positions.json"
+)
 
 
 @dataclass(frozen=True)
@@ -97,6 +103,7 @@ class TrackBPaperMinimalStartupConfig:
     ibkr_positions_snapshot_path: Path = DEFAULT_IBKR_POSITIONS_SNAPSHOT_PATH
     ibkr_open_orders_snapshot_path: Path = DEFAULT_IBKR_OPEN_ORDERS_SNAPSHOT_PATH
     ibkr_broker_truth_refresh_status_path: Path = DEFAULT_IBKR_BROKER_TRUTH_REFRESH_STATUS_PATH
+    managed_position_registry_path: Path = DEFAULT_MANAGED_POSITION_REGISTRY_PATH
 
     def resolve(self, path: Path) -> Path:
         return path if path.is_absolute() else self.repo_root / path
@@ -119,6 +126,7 @@ def build_track_b_paper_minimal_startup(
     ibkr_positions_snapshot = _read_json(config.resolve(config.ibkr_positions_snapshot_path))
     ibkr_open_orders_snapshot = _read_json(config.resolve(config.ibkr_open_orders_snapshot_path))
     ibkr_broker_truth_refresh_status = _read_json(config.resolve(config.ibkr_broker_truth_refresh_status_path))
+    managed_positions = _read_json(config.resolve(config.managed_position_registry_path))
 
     blockers: list[dict[str, Any]] = []
     warnings: list[dict[str, Any]] = []
@@ -140,6 +148,7 @@ def build_track_b_paper_minimal_startup(
         ibkr_positions_snapshot=ibkr_positions_snapshot,
         ibkr_open_orders_snapshot=ibkr_open_orders_snapshot,
         ibkr_broker_truth_refresh_status=ibkr_broker_truth_refresh_status,
+        managed_positions=managed_positions,
         now=actual_now,
     )
     blockers.extend(list(broker_truth_authority.get("blockers") or []))
@@ -248,6 +257,7 @@ def build_track_b_paper_minimal_startup(
             "ibkr_positions_snapshot": str(config.resolve(config.ibkr_positions_snapshot_path)),
             "ibkr_open_orders_snapshot": str(config.resolve(config.ibkr_open_orders_snapshot_path)),
             "ibkr_broker_truth_refresh_status": str(config.resolve(config.ibkr_broker_truth_refresh_status_path)),
+            "managed_position_registry": str(config.resolve(config.managed_position_registry_path)),
         },
 }
 
@@ -264,6 +274,7 @@ def classify_track_b_paper_broker_truth_authority(
     ibkr_positions_snapshot: Mapping[str, Any],
     ibkr_open_orders_snapshot: Mapping[str, Any],
     ibkr_broker_truth_refresh_status: Mapping[str, Any],
+    managed_positions: Mapping[str, Any],
     now: datetime,
 ) -> dict[str, Any]:
     """Classify PAPER startup/new-entry authority from broker truth first."""
@@ -364,7 +375,35 @@ def classify_track_b_paper_broker_truth_authority(
         broker_open_order_count = read_only_open_order_count
         unknown_open_orders = read_only_unknown_open_orders
     if broker_positions_available and broker_position_count != 0:
-        block("broker_positions_present", f"Broker position count is {broker_position_count}; flat start is required.", source="broker_truth")
+        startup_authority = classify_fresh_complete_clean_broker_truth(
+            broker_truth_status={
+                **dict(ibkr_broker_truth_refresh_status),
+                "fresh": fresh_read_only_truth.get("available") is True,
+                "positions_complete": fresh_read_only_truth.get("available") is True,
+                "open_orders_complete": fresh_read_only_truth.get("available") is True,
+                "open_order_count": broker_open_order_count,
+                "unknown_open_order_count": unknown_open_orders,
+                "live_money_eligible": _any_true(lease, bsa, reconciliation, config_in_force, runtime_truth, key="live_money_eligible"),
+                "paper_proof_invoked": _any_true(lease, bsa, reconciliation, open_order_truth, runtime_truth, key="paper_proof_invoked"),
+            },
+            positions_snapshot=ibkr_positions_snapshot,
+            open_orders_snapshot=ibkr_open_orders_snapshot,
+            reconciliation=reconciliation,
+            open_order_truth=open_order_truth,
+            safety={"live_money_eligible": False, "paper_proof_invoked": False},
+            managed_positions=managed_positions,
+            allow_known_managed_positions=True,
+            expected_account_id=config.account_id,
+        )
+        if startup_authority.broker_truth_clean is True:
+            warn(
+                "broker_positions_known_managed_startup_diagnostic",
+                f"Broker has {broker_position_count} Track B PAPER position(s), all known/current managed exposure.",
+                source="broker_truth",
+            )
+        else:
+            detail = ", ".join(startup_authority.blockers) or f"Broker position count is {broker_position_count}."
+            block("broker_positions_present", detail, source="broker_truth")
 
     if unknown_open_orders != 0:
         block("unknown_open_orders_present", f"Unknown open order count is {unknown_open_orders}.", source="broker_truth")

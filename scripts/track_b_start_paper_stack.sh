@@ -957,6 +957,8 @@ broker_startup_authority = classify_fresh_complete_clean_broker_truth(
     open_order_truth=open_order_truth,
     status=status,
     safety=as_mapping(status.get("safety")),
+    managed_positions=managed_positions or managed_positions_artifact,
+    allow_known_managed_positions=True,
     expected_account_id="DUM882026",
 ).to_dict()
 
@@ -1274,7 +1276,9 @@ def exact_owned_managed_exposure_restore_evidence():
         evidence_blockers.append("broker_lifecycle_not_clean")
     if broker_position_count <= 0 or lifecycle_position_count <= 0:
         evidence_blockers.append("owned_restore_requires_current_exposure")
-    if broker_position_count != lifecycle_position_count:
+    if broker_startup_authority.get("broker_truth_clean") is True and broker_startup_authority.get("known_managed_position_count", 0) > 0:
+        owned_exposure_count = int_value(broker_startup_authority.get("known_managed_position_count"))
+    elif broker_position_count != lifecycle_position_count:
         evidence_blockers.append("broker_lifecycle_exposure_count_mismatch")
     if broker_order_count != 0 or lifecycle_order_count != 0 or unknown_broker_order_count != 0:
         evidence_blockers.append("owned_restore_requires_zero_open_orders")
@@ -1285,9 +1289,14 @@ def exact_owned_managed_exposure_restore_evidence():
     if owner_resolution.get("classification") != "OWNED_MANAGED_EXPOSURE":
         evidence_blockers.append("owner_resolution_not_owned_managed_exposure")
     owned_exposure_count = int_value(owner_resolution.get("owned_exposure_count"))
+    if broker_startup_authority.get("broker_truth_clean") is True and int_value(broker_startup_authority.get("known_managed_position_count")) > 0:
+        owned_exposure_count = int_value(broker_startup_authority.get("known_managed_position_count"))
     if owned_exposure_count <= 0:
         evidence_blockers.append("owned_exposure_count_missing")
-    if owned_exposure_count != broker_position_count or owned_exposure_count != lifecycle_position_count:
+    if (
+        broker_startup_authority.get("broker_truth_clean") is not True
+        and (owned_exposure_count != broker_position_count or owned_exposure_count != lifecycle_position_count)
+    ):
         evidence_blockers.append("owned_exposure_count_not_current_scope_count")
     if list_rows(owner_resolution.get("ambiguous_exposures")):
         evidence_blockers.append("ambiguous_owner_exposure_present")
@@ -1353,7 +1362,7 @@ def exact_owned_managed_exposure_restore_evidence():
         if identity_key(state) not in active_identity_keys:
             evidence_blockers.append("registry_identity_differs_from_managed_position")
 
-    if safe_state.get("classification") != "SAFE_STATE_NORMAL":
+    if safe_state.get("classification") != "SAFE_STATE_NORMAL" and broker_startup_authority.get("broker_truth_clean") is not True:
         evidence_blockers.append("safe_state_not_normal")
     close_authority = as_mapping(safe_state.get("close_authority"))
     if close_authority.get("broad_flatten_allowed") is True or close_authority.get("global_flatten_allowed") is True:
@@ -1361,7 +1370,7 @@ def exact_owned_managed_exposure_restore_evidence():
     if safe_state.get("live_money_eligible") is True or safe_state.get("paper_proof_invoked") is True:
         evidence_blockers.append("safe_state_live_money_or_paper_proof")
 
-    if guardian.get("classification") != "BROKER_POSITION_GUARDIAN_READY":
+    if guardian.get("classification") != "BROKER_POSITION_GUARDIAN_READY" and broker_startup_authority.get("broker_truth_clean") is not True:
         evidence_blockers.append("guardian_not_ready")
     guardian_close = as_mapping(guardian.get("managed_close_authority"))
     if guardian_close.get("broad_flatten_allowed") is True or guardian_close.get("global_flatten_allowed") is True:

@@ -159,6 +159,29 @@ def test_missing_registry_lifecycle_identity_is_diagnostic_for_exact_broker_clos
     assert "REGISTRY_OPEN_MANAGED_RECORD_MISSING" in payload["eligible_positions"][0]["legacy_apply_blockers_diagnostic"]
 
 
+def test_stale_guardian_and_safe_state_are_diagnostic_for_exact_paper_close() -> None:
+    inputs = _inputs()
+    inputs["managed_positions"]["managed_positions"][0]["apply_authority_degraded"] = True
+    inputs["guardian"]["classification"] = "BROKER_POSITION_GUARDIAN_HARD_HOLD"
+    inputs["guardian"]["managed_close_authority"] = {"allowed": False, "candidates": []}
+    inputs["safe_state"]["classification"] = "SAFE_STATE_HARD_HOLD"
+    inputs["safe_state"]["close_authority"] = {"allowed": False, "guardian_close_candidates": []}
+    inputs["reconciliation"]["classification"] = "TRACK_B_PAPER_BROKER_RECONCILIATION_BLOCKED"
+    inputs["reconciliation"]["broker_reconciled"] = False
+
+    payload = _build(inputs)
+
+    assert payload["classification"] == EXIT_DUE_CLOSE_READY
+    assert payload["eligible_count"] == 1
+    assert payload["eligible_positions"][0]["apply_blockers"] == []
+    diagnostics = payload["eligible_positions"][0]["legacy_apply_blockers_diagnostic"]
+    assert "GUARDIAN_EXACT_CLOSE_CANDIDATE_MISSING" in diagnostics
+    assert "GUARDIAN_CLOSE_AUTHORITY_NOT_ALLOWED" in diagnostics
+    assert "SAFE_STATE_CLOSE_NOT_ALLOWED" in diagnostics
+    assert "BROKER_LIFECYCLE_RECONCILIATION_NOT_CLEAN" in diagnostics
+    assert "MANAGED_POSITION_APPLY_AUTHORITY_DEGRADED" in diagnostics
+
+
 def test_incomplete_registry_review_row_superseded_by_current_scope_lifecycle_for_close() -> None:
     inputs = _inputs(runtime_down=False)
     inputs["reconciliation"]["broker_reconciled"] = True
