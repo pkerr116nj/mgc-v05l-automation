@@ -26,6 +26,7 @@ PID_METADATA_FILE="${RUNTIME_DIR}/probationary_paper.pid.json"
 CONFIG_PATHS_FILE="${RUNTIME_DIR}/paper_runtime_config_paths.txt"
 POST_TRUTH_PROGRESS_FILE="${RUNTIME_DIR}/paper_post_truth_startup_progress.json"
 LAUNCH_STATUS_FILE="${RUNTIME_DIR}/probationary_paper_launch_status.json"
+DETACHED_CHILD_STATUS_FILE="${RUNTIME_DIR}/probationary_paper_detached_child_status.json"
 WRAPPER_PATH="${RUNTIME_DIR}/track_b_paper_stack_runtime_wrapper.sh"
 LAUNCHCTL_LABEL_FILE="${PID_FILE}.launchctl_label"
 LAUNCHCTL_STDOUT_FILE="${PID_FILE}.launchctl_submit.stdout"
@@ -531,6 +532,7 @@ write_startup_artifact() {
   MGC_STARTUP_PREFLIGHT_DEPENDENCY_REFRESH_FAILURES_JSON="${STARTUP_PREFLIGHT_DEPENDENCY_REFRESH_FAILURES_JSON}" \
   MGC_TRACK_B_PAPER_STACK_STARTUP_MODE="${STARTUP_MODE}" \
   MGC_TRACK_B_PAPER_STACK_OWNED_MANAGED_EXPOSURE_RESTORE_JSON="${STARTUP_OWNED_MANAGED_EXPOSURE_RESTORE_JSON}" \
+  MGC_TRACK_B_DETACHED_CHILD_STATUS_FILE="${DETACHED_CHILD_STATUS_FILE}" \
   "${PYTHON_BIN}" - "$STARTUP_ARTIFACT" "$classification" "$detail" "$pid" "$REPO_ROOT" "$CONFIG_PATHS_FILE" "$STACK_PROFILE" "$LAUNCH_STATUS_FILE" <<'PY'
 import json
 import os
@@ -549,12 +551,26 @@ try:
 except (OSError, json.JSONDecodeError):
     launch_status = {}
 
+def _read_json(path):
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
 def env_json_list(name):
     try:
         value = json.loads(os.environ.get(name, "[]"))
     except json.JSONDecodeError:
         return []
     return value if isinstance(value, list) else []
+
+detached_child_status = (
+    _read_json(Path(os.environ.get("MGC_TRACK_B_DETACHED_CHILD_STATUS_FILE", "")))
+    if os.environ.get("MGC_TRACK_B_DETACHED_CHILD_STATUS_FILE")
+    else {}
+)
+exit_source = detached_child_status or launch_status
 
 payload = {
     "schema_version": "track_b_paper_stack_startup_v1",
@@ -571,12 +587,19 @@ payload = {
     "broker_mutation": False,
     "dashboard_authority": False,
     "runtime_launch_status": launch_status or None,
+    "runtime_detached_child_status": detached_child_status or None,
     "runtime_exit_status": {
-        "classification": launch_status.get("classification"),
-        "child_exit_code": launch_status.get("child_exit_code"),
-        "final_pid_alive": launch_status.get("final_pid_alive"),
-        "termination_reason": launch_status.get("termination_reason"),
-    } if launch_status else None,
+        "classification": exit_source.get("classification"),
+        "child_exit_code": exit_source.get("child_exit_code"),
+        "child_final_status": exit_source.get("child_final_status"),
+        "final_pid_alive": (
+            exit_source.get("final_pid_alive")
+            if "final_pid_alive" in exit_source
+            else exit_source.get("process_alive")
+        ),
+        "last_runtime_cycle_marker": exit_source.get("last_runtime_cycle_marker"),
+        "termination_reason": exit_source.get("termination_reason"),
+    } if exit_source else None,
     "startup_mode": os.environ.get("MGC_TRACK_B_PAPER_STACK_STARTUP_MODE") or "STANDARD_START",
     "owned_managed_exposure_maintenance_restore": json.loads(
         os.environ.get("MGC_TRACK_B_PAPER_STACK_OWNED_MANAGED_EXPOSURE_RESTORE_JSON") or "{}"
@@ -1778,6 +1801,97 @@ print(generated_at)
 PY
 }
 
+update_detached_child_monitor() {
+  local pid="$1"
+  "${PYTHON_BIN}" -m mgc_v05l.execution_core.track_b_detached_runtime_monitor \
+    --event heartbeat \
+    --status-path "${DETACHED_CHILD_STATUS_FILE}" \
+    --pid "${pid}" \
+    --repo-root "${REPO_ROOT}" \
+    --log-file "${RUNTIME_LOG}" \
+    --pid-file "${PID_FILE}" \
+    --config-paths-file "${CONFIG_PATHS_FILE}" \
+    --runtime-truth-file "${RUNTIME_DIR}/paper_runtime_truth.json" \
+    --post-truth-progress-file "${POST_TRUTH_PROGRESS_FILE}" \
+    --runtime-instance-id "${runtime_instance_id}" \
+    --source-commit "${source_commit}" \
+    --python-bin "${PYTHON_BIN}"
+}
+
+detached_child_ready_authority() {
+  local pid="$1"
+  "${PYTHON_BIN}" - "${DETACHED_CHILD_STATUS_FILE}" "${pid}" <<'PY'
+from datetime import datetime
+import json
+import sys
+from pathlib import Path
+
+def parse_ts(value):
+    if not value:
+        return None
+    try:
+        return datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+
+path = Path(sys.argv[1])
+expected_pid = int(sys.argv[2])
+try:
+    payload = json.loads(path.read_text(encoding="utf-8"))
+except (OSError, json.JSONDecodeError):
+    print("false")
+    raise SystemExit(0)
+if int(payload.get("child_pid") or payload.get("pid") or 0) != expected_pid:
+    print("false")
+    raise SystemExit(0)
+if payload.get("child_final_status") != "RUNNING" or payload.get("process_alive") is not True:
+    print("false")
+    raise SystemExit(0)
+if payload.get("classification") != "RUNTIME_CHILD_RUNNING_CYCLE_OBSERVED":
+    print("false")
+    raise SystemExit(0)
+marker = payload.get("last_runtime_cycle_marker")
+if not isinstance(marker, dict):
+    print("false")
+    raise SystemExit(0)
+if marker.get("stage") != "runtime_cycle" or marker.get("state") not in {"STARTED", "IN_PROGRESS", "COMPLETED"}:
+    print("false")
+    raise SystemExit(0)
+truth = payload.get("runtime_truth_marker")
+if not isinstance(truth, dict):
+    print("false")
+    raise SystemExit(0)
+if marker.get("state") == "COMPLETED":
+    marker_at = parse_ts(marker.get("generated_at") or marker.get("heartbeat_at"))
+    truth_at = parse_ts(truth.get("generated_at"))
+    if marker_at is not None and truth_at is not None and truth_at <= marker_at:
+        print("false")
+        raise SystemExit(0)
+print("true")
+PY
+}
+
+detached_child_exit_classification() {
+  local pid="$1"
+  "${PYTHON_BIN}" - "${DETACHED_CHILD_STATUS_FILE}" "${pid}" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+expected_pid = int(sys.argv[2])
+try:
+    payload = json.loads(path.read_text(encoding="utf-8"))
+except (OSError, json.JSONDecodeError):
+    raise SystemExit(1)
+if int(payload.get("child_pid") or payload.get("pid") or 0) != expected_pid:
+    raise SystemExit(1)
+if payload.get("child_final_status") == "RUNNING" and payload.get("process_alive") is True:
+    raise SystemExit(1)
+print(str(payload.get("classification") or "RUNTIME_EXITED_BEFORE_DURABLE_READY"))
+PY
+}
+
 write_runtime_config_paths_file() {
   for config_path in "${CANONICAL_CONFIGS[@]}"; do
     if [[ ! -f "${config_path}" ]]; then
@@ -1936,6 +2050,54 @@ export MGC_TRACK_B_PAPER_STACK_OWNED_MANAGED_EXPOSURE_RESTORE_JSON='${STARTUP_OW
 export MGC_TRACK_B_PAPER_MINIMAL_STARTUP_V1="${PAPER_MINIMAL_STARTUP_V1}"
 export MGC_TRACK_B_PAPER_MINIMAL_STARTUP_CLASSIFICATION="${STARTUP_PREFLIGHT_REFRESH_CLASSIFICATION}"
 mkdir -p "${RUNTIME_DIR}"
+runtime_pid=""
+runtime_child_started_at=""
+detached_child_final_status_written=0
+write_detached_child_status() {
+  local event="\$1"
+  local exit_code="\${2:-}"
+  if [[ -z "\${runtime_pid:-}" ]]; then
+    return 0
+  fi
+  local args=(
+    -m mgc_v05l.execution_core.track_b_detached_runtime_monitor
+    --event "\${event}"
+    --status-path "${DETACHED_CHILD_STATUS_FILE}"
+    --pid "\${runtime_pid}"
+    --started-at "\${runtime_child_started_at}"
+    --repo-root "${REPO_ROOT}"
+    --log-file "${RUNTIME_LOG}"
+    --pid-file "${PID_FILE}"
+    --config-paths-file "${CONFIG_PATHS_FILE}"
+    --runtime-truth-file "${RUNTIME_DIR}/paper_runtime_truth.json"
+    --post-truth-progress-file "${POST_TRUTH_PROGRESS_FILE}"
+    --runtime-instance-id "${runtime_instance_id}"
+    --source-commit "${source_commit}"
+    --python-bin "${PYTHON_BIN}"
+  )
+  if [[ -n "\${exit_code}" ]]; then
+    args+=(--exit-code "\${exit_code}")
+  fi
+  "${PYTHON_BIN}" "\${args[@]}" >/dev/null 2>>"${RUNTIME_LOG}" || true
+}
+write_detached_child_final_status_on_wrapper_exit() {
+  local wrapper_exit_code="\$1"
+  if [[ "\${detached_child_final_status_written:-0}" == "1" || -z "\${runtime_pid:-}" ]]; then
+    return 0
+  fi
+  detached_child_final_status_written=1
+  local final_event="exited"
+  if ps -p "\${runtime_pid}" >/dev/null 2>&1; then
+    final_event="heartbeat"
+  fi
+  printf '%s\n' "track_b_paper_stack_wrapper_final_status generated_at=\$(date -u +%Y-%m-%dT%H:%M:%SZ) runtime_pid=\${runtime_pid} wrapper_exit_code=\${wrapper_exit_code} final_event=\${final_event}" >> "${RUNTIME_LOG}"
+  if [[ "\${final_event}" == "exited" ]]; then
+    write_detached_child_status "\${final_event}" "\${wrapper_exit_code}"
+  else
+    write_detached_child_status "\${final_event}"
+  fi
+}
+trap 'wrapper_exit_code=\$?; write_detached_child_final_status_on_wrapper_exit "\${wrapper_exit_code}"' EXIT
 if "${PYTHON_BIN}" - <<'PY' "${RUNTIME_DIR}/paper_runtime_truth.json" "\$\$"
 import json
 import os
@@ -1970,6 +2132,7 @@ then
   exit 0
 fi
 printf '%s\n' "track_b_paper_stack_wrapper_start generated_at=\$(date -u +%Y-%m-%dT%H:%M:%SZ) repo_root=${REPO_ROOT} config_stack=${config_stack}" >> "${RUNTIME_LOG}"
+runtime_child_started_at="\$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 bash "${SCRIPT_DIR}/run_probationary_paper_soak.sh" \
   --pid-file "${PID_FILE}" \
   --log-file "${RUNTIME_LOG}" \
@@ -1978,6 +2141,7 @@ bash "${SCRIPT_DIR}/run_probationary_paper_soak.sh" \
   --schwab-config "${REPO_ROOT}/config/schwab.local.json" >> "${RUNTIME_LOG}" 2>&1 &
 runtime_pid="\$!"
 echo "\${runtime_pid}" > "${PID_FILE}"
+write_detached_child_status "started"
 "${PYTHON_BIN}" - <<'PY' "${PID_METADATA_FILE}" "\${runtime_pid}" "${runtime_instance_id}" "${REPO_ROOT}" "${source_commit}"
 import json
 import sys
@@ -2013,6 +2177,8 @@ runtime_exit_code="\$?"
 set -e
 runtime_exit_observed_at="\$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 printf '%s\n' "track_b_paper_stack_wrapper_child_exit generated_at=\${runtime_exit_observed_at} runtime_pid=\${runtime_pid} exit_code=\${runtime_exit_code}" >> "${RUNTIME_LOG}"
+write_detached_child_status "exited" "\${runtime_exit_code}"
+detached_child_final_status_written=1
 if ! "${PYTHON_BIN}" - <<'PY' "${LAUNCH_STATUS_FILE}" "${PID_FILE}" "${RUNTIME_LOG}" "${CONFIG_PATHS_FILE}" "${RUNTIME_DIR}/paper_runtime_truth.json" "\${runtime_pid}" "\${runtime_exit_code}" "${REPO_ROOT}" "${PYTHON_BIN}" "\${runtime_exit_observed_at}"
 import json
 import os
@@ -2115,10 +2281,10 @@ if paper_minimal_startup_enabled; then
       exit 1
     fi
     carrier="screen"
-  elif screen_available; then
-    carrier="screen"
   elif nohup_available; then
     carrier="nohup"
+  elif screen_available; then
+    carrier="screen"
   else
     write_startup_artifact "BLOCKED_NO_DIRECT_CARRIER" "Neither screen nor nohup is available for direct controlled PAPER runtime ownership." ""
     exit 1
@@ -2143,6 +2309,7 @@ elif ! screen_available; then
 fi
 
 rm -f "${LAUNCH_STATUS_FILE}"
+rm -f "${DETACHED_CHILD_STATUS_FILE}"
 if paper_minimal_startup_enabled; then
   rm -f "${PID_FILE}" "${PID_METADATA_FILE}"
 fi
@@ -2210,11 +2377,24 @@ if paper_minimal_startup_enabled; then
           fi
           progress_generated_at="$(post_truth_startup_progress_heartbeat "${pid}" 2>/dev/null || true)"
           if [[ -n "${progress_generated_at}" && "${truth_advanced}" != "true" ]]; then
+            update_detached_child_monitor "${pid}" >/dev/null || true
             deadline=$((SECONDS + WAIT_SECONDS))
             write_startup_artifact "RUNTIME_RUNNING_POST_TRUTH_AUTHORITY_REFRESH" "Runtime PID ${pid} is alive and publishing post-truth startup progress at ${progress_generated_at}; waiting for runtime truth to advance before readiness." "${pid}" >/dev/null
             continue
           fi
+          detached_child_ready="$(detached_child_ready_authority "${pid}" 2>/dev/null || true)"
+          if [[ "${detached_child_ready}" != "true" ]]; then
+            update_detached_child_monitor "${pid}" >/dev/null || true
+            write_startup_artifact "RUNTIME_RUNNING_WAITING_FOR_DETACHED_CHILD_AUTHORITY" "Runtime matched PAPER_MINIMAL_STARTUP_V1 shape; waiting for fresh detached-child monitor authority before durable readiness." "${pid}" >/dev/null
+            continue
+          fi
           if (( SECONDS - stable_since >= STABLE_SECONDS )) && [[ "${truth_advanced}" == "true" ]]; then
+            update_detached_child_monitor "${pid}" >/dev/null || true
+            detached_child_ready="$(detached_child_ready_authority "${pid}" 2>/dev/null || true)"
+            if [[ "${detached_child_ready}" != "true" ]]; then
+              write_startup_artifact "RUNTIME_EXITED_BEFORE_DURABLE_READY" "Runtime passed the stability window, but refreshed detached-child monitor authority did not prove a live durable runtime." "${pid}"
+              exit 1
+            fi
             write_startup_artifact "READY_SUBMIT_CAPABLE" "Track B PAPER runtime started through direct PAPER_MINIMAL_STARTUP_V1 process path, matched required runtime shape, survived ${STABLE_SECONDS}s, and advanced runtime truth after post-truth startup progress." "${pid}"
           exit 0
           fi
@@ -2228,10 +2408,36 @@ if paper_minimal_startup_enabled; then
         fi
       fi
     elif [[ -n "${pid}" ]]; then
-      write_startup_artifact "BLOCKED_RUNTIME_EXITED_DURING_STARTUP" "Runtime wrote PID ${pid}, then exited before ${STABLE_SECONDS}s same-PID liveness and advancing runtime truth or post-truth startup progress were verified." "${pid}"
+      child_exit_classification="$(detached_child_exit_classification "${pid}" 2>/dev/null || true)"
+      if [[ -z "${child_exit_classification}" ]]; then
+        update_detached_child_monitor "${pid}" >/dev/null || true
+        child_exit_classification="$(detached_child_exit_classification "${pid}" 2>/dev/null || true)"
+      fi
+      if [[ "${child_exit_classification}" == "RUNTIME_CLEAN_EXIT_AFTER_MAX_CYCLES" ]]; then
+        write_startup_artifact "RUNTIME_CLEAN_EXIT_AFTER_MAX_CYCLES" "Runtime child exited cleanly after a bounded cycle; this is not a durable service-ready state." "${pid}"
+        exit 1
+      fi
+      if [[ -n "${child_exit_classification}" ]]; then
+        write_startup_artifact "RUNTIME_EXITED_BEFORE_DURABLE_READY" "Runtime child exited before durable service readiness; detached child status captured exit code and last marker." "${pid}"
+        exit 1
+      fi
+      write_startup_artifact "RUNTIME_EXITED_BEFORE_DURABLE_READY" "Runtime wrote PID ${pid}, then exited before ${STABLE_SECONDS}s same-PID liveness and advancing runtime truth or post-truth startup progress were verified." "${pid}"
       exit 1
     elif [[ -n "${observed_runtime_pid}" ]]; then
-      write_startup_artifact "BLOCKED_RUNTIME_EXITED_DURING_STARTUP" "Runtime reached initial minimal process ownership, then exited before ${STABLE_SECONDS}s same-PID liveness and advancing runtime truth or post-truth startup progress were verified." "${observed_runtime_pid}"
+      child_exit_classification="$(detached_child_exit_classification "${observed_runtime_pid}" 2>/dev/null || true)"
+      if [[ -z "${child_exit_classification}" ]]; then
+        update_detached_child_monitor "${observed_runtime_pid}" >/dev/null || true
+        child_exit_classification="$(detached_child_exit_classification "${observed_runtime_pid}" 2>/dev/null || true)"
+      fi
+      if [[ "${child_exit_classification}" == "RUNTIME_CLEAN_EXIT_AFTER_MAX_CYCLES" ]]; then
+        write_startup_artifact "RUNTIME_CLEAN_EXIT_AFTER_MAX_CYCLES" "Runtime child exited cleanly after a bounded cycle; this is not a durable service-ready state." "${observed_runtime_pid}"
+        exit 1
+      fi
+      if [[ -n "${child_exit_classification}" ]]; then
+        write_startup_artifact "RUNTIME_EXITED_BEFORE_DURABLE_READY" "Runtime child exited before durable service readiness; detached child status captured exit code and last marker." "${observed_runtime_pid}"
+        exit 1
+      fi
+      write_startup_artifact "RUNTIME_EXITED_BEFORE_DURABLE_READY" "Runtime reached initial minimal process ownership, then exited before ${STABLE_SECONDS}s same-PID liveness and advancing runtime truth or post-truth startup progress were verified." "${observed_runtime_pid}"
       exit 1
     fi
   done

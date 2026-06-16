@@ -34,6 +34,11 @@ def test_paper_stack_start_launches_foreground_runtime_inside_screen() -> None:
     assert "RUNTIME_EXITED_AFTER_INITIAL_TRUTH" in source
     assert "track_b_paper_stack_wrapper_child_exit" in source
     assert "RUNTIME_EXIT_STATUS_CAPTURE_FAILED" in source
+    assert "probationary_paper_detached_child_status.json" in source
+    assert "write_detached_child_status \"started\"" in source
+    assert "write_detached_child_status \"exited\"" in source
+    assert "write_detached_child_final_status_on_wrapper_exit" in source
+    assert "track_b_paper_stack_wrapper_final_status" in source
     assert "--background" not in source
     assert "run_probationary_paper_soak.sh" in source
 
@@ -54,6 +59,9 @@ def test_paper_minimal_start_uses_direct_process_carrier_not_launchctl() -> None
     assert "screen_available" in minimal_carrier_block
     assert "nohup_available" in minimal_carrier_block
     assert "carrier=\"nohup\"" in minimal_carrier_block
+    assert minimal_carrier_block.index("elif nohup_available; then") < minimal_carrier_block.index(
+        "elif screen_available; then"
+    )
     assert "launchctl submit" not in minimal_carrier_block
 
     assert "nohup /bin/bash" in source
@@ -83,13 +91,19 @@ def test_paper_minimal_start_requires_durable_liveness_and_truth_advancement() -
     assert "direct PAPER_MINIMAL_STARTUP_V1 process path" in minimal_wait_block
     assert "RUNTIME_RUNNING_WAITING_FOR_MINIMAL_STARTUP_STABILITY" in minimal_wait_block
     assert "RUNTIME_RUNNING_WAITING_FOR_MINIMAL_RUNTIME_SHAPE" in minimal_wait_block
-    assert "BLOCKED_RUNTIME_EXITED_DURING_STARTUP" in minimal_wait_block
+    assert "RUNTIME_EXITED_BEFORE_DURABLE_READY" in minimal_wait_block
     assert "STABLE_SECONDS" in minimal_wait_block
     assert "candidate_pid" in minimal_wait_block
     assert "first_truth_generated_at" in minimal_wait_block
     assert "last_truth_generated_at" in minimal_wait_block
     assert "truth_advanced" in minimal_wait_block
     assert '[[ "${truth_advanced}" == "true" ]]' in minimal_wait_block
+    assert "detached_child_ready_authority" in minimal_wait_block
+    assert 'payload.get("child_final_status") != "RUNNING"' in source
+    assert 'payload.get("process_alive") is not True' in source
+    assert 'payload.get("classification") != "RUNTIME_CHILD_RUNNING_CYCLE_OBSERVED"' in source
+    assert "RUNTIME_RUNNING_WAITING_FOR_DETACHED_CHILD_AUTHORITY" in minimal_wait_block
+    assert "refreshed detached-child monitor authority did not prove" in minimal_wait_block
     assert "same-PID liveness" in minimal_wait_block
     assert 'elif [[ -n "${pid}" ]]; then' in minimal_wait_block
     assert "Runtime wrote PID" in minimal_wait_block
@@ -156,9 +170,11 @@ def test_paper_stack_startup_artifact_carries_launch_exit_status_when_available(
 
     assert "launch_status_file" in writer_block
     assert '"runtime_launch_status": launch_status or None' in writer_block
+    assert '"runtime_detached_child_status": detached_child_status or None' in writer_block
     assert '"runtime_exit_status"' in writer_block
-    assert 'launch_status.get("child_exit_code")' in writer_block
-    assert 'launch_status.get("termination_reason")' in writer_block
+    assert "exit_source = detached_child_status or launch_status" in writer_block
+    assert 'exit_source.get("child_exit_code")' in writer_block
+    assert 'exit_source.get("termination_reason")' in writer_block
     assert source.index('rm -f "${LAUNCH_STATUS_FILE}"') < source.index('if [[ "${carrier}" == "screen" ]]; then')
     assert source.index('rm -f "${PID_FILE}" "${PID_METADATA_FILE}"') < source.index(
         'if [[ "${carrier}" == "screen" ]]; then'

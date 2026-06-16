@@ -1,0 +1,122 @@
+import json
+import os
+from datetime import UTC, datetime
+from pathlib import Path
+
+from mgc_v05l.execution_core.track_b_detached_runtime_monitor import (
+    build_detached_runtime_child_status,
+)
+
+
+def _write_json(path: Path, payload: dict) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload) + "\n", encoding="utf-8")
+
+
+def test_clean_bounded_exit_after_runtime_cycle_is_not_ready_service(tmp_path: Path) -> None:
+    pid = 999991
+    truth = tmp_path / "truth.json"
+    progress = tmp_path / "progress.json"
+    log = tmp_path / "runtime.log"
+    status = tmp_path / "child_status.json"
+    _write_json(truth, {"producer_pid": pid, "generated_at": "2026-06-16T12:00:00+00:00"})
+    _write_json(
+        progress,
+        {
+            "producer_pid": pid,
+            "generated_at": "2026-06-16T12:00:05+00:00",
+            "stage": "runtime_cycle",
+            "state": "COMPLETED",
+        },
+    )
+    log.write_text('{"reconciliation_clean": true, "stop_reason": null}\n', encoding="utf-8")
+
+    payload = build_detached_runtime_child_status(
+        event="exited",
+        status_path=status,
+        pid=pid,
+        exit_code=0,
+        log_file=log,
+        runtime_truth_file=truth,
+        post_truth_progress_file=progress,
+        observed_at=datetime(2026, 6, 16, 12, 0, tzinfo=UTC),
+    )
+
+    assert payload["classification"] == "RUNTIME_CLEAN_EXIT_AFTER_MAX_CYCLES"
+    assert payload["child_final_status"] == "EXITED"
+    assert payload["runtime_cycle_completed"] is True
+    assert payload["submit_authority"] is False
+    assert json.loads(status.read_text(encoding="utf-8"))["classification"] == payload["classification"]
+
+
+def test_exit_before_runtime_cycle_is_blocked_with_exit_code(tmp_path: Path) -> None:
+    pid = 999992
+    truth = tmp_path / "truth.json"
+    progress = tmp_path / "progress.json"
+    status = tmp_path / "child_status.json"
+    _write_json(truth, {"producer_pid": pid, "generated_at": "2026-06-16T12:00:00+00:00"})
+    _write_json(progress, {"producer_pid": pid, "stage": "lane_restore", "state": "COMPLETED"})
+
+    payload = build_detached_runtime_child_status(
+        event="exited",
+        status_path=status,
+        pid=pid,
+        exit_code=1,
+        runtime_truth_file=truth,
+        post_truth_progress_file=progress,
+    )
+
+    assert payload["classification"] == "RUNTIME_EXITED_BEFORE_DURABLE_READY"
+    assert payload["child_exit_code"] == 1
+    assert payload["last_runtime_cycle_marker"] is None
+    assert payload["termination_reason"] == "runtime_exited_after_initial_truth"
+
+
+def test_running_child_with_runtime_cycle_marker_is_observable(tmp_path: Path) -> None:
+    pid = os.getpid()
+    truth = tmp_path / "truth.json"
+    progress = tmp_path / "progress.json"
+    status = tmp_path / "child_status.json"
+    _write_json(truth, {"producer_pid": pid, "generated_at": "2026-06-16T12:00:00+00:00"})
+    _write_json(progress, {"producer_pid": pid, "stage": "runtime_cycle", "state": "STARTED"})
+
+    payload = build_detached_runtime_child_status(
+        event="heartbeat",
+        status_path=status,
+        pid=pid,
+        runtime_truth_file=truth,
+        post_truth_progress_file=progress,
+    )
+
+    assert payload["classification"] == "RUNTIME_CHILD_RUNNING_CYCLE_OBSERVED"
+    assert payload["process_alive"] is True
+    assert payload["runtime_cycle_marker_observed"] is True
+
+
+def test_completed_cycle_without_newer_truth_is_not_durable_ready(tmp_path: Path) -> None:
+    pid = os.getpid()
+    truth = tmp_path / "truth.json"
+    progress = tmp_path / "progress.json"
+    status = tmp_path / "child_status.json"
+    _write_json(truth, {"producer_pid": pid, "generated_at": "2026-06-16T12:00:00+00:00"})
+    _write_json(
+        progress,
+        {
+            "producer_pid": pid,
+            "generated_at": "2026-06-16T12:00:01+00:00",
+            "stage": "runtime_cycle",
+            "state": "COMPLETED",
+        },
+    )
+
+    payload = build_detached_runtime_child_status(
+        event="heartbeat",
+        status_path=status,
+        pid=pid,
+        runtime_truth_file=truth,
+        post_truth_progress_file=progress,
+    )
+
+    assert payload["classification"] == "RUNTIME_CHILD_CYCLE_COMPLETED_WAITING_FOR_NEXT_TRUTH"
+    assert payload["child_final_status"] == "RUNNING"
+    assert payload["runtime_cycle_completed"] is True
