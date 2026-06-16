@@ -88,6 +88,7 @@ from mgc_v05l.execution_core.track_b_self_recover_rules import (
     write_track_b_self_recover_rules,
 )
 from mgc_v05l.execution_core.track_b_shared_truth_refresh_cli import (
+    DEFAULT_LEASE_HISTORY,
     DEFAULT_SHARED_TRUTH_REFRESH_ARTIFACT,
     TrackBSharedTruthRefreshConfig,
     refresh_track_b_shared_truth,
@@ -131,7 +132,7 @@ class TrackBControlPlaneSnapshotConfig:
     continuation_aware_exit_preview_path: Path = DEFAULT_CONTINUATION_AWARE_EXIT_PREVIEW_PATH
     continuation_aware_exit_history_path: Path = DEFAULT_CONTINUATION_AWARE_EXIT_HISTORY_PATH
     runtime_safe_state_envelope_path: Path = DEFAULT_RUNTIME_SAFE_STATE_ENVELOPE_ARTIFACT
-    broker_lease_history_path: Path | None = None
+    broker_lease_history_path: Path | None = DEFAULT_LEASE_HISTORY
     refresh_proof_readiness_before_snapshot: bool = True
     refresh_artifact_archive_plan_before_snapshot: bool = False
     proof_required_symbols: tuple[str, ...] | None = None
@@ -185,13 +186,6 @@ def build_track_b_control_plane_snapshot(
                 }
             )
 
-    if config.refresh_proof_readiness_before_snapshot:
-        _timed_step(
-            "proof_readiness_refresh",
-            lambda: _refresh_proof_readiness_for_snapshot(config=config, now=actual_now),
-            current_hot_path_required=True,
-            cache_or_throttle_candidate=True,
-        )
     shared_truth = _timed_step(
         "shared_truth_refresh_initial",
         lambda: _refresh_shared_truth_for_snapshot(
@@ -213,6 +207,18 @@ def build_track_b_control_plane_snapshot(
             lambda: post_shared_truth_refresh_hook(shared_truth),
             current_hot_path_required=False,
             notes="test/injection hook",
+        )
+    if config.refresh_proof_readiness_before_snapshot:
+        _timed_step(
+            "proof_readiness_refresh",
+            lambda: _refresh_proof_readiness_for_snapshot(
+                config=config,
+                now=actual_now,
+                shared_truth=shared_truth,
+            ),
+            current_hot_path_required=True,
+            cache_or_throttle_candidate=True,
+            notes="reuses shared_truth_refresh_initial instead of refreshing shared truth again",
         )
 
     agent_health_config = TrackBAgentHealthConfig(
@@ -582,6 +588,7 @@ def _refresh_proof_readiness_for_snapshot(
     *,
     config: TrackBControlPlaneSnapshotConfig,
     now: datetime,
+    shared_truth: Mapping[str, Any],
 ) -> Mapping[str, Any]:
     proof_config = TrackBPaperProofReadinessConfig(
         repo_root=config.repo_root,
@@ -590,7 +597,7 @@ def _refresh_proof_readiness_for_snapshot(
         now=now,
         broker_lease_history_path=config.broker_lease_history_path,
     )
-    payload = build_track_b_paper_proof_readiness(config=proof_config, now=now)
+    payload = build_track_b_paper_proof_readiness(config=proof_config, now=now, shared_truth=shared_truth)
     write_track_b_paper_proof_readiness(config=proof_config, payload=payload)
     return payload
 
@@ -748,7 +755,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         repo_root=Path(args.repo_root).expanduser().resolve(),
         output_path=Path(args.output_path),
         dashboard_projection_path=None if bool(args.no_dashboard_projection) else Path(args.dashboard_projection_path),
-        broker_lease_history_path=None if bool(args.no_broker_lease_history) else None,
+        broker_lease_history_path=None if bool(args.no_broker_lease_history) else DEFAULT_LEASE_HISTORY,
         proof_required_symbols=_csv_tuple(args.proof_required_symbols),
     )
     payload = build_track_b_control_plane_snapshot(config=config)

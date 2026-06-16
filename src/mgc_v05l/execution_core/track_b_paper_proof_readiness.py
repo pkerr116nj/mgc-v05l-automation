@@ -72,19 +72,23 @@ def build_track_b_paper_proof_readiness(
     pid_running: Callable[[int], bool] | None = None,
     process_root_resolver: Callable[[int], Path | None] | None = None,
     source_commit_resolver: Callable[[Path], str | None] | None = None,
+    shared_truth: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     actual_now = _ensure_utc(now or config.now or datetime.now(UTC))
-    shared_config = TrackBSharedTruthRefreshConfig(
-        repo_root=config.repo_root,
-        broker_lease_history_path=config.broker_lease_history_path,
-    )
-    shared_truth = refresh_track_b_shared_truth(
-        config=shared_config,
-        now=actual_now,
-        pid_running=pid_running,
-        process_root_resolver=process_root_resolver,
-        source_commit_resolver=source_commit_resolver,
-    )
+    shared_truth_source = "provided"
+    if shared_truth is None:
+        shared_config = TrackBSharedTruthRefreshConfig(
+            repo_root=config.repo_root,
+            broker_lease_history_path=config.broker_lease_history_path,
+        )
+        shared_truth = refresh_track_b_shared_truth(
+            config=shared_config,
+            now=actual_now,
+            pid_running=pid_running,
+            process_root_resolver=process_root_resolver,
+            source_commit_resolver=source_commit_resolver,
+        )
+        shared_truth_source = "refreshed"
     shared_preflight = build_runtime_start_preflight_summary(shared_truth)
     phase1_config = Phase1RuntimeDataReadinessConfig(repo_root=config.repo_root, now=actual_now)
     phase1 = build_phase1_runtime_data_readiness(config=phase1_config)
@@ -113,6 +117,7 @@ def build_track_b_paper_proof_readiness(
         "primary_blocker": decision["primary_blocker"],
         "secondary_warnings": decision["secondary_warnings"],
         "broker_lease_warning": decision["broker_lease_warning"],
+        "shared_truth_source": shared_truth_source,
         "phase1_session_reason": decision["phase1_session_reason"],
         "blockers": decision["blockers"],
         "shared_truth_preflight": shared_preflight,

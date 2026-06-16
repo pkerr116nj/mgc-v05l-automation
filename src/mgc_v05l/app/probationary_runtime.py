@@ -121,6 +121,7 @@ from ..execution_core.track_b_authority_refresh_heartbeat import (
     record_track_b_authority_refresh_runtime_failure,
     refresh_track_b_paper_authority_if_due,
 )
+from ..execution_core.track_b_atomic_io import write_json_atomic
 from ..execution_core.track_b_live_runtime_environment_watchdog import (
     TrackBLiveRuntimeEnvironmentWatchdogConfig,
     run_track_b_live_runtime_environment_watchdog_if_due,
@@ -128,6 +129,11 @@ from ..execution_core.track_b_live_runtime_environment_watchdog import (
 from ..execution_core.track_b_paper_minimal_startup import (
     TrackBPaperMinimalStartupConfig,
     build_track_b_paper_minimal_startup,
+)
+from ..execution_core.track_b_startup_hot_path_authority import (
+    TrackBStartupHotPathAuthorityConfig,
+    build_track_b_startup_hot_path_authority,
+    write_track_b_startup_hot_path_authority,
 )
 from ..execution_core.track_b_broker_market_truth_entry_authority import (
     BROKER_MARKET_TRUTH_ENTRY_ALLOWED,
@@ -7740,6 +7746,8 @@ class ProbationaryPaperSupervisor:
                 )
                 return self._finalize_summary(new_bars=0, reconciliation_clean=False, stop_reason=stop_reason)
 
+            _start_track_b_async_diagnostic_authority_refresh_for_active_paper_runtime(self._settings)
+
             cycles = 0
             new_bars = 0
             while True:
@@ -10101,19 +10109,112 @@ class _PaperPostTruthProgressHeartbeat:
 
 def _refresh_track_b_authority_for_active_paper_runtime(settings: StrategySettings) -> dict[str, Any]:
     repo_root = Path(__file__).resolve().parents[3]
-    config = TrackBAuthorityRefreshHeartbeatConfig(repo_root=repo_root)
+    config = TrackBStartupHotPathAuthorityConfig(repo_root=repo_root)
     try:
-        return refresh_track_b_paper_authority_if_due(
-            config=config,
-            runtime_active=True,
-        )
-    except Exception as exc:
-        payload = record_track_b_authority_refresh_runtime_failure(
-            config=config,
-            exception=exc,
-        )
+        payload = build_track_b_startup_hot_path_authority(config=config)
+        write_track_b_startup_hot_path_authority(config=config, payload=payload)
         payload["runtime_artifacts_root"] = str(getattr(settings, "probationary_artifacts_path", ""))
         return payload
+    except Exception as exc:
+        payload = {
+            "schema_version": "track_b_startup_hot_path_authority_runtime_failure_v1",
+            "generated_at": datetime.now(timezone.utc).isoformat(),
+            "classification": "STARTUP_HOT_PATH_AUTHORITY_FAILED",
+            "allowed": False,
+            "read_only": True,
+            "broker_state_mutated": False,
+            "submit_attempted": False,
+            "cancel_attempted": False,
+            "close_attempted": False,
+            "bounded_current_state_only": True,
+            "full_shared_truth_refresh_invoked": False,
+            "control_plane_snapshot_build_invoked": False,
+            "proof_readiness_refresh_invoked": False,
+            "historical_manifest_scan_invoked": False,
+            "lifecycle_report_tree_scan_invoked": False,
+            "blockers": [
+                {
+                    "code": "startup_hot_path_authority_failed",
+                    "detail": str(exc),
+                    "source": type(exc).__name__,
+                }
+            ],
+            "source_artifact_refs": {"startup_hot_path_authority": str(config.resolve(config.output_path))},
+        }
+        write_track_b_startup_hot_path_authority(config=config, payload=payload)
+        payload["runtime_artifacts_root"] = str(getattr(settings, "probationary_artifacts_path", ""))
+        return payload
+
+
+def _start_track_b_async_diagnostic_authority_refresh_for_active_paper_runtime(settings: StrategySettings) -> None:
+    repo_root = Path(__file__).resolve().parents[3]
+    config = TrackBAuthorityRefreshHeartbeatConfig(repo_root=repo_root)
+
+    def _run() -> None:
+        status_path = repo_root / "outputs" / "track_b_execution_core" / "authority_refresh" / "latest_async_diagnostic_authority_refresh.json"
+        started_at = time_module.perf_counter()
+        _write_track_b_async_diagnostic_authority_refresh_status(
+            path=status_path,
+            payload={
+                "schema_version": "track_b_async_diagnostic_authority_refresh_v1",
+                "generated_at": datetime.now(timezone.utc).isoformat(),
+                "classification": "ASYNC_DIAGNOSTIC_AUTHORITY_REFRESH_RUNNING",
+                "read_only": True,
+                "startup_readiness_blocking": False,
+                "runtime_artifacts_root": str(getattr(settings, "probationary_artifacts_path", "")),
+            },
+        )
+        try:
+            payload = refresh_track_b_paper_authority_if_due(
+                config=config,
+                force=True,
+                runtime_active=True,
+            )
+            _write_track_b_async_diagnostic_authority_refresh_status(
+                path=status_path,
+                payload={
+                    "schema_version": "track_b_async_diagnostic_authority_refresh_v1",
+                    "generated_at": datetime.now(timezone.utc).isoformat(),
+                    "classification": "ASYNC_DIAGNOSTIC_AUTHORITY_REFRESH_COMPLETED",
+                    "read_only": True,
+                    "startup_readiness_blocking": False,
+                    "duration_seconds": round(max(time_module.perf_counter() - started_at, 0.0), 6),
+                    "authority_refresh_classification": payload.get("classification"),
+                    "authority_refresh_artifact": str(config.resolve(config.output_path)),
+                    "slowest_substage": payload.get("slowest_substage") if isinstance(payload, Mapping) else None,
+                    "substage_durations": payload.get("substage_durations") if isinstance(payload, Mapping) else None,
+                    "runtime_artifacts_root": str(getattr(settings, "probationary_artifacts_path", "")),
+                },
+            )
+        except Exception as exc:
+            failure = record_track_b_authority_refresh_runtime_failure(config=config, exception=exc)
+            _write_track_b_async_diagnostic_authority_refresh_status(
+                path=status_path,
+                payload={
+                    "schema_version": "track_b_async_diagnostic_authority_refresh_v1",
+                    "generated_at": datetime.now(timezone.utc).isoformat(),
+                    "classification": "ASYNC_DIAGNOSTIC_AUTHORITY_REFRESH_FAILED",
+                    "read_only": True,
+                    "startup_readiness_blocking": False,
+                    "duration_seconds": round(max(time_module.perf_counter() - started_at, 0.0), 6),
+                    "exception_type": type(exc).__name__,
+                    "exception_message": str(exc),
+                    "failure_artifact": str(config.resolve(config.output_path)),
+                    "failure_classification": failure.get("classification") if isinstance(failure, Mapping) else None,
+                    "runtime_artifacts_root": str(getattr(settings, "probationary_artifacts_path", "")),
+                },
+            )
+
+    thread = threading.Thread(
+        target=_run,
+        name="track-b-async-diagnostic-authority-refresh",
+        daemon=True,
+    )
+    thread.start()
+
+
+def _write_track_b_async_diagnostic_authority_refresh_status(*, path: Path, payload: Mapping[str, Any]) -> None:
+    write_json_atomic(path, dict(payload))
 
 
 def _write_track_b_live_runtime_environment_watchdog_for_active_paper_runtime(settings: StrategySettings) -> dict[str, Any]:

@@ -209,6 +209,20 @@ def test_paper_stack_start_has_minimal_startup_v1_path_for_explicit_paper_starts
     assert "MGC_TRACK_B_PAPER_MINIMAL_STARTUP_CLASSIFICATION" in source
 
 
+def test_paper_stack_minimal_startup_path_does_not_invoke_full_rebuild_before_launch() -> None:
+    source = START_SCRIPT.read_text(encoding="utf-8")
+    minimal_launch_block = source[
+        source.index("if paper_minimal_startup_enabled; then", source.index("\nwrite_runtime_config_paths_file\n"))
+        : source.index("if ! paper_minimal_startup_enabled; then", source.index("\nwrite_runtime_config_paths_file\n"))
+    ]
+
+    assert "run_paper_minimal_startup_preflight" in minimal_launch_block
+    assert "run_startup_preflight_evidence_refresh" not in minimal_launch_block
+    assert "track_b_control_plane_snapshot" not in minimal_launch_block
+    assert "track_b_shared_truth_refresh_cli" not in minimal_launch_block
+    assert "track_b_managed_position_registry" not in minimal_launch_block
+
+
 def test_paper_stack_writes_selected_config_paths_before_minimal_startup() -> None:
     source = START_SCRIPT.read_text(encoding="utf-8")
     start_block = source[

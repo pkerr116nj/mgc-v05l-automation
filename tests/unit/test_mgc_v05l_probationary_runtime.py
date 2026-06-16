@@ -206,12 +206,28 @@ def test_paper_runtime_truth_artifact_schema_contains_operational_fields(tmp_pat
     assert metadata["submit_authority"] is False
 
 
-def test_paper_runtime_invokes_read_only_authority_refresh_heartbeat() -> None:
+def test_paper_runtime_invokes_bounded_startup_authority_and_async_diagnostic_refresh() -> None:
     source = Path(probationary_runtime_module.__file__).read_text(encoding="utf-8")
+    bounded_block = source[
+        source.index("def _refresh_track_b_authority_for_active_paper_runtime")
+        : source.index("def _start_track_b_async_diagnostic_authority_refresh_for_active_paper_runtime")
+    ]
+    async_block = source[
+        source.index("def _start_track_b_async_diagnostic_authority_refresh_for_active_paper_runtime")
+        : source.index("def _write_track_b_async_diagnostic_authority_refresh_status")
+    ]
 
-    assert "TrackBAuthorityRefreshHeartbeatConfig" in source
-    assert "refresh_track_b_paper_authority_if_due" in source
+    assert "TrackBStartupHotPathAuthorityConfig" in bounded_block
+    assert "build_track_b_startup_hot_path_authority" in bounded_block
+    assert "write_track_b_startup_hot_path_authority" in bounded_block
+    assert "refresh_track_b_paper_authority_if_due" not in bounded_block
+    assert "record_track_b_authority_refresh_runtime_failure" not in bounded_block
     assert "_refresh_track_b_authority_for_active_paper_runtime(self._settings)" in source
+    assert "_start_track_b_async_diagnostic_authority_refresh_for_active_paper_runtime(self._settings)" in source
+    assert "TrackBAuthorityRefreshHeartbeatConfig" in async_block
+    assert "refresh_track_b_paper_authority_if_due" in async_block
+    assert "force=True" in async_block
+    assert "startup_readiness_blocking" in async_block
     assert "TrackBLiveRuntimeEnvironmentWatchdogConfig" in source
     assert "run_track_b_live_runtime_environment_watchdog_if_due" in source
     assert "_write_track_b_live_runtime_environment_watchdog_for_active_paper_runtime(self._settings)" in source

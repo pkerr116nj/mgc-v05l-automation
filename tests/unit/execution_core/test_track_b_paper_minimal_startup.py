@@ -9,6 +9,11 @@ from mgc_v05l.execution_core.track_b_paper_minimal_startup import (
     build_track_b_paper_minimal_startup,
 )
 from mgc_v05l.execution_core.track_b_readiness_state import classify_canonical_readiness
+from mgc_v05l.execution_core.track_b_startup_hot_path_authority import (
+    TrackBStartupHotPathAuthorityConfig,
+    build_track_b_startup_hot_path_authority,
+    write_track_b_startup_hot_path_authority,
+)
 
 
 NOW = datetime(2026, 6, 10, 1, 58, tzinfo=timezone.utc)
@@ -237,6 +242,11 @@ def _classification(tmp_path: Path) -> dict:
     return build_track_b_paper_minimal_startup(config=config, now=NOW)
 
 
+def _hot_path_classification(tmp_path: Path) -> dict:
+    config = TrackBStartupHotPathAuthorityConfig(repo_root=tmp_path)
+    return build_track_b_startup_hot_path_authority(config=config, now=NOW)
+
+
 def _codes(payload: dict) -> set[str]:
     return {str(row.get("code")) for row in payload.get("blockers") or []}
 
@@ -255,6 +265,50 @@ def test_flat_broker_known_orders_price_profile_paper_route_qty_cap_allows_submi
     assert payload["account_id"] == "DUM882026"
     assert payload["configured_instruments"] == ["MES", "MNQ"]
     assert all(row["available"] for row in payload["price_availability"])
+
+
+def test_startup_hot_path_authority_uses_bounded_current_state_only(tmp_path: Path) -> None:
+    _seed_minimal_ready(tmp_path)
+
+    payload = _hot_path_classification(tmp_path)
+
+    assert payload["classification"] == "STARTUP_HOT_PATH_AUTHORITY_ALLOWED"
+    assert payload["allowed"] is True
+    assert payload["bounded_current_state_only"] is True
+    assert payload["full_shared_truth_refresh_invoked"] is False
+    assert payload["control_plane_snapshot_build_invoked"] is False
+    assert payload["proof_readiness_refresh_invoked"] is False
+    assert payload["historical_manifest_scan_invoked"] is False
+    assert payload["lifecycle_report_tree_scan_invoked"] is False
+    assert all(row["scans_historical_artifacts"] is False for row in payload["substage_durations"])
+
+
+def test_startup_hot_path_authority_blocks_unmanaged_current_exposure(tmp_path: Path) -> None:
+    _seed_minimal_ready(tmp_path)
+    _seed_fresh_ibkr_read_only_truth(
+        tmp_path,
+        TrackBPaperMinimalStartupConfig(repo_root=tmp_path),
+        mes_qty="1.0",
+    )
+
+    payload = _hot_path_classification(tmp_path)
+
+    assert payload["classification"] == "STARTUP_HOT_PATH_AUTHORITY_BLOCKED"
+    assert payload["allowed"] is False
+    assert "broker_positions_present" in _codes(payload)
+    assert payload["blockers"][0]["detail"] == "track_b_futures_positions_unmanaged_or_ambiguous"
+
+
+def test_startup_hot_path_authority_writes_artifact(tmp_path: Path) -> None:
+    _seed_minimal_ready(tmp_path)
+    config = TrackBStartupHotPathAuthorityConfig(repo_root=tmp_path)
+    payload = build_track_b_startup_hot_path_authority(config=config, now=NOW)
+
+    path = write_track_b_startup_hot_path_authority(config=config, payload=payload)
+
+    written = json.loads(path.read_text(encoding="utf-8"))
+    assert written["schema_version"] == "track_b_startup_hot_path_authority_v1"
+    assert written["source_artifact_refs"]["startup_hot_path_authority"] == str(path)
 
 
 def test_batch1_track_b_futures_position_blocks_minimal_startup(tmp_path: Path) -> None:

@@ -1086,6 +1086,8 @@ def _refresh_broker_lease(
             },
         }
     )
+    if lease:
+        _write_json_atomic(config.resolve(config.broker_lease_path), lease)
     return lease
 
 

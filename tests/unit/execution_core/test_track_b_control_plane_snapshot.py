@@ -84,7 +84,7 @@ def test_snapshot_refreshes_stale_proof_readiness_before_supervisor(monkeypatch,
     proof_calls = []
 
     def fake_build_proof(**kwargs):
-        proof_calls.append(kwargs["config"])
+        proof_calls.append(kwargs)
         return {
             "generated_at": NOW.isoformat(),
             "classification": "READY_FOR_PROOF",
@@ -111,6 +111,7 @@ def test_snapshot_refreshes_stale_proof_readiness_before_supervisor(monkeypatch,
     )
 
     assert proof_calls
+    assert proof_calls[0].get("shared_truth") is not None
     assert payload["classification"] == CONTROL_PLANE_SNAPSHOT_READY
     assert payload["runtime_supervisor_classification"] == "SUPERVISOR_RUNTIME_START_ALLOWED"
     assert payload["proof_window_status"] == "ready"
@@ -123,7 +124,7 @@ def test_snapshot_refreshes_proof_readiness_with_scoped_symbols(monkeypatch, tmp
     proof_calls = []
 
     def fake_build_proof(**kwargs):
-        proof_calls.append(kwargs["config"])
+        proof_calls.append(kwargs)
         return {
             "generated_at": NOW.isoformat(),
             "classification": "READY_FOR_PROOF",
@@ -153,7 +154,8 @@ def test_snapshot_refreshes_proof_readiness_with_scoped_symbols(monkeypatch, tmp
     )
 
     assert proof_calls
-    assert proof_calls[0].required_symbols == ("MNQ", "MES")
+    assert proof_calls[0]["config"].required_symbols == ("MNQ", "MES")
+    assert proof_calls[0].get("shared_truth") is not None
     assert payload["classification"] == CONTROL_PLANE_SNAPSHOT_READY
 
 
