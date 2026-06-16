@@ -32,8 +32,11 @@ def build_detached_runtime_child_status(
     runtime_instance_id: str | None = None,
     source_commit: str | None = None,
     python_bin: str | None = None,
+    child_command: str | None = None,
+    parent_pid: int | None = None,
 ) -> dict[str, Any]:
     actual_observed_at = _ensure_utc(observed_at or datetime.now(UTC))
+    existing = _read_json(status_path)
     truth = _read_json(runtime_truth_file)
     progress = _read_json(post_truth_progress_file)
     summary = _last_json_summary(log_file)
@@ -42,9 +45,11 @@ def build_detached_runtime_child_status(
     runtime_cycle_marker = progress_marker if progress_marker.get("stage") == "runtime_cycle" else {}
     process_alive = _pid_alive(pid)
 
+    exit_signal = _exit_signal(exit_code)
     classification, final_status, termination_reason = _classify(
         event=event,
         exit_code=exit_code,
+        exit_signal=exit_signal,
         process_alive=process_alive,
         truth_marker=truth_marker,
         runtime_cycle_marker=runtime_cycle_marker,
@@ -57,9 +62,12 @@ def build_detached_runtime_child_status(
         "classification": classification,
         "child_pid": pid,
         "pid": pid,
-        "child_started_at": started_at,
+        "child_started_at": started_at or existing.get("child_started_at"),
+        "child_command": child_command or existing.get("child_command"),
+        "supervisor_parent_pid": parent_pid if parent_pid is not None else existing.get("supervisor_parent_pid"),
         "child_final_status": final_status,
         "child_exit_code": exit_code,
+        "child_exit_signal": exit_signal,
         "process_alive": process_alive,
         "termination_reason": termination_reason,
         "runtime_instance_id": runtime_instance_id,
@@ -92,6 +100,7 @@ def _classify(
     *,
     event: str,
     exit_code: int | None,
+    exit_signal: int | None,
     process_alive: bool,
     truth_marker: Mapping[str, Any],
     runtime_cycle_marker: Mapping[str, Any],
@@ -112,11 +121,18 @@ def _classify(
             return "RUNTIME_CHILD_STARTED", "RUNNING", None
         return "RUNTIME_CHILD_NOT_ALIVE", "NOT_ALIVE", "child_not_alive"
 
+    if exit_signal is not None:
+        if runtime_cycle_marker:
+            return "RUNTIME_CHILD_SIGNALED_AFTER_CYCLE_MARKER", "SIGNALED", f"signal_{exit_signal}"
+        if truth_marker:
+            return "RUNTIME_CHILD_SIGNALED_AFTER_INITIAL_TRUTH", "SIGNALED", f"signal_{exit_signal}"
+        return "RUNTIME_CHILD_SIGNALED_BEFORE_RUNTIME_TRUTH", "SIGNALED", f"signal_{exit_signal}"
+
     summary_stop_reason = summary.get("stop_reason") if isinstance(summary, Mapping) else None
     reconciliation_clean = summary.get("reconciliation_clean") if isinstance(summary, Mapping) else None
     cycle_completed = runtime_cycle_marker.get("state") == "COMPLETED"
     if exit_code == 0 and cycle_completed and (summary_stop_reason in {None, ""}) and reconciliation_clean is not False:
-        return "RUNTIME_CLEAN_EXIT_AFTER_MAX_CYCLES", "EXITED", "clean_bounded_runtime_exit"
+        return "RUNTIME_CLEAN_EXIT_AFTER_CYCLE", "EXITED", "clean_runtime_exit_after_cycle"
     if runtime_cycle_marker:
         return "RUNTIME_EXITED_BEFORE_DURABLE_READY", "EXITED", "runtime_exited_after_runtime_cycle_marker"
     if truth_marker:
@@ -222,6 +238,18 @@ def _optional_int(value: Any) -> int | None:
         return None
 
 
+def _exit_signal(exit_code: int | None) -> int | None:
+    if exit_code is None:
+        return None
+    # POSIX shells report a signal-terminated child as 128 + signal.
+    if 129 <= exit_code <= 192:
+        return exit_code - 128
+    # Python subprocess-style negative return codes are also accepted in tests.
+    if exit_code < 0:
+        return abs(exit_code)
+    return None
+
+
 def _ensure_utc(value: datetime) -> datetime:
     if value.tzinfo is None:
         return value.replace(tzinfo=UTC)
@@ -254,6 +282,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--runtime-instance-id")
     parser.add_argument("--source-commit")
     parser.add_argument("--python-bin")
+    parser.add_argument("--child-command")
+    parser.add_argument("--parent-pid", type=int)
     args = parser.parse_args(argv)
     payload = build_detached_runtime_child_status(
         event=args.event,
@@ -270,6 +300,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         runtime_instance_id=args.runtime_instance_id,
         source_commit=args.source_commit,
         python_bin=args.python_bin,
+        child_command=args.child_command,
+        parent_pid=args.parent_pid,
     )
     print(json.dumps(payload, sort_keys=True))
     return 0

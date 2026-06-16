@@ -25,10 +25,9 @@ def test_paper_stack_start_uses_canonical_config_without_review_overlay() -> Non
     assert "BLOCKED_FORBIDDEN_REVIEW_OVERLAY" in source
 
 
-def test_paper_stack_start_launches_foreground_runtime_inside_screen() -> None:
+def test_paper_stack_start_launches_runtime_under_detached_parent_monitor() -> None:
     source = START_SCRIPT.read_text(encoding="utf-8")
 
-    assert "screen -dmS" in source
     assert 'runtime_pid="\\$!"' in source
     assert 'wait "\\${runtime_pid}"' in source
     assert "RUNTIME_EXITED_AFTER_INITIAL_TRUTH" in source
@@ -39,11 +38,14 @@ def test_paper_stack_start_launches_foreground_runtime_inside_screen() -> None:
     assert "write_detached_child_status \"exited\"" in source
     assert "write_detached_child_final_status_on_wrapper_exit" in source
     assert "track_b_paper_stack_wrapper_final_status" in source
+    assert "--parent-pid \"\\$\\$\"" in source
+    assert "--child-command \"\\${runtime_child_command}\"" in source
+    assert "runtime_child_command=" in source
     assert "--background" not in source
     assert "run_probationary_paper_soak.sh" in source
 
 
-def test_paper_minimal_start_uses_direct_process_carrier_not_launchctl() -> None:
+def test_paper_minimal_start_uses_launchctl_for_durable_wrapper_parent() -> None:
     source = START_SCRIPT.read_text(encoding="utf-8")
 
     minimal_carrier_block = source[
@@ -54,14 +56,14 @@ def test_paper_minimal_start_uses_direct_process_carrier_not_launchctl() -> None
         )
     ]
 
-    assert "BLOCKED_LAUNCHCTL_DISABLED_FOR_PAPER_MINIMAL_STARTUP" in minimal_carrier_block
-    assert "Controlled PAPER_MINIMAL_STARTUP_V1 restarts use direct screen/nohup" in minimal_carrier_block
-    assert "screen_available" in minimal_carrier_block
+    assert "BLOCKED_LAUNCHCTL_DISABLED_FOR_PAPER_MINIMAL_STARTUP" not in minimal_carrier_block
+    assert "BLOCKED_LAUNCHCTL_UNAVAILABLE" in minimal_carrier_block
+    assert "BLOCKED_SCREEN_DISABLED_FOR_PAPER_MINIMAL_STARTUP" in minimal_carrier_block
+    assert "screen_available" not in minimal_carrier_block
+    assert "launchctl_available" in minimal_carrier_block
     assert "nohup_available" in minimal_carrier_block
+    assert "carrier=\"launchctl\"" in minimal_carrier_block
     assert "carrier=\"nohup\"" in minimal_carrier_block
-    assert minimal_carrier_block.index("elif nohup_available; then") < minimal_carrier_block.index(
-        "elif screen_available; then"
-    )
     assert "launchctl submit" not in minimal_carrier_block
 
     assert "nohup /bin/bash" in source
@@ -172,8 +174,10 @@ def test_paper_stack_startup_artifact_carries_launch_exit_status_when_available(
     assert '"runtime_launch_status": launch_status or None' in writer_block
     assert '"runtime_detached_child_status": detached_child_status or None' in writer_block
     assert '"runtime_exit_status"' in writer_block
-    assert "exit_source = detached_child_status or launch_status" in writer_block
+    assert "exit_source = detached_child_status" in writer_block
+    assert "exit_source = detached_child_status or launch_status" not in writer_block
     assert 'exit_source.get("child_exit_code")' in writer_block
+    assert 'exit_source.get("child_exit_signal")' in writer_block
     assert 'exit_source.get("termination_reason")' in writer_block
     assert source.index('rm -f "${LAUNCH_STATUS_FILE}"') < source.index('if [[ "${carrier}" == "screen" ]]; then')
     assert source.index('rm -f "${PID_FILE}" "${PID_METADATA_FILE}"') < source.index(

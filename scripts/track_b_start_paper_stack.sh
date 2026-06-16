@@ -570,7 +570,7 @@ detached_child_status = (
     if os.environ.get("MGC_TRACK_B_DETACHED_CHILD_STATUS_FILE")
     else {}
 )
-exit_source = detached_child_status or launch_status
+exit_source = detached_child_status
 
 payload = {
     "schema_version": "track_b_paper_stack_startup_v1",
@@ -591,6 +591,7 @@ payload = {
     "runtime_exit_status": {
         "classification": exit_source.get("classification"),
         "child_exit_code": exit_source.get("child_exit_code"),
+        "child_exit_signal": exit_source.get("child_exit_signal"),
         "child_final_status": exit_source.get("child_final_status"),
         "final_pid_alive": (
             exit_source.get("final_pid_alive")
@@ -2052,6 +2053,7 @@ export MGC_TRACK_B_PAPER_MINIMAL_STARTUP_CLASSIFICATION="${STARTUP_PREFLIGHT_REF
 mkdir -p "${RUNTIME_DIR}"
 runtime_pid=""
 runtime_child_started_at=""
+runtime_child_command=""
 detached_child_final_status_written=0
 write_detached_child_status() {
   local event="\$1"
@@ -2074,7 +2076,11 @@ write_detached_child_status() {
     --runtime-instance-id "${runtime_instance_id}"
     --source-commit "${source_commit}"
     --python-bin "${PYTHON_BIN}"
+    --parent-pid "\$\$"
   )
+  if [[ -n "\${runtime_child_command:-}" ]]; then
+    args+=(--child-command "\${runtime_child_command}")
+  fi
   if [[ -n "\${exit_code}" ]]; then
     args+=(--exit-code "\${exit_code}")
   fi
@@ -2133,6 +2139,7 @@ then
 fi
 printf '%s\n' "track_b_paper_stack_wrapper_start generated_at=\$(date -u +%Y-%m-%dT%H:%M:%SZ) repo_root=${REPO_ROOT} config_stack=${config_stack}" >> "${RUNTIME_LOG}"
 runtime_child_started_at="\$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+runtime_child_command="bash ${SCRIPT_DIR}/run_probationary_paper_soak.sh --pid-file ${PID_FILE} --log-file ${RUNTIME_LOG} --config-paths-file ${CONFIG_PATHS_FILE} --launch-status-file ${LAUNCH_STATUS_FILE} --schwab-config ${REPO_ROOT}/config/schwab.local.json"
 bash "${SCRIPT_DIR}/run_probationary_paper_soak.sh" \
   --pid-file "${PID_FILE}" \
   --log-file "${RUNTIME_LOG}" \
@@ -2267,8 +2274,11 @@ mv "${wrapper_tmp}" "${WRAPPER_PATH}"
 carrier="screen"
 if paper_minimal_startup_enabled; then
   if [[ "${PREFERRED_CARRIER}" == "launchctl" ]]; then
-    write_startup_artifact "BLOCKED_LAUNCHCTL_DISABLED_FOR_PAPER_MINIMAL_STARTUP" "Controlled PAPER_MINIMAL_STARTUP_V1 restarts use direct screen/nohup process ownership, not launchctl." ""
-    exit 1
+    if ! launchctl_available; then
+      write_startup_artifact "BLOCKED_LAUNCHCTL_UNAVAILABLE" "launchctl carrier was explicitly requested but launchctl is unavailable." ""
+      exit 1
+    fi
+    carrier="launchctl"
   elif [[ "${PREFERRED_CARRIER}" == "nohup" ]]; then
     if ! nohup_available; then
       write_startup_artifact "BLOCKED_NOHUP_UNAVAILABLE" "nohup carrier was explicitly requested but nohup is unavailable." ""
@@ -2276,17 +2286,14 @@ if paper_minimal_startup_enabled; then
     fi
     carrier="nohup"
   elif [[ "${PREFERRED_CARRIER}" == "screen" ]]; then
-    if ! screen_available; then
-      write_startup_artifact "BLOCKED_SCREEN_UNAVAILABLE" "screen carrier was explicitly requested but detached screen sessions are not usable." ""
-      exit 1
-    fi
-    carrier="screen"
+    write_startup_artifact "BLOCKED_SCREEN_DISABLED_FOR_PAPER_MINIMAL_STARTUP" "Controlled PAPER_MINIMAL_STARTUP_V1 restarts require the detached wrapper to be the sole runtime supervisor; screen is not authoritative enough for child-exit capture." ""
+    exit 1
+  elif launchctl_available; then
+    carrier="launchctl"
   elif nohup_available; then
     carrier="nohup"
-  elif screen_available; then
-    carrier="screen"
   else
-    write_startup_artifact "BLOCKED_NO_DIRECT_CARRIER" "Neither screen nor nohup is available for direct controlled PAPER runtime ownership." ""
+    write_startup_artifact "BLOCKED_NO_DIRECT_CARRIER" "Neither launchctl nor nohup is available for controlled PAPER runtime ownership by the detached wrapper supervisor." ""
     exit 1
   fi
 elif [[ "${PREFERRED_CARRIER}" == "screen" ]]; then
@@ -2413,8 +2420,8 @@ if paper_minimal_startup_enabled; then
         update_detached_child_monitor "${pid}" >/dev/null || true
         child_exit_classification="$(detached_child_exit_classification "${pid}" 2>/dev/null || true)"
       fi
-      if [[ "${child_exit_classification}" == "RUNTIME_CLEAN_EXIT_AFTER_MAX_CYCLES" ]]; then
-        write_startup_artifact "RUNTIME_CLEAN_EXIT_AFTER_MAX_CYCLES" "Runtime child exited cleanly after a bounded cycle; this is not a durable service-ready state." "${pid}"
+      if [[ "${child_exit_classification}" == "RUNTIME_CLEAN_EXIT_AFTER_CYCLE" || "${child_exit_classification}" == "RUNTIME_CLEAN_EXIT_AFTER_MAX_CYCLES" ]]; then
+        write_startup_artifact "${child_exit_classification}" "Runtime child exited cleanly after a cycle; this is not a durable service-ready state." "${pid}"
         exit 1
       fi
       if [[ -n "${child_exit_classification}" ]]; then
@@ -2429,8 +2436,8 @@ if paper_minimal_startup_enabled; then
         update_detached_child_monitor "${observed_runtime_pid}" >/dev/null || true
         child_exit_classification="$(detached_child_exit_classification "${observed_runtime_pid}" 2>/dev/null || true)"
       fi
-      if [[ "${child_exit_classification}" == "RUNTIME_CLEAN_EXIT_AFTER_MAX_CYCLES" ]]; then
-        write_startup_artifact "RUNTIME_CLEAN_EXIT_AFTER_MAX_CYCLES" "Runtime child exited cleanly after a bounded cycle; this is not a durable service-ready state." "${observed_runtime_pid}"
+      if [[ "${child_exit_classification}" == "RUNTIME_CLEAN_EXIT_AFTER_CYCLE" || "${child_exit_classification}" == "RUNTIME_CLEAN_EXIT_AFTER_MAX_CYCLES" ]]; then
+        write_startup_artifact "${child_exit_classification}" "Runtime child exited cleanly after a cycle; this is not a durable service-ready state." "${observed_runtime_pid}"
         exit 1
       fi
       if [[ -n "${child_exit_classification}" ]]; then
