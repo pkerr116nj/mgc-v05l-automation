@@ -31,9 +31,21 @@ def _report(
         "expiry": expiry,
         "con_id": con_id,
         "local_symbol": local_symbol,
-        "exchange": "COMEX" if symbol in {"GC", "MGC"} else "CME",
+        "exchange": "COMEX" if symbol in {"GC", "MGC"} else "CBOT" if symbol in {"ZT", "ZF", "ZN", "ZB"} else "CME",
         "currency": "USD",
-        "multiplier": "10" if symbol == "MGC" else "100" if symbol == "GC" else "2" if symbol == "MNQ" else "5",
+        "multiplier": (
+            "10"
+            if symbol == "MGC"
+            else "100"
+            if symbol == "GC"
+            else "2000"
+            if symbol == "ZT"
+            else "1000"
+            if symbol in {"ZF", "ZN", "ZB"}
+            else "2"
+            if symbol == "MNQ"
+            else "5"
+        ),
         "updated_at": updated_at,
     }
     return {
@@ -58,7 +70,7 @@ def _target(
         "expiry": expiry,
         "con_id": con_id,
         "local_symbol": local_symbol,
-        "exchange": "COMEX" if symbol in {"GC", "MGC"} else "CME",
+        "exchange": "COMEX" if symbol in {"GC", "MGC"} else "CBOT" if symbol in {"ZT", "ZF", "ZN", "ZB"} else "CME",
         "currency": "USD",
     }
 
@@ -340,6 +352,39 @@ def test_existing_lifecycle_exit_uses_original_contract_even_if_details_missing(
     assert result["classification"] == CONTRACT_EXIT_OR_MANAGEMENT_ALLOWED
     assert result["submit_allowed"] is True
     assert result["lifecycle_mutation_allowed"] is False
+
+
+def test_rates_new_entry_allows_fresh_exact_contract_details() -> None:
+    result = evaluate_futures_contract_pre_submit(
+        FuturesContractResolverInput(
+            strategy_id="zb_us_active_participation_long",
+            symbol="ZB",
+            contract_month="202609",
+            action="BUY",
+            intent_type="BUY_TO_OPEN",
+            selected_target=_target(
+                symbol="ZB",
+                contract_month="202609",
+                expiry="20260921",
+                con_id=840227357,
+                local_symbol="ZBU6",
+            ),
+            qualified_contract_report=_report(
+                symbol="ZB",
+                expiry="20260921",
+                con_id=840227357,
+                local_symbol="ZBU6",
+                updated_at="2026-05-29T11:59:00+00:00",
+            ),
+            now=NOW,
+        )
+    )
+
+    assert result["classification"] == CONTRACT_ALLOWED
+    assert result["submit_allowed"] is True
+    assert result["selected_contract"]["local_symbol"] == "ZBU6"
+    assert result["selected_contract"]["con_id"] == 840227357
+    assert result["product_family"] == "RATES"
 
 
 def test_new_short_entry_resolves_independently_from_exit_policy() -> None:

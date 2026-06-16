@@ -99,6 +99,23 @@ def test_phase1_rates_targets_are_direct_cbot_execution_targets() -> None:
         assert target["contract_family"] == contract_family
 
 
+def test_phase1_rates_targets_use_validated_september_contract_identity() -> None:
+    expected = {
+        "ZT": ("ZTU6", "20260930", 842590391),
+        "ZF": ("ZFU6", "20260930", 842590380),
+        "ZN": ("ZNU6", "20260921", 840227361),
+        "ZB": ("ZBU6", "20260921", 840227357),
+    }
+    for symbol, (local_symbol, expiry, con_id) in expected.items():
+        target = phase1_execution_target_for_source(symbol, now=date(2026, 6, 16))
+
+        assert target["symbol"] == symbol
+        assert target["contract_month"] == "202609"
+        assert target["local_symbol"] == local_symbol
+        assert target["expiry"] == expiry
+        assert target["con_id"] == con_id
+
+
 def test_phase1_platinum_target_is_direct_nymex_execution_target() -> None:
     assert "PL" in supported_phase1_source_instruments()
 

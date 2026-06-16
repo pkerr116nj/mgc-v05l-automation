@@ -18,6 +18,10 @@ from mgc_v05l.execution_core.track_b_contract_identity import normalize_track_b_
         ("ES", "ESU6", "20260918", 649180671, "ES-202609"),
         ("MNQ", "MNQU6", "20260918", 793356225, "MNQ-202609"),
         ("MES", "MESU6", "20260918", 793356217, "MES-202609"),
+        ("ZT", "ZTU6", "20260930", 842590391, "ZT-202609"),
+        ("ZF", "ZFU6", "20260930", 842590380, "ZF-202609"),
+        ("ZN", "ZNU6", "20260921", 840227361, "ZN-202609"),
+        ("ZB", "ZBU6", "20260921", 840227357, "ZB-202609"),
     ),
 )
 def test_validated_track_b_futures_normalize_from_broker_local_symbol(
@@ -64,15 +68,14 @@ def test_normalizer_fails_closed_on_identity_contradiction() -> None:
     assert "con_id_mismatch" in identity["blockers"]
 
 
-@pytest.mark.parametrize("symbol", ("ZT", "ZF", "ZN", "ZB"))
-def test_rates_contract_identity_fails_closed_until_ibkr_qualification_is_validated(symbol: str) -> None:
+def test_unvalidated_rates_contract_identity_fails_closed() -> None:
     identity = normalize_track_b_contract_identity(
         {
             "account_id": "DUM882026",
             "security_type": "FUT",
-            "symbol": symbol,
-            "local_symbol": f"{symbol}U6",
-            "expiry": "20260930",
+            "symbol": "ZT",
+            "local_symbol": "ZTZ6",
+            "expiry": "20261231",
             "quantity": "1.0",
         }
     )

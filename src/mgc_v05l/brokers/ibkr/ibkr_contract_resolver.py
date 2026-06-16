@@ -104,6 +104,38 @@ def _default_futures_rules() -> dict[str, IbkrFuturesContractRule]:
             allowed_exchanges=("CME", "GLOBEX"),
         ),
         IbkrFuturesContractRule(
+            internal_symbol="ZT",
+            broker_symbol_root="ZT",
+            exchange="CBOT",
+            multiplier="2000",
+            trading_class="ZT",
+            allowed_exchanges=("CBOT", "ECBOT"),
+        ),
+        IbkrFuturesContractRule(
+            internal_symbol="ZF",
+            broker_symbol_root="ZF",
+            exchange="CBOT",
+            multiplier="1000",
+            trading_class="ZF",
+            allowed_exchanges=("CBOT", "ECBOT"),
+        ),
+        IbkrFuturesContractRule(
+            internal_symbol="ZN",
+            broker_symbol_root="ZN",
+            exchange="CBOT",
+            multiplier="1000",
+            trading_class="ZN",
+            allowed_exchanges=("CBOT", "ECBOT"),
+        ),
+        IbkrFuturesContractRule(
+            internal_symbol="ZB",
+            broker_symbol_root="ZB",
+            exchange="CBOT",
+            multiplier="1000",
+            trading_class="ZB",
+            allowed_exchanges=("CBOT", "ECBOT"),
+        ),
+        IbkrFuturesContractRule(
             internal_symbol="CL",
             broker_symbol_root="CL",
             exchange="NYMEX",
@@ -263,4 +295,3 @@ class IbkrContractResolver:
             trading_class=rule.trading_class,
             metadata=metadata,
         )
-

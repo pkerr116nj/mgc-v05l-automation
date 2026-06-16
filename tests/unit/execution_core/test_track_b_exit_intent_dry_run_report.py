@@ -221,6 +221,10 @@ def test_complete_fresh_broker_snapshot_blocks_stale_managed_close_candidate(tmp
         ("NQ", "NQU6", "20260918", 770561204, "-1", "SHORT", "BUY"),
         ("MES", "MESU6", "20260918", 793356217, "-1", "SHORT", "BUY"),
         ("MNQ", "MNQU6", "20260918", 793356225, "1", "LONG", "SELL"),
+        ("ZT", "ZTU6", "20260930", 842590391, "-1", "SHORT", "BUY"),
+        ("ZF", "ZFU6", "20260930", 842590380, "-1", "SHORT", "BUY"),
+        ("ZN", "ZNU6", "20260921", 840227361, "-1", "SHORT", "BUY"),
+        ("ZB", "ZBU6", "20260921", 840227357, "-1", "SHORT", "BUY"),
     ),
 )
 def test_fresh_broker_snapshot_local_symbol_expiry_without_con_id_normalizes_through_shared_identity(
@@ -308,11 +312,11 @@ def test_fresh_broker_snapshot_unresolved_identity_blocks_instead_of_disappearin
         "positions": [
             {
                 "account_id": "DUM882026",
-                "local_symbol": "ZTU6",
+                "local_symbol": "ZQU6",
                 "expiry": "20260930",
                 "quantity": "-1",
                 "security_type": "FUT",
-                "symbol": "ZT",
+                "symbol": "ZQ",
             }
         ],
         "live_money_eligible": False,

@@ -70,6 +70,34 @@ def test_ibkr_contract_resolver_uses_explicit_currency_multiplier_and_broker_roo
     assert qualified.multiplier == "125000"
 
 
+@pytest.mark.parametrize(
+    ("symbol", "local_symbol", "multiplier"),
+    (
+        ("ZT", "ZTU26", "2000"),
+        ("ZF", "ZFU26", "1000"),
+        ("ZN", "ZNU26", "1000"),
+        ("ZB", "ZBU26", "1000"),
+    ),
+)
+def test_ibkr_contract_resolver_supports_cbot_rates_futures(
+    symbol: str,
+    local_symbol: str,
+    multiplier: str,
+) -> None:
+    resolver = IbkrContractResolver()
+
+    qualified = resolver.qualify_futures(symbol=symbol, expiry="202609")
+
+    assert qualified.internal_symbol == symbol
+    assert qualified.broker_symbol == symbol
+    assert qualified.exchange == "CBOT"
+    assert qualified.currency == "USD"
+    assert qualified.expiry == "202609"
+    assert qualified.local_symbol == local_symbol
+    assert qualified.multiplier == multiplier
+    assert qualified.trading_class == symbol
+
+
 def test_ibkr_contract_resolver_requires_calendar_month_expiry() -> None:
     resolver = IbkrContractResolver()
 
