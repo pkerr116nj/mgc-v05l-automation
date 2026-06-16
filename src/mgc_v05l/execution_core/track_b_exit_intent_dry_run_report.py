@@ -74,13 +74,13 @@ def build_track_b_exit_intent_dry_run_report(
     actual_now = require_aware_datetime(now or datetime.now(UTC), "now")
     inputs = _inputs(config=config, overrides=input_overrides or {})
     source_refs = _source_artifact_refs(config=config, inputs=inputs)
-    broker_positions = [
+    managed_broker_positions = _broker_positions_from_managed_positions(inputs["managed_positions"])
+    reconciliation_broker_positions = [
         row
         for row in (_mapping(item) for item in _list(inputs["reconciliation"].get("track_b_broker_positions")))
         if abs(_decimal(row.get("quantity"))) > Decimal("0")
     ]
-    if not broker_positions and "track_b_broker_positions" not in inputs["reconciliation"]:
-        broker_positions = _broker_positions_from_managed_positions(inputs["managed_positions"])
+    broker_positions = managed_broker_positions or reconciliation_broker_positions
     candidates = [
         _candidate_report(
             broker_position=position,
@@ -137,6 +137,8 @@ def build_track_b_exit_intent_dry_run_report(
 def _broker_positions_from_managed_positions(managed_positions: Mapping[str, Any]) -> list[dict[str, Any]]:
     positions: list[dict[str, Any]] = []
     for row in (_mapping(item) for item in _list(managed_positions.get("managed_positions"))):
+        if not _managed_position_is_current(row):
+            continue
         broker = _mapping(row.get("broker_position"))
         local_symbol = _text(broker.get("local_symbol") or row.get("local_symbol") or row.get("contract"))
         con_id = _int(broker.get("con_id") or row.get("con_id"))
@@ -160,6 +162,15 @@ def _broker_positions_from_managed_positions(managed_positions: Mapping[str, Any
             }
         )
     return positions
+
+
+def _managed_position_is_current(row: Mapping[str, Any]) -> bool:
+    classification = _text(row.get("classification")).upper()
+    if classification not in {"OPEN_MANAGED", "OPEN_MANAGED_MATCHED", "OPEN_MANAGED_EXIT_DUE"} and row.get("exit_due") is not True:
+        return False
+    if row.get("projection_authority_owner_confirmed") is False:
+        return False
+    return True
 
 
 def run_track_b_exit_intent_dry_run_report(

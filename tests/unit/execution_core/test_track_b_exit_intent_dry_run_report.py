@@ -107,12 +107,78 @@ def test_no_broker_positions_reports_no_candidates(tmp_path: Path) -> None:
     inputs = _inputs()
     inputs["reconciliation"]["track_b_broker_positions"] = []
     inputs["reconciliation"]["track_b_broker_position_count"] = 0
+    inputs["managed_positions"]["managed_positions"] = []
 
     payload = _build(tmp_path, inputs)
 
     assert payload["classification"] == NO_BROKER_POSITIONS
     assert payload["candidate_count"] == 0
     assert payload["candidate_exit_intents"] == []
+
+
+def test_current_managed_positions_outrank_stale_reconciliation_positions(tmp_path: Path) -> None:
+    inputs = _inputs()
+    inputs["reconciliation"]["classification"] = "TRACK_B_PAPER_BROKER_RECONCILIATION_BLOCKED"
+    inputs["reconciliation"]["broker_reconciled"] = False
+    inputs["reconciliation"]["track_b_broker_positions"] = [
+        {
+            "account_id": "DUM882026",
+            "local_symbol": "MGCQ6",
+            "con_id": 732156883,
+            "quantity": "-1",
+            "symbol": "MGC",
+            "track_b_root": "MGC",
+        }
+    ]
+    inputs["managed_positions"]["managed_positions"] = [
+        {
+            "classification": "OPEN_MANAGED_EXIT_DUE",
+            "account_id": "DUM882026",
+            "local_symbol": "ESU6",
+            "con_id": 649180671,
+            "quantity": "1",
+            "side": "LONG",
+            "broker_position": {
+                "account_id": "DUM882026",
+                "local_symbol": "ESU6",
+                "con_id": 649180671,
+                "quantity": "1.0",
+                "symbol": "ES",
+                "track_b_root": "ES",
+            },
+            "projection_authority_owner_confirmed": True,
+            "lifecycle_id": "life-es",
+            "trade_id": "trade-es",
+            "strategy_id": "es_strategy",
+            "lane_id": "es_lane",
+            "exit_due": True,
+        }
+    ]
+    inputs["managed_orders"]["managed_orders"] = [
+        {
+            "classification": "POSITION_WITHOUT_CLOSE_ORDER",
+            "account_id": "DUM882026",
+            "local_symbol": "ESU6",
+            "con_id": 649180671,
+            "quantity": "1",
+            "lifecycle_id": "life-es",
+            "trade_id": "trade-es",
+            "strategy_id": "es_strategy",
+            "lane_id": "es_lane",
+            "required_close_action": "SELL",
+            "required_close_quantity": "1",
+            "working": False,
+        }
+    ]
+
+    payload = _build(tmp_path, inputs)
+
+    assert payload["classification"] == EXIT_INTENT_DRY_RUN_READY
+    assert payload["candidate_count"] == 1
+    candidate = payload["candidate_exit_intents"][0]
+    assert candidate["local_symbol"] == "ESU6"
+    assert candidate["candidate_close_action"] == "SELL"
+    assert candidate["exit_due"] is True
 
 
 def test_run_can_write_report_without_broker_or_service_side_effects(tmp_path: Path) -> None:
