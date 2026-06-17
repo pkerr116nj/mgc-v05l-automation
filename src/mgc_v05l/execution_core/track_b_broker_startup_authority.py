@@ -7,7 +7,7 @@ from decimal import Decimal, InvalidOperation
 from typing import Any, Mapping, Sequence
 
 
-TRACK_B_FUTURES_ROOTS = frozenset({"MES", "MNQ", "MGC", "GC", "NQ", "ES"})
+TRACK_B_FUTURES_ROOTS = frozenset({"MES", "MNQ", "MGC", "GC", "NQ", "ES", "ZT", "ZF", "ZN", "ZB"})
 FRESH_COMPLETE_CLEAN_BROKER_TRUTH = "FRESH_COMPLETE_CLEAN_BROKER_TRUTH"
 FRESH_COMPLETE_MANAGED_BROKER_TRUTH = "FRESH_COMPLETE_MANAGED_BROKER_TRUTH"
 BROKER_TRUTH_NOT_STARTUP_CLEAN = "BROKER_TRUTH_NOT_STARTUP_CLEAN"
@@ -286,7 +286,7 @@ def _managed_position_matches_broker_position(
 
     if not _managed_position_is_current_open(managed_position):
         return False
-    if managed_position.get("projection_authority_owner_confirmed") is not True:
+    if managed_position.get("projection_authority_owner_confirmed") is False:
         return False
     if not _text(managed_position.get("lifecycle_id") or lifecycle.get("lifecycle_id")):
         return False

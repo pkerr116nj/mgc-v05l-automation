@@ -167,6 +167,90 @@ def test_managed_mnq_position_with_unrelated_equity_order_allows_startup_authori
     assert authority.known_managed_position_count == 1
 
 
+def test_open_managed_matched_position_without_optional_owner_flag_allows_startup_authority() -> None:
+    positions = _positions()
+    positions["positions"][0].update({"quantity": "-1", "con_id": 770561204, "symbol": "NQ", "local_symbol": "NQU6"})
+
+    authority = classify_fresh_complete_clean_broker_truth(
+        broker_truth_status=_status(),
+        positions_snapshot=positions,
+        open_orders_snapshot=_orders(),
+        managed_positions={
+            "managed_positions": [
+                {
+                    "account_id": "DUM882026",
+                    "symbol": "NQ",
+                    "local_symbol": "NQU6",
+                    "con_id": 770561204,
+                    "classification": "OPEN_MANAGED_MATCHED",
+                    "broker_qty_match": True,
+                    "signed_broker_qty": "-1",
+                    "signed_lifecycle_qty": "-1",
+                    "lifecycle_id": "lc-nq",
+                    "trade_id": "trade-nq",
+                    "managed_exit_policy_id": "GLOBEX_ACTIVE_EVIDENCE_TIMEBOX_15M_EXIT_V1",
+                }
+            ]
+        },
+        allow_known_managed_positions=True,
+        expected_account_id="DUM882026",
+    )
+
+    assert authority.broker_truth_clean is True
+    assert authority.classification == FRESH_COMPLETE_MANAGED_BROKER_TRUTH
+    assert authority.known_managed_position_count == 1
+    assert authority.blockers == ()
+
+
+def test_explicit_unconfirmed_owner_still_blocks_startup_authority() -> None:
+    positions = _positions()
+    positions["positions"][0].update({"quantity": "-1", "con_id": 770561204, "symbol": "NQ", "local_symbol": "NQU6"})
+
+    authority = classify_fresh_complete_clean_broker_truth(
+        broker_truth_status=_status(),
+        positions_snapshot=positions,
+        open_orders_snapshot=_orders(),
+        managed_positions={
+            "managed_positions": [
+                {
+                    "account_id": "DUM882026",
+                    "symbol": "NQ",
+                    "local_symbol": "NQU6",
+                    "con_id": 770561204,
+                    "classification": "OPEN_MANAGED_MATCHED",
+                    "projection_authority_owner_confirmed": False,
+                    "signed_broker_qty": "-1",
+                    "lifecycle_id": "lc-nq",
+                    "trade_id": "trade-nq",
+                    "managed_exit_policy_id": "GLOBEX_ACTIVE_EVIDENCE_TIMEBOX_15M_EXIT_V1",
+                }
+            ]
+        },
+        allow_known_managed_positions=True,
+        expected_account_id="DUM882026",
+    )
+
+    assert authority.classification == BROKER_TRUTH_NOT_STARTUP_CLEAN
+    assert "track_b_futures_positions_unmanaged_or_ambiguous" in authority.blockers
+
+
+def test_rates_roots_are_track_b_futures_for_startup_authority() -> None:
+    positions = _positions()
+    positions["positions"][0].update({"quantity": "1", "con_id": 999001, "symbol": "ZN", "local_symbol": "ZNU6"})
+
+    authority = classify_fresh_complete_clean_broker_truth(
+        broker_truth_status=_status(),
+        positions_snapshot=positions,
+        open_orders_snapshot=_orders(),
+        managed_positions={"managed_positions": []},
+        allow_known_managed_positions=True,
+        expected_account_id="DUM882026",
+    )
+
+    assert authority.classification == BROKER_TRUTH_NOT_STARTUP_CLEAN
+    assert "track_b_futures_positions_unmanaged_or_ambiguous" in authority.blockers
+
+
 def test_conflicting_same_contract_futures_order_blocks_startup_authority() -> None:
     positions = _positions()
     positions["positions"][0]["quantity"] = "1"
