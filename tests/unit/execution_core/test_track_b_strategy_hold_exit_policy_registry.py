@@ -96,6 +96,26 @@ def test_batch1_active_evidence_hold_exit_policies_are_read_only() -> None:
             "es_london_late_active_participation_short",
             "LONDON_LATE_ACTIVE_EVIDENCE_15M_TIMEBOX_HOLD_V1",
         ),
+        (
+            "PAPER_ACTIVE_EVIDENCE_ZT_US_PARTICIPATION_LONG_V1",
+            "zt_us_active_participation_long",
+            "US_ACTIVE_EVIDENCE_60M_TIMEBOX_HOLD_V1",
+        ),
+        (
+            "PAPER_ACTIVE_EVIDENCE_ZF_GLOBEX_PARTICIPATION_SHORT_V1",
+            "zf_globex_active_participation_short",
+            "GLOBEX_ACTIVE_EVIDENCE_15M_TIMEBOX_HOLD_V1",
+        ),
+        (
+            "PAPER_ACTIVE_EVIDENCE_ZN_LONDON_OPEN_PARTICIPATION_LONG_V1",
+            "zn_london_open_active_participation_long",
+            "LONDON_OPEN_ACTIVE_EVIDENCE_15M_TIMEBOX_HOLD_V1",
+        ),
+        (
+            "PAPER_ACTIVE_EVIDENCE_ZB_LONDON_LATE_PARTICIPATION_SHORT_V1",
+            "zb_london_late_active_participation_short",
+            "LONDON_LATE_ACTIVE_EVIDENCE_15M_TIMEBOX_HOLD_V1",
+        ),
     ):
         policy = strategy_hold_exit_policy_for(strategy_id)
 

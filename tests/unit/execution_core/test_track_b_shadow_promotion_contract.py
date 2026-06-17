@@ -258,6 +258,57 @@ def test_london_late_mes_short_active_evidence_cohort_exports_guarded_row() -> N
     assert row["unguarded_broker_mutation_allowed"] is False
 
 
+def test_batch2_rates_active_evidence_cohort_exports_validated_contract_rows() -> None:
+    enabled = [
+        "PAPER_ACTIVE_EVIDENCE_ZT_US_PARTICIPATION_LONG_V1",
+        "PAPER_ACTIVE_EVIDENCE_ZF_GLOBEX_PARTICIPATION_SHORT_V1",
+        "PAPER_ACTIVE_EVIDENCE_ZN_LONDON_OPEN_PARTICIPATION_LONG_V1",
+        "PAPER_ACTIVE_EVIDENCE_ZB_LONDON_LATE_PARTICIPATION_SHORT_V1",
+    ]
+    report = build_shadow_promotion_contract_report({"enabled_strategy_ids": enabled})
+    rows = promoted_probationary_paper_lane_rows({"enabled_strategy_ids": enabled})
+
+    expected = {
+        "PAPER_ACTIVE_EVIDENCE_ZT_US_PARTICIPATION_LONG_V1": ("zt_us_active_participation_long", "ZT", "ZTU6", 842590391),
+        "PAPER_ACTIVE_EVIDENCE_ZF_GLOBEX_PARTICIPATION_SHORT_V1": (
+            "zf_globex_active_participation_short",
+            "ZF",
+            "ZFU6",
+            842590380,
+        ),
+        "PAPER_ACTIVE_EVIDENCE_ZN_LONDON_OPEN_PARTICIPATION_LONG_V1": (
+            "zn_london_open_active_participation_long",
+            "ZN",
+            "ZNU6",
+            840227361,
+        ),
+        "PAPER_ACTIVE_EVIDENCE_ZB_LONDON_LATE_PARTICIPATION_SHORT_V1": (
+            "zb_london_late_active_participation_short",
+            "ZB",
+            "ZBU6",
+            840227357,
+        ),
+    }
+
+    by_strategy = {row["standalone_strategy_id"]: row for row in rows}
+    candidates = {row["promoted_strategy_id"]: row for row in report["promotion_candidates"]}
+    assert set(by_strategy) == set(enabled)
+    for strategy_id, (lane_id, symbol, local_symbol, con_id) in expected.items():
+        row = by_strategy[strategy_id]
+        candidate = candidates[strategy_id]
+        assert row["lane_id"] == lane_id
+        assert row["symbol"] == symbol
+        assert row["local_symbol"] == local_symbol
+        assert row["con_id"] == con_id
+        assert row["conflict_group"] == "rates_treasury_active_evidence"
+        assert candidate["evidence_summary"]["activation_batch"] == "PAPER_NOISEMAKER_CHAOS_BATCH_2"
+        assert row["max_position_quantity"] == 1
+        assert row["live_money_eligible"] is False
+        assert row["paper_proof_invoked"] is False
+        assert row["broad_cancel_flatten_allowed"] is False
+        assert row["unguarded_broker_mutation_allowed"] is False
+
+
 def test_promotion_contract_reports_remaining_shadow_only_exception_groups() -> None:
     report = build_shadow_promotion_contract_report({"enabled_strategy_ids": [ASIAN_DRIFT_LATE_JOIN_PROMOTED_ID]})
 

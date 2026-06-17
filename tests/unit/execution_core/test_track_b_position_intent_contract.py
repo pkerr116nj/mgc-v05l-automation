@@ -141,6 +141,34 @@ def test_batch1_active_evidence_position_intents_use_validated_contracts() -> No
             "20260918",
             "ES-202609",
         ),
+        "PAPER_ACTIVE_EVIDENCE_ZT_US_PARTICIPATION_LONG_V1": (
+            "ZT",
+            "ZTU6",
+            842590391,
+            "20260930",
+            "ZT-202609",
+        ),
+        "PAPER_ACTIVE_EVIDENCE_ZF_GLOBEX_PARTICIPATION_SHORT_V1": (
+            "ZF",
+            "ZFU6",
+            842590380,
+            "20260930",
+            "ZF-202609",
+        ),
+        "PAPER_ACTIVE_EVIDENCE_ZN_LONDON_OPEN_PARTICIPATION_LONG_V1": (
+            "ZN",
+            "ZNU6",
+            840227361,
+            "20260921",
+            "ZN-202609",
+        ),
+        "PAPER_ACTIVE_EVIDENCE_ZB_LONDON_LATE_PARTICIPATION_SHORT_V1": (
+            "ZB",
+            "ZBU6",
+            840227357,
+            "20260921",
+            "ZB-202609",
+        ),
     }
 
     for strategy_id, (symbol, local_symbol, con_id, expiry, contract_key) in expected.items():

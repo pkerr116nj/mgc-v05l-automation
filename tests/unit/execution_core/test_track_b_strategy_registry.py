@@ -454,7 +454,7 @@ def test_london_late_mnq_short_active_evidence_registry_metadata_is_valid() -> N
 
 
 def test_batch1_active_evidence_registry_metadata_is_valid() -> None:
-    for symbol in ("MGC", "GC", "NQ", "ES"):
+    for symbol in ("MGC", "GC", "NQ", "ES", "ZT", "ZF", "ZN", "ZB"):
         for session, direction, policy_id in (
             ("US", "LONG", "US_ACTIVE_EVIDENCE_TIMEBOX_60M_EXIT_V1"),
             ("LONDON_LATE", "SHORT", "GLOBEX_ACTIVE_EVIDENCE_TIMEBOX_15M_EXIT_V1"),

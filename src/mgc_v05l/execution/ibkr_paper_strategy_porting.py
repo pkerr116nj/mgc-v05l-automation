@@ -90,6 +90,54 @@ _BATCH1_ACTIVE_EVIDENCE_CONTRACTS: dict[str, dict[str, Any]] = {
         "min_tick": "0.25",
         "trading_class": "ES",
     },
+    "ZT": {
+        "symbol": "ZT",
+        "contract_month": "202609",
+        "expiry": "20260930",
+        "con_id": 842590391,
+        "local_symbol": "ZTU6",
+        "exchange": "CBOT",
+        "currency": "USD",
+        "multiplier": "2000",
+        "min_tick": "0.00390625",
+        "trading_class": "ZT",
+    },
+    "ZF": {
+        "symbol": "ZF",
+        "contract_month": "202609",
+        "expiry": "20260930",
+        "con_id": 842590380,
+        "local_symbol": "ZFU6",
+        "exchange": "CBOT",
+        "currency": "USD",
+        "multiplier": "1000",
+        "min_tick": "0.0078125",
+        "trading_class": "ZF",
+    },
+    "ZN": {
+        "symbol": "ZN",
+        "contract_month": "202609",
+        "expiry": "20260921",
+        "con_id": 840227361,
+        "local_symbol": "ZNU6",
+        "exchange": "CBOT",
+        "currency": "USD",
+        "multiplier": "1000",
+        "min_tick": "0.015625",
+        "trading_class": "ZN",
+    },
+    "ZB": {
+        "symbol": "ZB",
+        "contract_month": "202609",
+        "expiry": "20260921",
+        "con_id": 840227357,
+        "local_symbol": "ZBU6",
+        "exchange": "CBOT",
+        "currency": "USD",
+        "multiplier": "1000",
+        "min_tick": "0.03125",
+        "trading_class": "ZB",
+    },
 }
 _GC_PHASE1_SUBMIT_LANE_IDS = (
     *_active_evidence_lane_ids("gc"),
@@ -185,6 +233,10 @@ _MES_PHASE1_SUBMIT_LANE_IDS = (
     "mes_1x_ny_early_core__us_midday_long",
     "mes_1x_ny_early_core__us_midday_short_breakdown",
 )
+_ZT_PHASE1_SUBMIT_LANE_IDS = (*_active_evidence_lane_ids("zt"),)
+_ZF_PHASE1_SUBMIT_LANE_IDS = (*_active_evidence_lane_ids("zf"),)
+_ZN_PHASE1_SUBMIT_LANE_IDS = (*_active_evidence_lane_ids("zn"),)
+_ZB_PHASE1_SUBMIT_LANE_IDS = (*_active_evidence_lane_ids("zb"),)
 _PL_PHASE1_SUBMIT_LANE_IDS = (
     "atp_companion_v1_pl_asia_us",
     "atp_companion_v1_pl_asia_us_5m",
@@ -301,6 +353,22 @@ _SUBMIT_CAPABLE_LANE_ADAPTERS |= {
     }
     for lane_id in _MES_PHASE1_SUBMIT_LANE_IDS
 }
+for symbol, lane_ids in (
+    ("ZT", _ZT_PHASE1_SUBMIT_LANE_IDS),
+    ("ZF", _ZF_PHASE1_SUBMIT_LANE_IDS),
+    ("ZN", _ZN_PHASE1_SUBMIT_LANE_IDS),
+    ("ZB", _ZB_PHASE1_SUBMIT_LANE_IDS),
+):
+    _SUBMIT_CAPABLE_LANE_ADAPTERS |= {
+        lane_id: {
+            "lane_id": lane_id,
+            "source_instrument": symbol,
+            "bridge_execution_target": dict(phase1_execution_target_for_source(symbol) or {}),
+            "current_order_destination": "ibkr_paper_bridge_submit_capable",
+            "bridge_proxy_mode": f"{symbol}_SIGNAL_DIRECT_PHASE1",
+        }
+        for lane_id in lane_ids
+    }
 _SUBMIT_CAPABLE_LANE_ADAPTERS |= {
     lane_id: {
         "lane_id": lane_id,
@@ -345,10 +413,11 @@ for lane_id in (
         )
 
 for lane_id in (
-    *_active_evidence_lane_ids("mgc"),
-    *_active_evidence_lane_ids("gc"),
-    *_active_evidence_lane_ids("nq"),
-    *_active_evidence_lane_ids("es"),
+    *(
+        lane_id
+        for symbol in _BATCH1_ACTIVE_EVIDENCE_CONTRACTS
+        for lane_id in _active_evidence_lane_ids(symbol)
+    ),
     "mnq_london_open_active_participation_long",
     "mnq_london_open_active_participation_short",
     "mes_london_open_active_participation_long",

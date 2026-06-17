@@ -397,6 +397,10 @@ _BATCH1_ACTIVE_EVIDENCE_SYMBOL_CONFLICT_GROUPS = {
     "GC": "gold_mgc_gc_active_evidence",
     "NQ": "equity_index_nasdaq_mnq_nq_active_evidence",
     "ES": "equity_index_sp500_mes_es_active_evidence",
+    "ZT": "rates_treasury_active_evidence",
+    "ZF": "rates_treasury_active_evidence",
+    "ZN": "rates_treasury_active_evidence",
+    "ZB": "rates_treasury_active_evidence",
 }
 _BATCH1_ACTIVE_EVIDENCE_SESSIONS = (
     (

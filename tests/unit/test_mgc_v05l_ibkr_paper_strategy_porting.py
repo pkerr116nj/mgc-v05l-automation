@@ -279,6 +279,10 @@ def test_batch1_active_evidence_lanes_use_validated_contract_bridge_targets() ->
         "gc_globex_active_participation_short": ("GC", "GCQ6", 732156872, "20260827", "100", "0.1"),
         "nq_london_open_active_participation_long": ("NQ", "NQU6", 770561204, "20260918", "20", "0.25"),
         "es_london_late_active_participation_short": ("ES", "ESU6", 649180671, "20260918", "50", "0.25"),
+        "zt_us_active_participation_long": ("ZT", "ZTU6", 842590391, "20260930", "2000", "0.00390625"),
+        "zf_globex_active_participation_short": ("ZF", "ZFU6", 842590380, "20260930", "1000", "0.0078125"),
+        "zn_london_open_active_participation_long": ("ZN", "ZNU6", 840227361, "20260921", "1000", "0.015625"),
+        "zb_london_late_active_participation_short": ("ZB", "ZBU6", 840227357, "20260921", "1000", "0.03125"),
     }
 
     for lane_id, (symbol, local_symbol, con_id, expiry, multiplier, min_tick) in expected_targets.items():
