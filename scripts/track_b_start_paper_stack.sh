@@ -1627,6 +1627,83 @@ nohup_available() {
   command -v nohup >/dev/null 2>&1
 }
 
+cleanup_stale_runtime_carrier_artifacts() {
+  "${PYTHON_BIN}" - \
+    "${REPO_ROOT}" \
+    "${WRAPPER_PATH}" \
+    "${SCOPED_CONFIG_PATH}" \
+    "${LAUNCHCTL_LABEL_FILE}" \
+    "${PID_FILE}.screen_session" <<'PY'
+import json
+import subprocess
+import sys
+from pathlib import Path
+
+repo_root = str(Path(sys.argv[1]))
+wrapper_path = str(Path(sys.argv[2]))
+scoped_config_path = str(Path(sys.argv[3]))
+launchctl_label_file = Path(sys.argv[4])
+screen_session_file = Path(sys.argv[5])
+
+
+def _rows() -> list[dict[str, object]]:
+    ps = subprocess.run(
+        ["ps", "-axo", "pid=,ppid=,command="],
+        text=True,
+        check=False,
+        capture_output=True,
+    )
+    rows: list[dict[str, object]] = []
+    for line in ps.stdout.splitlines():
+        parts = line.strip().split(None, 2)
+        if len(parts) != 3:
+            continue
+        try:
+            pid = int(parts[0])
+            ppid = int(parts[1])
+        except ValueError:
+            continue
+        command = parts[2]
+        if repo_root not in command:
+            continue
+        is_wrapper = wrapper_path in command and "track_b_paper_stack_runtime_wrapper.sh" in command
+        is_runtime_child = (
+            ("mgc_v05l.app.main" in command and "probationary-paper-soak" in command)
+            or "run_probationary_paper_soak.sh" in command
+        )
+        same_scope_child = is_runtime_child and (
+            scoped_config_path in command or "paper_runtime_config_paths.txt" in command
+        )
+        if is_wrapper or same_scope_child:
+            rows.append(
+                {
+                    "pid": pid,
+                    "ppid": ppid,
+                    "role": "wrapper" if is_wrapper else "runtime_child",
+                    "command": command,
+                }
+            )
+    return rows
+
+
+active = _rows()
+if active:
+    print(json.dumps({"classification": "ACTIVE_RUNTIME_CARRIER_PRESENT", "active_processes": active}))
+    raise SystemExit(0)
+
+if launchctl_label_file.exists():
+    label = launchctl_label_file.read_text(encoding="utf-8").strip()
+    if label:
+        try:
+            subprocess.run(["launchctl", "remove", label], check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        except FileNotFoundError:
+            pass
+    launchctl_label_file.unlink(missing_ok=True)
+screen_session_file.unlink(missing_ok=True)
+print(json.dumps({"classification": "STALE_RUNTIME_CARRIER_ARTIFACTS_CLEANED"}))
+PY
+}
+
 acquire_authoritative_runtime_scope_lock() {
   "${PYTHON_BIN}" - \
     "${START_LOCK_DIR}" \
@@ -1677,17 +1754,19 @@ def process_rows() -> list[dict[str, object]]:
             continue
         is_wrapper = wrapper_path in command and "track_b_paper_stack_runtime_wrapper.sh" in command
         is_runtime_child = (
-            "mgc_v05l.app.main" in command
-            and "probationary-paper-soak" in command
-            and scoped_config_path in command
+            ("mgc_v05l.app.main" in command and "probationary-paper-soak" in command)
+            or "run_probationary_paper_soak.sh" in command
+        )
+        same_scope_child = is_runtime_child and (
+            scoped_config_path in command or "paper_runtime_config_paths.txt" in command
         )
         is_launcher = "scripts/track_b_start_paper_stack.sh" in command
-        if is_wrapper or is_runtime_child or is_launcher:
+        if is_wrapper or same_scope_child or is_launcher:
             rows.append(
                 {
                     "pid": pid,
                     "ppid": ppid,
-                    "role": "wrapper" if is_wrapper else "runtime_child" if is_runtime_child else "launcher",
+                    "role": "wrapper" if is_wrapper else "runtime_child" if same_scope_child else "launcher",
                     "command": command,
                 }
             )
@@ -1820,7 +1899,7 @@ stop_exact_runtime_pid_for_minimal_restart() {
 verify_direct_paper_runtime_shape() {
   local pid="$1"
   local expected_commit="$2"
-  "${PYTHON_BIN}" - "${REPO_ROOT}" "${RUNTIME_DIR}" "${pid}" "${expected_commit}" "${STACK_PROFILE}" <<'PY'
+  "${PYTHON_BIN}" - "${REPO_ROOT}" "${RUNTIME_DIR}" "${pid}" "${expected_commit}" "${STACK_PROFILE}" "${WRAPPER_PATH}" <<'PY'
 import json
 import subprocess
 import sys
@@ -1832,6 +1911,7 @@ runtime_dir = Path(sys.argv[2])
 pid = int(sys.argv[3])
 expected_commit = sys.argv[4]
 expected_profile = sys.argv[5]
+wrapper_path = Path(sys.argv[6])
 truth_path = runtime_dir / "paper_runtime_truth.json"
 config_path = runtime_dir / "paper_config_in_force.json"
 
@@ -1919,24 +1999,38 @@ if any("SIMULATION" in mode for mode in execution_modes):
     raise SystemExit(1)
 
 ps = subprocess.run(
-    ["ps", "-axo", "pid=,command="],
+    ["ps", "-axo", "pid=,ppid=,command="],
     text=True,
     check=False,
     capture_output=True,
 )
 runtime_pids = []
+wrapper_pids = []
+runtime_parent_pid = None
 for line in ps.stdout.splitlines():
-    parts = line.strip().split(None, 1)
-    if len(parts) != 2:
+    parts = line.strip().split(None, 2)
+    if len(parts) != 3:
         continue
-    row_pid, command = parts
+    row_pid, ppid, command = parts
+    try:
+        row_pid_int = int(row_pid)
+        ppid_int = int(ppid)
+    except ValueError:
+        continue
+    if str(wrapper_path) in command and "track_b_paper_stack_runtime_wrapper.sh" in command:
+        wrapper_pids.append(row_pid_int)
     if (
         str(repo_root) in command
         and "mgc_v05l.app.main" in command
         and "probationary-paper-soak" in command
     ):
-        runtime_pids.append(int(row_pid))
+        runtime_pids.append(row_pid_int)
+        runtime_parent_pid = ppid_int
 if runtime_pids != [pid]:
+    raise SystemExit(1)
+if len(wrapper_pids) != 1:
+    raise SystemExit(1)
+if runtime_parent_pid not in wrapper_pids:
     raise SystemExit(1)
 print(generated_at)
 PY
@@ -2334,11 +2428,13 @@ for line in ps.stdout.splitlines():
         continue
     is_wrapper = wrapper_path in command and "track_b_paper_stack_runtime_wrapper.sh" in command
     is_runtime_child = (
-        "mgc_v05l.app.main" in command
-        and "probationary-paper-soak" in command
-        and scoped_config_path in command
+        ("mgc_v05l.app.main" in command and "probationary-paper-soak" in command)
+        or "run_probationary_paper_soak.sh" in command
     )
-    if is_wrapper or is_runtime_child:
+    same_scope_child = is_runtime_child and (
+        scoped_config_path in command or "paper_runtime_config_paths.txt" in command
+    )
+    if is_wrapper or same_scope_child:
         active.append(
             {
                 "pid": pid,
@@ -2580,6 +2676,7 @@ elif ! screen_available; then
 fi
 
 lock_result="${STACK_DIR}/.runtime_scope_lock.$$.json"
+cleanup_stale_runtime_carrier_artifacts >/dev/null || true
 set +e
 acquire_authoritative_runtime_scope_lock > "${lock_result}"
 lock_rc=$?

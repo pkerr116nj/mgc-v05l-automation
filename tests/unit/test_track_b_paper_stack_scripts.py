@@ -1591,6 +1591,42 @@ def test_thin_recovery_script_uses_broker_truth_and_direct_minimal_start_only() 
     assert "pkill" not in source
 
 
+def test_paper_stack_start_cleans_stale_carrier_artifacts_and_detects_soak_children() -> None:
+    source = START_SCRIPT.read_text(encoding="utf-8")
+
+    assert "cleanup_stale_runtime_carrier_artifacts" in source
+    assert 'launchctl_label_file.unlink(missing_ok=True)' in source
+    assert 'screen_session_file.unlink(missing_ok=True)' in source
+    assert '"run_probationary_paper_soak.sh" in command' in source
+    assert '"paper_runtime_config_paths.txt" in command' in source
+    assert "ACTIVE_RUNTIME_CARRIER_PRESENT" in source
+    assert "STALE_RUNTIME_CARRIER_ARTIFACTS_CLEANED" in source
+
+
+def test_paper_stack_start_requires_one_wrapper_parent_for_runtime_child() -> None:
+    source = START_SCRIPT.read_text(encoding="utf-8")
+    verify_block = source[source.index("verify_direct_paper_runtime_shape()") : source.index("post_truth_startup_progress_heartbeat()")]
+
+    assert '"pid=,ppid=,command="' in verify_block
+    assert "wrapper_pids = []" in verify_block
+    assert "runtime_parent_pid = None" in verify_block
+    assert "len(wrapper_pids) != 1" in verify_block
+    assert "runtime_parent_pid not in wrapper_pids" in verify_block
+
+
+def test_thin_recovery_requires_authoritative_wrapper_parent_and_single_child() -> None:
+    source = THIN_RECOVERY_SCRIPT.read_text(encoding="utf-8")
+    verify_block = source[source.index("verify_runtime_shape()") : source.index("case \"${MODE}\"")]
+
+    assert 'WRAPPER_PATH="${RUNTIME_DIR}/track_b_paper_stack_runtime_wrapper.sh"' in source
+    assert '"pid=,ppid=,command="' in verify_block
+    assert "runtime_process_count_mismatch" in verify_block
+    assert "runtime_parent_count_mismatch" in verify_block
+    assert "runtime_parent_child_mismatch" in verify_block
+    assert "len(wrapper_pids) != 1" in verify_block
+    assert "runtime_parent_pid not in wrapper_pids" in verify_block
+
+
 def test_paper_stack_startup_uses_unique_atomic_artifact_writes() -> None:
     source = START_SCRIPT.read_text(encoding="utf-8")
 

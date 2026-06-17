@@ -14,6 +14,7 @@ fi
 PYTHON_BIN="${REPO_ROOT}/.venv/bin/python"
 RUNTIME_DIR="${REPO_ROOT}/outputs/probationary_pattern_engine/paper_session/runtime"
 PID_FILE="${RUNTIME_DIR}/probationary_paper.pid"
+WRAPPER_PATH="${RUNTIME_DIR}/track_b_paper_stack_runtime_wrapper.sh"
 STATE_DIR="${REPO_ROOT}/outputs/track_b_execution_core/runtime_recovery"
 ARTIFACT_PATH="${STATE_DIR}/latest_thin_paper_runtime_recovery.json"
 START_SCRIPT="${REPO_ROOT}/scripts/track_b_start_paper_stack.sh"
@@ -150,7 +151,7 @@ verify_runtime_shape() {
   local pid="$1"
   local expected_commit
   expected_commit="$(git -C "${REPO_ROOT}" rev-parse HEAD)"
-  "${PYTHON_BIN}" - "${REPO_ROOT}" "${RUNTIME_DIR}" "${pid}" "${expected_commit}" "${PROFILE}" "${EXPECTED_LANES}" "${EXPECTED_EXECUTION_MODE}" <<'PY'
+  "${PYTHON_BIN}" - "${REPO_ROOT}" "${RUNTIME_DIR}" "${pid}" "${expected_commit}" "${PROFILE}" "${EXPECTED_LANES}" "${EXPECTED_EXECUTION_MODE}" "${WRAPPER_PATH}" <<'PY'
 import json
 import subprocess
 import sys
@@ -163,6 +164,7 @@ expected_commit = sys.argv[4]
 expected_profile = sys.argv[5]
 expected_lanes = int(sys.argv[6])
 expected_execution_mode = sys.argv[7]
+wrapper_path = Path(sys.argv[8])
 truth = json.loads((runtime_dir / "paper_runtime_truth.json").read_text(encoding="utf-8"))
 config = json.loads((runtime_dir / "paper_config_in_force.json").read_text(encoding="utf-8"))
 truth_pid = int(truth.get("producer_pid") or truth.get("pid") or 0)
@@ -178,17 +180,31 @@ if len(lanes) != expected_lanes or int(truth.get("lane_count") or 0) != expected
 execution_modes = {str(row.get("execution_mode") or (row.get("runtime_overlay_params") or {}).get("execution_mode") or "") for row in lanes}
 if execution_modes != {expected_execution_mode}:
     raise SystemExit("runtime_execution_mode_mismatch")
-ps = subprocess.run(["ps", "-axo", "pid=,command="], text=True, check=False, capture_output=True)
+ps = subprocess.run(["ps", "-axo", "pid=,ppid=,command="], text=True, check=False, capture_output=True)
 runtime_pids = []
+wrapper_pids = []
+runtime_parent_pid = None
 for line in ps.stdout.splitlines():
-    parts = line.strip().split(None, 1)
-    if len(parts) != 2:
+    parts = line.strip().split(None, 2)
+    if len(parts) != 3:
         continue
-    row_pid, command = parts
+    row_pid, ppid, command = parts
+    try:
+        row_pid_int = int(row_pid)
+        ppid_int = int(ppid)
+    except ValueError:
+        continue
+    if str(wrapper_path) in command and "track_b_paper_stack_runtime_wrapper.sh" in command:
+        wrapper_pids.append(row_pid_int)
     if str(repo_root) in command and "mgc_v05l.app.main" in command and "probationary-paper-soak" in command:
-        runtime_pids.append(int(row_pid))
+        runtime_pids.append(row_pid_int)
+        runtime_parent_pid = ppid_int
 if runtime_pids != [pid]:
     raise SystemExit("runtime_process_count_mismatch")
+if len(wrapper_pids) != 1:
+    raise SystemExit("runtime_parent_count_mismatch")
+if runtime_parent_pid not in wrapper_pids:
+    raise SystemExit("runtime_parent_child_mismatch")
 PY
 }
 
