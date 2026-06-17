@@ -1579,6 +1579,8 @@ def test_thin_recovery_script_uses_broker_truth_and_direct_minimal_start_only() 
     assert "TRACK_B_PAPER_MINIMAL_STARTUP_V1=1" in source
     assert "TRACK_B_PAPER_STACK_DISABLE_RECOVERY_SERVICE=1" in source
     assert "verify_runtime_shape" in source
+    assert "checker_pid = os.getpid()" in source
+    assert "row_pid_int == checker_pid" in source
     assert "mnq_mes_full_session_active_evidence" in source
     assert "IBKR_PAPER_BRIDGE" in source
     assert "expected_lanes = int" in source

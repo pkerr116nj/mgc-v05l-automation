@@ -160,6 +160,7 @@ verify_runtime_shape() {
   expected_commit="$(git -C "${REPO_ROOT}" rev-parse HEAD)"
   "${PYTHON_BIN}" - "${REPO_ROOT}" "${RUNTIME_DIR}" "${pid}" "${expected_commit}" "${PROFILE}" "${EXPECTED_LANES}" "${EXPECTED_EXECUTION_MODE}" "${WRAPPER_PATH}" <<'PY'
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -191,6 +192,7 @@ ps = subprocess.run(["ps", "-axo", "pid=,ppid=,command="], text=True, check=Fals
 runtime_pids = []
 wrapper_pids = []
 runtime_parent_pid = None
+checker_pid = os.getpid()
 for line in ps.stdout.splitlines():
     parts = line.strip().split(None, 2)
     if len(parts) != 3:
@@ -200,6 +202,8 @@ for line in ps.stdout.splitlines():
         row_pid_int = int(row_pid)
         ppid_int = int(ppid)
     except ValueError:
+        continue
+    if row_pid_int == checker_pid:
         continue
     if str(wrapper_path) in command and "track_b_paper_stack_runtime_wrapper.sh" in command:
         wrapper_pids.append(row_pid_int)
