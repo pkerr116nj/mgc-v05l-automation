@@ -81,17 +81,17 @@ def recognize_managed_close_broker_effect(
             blockers=["close_action_not_risk_reducing"],
         )
     same_side = (observed > 0 and expected > 0) or (observed < 0 and expected < 0)
+    if close_qty > abs(expected):
+        return _result(
+            classification=BROKER_EFFECT_BLOCKED,
+            effect_state="CLOSE_QUANTITY_EXCEEDS_EXPECTED_EXPOSURE",
+            expected=expected,
+            observed=observed,
+            close_qty=close_qty,
+            close_action=action,
+            blockers=["close_quantity_exceeds_expected_exposure"],
+        )
     if observed == expected:
-        if close_qty > abs(observed):
-            return _result(
-                classification=BROKER_EFFECT_BLOCKED,
-                effect_state="CLOSE_QUANTITY_EXCEEDS_OBSERVED_EXPOSURE",
-                expected=expected,
-                observed=observed,
-                close_qty=close_qty,
-                close_action=action,
-                blockers=["close_quantity_exceeds_observed_exposure"],
-            )
         return _result(
             classification=BROKER_EFFECT_ORIGINAL_EXPOSURE_PRESENT,
             effect_state="ORIGINAL_EXPOSURE_PRESENT",
@@ -115,6 +115,26 @@ def recognize_managed_close_broker_effect(
         return _result(
             classification=BROKER_EFFECT_OBSERVED,
             effect_state="EXPOSURE_OPPOSITE",
+            expected=expected,
+            observed=observed,
+            close_qty=close_qty,
+            close_action=action,
+            blockers=[],
+        )
+    if close_qty > abs(observed):
+        return _result(
+            classification=BROKER_EFFECT_BLOCKED,
+            effect_state="CLOSE_QUANTITY_EXCEEDS_OBSERVED_EXPOSURE",
+            expected=expected,
+            observed=observed,
+            close_qty=close_qty,
+            close_action=action,
+            blockers=["close_quantity_exceeds_observed_exposure"],
+        )
+    if same_side and abs(observed) > abs(expected):
+        return _result(
+            classification=BROKER_EFFECT_ORIGINAL_EXPOSURE_PRESENT,
+            effect_state="SAME_SIDE_EXCESS_EXPOSURE_PRESENT",
             expected=expected,
             observed=observed,
             close_qty=close_qty,
