@@ -114,8 +114,10 @@ from ..execution_core.track_b_submit_intent_ownership import (
     DEFAULT_TRACK_B_SUBMIT_INTENT_OWNERSHIP_LATEST_JSON,
     SubmitIntentOwnershipRecord,
     SubmitIntentOwnershipState,
+    UNRESOLVED_STATES,
     append_submit_intent_ownership_record,
     generate_ownership_intent_id,
+    load_submit_intent_ownership_records,
 )
 from ..execution_core.track_b_central_trade_registry import TradeEventType
 from ..execution_core.track_b_live_trade_registry import (
@@ -1268,6 +1270,23 @@ def run_ibkr_paper_strategy_bridge(
                 ),
             )
         )
+        if config.submit:
+            duplicate_entry_guard = _duplicate_entry_guard_for_bridge(
+                config=config,
+                intent=intent,
+                positions=positions,
+                open_orders=open_orders,
+                qualified_contract_report=qualified_contract_report,
+                now=started_at,
+            )
+            duplicate_entry_check = _check(
+                "track_b_duplicate_entry_guard",
+                bool(duplicate_entry_guard.get("allowed")),
+                True,
+                str(duplicate_entry_guard.get("detail") or "Track B duplicate-entry guard evaluated."),
+            )
+            duplicate_entry_check["authority"] = duplicate_entry_guard
+            dynamic_checks.append(duplicate_entry_check)
         preflight_checks = [*static_checks, *dynamic_checks]
         blocking_failures = [row for row in preflight_checks if row.get("blocking") and not row.get("passed")]
         if blocking_failures:
@@ -7017,6 +7036,211 @@ def _qualified_contract_is_exact(
 ) -> bool:
     contract = dict(qualified_contract_report.get("qualified_contract") or {})
     return _exact_contract_matches_phase1_target(contract=contract, target=expected_target)
+
+
+def _duplicate_entry_guard_for_bridge(
+    *,
+    config: IbkrPaperStrategyBridgeConfig,
+    intent: IbkrPaperStrategyOrderIntent,
+    positions: Mapping[str, Any],
+    open_orders: Mapping[str, Any],
+    qualified_contract_report: Mapping[str, Any],
+    now: datetime,
+) -> dict[str, Any]:
+    if not _is_entry_intent(config=config, intent=intent):
+        return {
+            "classification": "DUPLICATE_ENTRY_GUARD_NOT_APPLICABLE",
+            "allowed": True,
+            "detail": "Duplicate-entry guard is entry-only.",
+        }
+
+    contract = dict(qualified_contract_report.get("qualified_contract") or {})
+    lane_id = str((config.caller_metadata or {}).get("lane_id") or config.strategy_id or intent.strategy_id or "").strip()
+    action = str(intent.action or config.action or "").strip().upper()
+    intent_type = str((config.caller_metadata or {}).get("intent_type") or "").strip().upper()
+    local_symbol = str(contract.get("local_symbol") or contract.get("localSymbol") or "").strip().upper()
+    con_id = _int_or_none(contract.get("con_id") or contract.get("conId") or contract.get("qualified_contract_identifier"))
+    expiry = str(contract.get("expiry") or contract.get("lastTradeDateOrContractMonth") or config.contract_month or "").strip()
+    account_id = str(config.account_id or "").strip()
+
+    matching_open_orders = [
+        _compact_duplicate_entry_evidence(row)
+        for row in _open_order_rows(open_orders)
+        if _same_contract(row, con_id=con_id, local_symbol=local_symbol, expiry=expiry)
+        and str(row.get("action") or "").strip().upper() == action
+        and _order_ref_matches_lane(row, lane_id)
+    ]
+    ownership_matches = _matching_recent_submit_ownership_records(
+        config=config,
+        lane_id=lane_id,
+        account_id=account_id,
+        action=action,
+        intent_type=intent_type,
+        con_id=con_id,
+        local_symbol=local_symbol,
+        expiry=expiry,
+        now=now,
+    )
+    current_position_quantity = _exact_contract_position_quantity(
+        positions_snapshot=positions,
+        contract_report={"qualified_contract": contract},
+    )
+    current_position_quantity = 0.0 if current_position_quantity is None else current_position_quantity
+    current_same_side_position = (
+        (action == "BUY" and current_position_quantity > 0)
+        or (action == "SELL" and current_position_quantity < 0)
+    )
+    blockers: list[str] = []
+    if matching_open_orders:
+        blockers.append("equivalent_same_lane_open_order")
+    if ownership_matches:
+        blockers.append("equivalent_recent_submit_or_fill_evidence")
+    if current_same_side_position and ownership_matches:
+        blockers.append("same_side_broker_position_with_same_lane_ownership")
+    if blockers:
+        return {
+            "classification": "DUPLICATE_ENTRY_BLOCKED",
+            "allowed": False,
+            "detail": (
+                "Equivalent Track B PAPER entry already exists for the same lane/contract/side; "
+                "blocking duplicate submit before broker mutation."
+            ),
+            "blockers": blockers,
+            "lane_id": lane_id,
+            "account_id": account_id,
+            "action": action,
+            "intent_type": intent_type,
+            "local_symbol": local_symbol or None,
+            "con_id": con_id,
+            "expiry": expiry or None,
+            "current_position_quantity": current_position_quantity,
+            "matching_open_orders": matching_open_orders[:5],
+            "matching_submit_ownership": ownership_matches[:5],
+            "paper_only": True,
+            "live_money_eligible": False,
+            "paper_proof_invoked": False,
+        }
+    return {
+        "classification": "DUPLICATE_ENTRY_GUARD_ALLOWED",
+        "allowed": True,
+        "detail": "No equivalent same-lane/same-contract/same-side PAPER entry evidence was found.",
+        "lane_id": lane_id,
+        "account_id": account_id,
+        "action": action,
+        "intent_type": intent_type,
+        "local_symbol": local_symbol or None,
+        "con_id": con_id,
+        "expiry": expiry or None,
+        "current_position_quantity": current_position_quantity,
+        "paper_only": True,
+        "live_money_eligible": False,
+        "paper_proof_invoked": False,
+    }
+
+
+def _matching_recent_submit_ownership_records(
+    *,
+    config: IbkrPaperStrategyBridgeConfig,
+    lane_id: str,
+    account_id: str,
+    action: str,
+    intent_type: str,
+    con_id: int | None,
+    local_symbol: str,
+    expiry: str,
+    now: datetime,
+    recent_window_seconds: float = 6 * 60 * 60,
+) -> list[dict[str, Any]]:
+    path = Path(config.repo_root) / DEFAULT_TRACK_B_SUBMIT_INTENT_OWNERSHIP_JSONL
+    records = load_submit_intent_ownership_records(path)
+    matches: list[dict[str, Any]] = []
+    for record in records:
+        if str(record.get("mode") or "").strip().upper() != "PAPER":
+            continue
+        if str(record.get("account_id") or "").strip() != account_id:
+            continue
+        if str(record.get("lane_id") or record.get("strategy_id") or "").strip() != lane_id:
+            continue
+        if str(record.get("action") or "").strip().upper() != action:
+            continue
+        record_intent_type = str(record.get("intent_type") or "").strip().upper()
+        if intent_type and record_intent_type and record_intent_type != intent_type:
+            continue
+        if not _same_contract(record, con_id=con_id, local_symbol=local_symbol, expiry=expiry):
+            continue
+        state = str(record.get("state") or "").strip().upper()
+        age_seconds = _age_seconds(record.get("created_at") or record.get("updated_at"), now)
+        if state in UNRESOLVED_STATES or (age_seconds is not None and age_seconds <= recent_window_seconds):
+            compact = _compact_duplicate_entry_evidence(record)
+            compact["age_seconds"] = age_seconds
+            matches.append(compact)
+    matches.sort(key=lambda row: str(row.get("created_at") or row.get("updated_at") or ""))
+    return matches
+
+
+def _open_order_rows(open_orders: Mapping[str, Any]) -> list[dict[str, Any]]:
+    rows = open_orders.get("open_orders") or open_orders.get("orders") or open_orders.get("rows") or []
+    return [dict(row) for row in rows if isinstance(row, Mapping)]
+
+
+def _same_contract(
+    row: Mapping[str, Any],
+    *,
+    con_id: int | None,
+    local_symbol: str,
+    expiry: str,
+) -> bool:
+    row_con_id = _int_or_none(row.get("con_id") or row.get("conId") or row.get("qualified_contract_identifier"))
+    if row_con_id is not None and con_id is not None:
+        return row_con_id == con_id
+    row_local = str(row.get("local_symbol") or row.get("localSymbol") or "").strip().upper()
+    if local_symbol and row_local:
+        return row_local == local_symbol
+    row_expiry = str(row.get("expiry") or row.get("lastTradeDateOrContractMonth") or "").strip()
+    return bool(expiry and row_expiry and row_expiry == expiry)
+
+
+def _order_ref_matches_lane(row: Mapping[str, Any], lane_id: str) -> bool:
+    order_ref = str(row.get("order_ref") or row.get("orderRef") or "").strip().upper()
+    if not order_ref:
+        return True
+    lane_token = "".join(ch if ch.isalnum() else "_" for ch in lane_id.upper())[:36]
+    return lane_token in order_ref
+
+
+def _age_seconds(value: Any, now: datetime) -> float | None:
+    parsed = _parse_iso_datetime(value)
+    if parsed is None:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return max(0.0, (now.astimezone(timezone.utc) - parsed.astimezone(timezone.utc)).total_seconds())
+
+
+def _compact_duplicate_entry_evidence(row: Mapping[str, Any]) -> dict[str, Any]:
+    keys = (
+        "state",
+        "created_at",
+        "updated_at",
+        "lane_id",
+        "strategy_id",
+        "intent_type",
+        "action",
+        "symbol",
+        "local_symbol",
+        "expiry",
+        "con_id",
+        "qty",
+        "quantity",
+        "broker_order_id",
+        "order_id",
+        "client_id",
+        "perm_id",
+        "exec_id",
+        "runtime_pid",
+        "order_ref",
+    )
+    return {key: row.get(key) for key in keys if row.get(key) not in (None, "", [])}
 
 
 def _check(name: str, passed: bool, blocking: bool, detail: str) -> dict[str, Any]:

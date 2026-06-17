@@ -32,6 +32,7 @@ from mgc_v05l.execution.ibkr_paper_strategy_bridge import (
     write_strategy_order_intent_schema_file,
 )
 from mgc_v05l.execution_core.track_b_submit_intent_ownership import (
+    DEFAULT_TRACK_B_SUBMIT_INTENT_OWNERSHIP_JSONL,
     load_unresolved_submit_intent_ownership_records,
 )
 from mgc_v05l.execution.ibkr_paper_strategy_monitor import load_paper_strategy_monitor_status
@@ -534,6 +535,44 @@ def _config(tmp_path: Path, **overrides: object) -> IbkrPaperStrategyBridgeConfi
     return IbkrPaperStrategyBridgeConfig(**payload)
 
 
+def _mes_runtime_config(tmp_path: Path, *, lane_id: str = "mes_london_open_active_participation_long") -> IbkrPaperStrategyBridgeConfig:
+    return _config(
+        tmp_path,
+        strategy_id=lane_id,
+        symbol="MES",
+        contract_month="202609",
+        action="BUY",
+        caller_path="probationary_paper_runtime_lane",
+        caller_metadata={
+            "caller_type": "supervised_paper_runtime",
+            "lane_id": lane_id,
+            "strategy_id": lane_id,
+            "intent_type": "BUY_TO_OPEN",
+            "account_id": "DUM882026",
+            "runtime_pid": os.getpid(),
+            "runtime_cwd": str(tmp_path),
+        },
+    )
+
+
+def _mes_qualified_contract() -> dict[str, object]:
+    return {
+        "qualified_contract": {
+            "broker_symbol": "MES",
+            "symbol": "MES",
+            "local_symbol": "MESU6",
+            "con_id": 793356217,
+            "expiry": "20260918",
+        }
+    }
+
+
+def _write_submit_ownership(tmp_path: Path, *rows: dict[str, object]) -> None:
+    path = tmp_path / DEFAULT_TRACK_B_SUBMIT_INTENT_OWNERSHIP_JSONL
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("\n".join(json.dumps(row, sort_keys=True) for row in rows) + "\n", encoding="utf-8")
+
+
 def _write_active_profile_roster(tmp_path: Path, lanes: list[dict[str, object]]) -> None:
     path = (
         tmp_path
@@ -777,6 +816,90 @@ def _intent_from_config(config: IbkrPaperStrategyBridgeConfig) -> IbkrPaperStrat
         risk_tags=config.risk_tags,
         paper_only=config.paper_only,
     )
+
+
+def test_duplicate_entry_guard_blocks_same_lane_contract_side(tmp_path: Path) -> None:
+    config = _mes_runtime_config(tmp_path)
+    now = datetime(2026, 6, 17, 7, 15, 9, tzinfo=timezone.utc)
+    _write_submit_ownership(
+        tmp_path,
+        {
+            "mode": "PAPER",
+            "account_id": "DUM882026",
+            "state": "BROKER_POSITION_OBSERVED_ADOPTION_REQUIRED",
+            "created_at": "2026-06-17T07:15:08.366407+00:00",
+            "updated_at": "2026-06-17T07:15:09.380693+00:00",
+            "lane_id": "mes_london_open_active_participation_long",
+            "strategy_id": "mes_london_open_active_participation_long",
+            "intent_type": "BUY_TO_OPEN",
+            "action": "BUY",
+            "symbol": "MES",
+            "local_symbol": "MESU6",
+            "expiry": "20260918",
+            "con_id": 793356217,
+            "qty": 1,
+            "broker_order_id": "9",
+            "client_id": 9885,
+            "perm_id": 2130844547,
+            "runtime_pid": 78570,
+        },
+    )
+
+    result = bridge_module._duplicate_entry_guard_for_bridge(
+        config=config,
+        intent=_intent_from_config(config),
+        positions={"positions": [{"symbol": "MES", "local_symbol": "MESU6", "expiry": "20260918", "quantity": "1"}]},
+        open_orders={"open_orders": []},
+        qualified_contract_report=_mes_qualified_contract(),
+        now=now,
+    )
+
+    assert result["classification"] == "DUPLICATE_ENTRY_BLOCKED"
+    assert result["allowed"] is False
+    assert "equivalent_recent_submit_or_fill_evidence" in result["blockers"]
+
+
+def test_duplicate_entry_guard_allows_different_lane_or_symbol(tmp_path: Path) -> None:
+    config = _mes_runtime_config(tmp_path, lane_id="mes_london_open_active_participation_short")
+    now = datetime(2026, 6, 17, 7, 15, 9, tzinfo=timezone.utc)
+    _write_submit_ownership(
+        tmp_path,
+        {
+            "mode": "PAPER",
+            "account_id": "DUM882026",
+            "state": "BROKER_POSITION_OBSERVED_ADOPTION_REQUIRED",
+            "created_at": "2026-06-17T07:15:08.366407+00:00",
+            "lane_id": "mes_london_open_active_participation_long",
+            "strategy_id": "mes_london_open_active_participation_long",
+            "intent_type": "BUY_TO_OPEN",
+            "action": "BUY",
+            "symbol": "MES",
+            "local_symbol": "MESU6",
+            "expiry": "20260918",
+            "con_id": 793356217,
+            "qty": 1,
+        },
+    )
+
+    result = bridge_module._duplicate_entry_guard_for_bridge(
+        config=config,
+        intent=_intent_from_config(config),
+        positions={"positions": []},
+        open_orders={"open_orders": []},
+        qualified_contract_report=_mes_qualified_contract(),
+        now=now,
+    )
+
+    assert result["classification"] == "DUPLICATE_ENTRY_GUARD_ALLOWED"
+    assert result["allowed"] is True
+
+
+def test_runtime_bridge_client_id_is_stable_for_lane() -> None:
+    from mgc_v05l.app.probationary_runtime import _stable_runtime_bridge_client_id
+
+    lane_id = "mes_london_open_active_participation_long"
+    assert _stable_runtime_bridge_client_id(lane_id) == _stable_runtime_bridge_client_id(lane_id)
+    assert 9800 <= _stable_runtime_bridge_client_id(lane_id) < 10200
 
 
 def _write_runtime_1m_candle(

@@ -14586,7 +14586,7 @@ def _runtime_bridge_config_for_lane(
         mode="PAPER",
         host="127.0.0.1",
         port=7497,
-        client_id=9800 + (abs(hash(lane_id)) % 400),
+        client_id=_stable_runtime_bridge_client_id(lane_id),
         account_id="DUM882026",
         strategy_id=str(lane_id),
         symbol=str(bridge_target.get("symbol") or source_symbol).upper(),
@@ -14624,6 +14624,11 @@ def _runtime_bridge_config_for_lane(
         },
         output_dir=repo_root / "outputs" / "reports" / "ibkr_runtime_route_dispatch" / str(lane_id),
     )
+
+
+def _stable_runtime_bridge_client_id(lane_id: str) -> int:
+    digest = hashlib.sha256(str(lane_id).encode("utf-8")).hexdigest()
+    return 9800 + (int(digest[:8], 16) % 400)
 
 
 def _latest_control_plane_snapshot_evidence(*, repo_root: Path) -> dict[str, Any]:
