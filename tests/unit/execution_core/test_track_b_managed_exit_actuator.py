@@ -191,6 +191,8 @@ def test_attach_child_nonzero_empty_stdout_reports_stderr_blocker(tmp_path: Path
     assert payload["submit_attempted"] is False
     assert attempt["classification"] == MANAGED_EXIT_ACTUATOR_BLOCKED
     assert attempt["primary_blocker"] == "MANAGED_EXIT_ATTACH_CHILD_FAILED"
+    assert attempt["returncode"] == 2
+    assert attempt["stderr_tail"] == "usage: missing expiry"
     assert attempt["close_submit_attempt"] is None
 
 
