@@ -434,7 +434,7 @@ def test_broker_truth_sweeper_adopts_broker_backed_zt_position(tmp_path: Path) -
     _write_live_lifecycle_open(
         tmp_path,
         trade_id="trade-zt",
-        lifecycle_id=lifecycle_id,
+        lifecycle_id="bridge_fill_ZT|1m|2026-06-17T13:40:00Z|SELL_TO_OPEN",
         lane_id="zt_us_active_participation_short",
         generated_at=datetime(2026, 6, 17, 14, 2, 6, tzinfo=UTC),
         symbol="ZT",
@@ -515,8 +515,8 @@ def test_broker_truth_sweeper_repairs_zt_policy_from_registry_metadata(tmp_path:
     )
     _write_live_lifecycle_open(
         tmp_path,
-        trade_id="trade-zt",
-        lifecycle_id=lifecycle_id,
+        trade_id="trade_bridge_fill_ZT_1m_2026-06-17T13_40_00Z_SELL_TO_OPEN",
+        lifecycle_id="bridge_fill_ZT|1m|2026-06-17T13:40:00Z|SELL_TO_OPEN",
         lane_id="zt_us_active_participation_short",
         generated_at=datetime(2026, 6, 17, 14, 2, 6, tzinfo=UTC),
         symbol="ZT",

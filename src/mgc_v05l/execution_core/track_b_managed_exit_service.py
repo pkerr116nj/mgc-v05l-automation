@@ -1957,39 +1957,51 @@ def _managed_exit_policy_from_registry(
     trade_id = _string_or_none(position.get("trade_id"))
     lane_id = _string_or_none(position.get("lane_id") or position.get("strategy_id"))
     policies: list[str] = []
+    same_identity_policies: list[str] = []
     for record in terminal_records:
         for event in getattr(record, "event_chain", ()) or ():
             if not _event_matches_broker_position(event, identity, lane_id):
                 continue
+            policy_id = _managed_exit_policy_from_event(event)
+            if policy_id:
+                same_identity_policies.append(policy_id)
             event_lifecycle_id = _string_or_none(getattr(event, "lifecycle_id", None))
             event_trade_id = _string_or_none(getattr(event, "trade_id", None))
             if lifecycle_id and event_lifecycle_id != lifecycle_id:
                 continue
             if trade_id and event_trade_id != trade_id:
                 continue
-            policy_id = _managed_exit_policy_from_event(event)
             if policy_id:
                 policies.append(policy_id)
-    return policies[-1] if policies else None
+    return policies[-1] if policies else same_identity_policies[-1] if same_identity_policies else None
 
 
 def _managed_exit_policy_from_registry_event(*, record: Any, entry_event: Any, lane_id: str | None) -> str | None:
     entry_lifecycle_id = _string_or_none(getattr(entry_event, "lifecycle_id", None))
     entry_trade_id = _string_or_none(getattr(entry_event, "trade_id", None))
+    entry_con_id = _int_or_none(getattr(entry_event, "con_id", None))
+    entry_local_symbol = _string_or_none(getattr(entry_event, "local_symbol", None))
     policies: list[str] = []
+    same_identity_policies: list[str] = []
     for event in getattr(record, "event_chain", ()) or ():
         if lane_id and str(getattr(event, "lane_id", "") or "").strip() != lane_id:
             continue
+        if entry_con_id and _int_or_none(getattr(event, "con_id", None)) != entry_con_id:
+            continue
+        if entry_local_symbol and str(getattr(event, "local_symbol", "") or "").strip() != entry_local_symbol:
+            continue
+        policy_id = _managed_exit_policy_from_event(event)
+        if policy_id:
+            same_identity_policies.append(policy_id)
         event_lifecycle_id = _string_or_none(getattr(event, "lifecycle_id", None))
         event_trade_id = _string_or_none(getattr(event, "trade_id", None))
         if entry_lifecycle_id and event_lifecycle_id != entry_lifecycle_id:
             continue
         if entry_trade_id and event_trade_id != entry_trade_id:
             continue
-        policy_id = _managed_exit_policy_from_event(event)
         if policy_id:
             policies.append(policy_id)
-    return policies[-1] if policies else None
+    return policies[-1] if policies else same_identity_policies[-1] if same_identity_policies else None
 
 
 def _managed_exit_policy_from_event(event: Any) -> str | None:
