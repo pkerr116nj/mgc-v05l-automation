@@ -132,6 +132,52 @@ def _write_live_entry_fill(
         handle.write(json.dumps(event.to_dict(), sort_keys=True) + "\n")
 
 
+def _write_live_lifecycle_open(
+    tmp_path: Path,
+    *,
+    trade_id: str,
+    lifecycle_id: str,
+    lane_id: str,
+    generated_at: datetime,
+    symbol: str,
+    local_symbol: str,
+    con_id: int,
+    side: str,
+    action: str,
+    policy_id: str,
+    append: bool = True,
+) -> None:
+    path = tmp_path / "outputs/track_b_execution_core/trade_registry/live_trade_events.jsonl"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    event = TradeEvent(
+        event_id=f"{trade_id}_lifecycle_open",
+        event_type=TradeEventType.LIFECYCLE_OPEN_MANAGED,
+        generated_at=generated_at,
+        trade_id=trade_id,
+        lifecycle_id=lifecycle_id,
+        lane_id=lane_id,
+        thesis_strategy_id=lane_id,
+        account_id="DUM882026",
+        symbol=symbol,
+        con_id=con_id,
+        local_symbol=local_symbol,
+        expiry="20260930",
+        side=side,
+        action=action,
+        qty=Decimal("1"),
+        source_artifact_path="outputs/track_b_execution_core/test_lifecycle.json",
+        order_id="1",
+        client_id="10110",
+        perm_id="1477605652",
+        exec_id="0000e1a7.6a4759a9.01.01",
+        price=Decimal("103.1875"),
+        metadata={"managed_exit_policy_id": policy_id},
+    )
+    mode = "a" if append and path.exists() else "w"
+    with path.open(mode, encoding="utf-8") as handle:
+        handle.write(json.dumps(event.to_dict(), sort_keys=True) + "\n")
+
+
 def test_broker_truth_sweeper_repairs_stale_managed_contract_identity(tmp_path: Path) -> None:
     _broker_truth(tmp_path)
     registry = tmp_path / "outputs/track_b_execution_core/managed_positions/latest_managed_positions.json"
@@ -385,6 +431,19 @@ def test_broker_truth_sweeper_adopts_broker_backed_zt_position(tmp_path: Path) -
         exec_id="0000e1a7.6a4759a9.01.01",
         price="103.1875",
     )
+    _write_live_lifecycle_open(
+        tmp_path,
+        trade_id="trade-zt",
+        lifecycle_id=lifecycle_id,
+        lane_id="zt_us_active_participation_short",
+        generated_at=datetime(2026, 6, 17, 14, 2, 6, tzinfo=UTC),
+        symbol="ZT",
+        local_symbol="ZTU6",
+        con_id=842590391,
+        side="SHORT",
+        action="SELL",
+        policy_id="US_ACTIVE_EVIDENCE_TIMEBOX_60M_EXIT_V1",
+    )
 
     report = _run_broker_truth_sweeper(
         config=TrackBManagedExitServiceConfig(repo_root=tmp_path),
@@ -403,6 +462,81 @@ def test_broker_truth_sweeper_adopts_broker_backed_zt_position(tmp_path: Path) -
     assert position["managed_exit_policy_id"] == "US_ACTIVE_EVIDENCE_TIMEBOX_60M_EXIT_V1"
     assert position["entry_time"] == "2026-06-17T14:00:23.784071+00:00"
     assert position["entry_price"] == "103.1875"
+
+
+def test_broker_truth_sweeper_repairs_zt_policy_from_registry_metadata(tmp_path: Path) -> None:
+    _broker_truth(
+        tmp_path,
+        symbol="ZT",
+        local_symbol="ZTU6",
+        con_id=842590391,
+        expiry="20260930",
+        quantity="-1.0",
+    )
+    registry = tmp_path / "outputs/track_b_execution_core/managed_positions/latest_managed_positions.json"
+    lifecycle_id = "reserved_submit_zt_us_active_participation_short_20260617T140022852108Z_076e1500f34d"
+    _write_json(
+        registry,
+        {
+            "classification": "OPEN_MANAGED_MATCHED",
+            "managed_positions": [
+                {
+                    "classification": "OPEN_MANAGED_MATCHED",
+                    "account_id": "DUM882026",
+                    "local_symbol": "ZTU6",
+                    "con_id": 842590391,
+                    "quantity": "1.0",
+                    "side": "SHORT",
+                    "lane_id": "zt_us_active_participation_short",
+                    "strategy_id": "zt_us_active_participation_short",
+                    "lifecycle_id": lifecycle_id,
+                    "trade_id": "trade-zt",
+                    "managed_exit_policy_id": "GLOBEX_ACTIVE_EVIDENCE_TIMEBOX_15M_EXIT_V1",
+                    "entry_time": "2026-06-17T14:00:23.784071+00:00",
+                }
+            ],
+        },
+    )
+    _write_live_entry_fill(
+        tmp_path,
+        trade_id="trade-zt",
+        lifecycle_id=lifecycle_id,
+        lane_id="zt_us_active_participation_short",
+        generated_at=datetime(2026, 6, 17, 14, 0, 23, 784071, tzinfo=UTC),
+        symbol="ZT",
+        local_symbol="ZTU6",
+        con_id=842590391,
+        side="SHORT",
+        action="SELL",
+        order_id="1",
+        perm_id="1477605652",
+        exec_id="0000e1a7.6a4759a9.01.01",
+        price="103.1875",
+    )
+    _write_live_lifecycle_open(
+        tmp_path,
+        trade_id="trade-zt",
+        lifecycle_id=lifecycle_id,
+        lane_id="zt_us_active_participation_short",
+        generated_at=datetime(2026, 6, 17, 14, 2, 6, tzinfo=UTC),
+        symbol="ZT",
+        local_symbol="ZTU6",
+        con_id=842590391,
+        side="SHORT",
+        action="SELL",
+        policy_id="US_ACTIVE_EVIDENCE_TIMEBOX_60M_EXIT_V1",
+    )
+
+    report = _run_broker_truth_sweeper(
+        config=TrackBManagedExitServiceConfig(repo_root=tmp_path),
+        now=NOW,
+        write=True,
+    )
+
+    updated = json.loads(registry.read_text(encoding="utf-8"))
+    [position] = updated["managed_positions"]
+    assert report["classification"] == "MANAGED_EXIT_BROKER_TRUTH_SWEEP_REPAIRED"
+    assert position["managed_exit_policy_id"] == "US_ACTIVE_EVIDENCE_TIMEBOX_60M_EXIT_V1"
 
 
 def test_broker_truth_sweeper_enriches_missing_broker_con_id_from_managed_registry(tmp_path: Path) -> None:

@@ -1748,7 +1748,14 @@ def _repair_managed_position_from_broker(
     repaired["freshness_state"] = "FRESH"
     repaired["broker_qty_match"] = True
     repaired["broker_truth_swept_at"] = now.isoformat()
-    if not repaired.get("managed_exit_policy_id"):
+    registry_policy_id = _managed_exit_policy_from_registry(
+        position=repaired,
+        broker_position=broker_position,
+        terminal_records=terminal_records,
+    )
+    if registry_policy_id:
+        repaired["managed_exit_policy_id"] = registry_policy_id
+    elif not repaired.get("managed_exit_policy_id"):
         repaired["managed_exit_policy_id"] = _managed_exit_policy_from_lane(repaired.get("lane_id") or repaired.get("strategy_id"))
     entry_fill = _entry_fill_event_from_registry(
         position=repaired,
@@ -1918,7 +1925,12 @@ def _registry_lifecycle_candidates_for_broker_position(
                     "trade_id": _string_or_none(getattr(event, "trade_id", None)),
                     "lane_id": lane_id,
                     "strategy_id": lane_id,
-                    "managed_exit_policy_id": _managed_exit_policy_from_lane(lane_id),
+                    "managed_exit_policy_id": _managed_exit_policy_from_registry_event(
+                        record=record,
+                        entry_event=event,
+                        lane_id=lane_id,
+                    )
+                    or _managed_exit_policy_from_lane(lane_id),
                     "entry_timestamp": getattr(event, "generated_at", None).isoformat()
                     if getattr(event, "generated_at", None) is not None
                     else None,
@@ -1930,6 +1942,59 @@ def _registry_lifecycle_candidates_for_broker_position(
                 }
             )
     return candidates
+
+
+def _managed_exit_policy_from_registry(
+    *,
+    position: Mapping[str, Any],
+    broker_position: Mapping[str, Any],
+    terminal_records: Sequence[Any],
+) -> str | None:
+    if not terminal_records:
+        return None
+    identity = _broker_position_identity(broker_position)
+    lifecycle_id = _string_or_none(position.get("lifecycle_id"))
+    trade_id = _string_or_none(position.get("trade_id"))
+    lane_id = _string_or_none(position.get("lane_id") or position.get("strategy_id"))
+    policies: list[str] = []
+    for record in terminal_records:
+        for event in getattr(record, "event_chain", ()) or ():
+            if not _event_matches_broker_position(event, identity, lane_id):
+                continue
+            event_lifecycle_id = _string_or_none(getattr(event, "lifecycle_id", None))
+            event_trade_id = _string_or_none(getattr(event, "trade_id", None))
+            if lifecycle_id and event_lifecycle_id != lifecycle_id:
+                continue
+            if trade_id and event_trade_id != trade_id:
+                continue
+            policy_id = _managed_exit_policy_from_event(event)
+            if policy_id:
+                policies.append(policy_id)
+    return policies[-1] if policies else None
+
+
+def _managed_exit_policy_from_registry_event(*, record: Any, entry_event: Any, lane_id: str | None) -> str | None:
+    entry_lifecycle_id = _string_or_none(getattr(entry_event, "lifecycle_id", None))
+    entry_trade_id = _string_or_none(getattr(entry_event, "trade_id", None))
+    policies: list[str] = []
+    for event in getattr(record, "event_chain", ()) or ():
+        if lane_id and str(getattr(event, "lane_id", "") or "").strip() != lane_id:
+            continue
+        event_lifecycle_id = _string_or_none(getattr(event, "lifecycle_id", None))
+        event_trade_id = _string_or_none(getattr(event, "trade_id", None))
+        if entry_lifecycle_id and event_lifecycle_id != entry_lifecycle_id:
+            continue
+        if entry_trade_id and event_trade_id != entry_trade_id:
+            continue
+        policy_id = _managed_exit_policy_from_event(event)
+        if policy_id:
+            policies.append(policy_id)
+    return policies[-1] if policies else None
+
+
+def _managed_exit_policy_from_event(event: Any) -> str | None:
+    metadata = _mapping(getattr(event, "metadata", None))
+    return _string_or_none(metadata.get("managed_exit_policy_id") or getattr(event, "managed_exit_policy_id", None))
 
 
 def _entry_fill_event_from_registry(
