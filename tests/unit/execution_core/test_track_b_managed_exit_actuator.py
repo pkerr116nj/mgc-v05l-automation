@@ -169,6 +169,31 @@ def test_default_attach_timeout_fails_closed_before_submit(tmp_path: Path) -> No
     assert "--skip-control-plane-refresh" in calls[0]
 
 
+def test_attach_child_nonzero_empty_stdout_reports_stderr_blocker(tmp_path: Path) -> None:
+    def _failed_command(command, repo_root, timeout):
+        return subprocess.CompletedProcess(command, 2, stdout="", stderr="usage: missing expiry")
+
+    payload = run_track_b_managed_exit_actuator(
+        config=TrackBManagedExitActuatorConfig(
+            repo_root=tmp_path,
+            apply=True,
+            operator_authorized_managed_exit=True,
+            max_closes_per_run=1,
+        ),
+        now=NOW,
+        input_overrides=_inputs(runtime_down=True),
+        command_runner=_failed_command,
+        write=False,
+    )
+
+    attempt = payload["attempted_closes"][0]
+    assert payload["classification"] == MANAGED_EXIT_ACTUATOR_BLOCKED
+    assert payload["submit_attempted"] is False
+    assert attempt["classification"] == MANAGED_EXIT_ACTUATOR_BLOCKED
+    assert attempt["primary_blocker"] == "MANAGED_EXIT_ATTACH_CHILD_FAILED"
+    assert attempt["close_submit_attempt"] is None
+
+
 def test_default_attach_child_fast_path_remains_apply_eligible(tmp_path: Path) -> None:
     calls = []
 

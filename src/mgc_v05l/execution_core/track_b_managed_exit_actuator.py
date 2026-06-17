@@ -654,6 +654,18 @@ def _run_attach_child(
             "broker_state_mutated": False,
             "primary_blocker": "BROKER_HANDSHAKE_OR_ATTACH_TIMEOUT_BEFORE_SUBMIT",
         }
+    if completed.returncode != 0 and not (completed.stdout or "").strip():
+        return {
+            "classification": MANAGED_EXIT_ACTUATOR_BLOCKED,
+            "generated_at": now.isoformat(),
+            "returncode": completed.returncode,
+            "command": command,
+            "stdout_tail": _tail(completed.stdout),
+            "stderr_tail": _tail(completed.stderr),
+            "submit_attempted": False,
+            "broker_state_mutated": False,
+            "primary_blocker": "MANAGED_EXIT_ATTACH_CHILD_FAILED",
+        }
     try:
         payload = json.loads(completed.stdout or "{}")
     except json.JSONDecodeError:
