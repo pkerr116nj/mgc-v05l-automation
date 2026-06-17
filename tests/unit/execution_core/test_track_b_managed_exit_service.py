@@ -325,6 +325,86 @@ def test_broker_truth_sweeper_prefers_freshest_broker_backed_same_contract_lifec
     )
 
 
+def test_broker_truth_sweeper_adopts_broker_backed_zt_position(tmp_path: Path) -> None:
+    _broker_truth(
+        tmp_path,
+        symbol="ZT",
+        local_symbol="ZTU6",
+        con_id=842590391,
+        expiry="20260930",
+        quantity="-1.0",
+    )
+    registry = tmp_path / "outputs/track_b_execution_core/managed_positions/latest_managed_positions.json"
+    _write_json(
+        registry,
+        {
+            "classification": "NO_MANAGED_POSITIONS",
+            "managed_positions": [],
+        },
+    )
+    lifecycle_id = "bridge_fill_ZT|1m|2026-06-17T13:40:00Z|SELL_TO_OPEN"
+    lifecycle_path = (
+        tmp_path
+        / "outputs/track_b_execution_core/track_b_strategy_managed_paper_lifecycle"
+        / lifecycle_id
+        / "track_b_strategy_managed_paper_lifecycle_report.json"
+    )
+    _write_json(
+        lifecycle_path,
+        {
+            "lifecycle_id": lifecycle_id,
+            "trade_id": "trade-zt",
+            "lane_id": "zt_us_active_participation_short",
+            "strategy_id": "PAPER_ACTIVE_EVIDENCE_ZT_US_PARTICIPATION_SHORT_V1",
+            "local_symbol": "ZTU6",
+            "con_id": 842590391,
+            "managed_exit_policy_id": "US_ACTIVE_EVIDENCE_TIMEBOX_60M_EXIT_V1",
+            "paper_lifecycle_classification": "TRACK_B_STRATEGY_PAPER_OPEN_MANAGED",
+            "entry_fill": {
+                "price": "103.1875",
+                "filled_at": "2026-06-17T14:00:23.784071+00:00",
+                "broker_order_id": "1",
+                "perm_id": "1477605652",
+                "execution_id": "0000e1a7.6a4759a9.01.01",
+            },
+        },
+    )
+    _write_live_entry_fill(
+        tmp_path,
+        trade_id="trade-zt",
+        lifecycle_id=lifecycle_id,
+        lane_id="zt_us_active_participation_short",
+        generated_at=datetime(2026, 6, 17, 14, 0, 23, 784071, tzinfo=UTC),
+        symbol="ZT",
+        local_symbol="ZTU6",
+        con_id=842590391,
+        side="SHORT",
+        action="SELL",
+        order_id="1",
+        perm_id="1477605652",
+        exec_id="0000e1a7.6a4759a9.01.01",
+        price="103.1875",
+    )
+
+    report = _run_broker_truth_sweeper(
+        config=TrackBManagedExitServiceConfig(repo_root=tmp_path),
+        now=NOW,
+        write=True,
+    )
+
+    updated = json.loads(registry.read_text(encoding="utf-8"))
+    [position] = updated["managed_positions"]
+    assert report["classification"] == "MANAGED_EXIT_BROKER_TRUTH_SWEEP_ADOPTED"
+    assert position["classification"] == "OPEN_MANAGED_MATCHED"
+    assert position["local_symbol"] == "ZTU6"
+    assert position["con_id"] == 842590391
+    assert position["side"] == "SHORT"
+    assert position["lane_id"] == "zt_us_active_participation_short"
+    assert position["managed_exit_policy_id"] == "US_ACTIVE_EVIDENCE_TIMEBOX_60M_EXIT_V1"
+    assert position["entry_time"] == "2026-06-17T14:00:23.784071+00:00"
+    assert position["entry_price"] == "103.1875"
+
+
 def test_broker_truth_sweeper_enriches_missing_broker_con_id_from_managed_registry(tmp_path: Path) -> None:
     _broker_truth(tmp_path, con_id=0)
     registry = tmp_path / "outputs/track_b_execution_core/managed_positions/latest_managed_positions.json"

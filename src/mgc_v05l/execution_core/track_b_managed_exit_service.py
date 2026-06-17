@@ -1555,7 +1555,7 @@ def _is_track_b_futures_broker_position(row: Mapping[str, Any]) -> bool:
     sec_type = str(row.get("security_type") or row.get("secType") or "").strip().upper()
     if sec_type and sec_type != "FUT":
         return False
-    return _instrument_from_position(row) in {"MES", "MNQ", "MGC", "ES", "NQ", "GC"}
+    return _instrument_from_position(row) in {"MES", "MNQ", "MGC", "ES", "NQ", "GC", "ZT"}
 
 
 def _instrument_from_position(row: Mapping[str, Any]) -> str:
