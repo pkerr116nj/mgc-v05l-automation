@@ -3,11 +3,14 @@ from __future__ import annotations
 from mgc_v05l.execution_core.track_b_exit_strategy_roster import (
     MES_CHANGEOVER_0300_LONG_TIMEBOX_6H_V1,
     MES_CHANGEOVER_0700_LONG_TIMEBOX_4H_V1,
+    MES_DIAGNOSTIC_TIMEBOX_3X5M_V1,
     MES_GLOBEX_ACTIVE_EVIDENCE_TIMEBOX_15M_V1,
     MES_GLOBEX_ACTIVE_EVIDENCE_TIMEBOX_60M_V1,
     MES_US_ACTIVE_EVIDENCE_TIMEBOX_60M_V1,
+    ES_DIAGNOSTIC_TIMEBOX_3X5M_V1,
     ES_GLOBEX_ACTIVE_EVIDENCE_TIMEBOX_15M_V1,
     ES_US_ACTIVE_EVIDENCE_TIMEBOX_60M_V1,
+    GC_DIAGNOSTIC_TIMEBOX_3X5M_V1,
     GC_GLOBEX_ACTIVE_EVIDENCE_TIMEBOX_15M_V1,
     GC_US_ACTIVE_EVIDENCE_TIMEBOX_60M_V1,
     MGC_DIAGNOSTIC_TIMEBOX_3X5M_V1,
@@ -21,15 +24,20 @@ from mgc_v05l.execution_core.track_b_exit_strategy_roster import (
     MNQ_GLOBEX_ACTIVE_EVIDENCE_TIMEBOX_60M_V1,
     MNQ_SNAP_TURN_TIMEBOX_3X5M_V1,
     MNQ_US_ACTIVE_EVIDENCE_TIMEBOX_60M_V1,
+    NQ_DIAGNOSTIC_TIMEBOX_3X5M_V1,
     NQ_GLOBEX_ACTIVE_EVIDENCE_TIMEBOX_15M_V1,
     NQ_US_ACTIVE_EVIDENCE_TIMEBOX_60M_V1,
     PAPER_DIAGNOSTIC_TIME_BOXED_3X5M_EXIT_V1,
+    ZB_DIAGNOSTIC_TIMEBOX_3X5M_V1,
     ZB_GLOBEX_ACTIVE_EVIDENCE_TIMEBOX_15M_V1,
     ZB_US_ACTIVE_EVIDENCE_TIMEBOX_60M_V1,
+    ZF_DIAGNOSTIC_TIMEBOX_3X5M_V1,
     ZF_GLOBEX_ACTIVE_EVIDENCE_TIMEBOX_15M_V1,
     ZF_US_ACTIVE_EVIDENCE_TIMEBOX_60M_V1,
+    ZN_DIAGNOSTIC_TIMEBOX_3X5M_V1,
     ZN_GLOBEX_ACTIVE_EVIDENCE_TIMEBOX_15M_V1,
     ZN_US_ACTIVE_EVIDENCE_TIMEBOX_60M_V1,
+    ZT_DIAGNOSTIC_TIMEBOX_3X5M_V1,
     ZT_GLOBEX_ACTIVE_EVIDENCE_TIMEBOX_15M_V1,
     ZT_US_ACTIVE_EVIDENCE_TIMEBOX_60M_V1,
     close_action_for_position_side,
@@ -71,6 +79,33 @@ def test_mgc_diagnostic_timebox_profile_resolves_by_policy_and_instrument() -> N
     assert profile.managed_exit_policy_id == PAPER_DIAGNOSTIC_TIME_BOXED_3X5M_EXIT_V1
     assert profile.required_completed_5m_bars == 3
     assert close_limit_from_profile(latest_price="4534.9", side="LONG", profile=profile) == "4534.7"
+
+
+def test_validated_futures_diagnostic_timebox_profiles_resolve_by_policy_and_instrument() -> None:
+    for symbol, profile_id, tick_size in (
+        ("MES", MES_DIAGNOSTIC_TIMEBOX_3X5M_V1, "0.25"),
+        ("GC", GC_DIAGNOSTIC_TIMEBOX_3X5M_V1, "0.1"),
+        ("NQ", NQ_DIAGNOSTIC_TIMEBOX_3X5M_V1, "0.25"),
+        ("ES", ES_DIAGNOSTIC_TIMEBOX_3X5M_V1, "0.25"),
+        ("ZT", ZT_DIAGNOSTIC_TIMEBOX_3X5M_V1, "0.00390625"),
+        ("ZF", ZF_DIAGNOSTIC_TIMEBOX_3X5M_V1, "0.0078125"),
+        ("ZN", ZN_DIAGNOSTIC_TIMEBOX_3X5M_V1, "0.015625"),
+        ("ZB", ZB_DIAGNOSTIC_TIMEBOX_3X5M_V1, "0.03125"),
+    ):
+        profile = resolve_track_b_exit_profile_for_position(
+            instrument_family=symbol,
+            managed_exit_policy_id=PAPER_DIAGNOSTIC_TIME_BOXED_3X5M_EXIT_V1,
+        )
+
+        assert profile.exit_profile_id == profile_id
+        assert profile.instrument_family == symbol
+        assert profile.tick_size == tick_size
+        assert profile.required_completed_5m_bars == 3
+        assert profile.paper_only is True
+        assert profile.live_money_eligible is False
+        assert profile.paper_proof_allowed is False
+        assert profile.broad_cancel_allowed is False
+        assert profile.global_flatten_allowed is False
 
 
 def test_mnq_changeover_timebox_profile_resolves_by_policy_and_instrument() -> None:

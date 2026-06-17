@@ -45,7 +45,15 @@ ZF_GLOBEX_ACTIVE_EVIDENCE_TIMEBOX_15M_V1 = "ZF_GLOBEX_ACTIVE_EVIDENCE_TIMEBOX_15
 ZN_GLOBEX_ACTIVE_EVIDENCE_TIMEBOX_15M_V1 = "ZN_GLOBEX_ACTIVE_EVIDENCE_TIMEBOX_15M_V1"
 ZB_GLOBEX_ACTIVE_EVIDENCE_TIMEBOX_15M_V1 = "ZB_GLOBEX_ACTIVE_EVIDENCE_TIMEBOX_15M_V1"
 MNQ_GLOBEX_REOPEN_FIRST_CANDLE_TIMEBOX_60M_SHADOW_V1 = "MNQ_GLOBEX_REOPEN_FIRST_CANDLE_TIMEBOX_60M_SHADOW_V1"
+MES_DIAGNOSTIC_TIMEBOX_3X5M_V1 = "MES_DIAGNOSTIC_TIMEBOX_3X5M_V1"
 MGC_DIAGNOSTIC_TIMEBOX_3X5M_V1 = "MGC_DIAGNOSTIC_TIMEBOX_3X5M_V1"
+GC_DIAGNOSTIC_TIMEBOX_3X5M_V1 = "GC_DIAGNOSTIC_TIMEBOX_3X5M_V1"
+NQ_DIAGNOSTIC_TIMEBOX_3X5M_V1 = "NQ_DIAGNOSTIC_TIMEBOX_3X5M_V1"
+ES_DIAGNOSTIC_TIMEBOX_3X5M_V1 = "ES_DIAGNOSTIC_TIMEBOX_3X5M_V1"
+ZT_DIAGNOSTIC_TIMEBOX_3X5M_V1 = "ZT_DIAGNOSTIC_TIMEBOX_3X5M_V1"
+ZF_DIAGNOSTIC_TIMEBOX_3X5M_V1 = "ZF_DIAGNOSTIC_TIMEBOX_3X5M_V1"
+ZN_DIAGNOSTIC_TIMEBOX_3X5M_V1 = "ZN_DIAGNOSTIC_TIMEBOX_3X5M_V1"
+ZB_DIAGNOSTIC_TIMEBOX_3X5M_V1 = "ZB_DIAGNOSTIC_TIMEBOX_3X5M_V1"
 MGC_FORCED_SESSION_SEGMENT_TIMEBOX_3X5M_V1 = "MGC_FORCED_SESSION_SEGMENT_TIMEBOX_3X5M_V1"
 TIMEBOXED_3X5M_MANAGED_LIMIT_CLOSE_V1 = "timeboxed_3x5m_managed_limit_close_v1"
 TIMEBOXED_MANAGED_LIMIT_CLOSE_V1 = "timeboxed_managed_limit_close_v1"
@@ -403,6 +411,39 @@ _BATCH1_ACTIVE_EVIDENCE_EXIT_PROFILES = (
 )
 
 
+_VALIDATED_FUTURES_DIAGNOSTIC_TIMEBOX_PROFILES = (
+    (MES_DIAGNOSTIC_TIMEBOX_3X5M_V1, "MES", "0.25"),
+    (GC_DIAGNOSTIC_TIMEBOX_3X5M_V1, "GC", "0.1"),
+    (NQ_DIAGNOSTIC_TIMEBOX_3X5M_V1, "NQ", "0.25"),
+    (ES_DIAGNOSTIC_TIMEBOX_3X5M_V1, "ES", "0.25"),
+    (ZT_DIAGNOSTIC_TIMEBOX_3X5M_V1, "ZT", "0.00390625"),
+    (ZF_DIAGNOSTIC_TIMEBOX_3X5M_V1, "ZF", "0.0078125"),
+    (ZN_DIAGNOSTIC_TIMEBOX_3X5M_V1, "ZN", "0.015625"),
+    (ZB_DIAGNOSTIC_TIMEBOX_3X5M_V1, "ZB", "0.03125"),
+)
+
+
+def _validated_futures_diagnostic_timebox_profiles() -> dict[str, TrackBExitProfile]:
+    return {
+        profile_id: TrackBExitProfile(
+            exit_strategy_id=TIMEBOXED_3X5M_MANAGED_LIMIT_CLOSE_V1,
+            exit_profile_id=profile_id,
+            managed_exit_policy_id=PAPER_DIAGNOSTIC_TIME_BOXED_3X5M_EXIT_V1,
+            instrument_family=symbol,
+            strategy_family="paper_diagnostic_timebox",
+            order_type="LMT",
+            required_completed_5m_bars=3,
+            price_offset_ticks=2,
+            tick_size=tick_size,
+            profile_explanation=(
+                f"PAPER diagnostic {symbol} close profile: after three completed 5m bars, "
+                "submit the managed lifecycle close as an exact opposite-side limit order for the owned position."
+            ),
+        )
+        for profile_id, symbol, tick_size in _VALIDATED_FUTURES_DIAGNOSTIC_TIMEBOX_PROFILES
+    }
+
+
 def _batch1_active_evidence_exit_profiles() -> dict[str, TrackBExitProfile]:
     return {
         profile_id: TrackBExitProfile(
@@ -436,6 +477,7 @@ def _batch1_active_evidence_exit_profiles() -> dict[str, TrackBExitProfile]:
 
 EXIT_PROFILE_ROSTER = {
     **EXIT_PROFILE_ROSTER,
+    **_validated_futures_diagnostic_timebox_profiles(),
     **_batch1_active_evidence_exit_profiles(),
 }
 
