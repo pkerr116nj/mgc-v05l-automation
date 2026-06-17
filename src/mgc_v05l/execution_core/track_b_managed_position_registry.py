@@ -554,6 +554,7 @@ def _managed_positions(
         aggregate_qty = (lifecycle or {}).get("aggregate_qty")
         signed_lifecycle_qty = _signed_lifecycle_quantity(lifecycle)
         signed_broker_qty = _decimal((broker or {}).get("quantity"))
+        duplicate_excess_qty = _duplicate_excess_close_quantity(lifecycle, signed_broker_qty)
         broker_qty_match = (
             signed_lifecycle_qty is not None
             and signed_broker_qty is not None
@@ -587,6 +588,11 @@ def _managed_positions(
                 str(item.get("entry_perm_id") or "") for item in lifecycle_units if item.get("entry_perm_id")
             ],
             "duplicate_same_lane_exposure": (lifecycle or {}).get("duplicate_same_lane_exposure") is True,
+            "duplicate_entry_count": (lifecycle or {}).get("duplicate_entry_count"),
+            "duplicate_excess_qty": _decimal_display(duplicate_excess_qty),
+            "accepted_managed_qty": (lifecycle or {}).get("accepted_managed_qty"),
+            "duplicate_entry_exec_ids": (lifecycle or {}).get("duplicate_entry_exec_ids") or [],
+            "duplicate_entry_perm_ids": (lifecycle or {}).get("duplicate_entry_perm_ids") or [],
             "pyramiding_allowed": (lifecycle or {}).get("pyramiding_allowed") is True,
             "pyramiding_policy": (lifecycle or {}).get("pyramiding_policy"),
             "working_close_qty": _working_close_qty(effective_close_order_state),
@@ -618,7 +624,9 @@ def _managed_positions(
             if exit_due
             else None,
             "required_close_quantity": _decimal_display(abs(signed_broker_qty))
-            if exit_due and signed_broker_qty is not None
+            if exit_due and signed_broker_qty is not None and duplicate_excess_qty is None
+            else _decimal_display(duplicate_excess_qty)
+            if exit_due and duplicate_excess_qty is not None
             else None,
             "close_order_state": effective_close_order_state,
             "managed_order_state": managed_order_state,
@@ -1040,7 +1048,12 @@ def _registry_lifecycle_candidates_for_broker_positions(
 ) -> list[dict[str, Any]]:
     candidates: list[dict[str, Any]] = []
     for broker in broker_positions:
-        if _best_lifecycle_match([dict(item) for item in lifecycle_positions if isinstance(item, Mapping)], _position_key(broker), broker):
+        best_lifecycle = _best_lifecycle_match(
+            [dict(item) for item in lifecycle_positions if isinstance(item, Mapping)],
+            _position_key(broker),
+            broker,
+        )
+        if best_lifecycle and _signed_lifecycle_quantity(best_lifecycle) == _decimal(broker.get("quantity")):
             continue
         candidate = _registry_lifecycle_candidate_for_broker_position(
             broker_position=broker,
@@ -1097,7 +1110,36 @@ def _registry_lifecycle_candidate_for_broker_position(
                     }
                 )
             )
-    return max(candidates, key=lambda row: str(row.get("entry_timestamp") or "")) if candidates else None
+    if not candidates:
+        return None
+    selected = max(candidates, key=lambda row: str(row.get("entry_timestamp") or ""))
+    same_lane_side = [
+        row
+        for row in candidates
+        if row.get("lane_id") == selected.get("lane_id") and row.get("side") == selected.get("side")
+    ]
+    broker_qty = abs(_decimal(broker_position.get("quantity")) or Decimal("0"))
+    if len(same_lane_side) > 1 and broker_qty > Decimal("1"):
+        selected = {
+            **selected,
+            "duplicate_same_lane_exposure": True,
+            "duplicate_entry_count": len(same_lane_side),
+            "accepted_managed_qty": "1",
+            "duplicate_excess_qty": _decimal_display(max(broker_qty - Decimal("1"), Decimal("0"))),
+            "duplicate_entry_exec_ids": [
+                str(exec_id)
+                for row in same_lane_side
+                for exec_id in _list(row.get("entry_exec_ids"))
+                if str(exec_id or "").strip()
+            ],
+            "duplicate_entry_perm_ids": [
+                str(perm_id)
+                for row in same_lane_side
+                for perm_id in _list(row.get("entry_perm_ids"))
+                if str(perm_id or "").strip()
+            ],
+        }
+    return selected
 
 
 def _event_matches_broker_position(event: Any, *, broker_position: Mapping[str, Any]) -> bool:
@@ -1829,6 +1871,20 @@ def _signed_lifecycle_quantity(position: Mapping[str, Any] | None) -> Decimal | 
     return quantity
 
 
+def _duplicate_excess_close_quantity(
+    lifecycle: Mapping[str, Any] | None,
+    signed_broker_qty: Decimal | None,
+) -> Decimal | None:
+    if not lifecycle or lifecycle.get("duplicate_same_lane_exposure") is not True:
+        return None
+    excess = _decimal(lifecycle.get("duplicate_excess_qty"))
+    if excess is None or excess <= 0:
+        return None
+    if signed_broker_qty is None or abs(signed_broker_qty) <= excess:
+        return None
+    return excess
+
+
 def _working_close_qty(order_state: Mapping[str, Any] | None) -> str | None:
     if not order_state:
         return "0"
@@ -1870,6 +1926,20 @@ def _merge_resolved_lifecycle_positions(
         if lifecycle_id and lifecycle_id in existing_lifecycle_ids:
             continue
         if key and key in existing_keys:
+            existing_index = next((idx for idx, item in enumerate(merged) if _position_key(item) == key), None)
+            if existing_index is not None and _resolved_lifecycle_supersedes_existing(
+                resolved=row,
+                existing=merged[existing_index],
+            ):
+                existing_lifecycle_id = str(merged[existing_index].get("lifecycle_id") or "").strip()
+                merged[existing_index] = {
+                    **dict(row),
+                    "superseded_lifecycle_id": existing_lifecycle_id or None,
+                    "projection_repair_reason": "fresh_broker_backed_registry_owner_superseded_stale_same_contract_lifecycle",
+                }
+                if lifecycle_id:
+                    existing_lifecycle_ids.add(lifecycle_id)
+                continue
             continue
         merged.append(dict(row))
         if key:
@@ -1877,6 +1947,27 @@ def _merge_resolved_lifecycle_positions(
         if lifecycle_id:
             existing_lifecycle_ids.add(lifecycle_id)
     return merged
+
+
+def _resolved_lifecycle_supersedes_existing(
+    *,
+    resolved: Mapping[str, Any],
+    existing: Mapping[str, Any],
+) -> bool:
+    source = str(resolved.get("source") or "").upper()
+    if "LIVE_TRADE_REGISTRY" not in source:
+        return False
+    resolved_qty = _signed_lifecycle_quantity(resolved)
+    existing_qty = _signed_lifecycle_quantity(existing)
+    if resolved_qty is None or existing_qty is None or resolved_qty == existing_qty:
+        return False
+    if resolved_qty * existing_qty >= 0:
+        return False
+    if not _managed_exit_policy_id(resolved, None, {}, None):
+        return False
+    resolved_time = str(resolved.get("entry_timestamp") or "")
+    existing_time = str(existing.get("entry_timestamp") or "")
+    return not existing_time or resolved_time >= existing_time
 
 
 def _lifecycle_requires_operator_action(

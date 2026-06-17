@@ -38,6 +38,39 @@ def test_attributed_broker_position_builds_allowed_exit_intent(tmp_path: Path) -
     assert payload["runtime_restarted"] is False
 
 
+def test_duplicate_excess_required_close_quantity_builds_partial_exit_intent(tmp_path: Path) -> None:
+    inputs = _inputs()
+    inputs["reconciliation"]["track_b_broker_positions"][0]["quantity"] = "2"
+    inputs["managed_positions"]["managed_positions"][0].update(
+        {
+            "quantity": "2",
+            "side": "LONG",
+            "required_close_action": "SELL",
+            "required_close_quantity": "1",
+            "duplicate_same_lane_exposure": True,
+            "duplicate_excess_qty": "1",
+        }
+    )
+    inputs["managed_orders"]["managed_orders"][0]["required_close_action"] = "SELL"
+    inputs["managed_orders"]["managed_orders"][0]["required_close_quantity"] = "2"
+
+    payload = _build(tmp_path, inputs)
+
+    assert payload["classification"] == EXIT_INTENT_DRY_RUN_READY
+    candidate = payload["candidate_exit_intents"][0]
+    assert candidate["candidate_close_action"] == "SELL"
+    assert candidate["candidate_close_qty"] == "1"
+    intent = candidate["exit_intent"]
+    assert intent["owned_qty"] == "2"
+    assert intent["close_qty"] == "1"
+    assert intent["remaining_qty_after"] == "1"
+    assert intent["exit_type"] == "PARTIAL_SCALE_OUT"
+    assert intent["close_qty_source"] == "OPERATOR_INSTRUCTION"
+    assert intent["allow_partial"] is True
+    assert intent["partial_policy_supported"] is True
+    assert candidate["authority_decision"]["decision"] == "ALLOWED"
+
+
 def test_unattributed_broker_scoped_risk_exit_is_degraded_allowed(tmp_path: Path) -> None:
     inputs = _inputs()
     inputs["managed_positions"]["managed_positions"] = []

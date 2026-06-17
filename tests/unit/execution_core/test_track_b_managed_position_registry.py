@@ -1173,6 +1173,81 @@ def test_registry_owner_supersedes_stale_same_contract_projection(
     assert payload["projection_authority_diagnostics"]["classification"] == PROJECTION_AUTHORITY_COHERENT
 
 
+def test_registry_long_fills_supersede_stale_opposite_side_lifecycle_same_contract(tmp_path: Path) -> None:
+    broker = {
+        **_broker_position_mes_long(),
+        "quantity": "2.0",
+    }
+    stale_short = {
+        **_lifecycle_position(
+            lifecycle_id="reserved_submit_mes_globex_active_participation_short_20260612T064610876433Z_7525093fc5e5",
+            policy="GLOBEX_ACTIVE_EVIDENCE_TIMEBOX_60M_EXIT_V1",
+        ),
+        "account_id": "MULTIPLE",
+        "instrument_family": "MES",
+        "track_b_root": "MES",
+        "symbol": "MES",
+        "contract_key": "MES-202609",
+        "local_symbol": "MESU6",
+        "con_id": 793356217,
+        "expiry": "20260918",
+        "quantity": "1",
+        "aggregate_qty": "-1",
+        "side": "SHORT",
+        "trade_id": "trade_stale_mes_short",
+        "entry_timestamp": "2026-05-21T06:46:12+00:00",
+    }
+    _seed_base(tmp_path, broker_positions=[broker], lifecycle_positions=[stale_short])
+    _write_entry_fill_event(
+        tmp_path,
+        trade_id="trade_mes_long_a",
+        lifecycle_id="reserved_submit_mes_london_open_active_participation_long_20260617T071508366407Z_9774b038702f",
+        lane_id="mes_london_open_active_participation_long",
+        symbol="MES",
+        local_symbol="MESU6",
+        con_id=793356217,
+        generated_at=NOW + timedelta(minutes=1),
+        side="LONG",
+        action="BUY",
+        order_id="9",
+        perm_id="2130844547",
+        exec_id="0000e1a7.6a46e8e6.01.01",
+    )
+    _write_entry_fill_event(
+        tmp_path,
+        trade_id="trade_mes_long_b",
+        lifecycle_id="reserved_submit_mes_london_open_active_participation_long_20260617T071508486753Z_b7b64a634aac",
+        lane_id="mes_london_open_active_participation_long",
+        symbol="MES",
+        local_symbol="MESU6",
+        con_id=793356217,
+        generated_at=NOW + timedelta(minutes=2),
+        side="LONG",
+        action="BUY",
+        order_id="1",
+        perm_id="2130844505",
+        exec_id="0000e1a7.6a46e8e5.01.01",
+    )
+
+    payload = build_track_b_managed_position_registry(
+        config=TrackBManagedPositionRegistryConfig(repo_root=tmp_path),
+        now=NOW,
+    )
+
+    position = payload["managed_positions"][0]
+    assert position["classification"] in {OPEN_MANAGED_MATCHED, OPEN_MANAGED_EXIT_DUE}
+    assert position["side"] == "LONG"
+    assert position["quantity"] == "2"
+    assert position["signed_lifecycle_qty"] == "2"
+    assert position["signed_broker_qty"] == "2"
+    assert position["broker_qty_match"] is True
+    assert position["lane_id"] == "mes_london_open_active_participation_long"
+    assert position["lifecycle_id"] == (
+        "reserved_submit_mes_london_open_active_participation_long_20260617T071508486753Z_b7b64a634aac"
+    )
+    assert stale_short["lifecycle_id"] not in {row.get("lifecycle_id") for row in payload["managed_positions"]}
+
+
 def test_reconciled_owned_exposure_cannot_publish_no_managed_positions(
     tmp_path: Path,
     monkeypatch,

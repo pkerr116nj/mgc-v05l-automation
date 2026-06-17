@@ -369,6 +369,12 @@ def _exit_intent(
     qty = abs(_decimal(broker_position.get("quantity")))
     side = "LONG" if _decimal(broker_position.get("quantity")) > 0 else "SHORT"
     action = "SELL" if side == "LONG" else "BUY"
+    requested_close_qty = _requested_close_quantity(
+        owned_qty=qty,
+        managed_position=managed_position,
+        managed_order=managed_order,
+    )
+    is_partial = requested_close_qty < qty
     account_id = _text(broker_position.get("account_id") or broker_position.get("account") or "DUM882026")
     local_symbol = _text(broker_position.get("local_symbol"))
     con_id = _int(broker_position.get("con_id") or managed_position.get("con_id") or managed_order.get("con_id"))
@@ -387,11 +393,11 @@ def _exit_intent(
         "position_side": side,
         "owned_qty": str(qty),
         "close_action": action,
-        "close_qty": str(qty),
-        "remaining_qty_after": "0",
-        "close_qty_source": CloseQtySource.RISK_POLICY,
-        "exit_type": ExitType.FULL_CLOSE,
-        "exit_reason": "broker_scoped_risk_reduction_dry_run",
+        "close_qty": str(requested_close_qty),
+        "remaining_qty_after": str(qty - requested_close_qty),
+        "close_qty_source": CloseQtySource.OPERATOR_INSTRUCTION if is_partial else CloseQtySource.RISK_POLICY,
+        "exit_type": ExitType.PARTIAL_SCALE_OUT if is_partial else ExitType.FULL_CLOSE,
+        "exit_reason": "duplicate_exposure_reduction" if is_partial else "broker_scoped_risk_reduction_dry_run",
         "priority": 50,
         "urgency": ExitUrgency.NORMAL,
         "price_policy": {
@@ -400,7 +406,7 @@ def _exit_intent(
             "requires_current_executable_price_before_apply": True,
         },
         "idempotency_key": "",
-        "allow_partial": False,
+        "allow_partial": bool(is_partial),
         "allow_reverse": False,
         "source_policy_id": "TRACK_B_EXIT_INTENT_DRY_RUN_V1",
         "generated_at": now,
@@ -415,7 +421,7 @@ def _exit_intent(
         "strategy_id": strategy_id,
         "lane_id": lane_id,
         "source_artifact_refs": tuple(source_refs),
-        "partial_policy_supported": False,
+        "partial_policy_supported": bool(is_partial),
         "live_money_eligible": False,
         "live_money_allowed": False,
         "paper_proof_invoked": False,
@@ -497,6 +503,22 @@ def _matching_managed_position(
     if len(matches) == 1:
         return matches[0]
     return {}
+
+
+def _requested_close_quantity(
+    *,
+    owned_qty: Decimal,
+    managed_position: Mapping[str, Any],
+    managed_order: Mapping[str, Any],
+) -> Decimal:
+    if managed_position.get("duplicate_same_lane_exposure") is True:
+        raw = managed_position.get("required_close_quantity")
+    else:
+        raw = managed_order.get("required_close_quantity") or managed_position.get("required_close_quantity")
+    requested = _decimal(raw)
+    if requested <= 0 or requested > owned_qty:
+        return owned_qty
+    return requested
 
 
 def _matching_managed_order(
