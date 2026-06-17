@@ -1750,6 +1750,8 @@ def process_rows() -> list[dict[str, object]]:
         command = parts[2]
         if pid == launcher_pid:
             continue
+        if ppid == launcher_pid and lock_dir.name in command and "track_b_paper_stack_runtime_wrapper.sh" in command:
+            continue
         if repo_root not in command:
             continue
         is_wrapper = wrapper_path in command and "track_b_paper_stack_runtime_wrapper.sh" in command
@@ -2424,6 +2426,8 @@ for line in ps.stdout.splitlines():
     if pid == current_pid:
         continue
     command = parts[2]
+    if ppid == current_pid and "track_b_paper_stack_runtime_wrapper.sh" in command:
+        continue
     if repo_root not in command:
         continue
     is_wrapper = wrapper_path in command and "track_b_paper_stack_runtime_wrapper.sh" in command

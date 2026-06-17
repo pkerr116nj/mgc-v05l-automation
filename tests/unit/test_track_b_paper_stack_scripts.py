@@ -82,6 +82,7 @@ def test_paper_stack_start_enforces_single_authoritative_runtime_scope_before_la
     assert "BLOCKED_RUNTIME_SCOPE_LOCK_HELD" in source
     assert 'lock_dir.mkdir(parents=True, exist_ok=False)' in source
     assert 'wrapper_path in command and "track_b_paper_stack_runtime_wrapper.sh" in command' in source
+    assert 'ppid == launcher_pid and lock_dir.name in command and "track_b_paper_stack_runtime_wrapper.sh" in command' in source
     assert '"mgc_v05l.app.main" in command' in source
     assert '"probationary-paper-soak" in command' in source
     assert "scoped_config_path in command" in source
@@ -104,6 +105,7 @@ def test_detached_wrapper_owns_runtime_scope_lock_until_exit() -> None:
     assert "verify_single_runtime_carrier_on_wrapper_start()" in wrapper_block
     assert "track_b_paper_stack_wrapper_duplicate_carrier_blocked" in wrapper_block
     assert "BLOCKED_DUPLICATE_RUNTIME_CARRIER" in wrapper_block
+    assert 'ppid == current_pid and "track_b_paper_stack_runtime_wrapper.sh" in command' in wrapper_block
     assert "write_detached_child_final_status_on_wrapper_exit" in wrapper_block
     assert "release_runtime_scope_lock_on_wrapper_exit" in wrapper_block
     assert source.index("write_detached_child_final_status_on_wrapper_exit") < source.index(
