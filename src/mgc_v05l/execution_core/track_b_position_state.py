@@ -514,7 +514,11 @@ def _row_is_diagnostic_only(row: Mapping[str, Any]) -> bool:
     if "HISTORICAL" in scope or "FULL_AUDIT_ONLY" in scope or "DIAGNOSTIC" in scope:
         return True
     classification = str(row.get("classification") or "").upper()
-    return "HISTORICAL" in classification or "STALE_DERIVED" in classification
+    return (
+        "HISTORICAL" in classification
+        or "STALE_DERIVED" in classification
+        or classification == "STALE_MANAGED_POSITION_EVIDENCE"
+    )
 
 
 def _position_in_scope(*, broker_position: Mapping[str, Any], config: TrackBPositionStateReportConfig) -> bool:

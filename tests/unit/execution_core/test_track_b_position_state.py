@@ -149,6 +149,40 @@ def test_historical_stale_row_does_not_create_current_exposure(tmp_path: Path) -
     assert report["diagnostic_rows"][0]["row"]["historical_only"] is True
 
 
+def test_stale_managed_position_evidence_does_not_create_current_exposure(tmp_path: Path) -> None:
+    report = _report(
+        tmp_path,
+        broker_positions=[],
+        managed_positions=[
+            {
+                **_managed_position(
+                    local_symbol="MGCQ6",
+                    con_id=732156883,
+                    symbol="MGC",
+                    side="SHORT",
+                    quantity="1",
+                    lifecycle_id="stale-mgc-life",
+                    trade_id="stale-mgc-trade",
+                    strategy_id="mgc_strategy",
+                    lane_id="mgc_london_late_active_participation_short",
+                    broker_position=_broker_position(
+                        local_symbol="MGCQ6",
+                        con_id=732156883,
+                        symbol="MGC",
+                        quantity="-1",
+                    ),
+                ),
+                "classification": "STALE_MANAGED_POSITION_EVIDENCE",
+            }
+        ],
+    )
+
+    assert report["classification"] == "POSITION_STATE_FLAT"
+    assert report["positions"] == []
+    assert report["diagnostic_rows"][0]["kind"] == "managed_positions"
+    assert report["diagnostic_rows"][0]["row"]["classification"] == "STALE_MANAGED_POSITION_EVIDENCE"
+
+
 def test_wrong_account_position_is_not_mixed_into_position_state(tmp_path: Path) -> None:
     report = _report(tmp_path, broker_positions=[_broker_position(account_id="OTHER", quantity="1")])
 
