@@ -386,6 +386,7 @@ def _v11_eligible_positions(
             continue
         row["exit_authority_decision"] = dict(decision)
         row["exit_intent"] = dict(candidate.get("exit_intent") or {})
+        row["close_candidate"] = _authority_close_candidate(candidate=candidate, row=row)
         row["exit_authority_attribution_status"] = candidate.get("attribution_status")
         row["legacy_apply_blockers_diagnostic"] = list(
             row.get("legacy_apply_blockers_diagnostic")
@@ -401,6 +402,34 @@ def _v11_eligible_positions(
         row["apply_blockers"] = []
         positions.append(row)
     return positions
+
+
+def _authority_close_candidate(*, candidate: Mapping[str, Any], row: Mapping[str, Any]) -> dict[str, Any]:
+    existing = row.get("close_candidate") if isinstance(row.get("close_candidate"), Mapping) else {}
+    intent = candidate.get("exit_intent") if isinstance(candidate.get("exit_intent"), Mapping) else {}
+    attribution = candidate.get("attribution") if isinstance(candidate.get("attribution"), Mapping) else {}
+    merged = dict(existing)
+    merged.update(
+        {
+            "account_id": candidate.get("account_id") or intent.get("account_id") or existing.get("account_id"),
+            "local_symbol": candidate.get("local_symbol") or intent.get("local_symbol") or existing.get("local_symbol"),
+            "con_id": candidate.get("con_id") or intent.get("con_id") or existing.get("con_id"),
+            "symbol": candidate.get("instrument") or intent.get("instrument") or existing.get("symbol"),
+            "action": candidate.get("candidate_close_action") or intent.get("close_action") or existing.get("action"),
+            "quantity": candidate.get("candidate_close_qty") or intent.get("close_qty") or existing.get("quantity"),
+            "lifecycle_id": attribution.get("lifecycle_id") or intent.get("lifecycle_id") or existing.get("lifecycle_id"),
+            "trade_id": attribution.get("trade_id") or intent.get("trade_id") or existing.get("trade_id"),
+            "strategy_id": attribution.get("strategy_id") or intent.get("strategy_id") or existing.get("strategy_id"),
+            "lane_id": attribution.get("lane_id") or intent.get("lane_id") or existing.get("lane_id"),
+            "risk_reducing_only": True,
+            "classification": "EXIT_AUTHORITY_V1_1_CLOSE_ALLOWED",
+            "quantity_source": "EXIT_AUTHORITY_V1_1",
+        }
+    )
+    broker_qty = candidate.get("broker_position_qty") or intent.get("owned_qty")
+    if broker_qty is not None:
+        merged["broker_quantity"] = str(broker_qty)
+    return merged
 
 
 def _v11_blocked_positions(exit_authority: Mapping[str, Any]) -> list[dict[str, Any]]:

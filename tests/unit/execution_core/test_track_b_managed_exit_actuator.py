@@ -61,6 +61,38 @@ def test_runtime_down_exact_exit_due_position_applies_via_guarded_attach(tmp_pat
     assert calls[0][0].local_symbol == "MNQM6"
 
 
+def test_exit_authority_quantity_overrides_recovery_candidate_for_duplicate_reduction(tmp_path: Path) -> None:
+    inputs = _inputs(runtime_down=True)
+    position = inputs["managed_positions"]["managed_positions"][0]
+    position["quantity"] = "2"
+    position["signed_broker_qty"] = "2"
+    position["signed_lifecycle_qty"] = "2"
+    position["broker_position"]["quantity"] = "2.0"
+    position["required_close_quantity"] = "1"
+    position["duplicate_same_lane_exposure"] = True
+    position["duplicate_excess_qty"] = "1"
+    position["accepted_managed_qty"] = "1"
+    inputs["managed_orders"]["managed_orders"][0]["required_close_quantity"] = "2"
+    calls = []
+
+    def _attach(config, now):
+        calls.append((config, now))
+        return _submitted_attach_result()
+
+    payload = run_track_b_managed_exit_actuator(
+        config=TrackBManagedExitActuatorConfig(repo_root=tmp_path, apply=True, operator_authorized_managed_exit=True),
+        now=NOW,
+        input_overrides=inputs,
+        attach_runner=_attach,
+        write=False,
+    )
+
+    assert payload["classification"] == MANAGED_EXIT_ACTUATOR_APPLIED_OR_PENDING
+    assert payload["eligible_positions"][0]["close_candidate"]["broker_quantity"] in {"2", "2.0"}
+    assert payload["eligible_positions"][0]["close_candidate"]["quantity"] == "1"
+    assert calls[0][0].quantity == 1
+
+
 def test_dry_run_ready_does_not_call_attach(tmp_path: Path) -> None:
     calls = []
 
