@@ -70,6 +70,50 @@ def test_paper_minimal_start_uses_launchctl_for_durable_wrapper_parent() -> None
     assert "launchctl submit" in source
 
 
+def test_paper_stack_start_enforces_single_authoritative_runtime_scope_before_launch() -> None:
+    source = START_SCRIPT.read_text(encoding="utf-8")
+
+    assert source.index('STACK_PROFILE="${TRACK_B_PAPER_STACK_PROFILE:-canonical}"') < source.index(
+        'START_LOCK_DIR="${RUNTIME_DIR}/paper_stack_${STACK_PROFILE}.runtime_scope.lock"'
+    )
+    assert "acquire_authoritative_runtime_scope_lock()" in source
+    assert "BLOCKED_DUPLICATE_RUNTIME_CARRIER" in source
+    assert "BLOCKED_OVERLAPPING_RUNTIME_START" in source
+    assert "BLOCKED_RUNTIME_SCOPE_LOCK_HELD" in source
+    assert 'lock_dir.mkdir(parents=True, exist_ok=False)' in source
+    assert 'wrapper_path in command and "track_b_paper_stack_runtime_wrapper.sh" in command' in source
+    assert '"mgc_v05l.app.main" in command' in source
+    assert '"probationary-paper-soak" in command' in source
+    assert "scoped_config_path in command" in source
+    assert "rm -rf \"${START_LOCK_DIR}\"" in source
+
+    launch_start = source.index('lock_result="${STACK_DIR}/.runtime_scope_lock.$$.json"')
+    assert launch_start < source.index('screen -dmS "${session_name}"')
+    assert launch_start < source.index('nohup /bin/bash "${WRAPPER_PATH}"')
+    assert launch_start < source.index("launchctl submit")
+
+
+def test_detached_wrapper_owns_runtime_scope_lock_until_exit() -> None:
+    source = START_SCRIPT.read_text(encoding="utf-8")
+    wrapper_start = source.index('cat > "${wrapper_tmp}" <<WRAPPER')
+    wrapper_block = source[wrapper_start : source.index("\nWRAPPER", wrapper_start + 1)]
+
+    assert 'export MGC_TRACK_B_PAPER_STACK_RUNTIME_SCOPE_LOCK_DIR="' in wrapper_block
+    assert "release_runtime_scope_lock_on_wrapper_exit()" in wrapper_block
+    assert 'rm -rf "\\${lock_dir}"' in wrapper_block
+    assert "verify_single_runtime_carrier_on_wrapper_start()" in wrapper_block
+    assert "track_b_paper_stack_wrapper_duplicate_carrier_blocked" in wrapper_block
+    assert "BLOCKED_DUPLICATE_RUNTIME_CARRIER" in wrapper_block
+    assert "write_detached_child_final_status_on_wrapper_exit" in wrapper_block
+    assert "release_runtime_scope_lock_on_wrapper_exit" in wrapper_block
+    assert source.index("write_detached_child_final_status_on_wrapper_exit") < source.index(
+        "release_runtime_scope_lock_on_wrapper_exit()"
+    )
+    assert wrapper_block.index("verify_single_runtime_carrier_on_wrapper_start") < wrapper_block.index(
+        'if "${PYTHON_BIN}" - <<\'PY\' "${RUNTIME_DIR}/paper_runtime_truth.json"'
+    )
+
+
 def test_paper_stack_start_requires_sustained_readiness() -> None:
     source = START_SCRIPT.read_text(encoding="utf-8")
 

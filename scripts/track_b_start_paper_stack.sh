@@ -35,6 +35,8 @@ WAIT_SECONDS="${TRACK_B_PAPER_STACK_START_WAIT_SECONDS:-120}"
 STABLE_SECONDS="${TRACK_B_PAPER_STACK_STABLE_SECONDS:-30}"
 PREFERRED_CARRIER="${TRACK_B_PAPER_STACK_CARRIER:-auto}"
 STACK_PROFILE="${TRACK_B_PAPER_STACK_PROFILE:-canonical}"
+START_LOCK_DIR="${RUNTIME_DIR}/paper_stack_${STACK_PROFILE}.runtime_scope.lock"
+START_LOCK_METADATA_FILE="${START_LOCK_DIR}/owner.json"
 RESTART_REQUESTED="${TRACK_B_PAPER_STACK_RESTART:-0}"
 SCOPED_CONFIG_PATH="${RUNTIME_DIR}/paper_stack_${STACK_PROFILE}.yaml"
 SCOPED_ROSTER_PATH="${RUNTIME_DIR}/paper_stack_${STACK_PROFILE}_guarded_roster.json"
@@ -1625,6 +1627,161 @@ nohup_available() {
   command -v nohup >/dev/null 2>&1
 }
 
+acquire_authoritative_runtime_scope_lock() {
+  "${PYTHON_BIN}" - \
+    "${START_LOCK_DIR}" \
+    "${START_LOCK_METADATA_FILE}" \
+    "${REPO_ROOT}" \
+    "${WRAPPER_PATH}" \
+    "${SCOPED_CONFIG_PATH}" \
+    "${STACK_PROFILE}" \
+    "$$" <<'PY'
+import json
+import os
+import shutil
+import subprocess
+import sys
+from datetime import datetime, timezone
+from pathlib import Path
+
+lock_dir = Path(sys.argv[1])
+metadata_file = Path(sys.argv[2])
+repo_root = str(Path(sys.argv[3]))
+wrapper_path = str(Path(sys.argv[4]))
+scoped_config_path = str(Path(sys.argv[5]))
+stack_profile = sys.argv[6]
+launcher_pid = int(sys.argv[7])
+
+
+def process_rows() -> list[dict[str, object]]:
+    ps = subprocess.run(
+        ["ps", "-axo", "pid=,ppid=,command="],
+        text=True,
+        check=False,
+        capture_output=True,
+    )
+    rows: list[dict[str, object]] = []
+    for line in ps.stdout.splitlines():
+        parts = line.strip().split(None, 2)
+        if len(parts) != 3:
+            continue
+        try:
+            pid = int(parts[0])
+            ppid = int(parts[1])
+        except ValueError:
+            continue
+        command = parts[2]
+        if pid == launcher_pid:
+            continue
+        if repo_root not in command:
+            continue
+        is_wrapper = wrapper_path in command and "track_b_paper_stack_runtime_wrapper.sh" in command
+        is_runtime_child = (
+            "mgc_v05l.app.main" in command
+            and "probationary-paper-soak" in command
+            and scoped_config_path in command
+        )
+        is_launcher = "scripts/track_b_start_paper_stack.sh" in command
+        if is_wrapper or is_runtime_child or is_launcher:
+            rows.append(
+                {
+                    "pid": pid,
+                    "ppid": ppid,
+                    "role": "wrapper" if is_wrapper else "runtime_child" if is_runtime_child else "launcher",
+                    "command": command,
+                }
+            )
+    return rows
+
+
+active_rows = process_rows()
+active_wrappers_or_children = [row for row in active_rows if row["role"] in {"wrapper", "runtime_child"}]
+active_launchers = [row for row in active_rows if row["role"] == "launcher"]
+
+if active_wrappers_or_children:
+    payload = {
+        "classification": "BLOCKED_DUPLICATE_RUNTIME_CARRIER",
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "stack_profile": stack_profile,
+        "repo_root": repo_root,
+        "active_processes": active_wrappers_or_children,
+        "lock_dir": str(lock_dir),
+        "paper_only": True,
+        "live_money_eligible": False,
+        "paper_proof_invoked": False,
+    }
+    print(json.dumps(payload, indent=2, sort_keys=True))
+    raise SystemExit(2)
+
+if active_launchers:
+    payload = {
+        "classification": "BLOCKED_OVERLAPPING_RUNTIME_START",
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "stack_profile": stack_profile,
+        "repo_root": repo_root,
+        "active_processes": active_launchers,
+        "lock_dir": str(lock_dir),
+        "paper_only": True,
+        "live_money_eligible": False,
+        "paper_proof_invoked": False,
+    }
+    print(json.dumps(payload, indent=2, sort_keys=True))
+    raise SystemExit(2)
+
+if lock_dir.exists():
+    try:
+        shutil.rmtree(lock_dir)
+    except OSError as exc:
+        payload = {
+            "classification": "BLOCKED_RUNTIME_SCOPE_LOCK_STALE_CLEANUP_FAILED",
+            "generated_at": datetime.now(timezone.utc).isoformat(),
+            "stack_profile": stack_profile,
+            "repo_root": repo_root,
+            "lock_dir": str(lock_dir),
+            "error": str(exc),
+            "paper_only": True,
+            "live_money_eligible": False,
+            "paper_proof_invoked": False,
+        }
+        print(json.dumps(payload, indent=2, sort_keys=True))
+        raise SystemExit(2)
+
+try:
+    lock_dir.mkdir(parents=True, exist_ok=False)
+except FileExistsError:
+    payload = {
+        "classification": "BLOCKED_RUNTIME_SCOPE_LOCK_HELD",
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "stack_profile": stack_profile,
+        "repo_root": repo_root,
+        "lock_dir": str(lock_dir),
+        "paper_only": True,
+        "live_money_eligible": False,
+        "paper_proof_invoked": False,
+    }
+    print(json.dumps(payload, indent=2, sort_keys=True))
+    raise SystemExit(2)
+
+payload = {
+    "classification": "RUNTIME_SCOPE_LOCK_ACQUIRED",
+    "generated_at": datetime.now(timezone.utc).isoformat(),
+    "launcher_pid": launcher_pid,
+    "stack_profile": stack_profile,
+    "repo_root": repo_root,
+    "wrapper_path": wrapper_path,
+    "scoped_config_path": scoped_config_path,
+    "lock_dir": str(lock_dir),
+    "paper_only": True,
+    "live_money_eligible": False,
+    "paper_proof_invoked": False,
+}
+tmp = metadata_file.with_name(f".{metadata_file.name}.{os.getpid()}.tmp")
+tmp.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+tmp.replace(metadata_file)
+print(json.dumps(payload, indent=2, sort_keys=True))
+PY
+}
+
 stop_exact_runtime_pid_for_minimal_restart() {
   local pid="$1"
   if [[ -z "${pid}" ]]; then
@@ -2078,6 +2235,7 @@ export MGC_TRACK_B_PAPER_STACK_STARTUP_MODE="${STARTUP_MODE}"
 export MGC_TRACK_B_PAPER_STACK_OWNED_MANAGED_EXPOSURE_RESTORE_JSON='${STARTUP_OWNED_MANAGED_EXPOSURE_RESTORE_JSON}'
 export MGC_TRACK_B_PAPER_MINIMAL_STARTUP_V1="${PAPER_MINIMAL_STARTUP_V1}"
 export MGC_TRACK_B_PAPER_MINIMAL_STARTUP_CLASSIFICATION="${STARTUP_PREFLIGHT_REFRESH_CLASSIFICATION}"
+export MGC_TRACK_B_PAPER_STACK_RUNTIME_SCOPE_LOCK_DIR="${START_LOCK_DIR}"
 mkdir -p "${RUNTIME_DIR}"
 runtime_pid=""
 runtime_child_started_at=""
@@ -2131,7 +2289,85 @@ write_detached_child_final_status_on_wrapper_exit() {
     write_detached_child_status "\${final_event}"
   fi
 }
-trap 'wrapper_exit_code=\$?; write_detached_child_final_status_on_wrapper_exit "\${wrapper_exit_code}"' EXIT
+release_runtime_scope_lock_on_wrapper_exit() {
+  local lock_dir="\${MGC_TRACK_B_PAPER_STACK_RUNTIME_SCOPE_LOCK_DIR:-}"
+  if [[ -n "\${lock_dir}" && -d "\${lock_dir}" ]]; then
+    rm -rf "\${lock_dir}" >/dev/null 2>&1 || true
+  fi
+}
+trap 'wrapper_exit_code=\$?; write_detached_child_final_status_on_wrapper_exit "\${wrapper_exit_code}"; release_runtime_scope_lock_on_wrapper_exit' EXIT
+verify_single_runtime_carrier_on_wrapper_start() {
+  "${PYTHON_BIN}" - <<'PY' "${REPO_ROOT}" "${WRAPPER_PATH}" "${SCOPED_CONFIG_PATH}" "\$\$" "${RUNTIME_LOG}" "${STACK_PROFILE}"
+import json
+import subprocess
+import sys
+from datetime import datetime, timezone
+from pathlib import Path
+
+repo_root = str(Path(sys.argv[1]))
+wrapper_path = str(Path(sys.argv[2]))
+scoped_config_path = str(Path(sys.argv[3]))
+current_pid = int(sys.argv[4])
+runtime_log = Path(sys.argv[5])
+stack_profile = sys.argv[6]
+
+ps = subprocess.run(
+    ["ps", "-axo", "pid=,ppid=,command="],
+    text=True,
+    check=False,
+    capture_output=True,
+)
+active = []
+for line in ps.stdout.splitlines():
+    parts = line.strip().split(None, 2)
+    if len(parts) != 3:
+        continue
+    try:
+        pid = int(parts[0])
+        ppid = int(parts[1])
+    except ValueError:
+        continue
+    if pid == current_pid:
+        continue
+    command = parts[2]
+    if repo_root not in command:
+        continue
+    is_wrapper = wrapper_path in command and "track_b_paper_stack_runtime_wrapper.sh" in command
+    is_runtime_child = (
+        "mgc_v05l.app.main" in command
+        and "probationary-paper-soak" in command
+        and scoped_config_path in command
+    )
+    if is_wrapper or is_runtime_child:
+        active.append(
+            {
+                "pid": pid,
+                "ppid": ppid,
+                "role": "wrapper" if is_wrapper else "runtime_child",
+                "command": command,
+            }
+        )
+
+if active:
+    payload = {
+        "classification": "BLOCKED_DUPLICATE_RUNTIME_CARRIER",
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "stack_profile": stack_profile,
+        "current_wrapper_pid": current_pid,
+        "active_processes": active,
+        "paper_only": True,
+        "live_money_eligible": False,
+        "paper_proof_invoked": False,
+    }
+    runtime_log.parent.mkdir(parents=True, exist_ok=True)
+    with runtime_log.open("a", encoding="utf-8") as handle:
+        handle.write("track_b_paper_stack_wrapper_duplicate_carrier_blocked ")
+        handle.write(json.dumps(payload, sort_keys=True))
+        handle.write("\n")
+    raise SystemExit(2)
+PY
+}
+verify_single_runtime_carrier_on_wrapper_start
 if "${PYTHON_BIN}" - <<'PY' "${RUNTIME_DIR}/paper_runtime_truth.json" "\$\$"
 import json
 import os
@@ -2343,6 +2579,18 @@ elif ! screen_available; then
   fi
 fi
 
+lock_result="${STACK_DIR}/.runtime_scope_lock.$$.json"
+set +e
+acquire_authoritative_runtime_scope_lock > "${lock_result}"
+lock_rc=$?
+set -e
+if [[ "${lock_rc}" != "0" ]]; then
+  lock_classification="$("${PYTHON_BIN}" -c 'import json,sys; print((json.load(open(sys.argv[1])).get("classification") or "BLOCKED_RUNTIME_SCOPE_LOCK"))' "${lock_result}" 2>/dev/null || echo "BLOCKED_RUNTIME_SCOPE_LOCK")"
+  lock_detail="$("${PYTHON_BIN}" -c 'import json,sys; p=json.load(open(sys.argv[1])); print(p.get("detail") or p.get("error") or "Existing same-scope runtime carrier/child prevents a safe PAPER start.")' "${lock_result}" 2>/dev/null || echo "Existing same-scope runtime carrier/child prevents a safe PAPER start.")"
+  write_startup_artifact "${lock_classification}" "${lock_detail}" ""
+  exit 1
+fi
+
 rm -f "${LAUNCH_STATUS_FILE}"
 rm -f "${DETACHED_CHILD_STATUS_FILE}"
 if paper_minimal_startup_enabled; then
@@ -2366,6 +2614,7 @@ elif [[ "${carrier}" == "launchctl" ]]; then
     -e "${LAUNCHCTL_STDERR_FILE}" \
     -- /bin/bash "${WRAPPER_PATH}"; then
     write_startup_artifact "BLOCKED_LAUNCHCTL_SUBMIT_FAILED" "launchctl submit failed; inspect ${LAUNCHCTL_STDERR_FILE}." ""
+    rm -rf "${START_LOCK_DIR}" >/dev/null 2>&1 || true
     rm -f "${LAUNCHCTL_LABEL_FILE}"
     exit 1
   fi
