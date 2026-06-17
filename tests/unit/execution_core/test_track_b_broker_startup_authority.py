@@ -128,7 +128,88 @@ def test_unrelated_equity_open_order_does_not_block_track_b_futures_startup_auth
 
     assert authority.broker_truth_clean is True
     assert authority.broker_open_order_count == 0
+    assert authority.unrelated_open_order_count == 1
+    assert "unrelated_non_track_b_open_orders:1" in authority.diagnostics
     assert authority.blockers == ()
+
+
+def test_unrelated_option_open_orders_are_diagnostic_when_rows_are_known() -> None:
+    orders = _orders(
+        open_orders=[
+            {
+                "account_id": "DUM882026",
+                "security_type": "OPT",
+                "symbol": "NDX",
+                "local_symbol": "NDX   260618P29900000",
+                "order_ref": "OptTrader",
+                "status": "PreSubmitted",
+            },
+            {
+                "account_id": "DUM882026",
+                "security_type": "OPT",
+                "symbol": "NDX",
+                "local_symbol": "NDX   260618P29950000",
+                "order_ref": "OptTrader",
+                "status": "PreSubmitted",
+            },
+        ]
+    )
+
+    authority = classify_fresh_complete_clean_broker_truth(
+        broker_truth_status=_status(open_order_count=2),
+        positions_snapshot=_positions(),
+        open_orders_snapshot=orders,
+        expected_account_id="DUM882026",
+    )
+
+    assert authority.broker_truth_clean is True
+    assert authority.broker_open_order_count == 0
+    assert authority.unrelated_open_order_count == 2
+    assert "unrelated_non_track_b_open_orders:2" in authority.diagnostics
+    assert authority.blockers == ()
+
+
+def test_explicit_track_b_open_order_count_outranks_broader_aggregate_count() -> None:
+    status = _status(open_order_count=2)
+    status["track_b_broker_open_order_count"] = 0
+
+    authority = classify_fresh_complete_clean_broker_truth(
+        broker_truth_status=status,
+        positions_snapshot=_positions(),
+        open_orders_snapshot={},
+        expected_account_id="DUM882026",
+    )
+
+    assert authority.broker_truth_clean is True
+    assert authority.broker_open_order_count == 0
+    assert "track_b_futures_open_orders_present" not in authority.blockers
+
+
+def test_unknown_order_still_blocks_when_unrelated_option_orders_are_known() -> None:
+    orders = _orders(
+        open_orders=[
+            {
+                "account_id": "DUM882026",
+                "security_type": "OPT",
+                "symbol": "NDX",
+                "local_symbol": "NDX   260618P29900000",
+                "order_ref": "OptTrader",
+                "status": "PreSubmitted",
+            }
+        ]
+    )
+
+    authority = classify_fresh_complete_clean_broker_truth(
+        broker_truth_status=_status(open_order_count=1, unknown_open_order_count=1),
+        positions_snapshot=_positions(),
+        open_orders_snapshot=orders,
+        expected_account_id="DUM882026",
+    )
+
+    assert authority.broker_truth_clean is False
+    assert authority.broker_open_order_count == 0
+    assert authority.unrelated_open_order_count == 1
+    assert "unknown_open_orders_present" in authority.blockers
 
 
 def test_managed_mnq_position_with_unrelated_equity_order_allows_startup_authority() -> None:
@@ -164,6 +245,7 @@ def test_managed_mnq_position_with_unrelated_equity_order_allows_startup_authori
     assert authority.broker_truth_clean is True
     assert authority.classification == FRESH_COMPLETE_MANAGED_BROKER_TRUTH
     assert authority.broker_open_order_count == 0
+    assert authority.unrelated_open_order_count == 1
     assert authority.known_managed_position_count == 1
 
 

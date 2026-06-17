@@ -23,6 +23,7 @@ class BrokerStartupAuthority:
     broker_open_order_count: int
     unknown_open_order_count: int
     known_managed_position_count: int = 0
+    unrelated_open_order_count: int = 0
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -34,6 +35,7 @@ class BrokerStartupAuthority:
             "broker_open_order_count": self.broker_open_order_count,
             "unknown_open_order_count": self.unknown_open_order_count,
             "known_managed_position_count": self.known_managed_position_count,
+            "unrelated_open_order_count": self.unrelated_open_order_count,
         }
 
 
@@ -85,6 +87,7 @@ def classify_fresh_complete_clean_broker_truth(
     track_b_positions = tuple(row for row in positions if _is_track_b_future(row, roots) and _quantity(row) != 0.0)
     open_orders = _open_order_rows(open_orders_snapshot) or _open_order_rows(broker_truth_status)
     track_b_open_orders = tuple(row for row in open_orders if _is_track_b_future(row, roots))
+    unrelated_open_orders = tuple(row for row in open_orders if not _is_track_b_future(row, roots))
     same_contract_conflicts = _same_contract_order_conflicts(
         broker_positions=track_b_positions,
         open_orders=track_b_open_orders,
@@ -110,6 +113,9 @@ def classify_fresh_complete_clean_broker_truth(
         reconciliation,
         roots=roots,
     )
+    unrelated_open_order_count = len(unrelated_open_orders)
+    if unrelated_open_order_count:
+        diagnostics.append(f"unrelated_non_track_b_open_orders:{unrelated_open_order_count}")
     if same_contract_conflicts:
         blockers.append("conflicting_same_contract_futures_open_order")
     elif broker_open_order_count != 0:
@@ -149,6 +155,7 @@ def classify_fresh_complete_clean_broker_truth(
         broker_open_order_count=broker_open_order_count,
         unknown_open_order_count=unknown_open_order_count,
         known_managed_position_count=known_managed_position_count,
+        unrelated_open_order_count=unrelated_open_order_count,
     )
 
 
@@ -344,10 +351,21 @@ def _open_order_count(*payloads: Mapping[str, Any], roots: frozenset[str]) -> in
     if all_orders:
         return len([row for row in all_orders if _is_track_b_future(row, roots)])
 
+    scoped_count = 0
+    for payload in payloads:
+        payload = _mapping(payload)
+        for key in ("track_b_broker_open_order_count", "broker_track_b_open_order_count", "track_b_open_order_count"):
+            if payload.get(key) not in {None, ""}:
+                scoped_count = max(scoped_count, _int(payload.get(key), default=1))
+    if scoped_count:
+        return scoped_count
+    if any(_mapping(payload).get(key) in {0, "0"} for payload in payloads for key in ("track_b_broker_open_order_count", "broker_track_b_open_order_count", "track_b_open_order_count")):
+        return 0
+
     count = 0
     for payload in payloads:
         payload = _mapping(payload)
-        for key in ("open_order_count", "broker_open_order_count", "track_b_broker_open_order_count"):
+        for key in ("open_order_count", "broker_open_order_count"):
             if payload.get(key) not in {None, ""}:
                 count = max(count, _int(payload.get(key), default=1))
     return count

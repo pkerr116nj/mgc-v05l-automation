@@ -103,6 +103,7 @@ artifact_path = Path(sys.argv[2])
 positions_path = repo_root / "outputs/reports/ibkr_read_only_verification/ibkr_positions_snapshot.json"
 orders_path = repo_root / "outputs/reports/ibkr_read_only_verification/ibkr_open_orders_snapshot.json"
 status_path = repo_root / "outputs/reports/ibkr_read_only_verification/ibkr_broker_truth_refresh_status.json"
+managed_positions_path = repo_root / "outputs/track_b_execution_core/managed_positions/latest_managed_positions.json"
 
 def load(path: Path) -> dict:
     try:
@@ -113,10 +114,13 @@ def load(path: Path) -> dict:
 positions = load(positions_path)
 orders = load(orders_path)
 status = load(status_path)
+managed_positions = load(managed_positions_path)
 authority = classify_fresh_complete_clean_broker_truth(
     broker_truth_status=status,
     positions_snapshot=positions,
     open_orders_snapshot=orders,
+    managed_positions=managed_positions,
+    allow_known_managed_positions=True,
     expected_account_id="DUM882026",
 )
 blockers = list(authority.blockers)
@@ -128,10 +132,13 @@ payload = {
     "broker_positions_path": str(positions_path),
     "broker_open_orders_path": str(orders_path),
     "broker_truth_status_path": str(status_path),
+    "managed_positions_path": str(managed_positions_path),
     "broker_startup_authority": authority.to_dict(),
     "track_b_futures_positions": [dict(row) for row in authority.track_b_futures_positions],
     "broker_open_order_count": authority.broker_open_order_count,
     "unknown_order_count": authority.unknown_open_order_count,
+    "known_managed_position_count": authority.known_managed_position_count,
+    "unrelated_open_order_count": authority.unrelated_open_order_count,
     "blockers": blockers,
     "paper_only": True,
     "live_money_eligible": False,

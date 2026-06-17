@@ -1582,6 +1582,9 @@ def test_thin_recovery_script_uses_broker_truth_and_direct_minimal_start_only() 
     assert "expected_lanes = int" in source
     assert 'EXPECTED_LANES="${TRACK_B_PAPER_EXPECTED_LANE_COUNT:-71}"' in source
     assert "classify_fresh_complete_clean_broker_truth" in source
+    assert "latest_managed_positions.json" in source
+    assert "allow_known_managed_positions=True" in source
+    assert "unrelated_open_order_count" in source
     assert "track_b_status_paper_stack.sh" not in source
     assert "track_b_paper_stack_restart_precheck" not in source
     assert "track_b_control_plane_snapshot" not in source
