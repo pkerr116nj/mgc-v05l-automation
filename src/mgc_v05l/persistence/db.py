@@ -1,7 +1,10 @@
 """Database helpers."""
 
+from pathlib import Path
+
 from sqlalchemy import MetaData, create_engine, event
-from sqlalchemy.engine import Engine
+from sqlalchemy.engine import Engine, make_url
+from sqlalchemy.pool import NullPool
 
 metadata = MetaData()
 
@@ -12,12 +15,33 @@ SQLITE_WAL_AUTOCHECKPOINT_PAGES = 10000
 def build_engine(database_url: str) -> Engine:
     """Create the SQLAlchemy engine for the configured SQLite database."""
     connect_args = {}
+    engine_kwargs = {}
     if database_url.startswith("sqlite"):
         connect_args["timeout"] = SQLITE_BUSY_TIMEOUT_MS / 1000
-    engine = create_engine(database_url, future=True, connect_args=connect_args)
+        if _is_file_sqlite_url(database_url):
+            _ensure_sqlite_parent(database_url)
+            engine_kwargs["poolclass"] = NullPool
+    engine = create_engine(database_url, future=True, connect_args=connect_args, **engine_kwargs)
     if engine.dialect.name == "sqlite":
         _configure_sqlite_engine(engine)
     return engine
+
+
+def _is_file_sqlite_url(database_url: str) -> bool:
+    url = make_url(database_url)
+    database = str(url.database or "")
+    return bool(database and database != ":memory:")
+
+
+def _ensure_sqlite_parent(database_url: str) -> None:
+    database = str(make_url(database_url).database or "")
+    if not database or database == ":memory:":
+        return
+    path = Path(database).expanduser()
+    parent = path.parent
+    if str(parent) in {"", "."}:
+        return
+    parent.mkdir(parents=True, exist_ok=True)
 
 
 def _configure_sqlite_engine(engine: Engine) -> None:
