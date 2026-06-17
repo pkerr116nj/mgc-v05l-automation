@@ -600,6 +600,21 @@ def _apply_managed_exit(
         selected_position=selected_position,
         managed_exit_policy_id=managed_exit_policy_id,
     )
+    if exit_authority_allows and not _mapping(lifecycle_report.get("entry_fill")):
+        recovered_entry_fill = _entry_fill_from_current_broker_position_for_risk_reducing_exit(
+            config=config,
+            now=now,
+        )
+        if recovered_entry_fill:
+            lifecycle_report = {
+                **lifecycle_report,
+                "entry_fill": recovered_entry_fill,
+                "entry_fill_recovered_from_current_broker_position": True,
+                "entry_fill_recovery_diagnostic": (
+                    "Recovered minimal entry evidence from exact current broker position "
+                    "after ExitAuthority allowed a PAPER risk-reducing close."
+                ),
+            }
     entry_intent = lifecycle_report.get("entry_intent") if isinstance(lifecycle_report.get("entry_intent"), Mapping) else {}
     lifecycle_config = TrackBStrategyManagedPaperLifecycleConfig(
         mode=config.mode,
@@ -820,10 +835,58 @@ def _entry_fill_from_selected_managed_position(selected_position: Mapping[str, A
     return {}
 
 
+def _entry_fill_from_current_broker_position_for_risk_reducing_exit(
+    *,
+    config: TrackBManagedExitAttachConfig,
+    now: datetime,
+) -> dict[str, Any]:
+    position_truth = _read_json(config.resolve(config.position_truth_path))
+    broker_position = _exact_broker_position_for_config(config=config, position_truth=position_truth)
+    if not broker_position:
+        return {}
+    quantity = _decimal(broker_position.get("quantity"))
+    if quantity is None or quantity == Decimal("0"):
+        return {}
+    expected_side = "LONG" if quantity > 0 else "SHORT"
+    if expected_side != _normalized_position_side(config.side):
+        return {}
+    price = (
+        broker_position.get("entry_price")
+        or broker_position.get("avg_entry_price")
+        or broker_position.get("average_cost")
+        or broker_position.get("avg_cost")
+    )
+    if price in {None, ""}:
+        return {}
+    filled_at = (
+        broker_position.get("entry_time")
+        or broker_position.get("entry_timestamp")
+        or broker_position.get("updated_at")
+        or now.isoformat()
+    )
+    return {
+        "broker_order_id": str(broker_position.get("entry_order_id") or ""),
+        "perm_id": str(broker_position.get("entry_perm_id") or ""),
+        "execution_id": str(broker_position.get("entry_exec_id") or ""),
+        "exec_id": str(broker_position.get("entry_exec_id") or ""),
+        "price": str(price),
+        "quantity": str(abs(quantity)),
+        "filled_at": str(filled_at),
+        "source": "CURRENT_BROKER_POSITION_RISK_REDUCING_EXIT_EVIDENCE",
+    }
+
+
 def _first(value: Any) -> Any:
     if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
         return value[0] if value else None
     return value
+
+
+def _normalized_position_side(value: object) -> str:
+    text = str(value or "").strip().upper()
+    if text in {"SELL", "SHORT", "SELL_TO_OPEN"}:
+        return "SHORT"
+    return "LONG"
 
 
 def _select_active_managed_exit_due_position(
@@ -1330,10 +1393,13 @@ def _exact_broker_position_for_config(
         if not isinstance(row, Mapping):
             continue
         account = _valid_account_id(row.get("account_id") or row.get("account"))
+        row_con_id = _int_or_none(row.get("con_id") or row.get("conId"))
+        row_symbol = str(row.get("symbol") or row.get("instrument_family") or row.get("instrument") or "").strip()
         if (
             account == config.account_id
             and str(row.get("local_symbol") or row.get("localSymbol") or "") == config.local_symbol
-            and _int_or_none(row.get("con_id") or row.get("conId")) == config.con_id
+            and (row_con_id is None or row_con_id == config.con_id)
+            and (not row_symbol or row_symbol == config.instrument_family)
         ):
             return dict(row)
     return {}

@@ -2165,6 +2165,43 @@ def test_selected_current_scope_position_recovers_entry_price_from_broker_averag
     assert report["entry_fill"]["source"] == "MANAGED_POSITION_CURRENT_SCOPE_ENTRY_EVIDENCE"
 
 
+def test_risk_reducing_attach_recovers_entry_evidence_from_exact_broker_position(tmp_path: Path) -> None:
+    config = _seed(
+        tmp_path,
+        completed_bars=3,
+        position_overrides={
+            "quantity": "2.0",
+            "average_cost": "38060.62",
+            "updated_at": "2026-06-17T11:25:10+00:00",
+        },
+    )
+
+    recovered = attach_module._entry_fill_from_current_broker_position_for_risk_reducing_exit(  # noqa: SLF001
+        config=config,
+        now=NOW,
+    )
+
+    assert recovered["price"] == "38060.62"
+    assert recovered["quantity"] == "2.0"
+    assert recovered["filled_at"] == "2026-06-17T11:25:10+00:00"
+    assert recovered["source"] == "CURRENT_BROKER_POSITION_RISK_REDUCING_EXIT_EVIDENCE"
+
+
+def test_risk_reducing_attach_does_not_recover_entry_evidence_for_wrong_side(tmp_path: Path) -> None:
+    config = _seed(
+        tmp_path,
+        completed_bars=3,
+        position_overrides={"quantity": "-1.0", "average_cost": "38060.62"},
+    )
+
+    recovered = attach_module._entry_fill_from_current_broker_position_for_risk_reducing_exit(  # noqa: SLF001
+        config=config,
+        now=NOW,
+    )
+
+    assert recovered == {}
+
+
 def _write_reconciliation(
     repo_root: Path,
     *,
