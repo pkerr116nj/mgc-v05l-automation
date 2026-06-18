@@ -2638,11 +2638,8 @@ mv "${wrapper_tmp}" "${WRAPPER_PATH}"
 carrier="screen"
 if paper_minimal_startup_enabled; then
   if [[ "${PREFERRED_CARRIER}" == "launchctl" ]]; then
-    if ! launchctl_available; then
-      write_startup_artifact "BLOCKED_LAUNCHCTL_UNAVAILABLE" "launchctl carrier was explicitly requested but launchctl is unavailable." ""
-      exit 1
-    fi
-    carrier="launchctl"
+    write_startup_artifact "BLOCKED_LAUNCHCTL_DISABLED_FOR_PAPER_MINIMAL_STARTUP" "Controlled PAPER_MINIMAL_STARTUP_V1 restarts use the direct wrapper path; launchctl is not allowed for thin recovery." ""
+    exit 1
   elif [[ "${PREFERRED_CARRIER}" == "nohup" ]]; then
     if ! nohup_available; then
       write_startup_artifact "BLOCKED_NOHUP_UNAVAILABLE" "nohup carrier was explicitly requested but nohup is unavailable." ""
@@ -2652,10 +2649,11 @@ if paper_minimal_startup_enabled; then
   elif [[ "${PREFERRED_CARRIER}" == "screen" ]]; then
     write_startup_artifact "BLOCKED_SCREEN_DISABLED_FOR_PAPER_MINIMAL_STARTUP" "Controlled PAPER_MINIMAL_STARTUP_V1 restarts require the detached wrapper to be the sole runtime supervisor; screen is not authoritative enough for child-exit capture." ""
     exit 1
-  elif launchctl_available; then
-    carrier="launchctl"
   elif nohup_available; then
     carrier="nohup"
+  elif launchctl_available; then
+    write_startup_artifact "BLOCKED_NO_DIRECT_CARRIER" "nohup is unavailable and launchctl is disabled for controlled PAPER_MINIMAL_STARTUP_V1 thin recovery." ""
+    exit 1
   else
     write_startup_artifact "BLOCKED_NO_DIRECT_CARRIER" "Neither launchctl nor nohup is available for controlled PAPER runtime ownership by the detached wrapper supervisor." ""
     exit 1
@@ -2763,9 +2761,7 @@ if paper_minimal_startup_enabled; then
           progress_generated_at="$(post_truth_startup_progress_heartbeat "${pid}" 2>/dev/null || true)"
           if [[ -n "${progress_generated_at}" && "${truth_advanced}" != "true" ]]; then
             update_detached_child_monitor "${pid}" >/dev/null || true
-            deadline=$((SECONDS + WAIT_SECONDS))
-            write_startup_artifact "RUNTIME_RUNNING_POST_TRUTH_AUTHORITY_REFRESH" "Runtime PID ${pid} is alive and publishing post-truth startup progress at ${progress_generated_at}; waiting for runtime truth to advance before readiness." "${pid}" >/dev/null
-            continue
+            write_startup_artifact "RUNTIME_RUNNING_POST_TRUTH_AUTHORITY_REFRESH" "Runtime PID ${pid} is alive and publishing post-truth startup progress at ${progress_generated_at}; treating progress as diagnostic while same-PID runtime shape and detached-child authority are verified." "${pid}" >/dev/null
           fi
           detached_child_ready="$(detached_child_ready_authority "${pid}" 2>/dev/null || true)"
           if [[ "${detached_child_ready}" != "true" ]]; then
@@ -2773,14 +2769,14 @@ if paper_minimal_startup_enabled; then
             write_startup_artifact "RUNTIME_RUNNING_WAITING_FOR_DETACHED_CHILD_AUTHORITY" "Runtime matched PAPER_MINIMAL_STARTUP_V1 shape; waiting for fresh detached-child monitor authority before durable readiness." "${pid}" >/dev/null
             continue
           fi
-          if (( SECONDS - stable_since >= STABLE_SECONDS )) && [[ "${truth_advanced}" == "true" ]]; then
+          if (( SECONDS - stable_since >= STABLE_SECONDS )); then
             update_detached_child_monitor "${pid}" >/dev/null || true
             detached_child_ready="$(detached_child_ready_authority "${pid}" 2>/dev/null || true)"
             if [[ "${detached_child_ready}" != "true" ]]; then
               write_startup_artifact "RUNTIME_EXITED_BEFORE_DURABLE_READY" "Runtime passed the stability window, but refreshed detached-child monitor authority did not prove a live durable runtime." "${pid}"
               exit 1
             fi
-            write_startup_artifact "READY_SUBMIT_CAPABLE" "Track B PAPER runtime started through direct PAPER_MINIMAL_STARTUP_V1 process path, matched required runtime shape, survived ${STABLE_SECONDS}s, and advanced runtime truth after post-truth startup progress." "${pid}"
+            write_startup_artifact "READY_SUBMIT_CAPABLE" "Track B PAPER runtime started through direct PAPER_MINIMAL_STARTUP_V1 process path, matched required runtime shape, survived ${STABLE_SECONDS}s, and retained authoritative wrapper/child ownership; runtime truth advancement is diagnostic after shape verification." "${pid}"
           exit 0
           fi
           write_startup_artifact "RUNTIME_RUNNING_WAITING_FOR_MINIMAL_STARTUP_STABILITY" "Runtime matched PAPER_MINIMAL_STARTUP_V1 shape; waiting for ${STABLE_SECONDS}s same-PID liveness and advancing runtime truth or post-truth startup progress." "${pid}" >/dev/null

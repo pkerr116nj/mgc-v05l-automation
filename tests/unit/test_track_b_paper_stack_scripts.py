@@ -45,7 +45,7 @@ def test_paper_stack_start_launches_runtime_under_detached_parent_monitor() -> N
     assert "run_probationary_paper_soak.sh" in source
 
 
-def test_paper_minimal_start_uses_launchctl_for_durable_wrapper_parent() -> None:
+def test_paper_minimal_start_uses_direct_nohup_and_blocks_launchctl() -> None:
     source = START_SCRIPT.read_text(encoding="utf-8")
 
     minimal_carrier_block = source[
@@ -56,14 +56,14 @@ def test_paper_minimal_start_uses_launchctl_for_durable_wrapper_parent() -> None
         )
     ]
 
-    assert "BLOCKED_LAUNCHCTL_DISABLED_FOR_PAPER_MINIMAL_STARTUP" not in minimal_carrier_block
-    assert "BLOCKED_LAUNCHCTL_UNAVAILABLE" in minimal_carrier_block
+    assert "BLOCKED_LAUNCHCTL_DISABLED_FOR_PAPER_MINIMAL_STARTUP" in minimal_carrier_block
+    assert "BLOCKED_LAUNCHCTL_UNAVAILABLE" not in minimal_carrier_block
     assert "BLOCKED_SCREEN_DISABLED_FOR_PAPER_MINIMAL_STARTUP" in minimal_carrier_block
     assert "screen_available" not in minimal_carrier_block
     assert "launchctl_available" in minimal_carrier_block
     assert "nohup_available" in minimal_carrier_block
-    assert "carrier=\"launchctl\"" in minimal_carrier_block
     assert "carrier=\"nohup\"" in minimal_carrier_block
+    assert "carrier=\"launchctl\"" not in minimal_carrier_block
     assert "launchctl submit" not in minimal_carrier_block
 
     assert "nohup /bin/bash" in source
@@ -127,7 +127,7 @@ def test_paper_stack_start_requires_sustained_readiness() -> None:
     assert "submit remains disabled" in source
 
 
-def test_paper_minimal_start_requires_durable_liveness_and_truth_advancement() -> None:
+def test_paper_minimal_start_requires_durable_liveness_and_shape() -> None:
     source = START_SCRIPT.read_text(encoding="utf-8")
     minimal_wait_block = source[
         source.index("if paper_minimal_startup_enabled; then", source.index('if [[ "${carrier}" == "screen" ]]'))
@@ -138,6 +138,24 @@ def test_paper_minimal_start_requires_durable_liveness_and_truth_advancement() -
     assert "READY_SUBMIT_CAPABLE" in minimal_wait_block
     assert "direct PAPER_MINIMAL_STARTUP_V1 process path" in minimal_wait_block
     assert "RUNTIME_RUNNING_WAITING_FOR_MINIMAL_STARTUP_STABILITY" in minimal_wait_block
+
+
+def test_paper_minimal_start_does_not_loop_waiting_for_runtime_truth_advancement() -> None:
+    source = START_SCRIPT.read_text(encoding="utf-8")
+    minimal_wait_block = source[
+        source.index("if paper_minimal_startup_enabled; then", source.index('if [[ "${carrier}" == "screen" ]]'))
+        : source.index("\ndeadline=$((SECONDS + WAIT_SECONDS))", source.index("if paper_minimal_startup_enabled; then", source.index('if [[ "${carrier}" == "screen" ]]')))
+    ]
+    post_truth_block = minimal_wait_block[
+        minimal_wait_block.index('if [[ -n "${progress_generated_at}"')
+        : minimal_wait_block.index('detached_child_ready="$(detached_child_ready_authority')
+    ]
+
+    assert "deadline=$((SECONDS + WAIT_SECONDS))" not in post_truth_block
+    assert "continue" not in post_truth_block
+    assert "treating progress as diagnostic" in post_truth_block
+    assert 'if (( SECONDS - stable_since >= STABLE_SECONDS )); then' in minimal_wait_block
+    assert '[[ "${truth_advanced}" == "true" ]]' not in minimal_wait_block
     assert "RUNTIME_RUNNING_WAITING_FOR_MINIMAL_RUNTIME_SHAPE" in minimal_wait_block
     assert "RUNTIME_EXITED_BEFORE_DURABLE_READY" in minimal_wait_block
     assert "STABLE_SECONDS" in minimal_wait_block
@@ -145,7 +163,6 @@ def test_paper_minimal_start_requires_durable_liveness_and_truth_advancement() -
     assert "first_truth_generated_at" in minimal_wait_block
     assert "last_truth_generated_at" in minimal_wait_block
     assert "truth_advanced" in minimal_wait_block
-    assert '[[ "${truth_advanced}" == "true" ]]' in minimal_wait_block
     assert "detached_child_ready_authority" in minimal_wait_block
     assert 'payload.get("child_final_status") != "RUNNING"' in source
     assert 'payload.get("process_alive") is not True' in source
@@ -184,11 +201,16 @@ def test_paper_minimal_start_accepts_post_truth_progress_heartbeat_without_first
     assert 'progress_stage in {"authority_refresh", "watchdog_liveness_refresh", "lane_restore", "runtime_cycle"}' in verifier_block
     assert "progress_pid != pid" in progress_block
     assert "RUNTIME_RUNNING_POST_TRUTH_AUTHORITY_REFRESH" in minimal_wait_block
-    assert "deadline=$((SECONDS + WAIT_SECONDS))" in minimal_wait_block
-    assert "waiting for runtime truth to advance before readiness" in minimal_wait_block
+    post_truth_branch = minimal_wait_block[
+        minimal_wait_block.index('if [[ -n "${progress_generated_at}"')
+        : minimal_wait_block.index('detached_child_ready="$(detached_child_ready_authority')
+    ]
+    assert "deadline=$((SECONDS + WAIT_SECONDS))" not in post_truth_branch
+    assert "waiting for runtime truth to advance before readiness" not in minimal_wait_block
+    assert "treating progress as diagnostic" in minimal_wait_block
     assert "truth_advanced=\"false\"" in minimal_wait_block
-    assert '[[ "${truth_advanced}" == "true" ]]' in minimal_wait_block
-    assert "advanced runtime truth after post-truth startup progress" in minimal_wait_block
+    assert '[[ "${truth_advanced}" == "true" ]]' not in minimal_wait_block
+    assert "runtime truth advancement is diagnostic after shape verification" in minimal_wait_block
 
 
 def test_paper_minimal_shape_verifier_checks_commit_profile_lane_count_and_truth_freshness() -> None:
