@@ -9,19 +9,23 @@ from pathlib import Path
 from typing import Any, Mapping, Sequence
 
 from mgc_v05l.execution_core.track_b_broker_startup_authority import TRACK_B_FUTURES_ROOTS
+from mgc_v05l.execution_core.track_b_current_state_authority import (
+    BROKER_TRUTH_CRITICAL,
+    DEFAULT_PRICE_MAX_AGE_SECONDS,
+    DIAGNOSTIC_ONLY,
+    EXPECTED_PAPER_ACCOUNT,
+    MARKET_TRUTH_CRITICAL,
+    CurrentStateAuthorityInput,
+    evaluate_current_state_authority,
+    track_b_root_from_local_symbol,
+)
 
 BROKER_MARKET_TRUTH_ENTRY_ALLOWED = "BROKER_MARKET_TRUTH_ENTRY_ALLOWED"
 BROKER_MARKET_TRUTH_ENTRY_BLOCKED = "BROKER_MARKET_TRUTH_ENTRY_BLOCKED"
 
-BROKER_TRUTH_CRITICAL = "BROKER_TRUTH_CRITICAL"
-MARKET_TRUTH_CRITICAL = "MARKET_TRUTH_CRITICAL"
-DIAGNOSTIC_ONLY = "DIAGNOSTIC_ONLY"
-
-EXPECTED_PAPER_ACCOUNT = "DUM882026"
 EXPECTED_EXECUTION_MODE = "IBKR_PAPER_BRIDGE"
 EXPECTED_ROUTE_DESTINATION = "ibkr_paper_bridge_submit_capable"
 TRACK_B_FUTURES_SYMBOLS = set(TRACK_B_FUTURES_ROOTS)
-DEFAULT_PRICE_MAX_AGE_SECONDS = 180.0
 
 
 @dataclass(frozen=True)
@@ -79,83 +83,29 @@ def evaluate_broker_market_truth_entry_authority(
         block(BROKER_TRUTH_CRITICAL, "wrong_execution_mode", "PAPER entry execution mode must be IBKR_PAPER_BRIDGE.")
     if lane_ids and lane_id not in lane_ids:
         block(MARKET_TRUTH_CRITICAL, "lane_not_in_active_profile_roster", "PAPER bridge lane is not in the active profile roster.")
-    if not bool(authority_input.paper_only):
-        block(BROKER_TRUTH_CRITICAL, "paper_only_false", "PAPER entry intent must remain paper_only=true.")
-    if bool(authority_input.live_money_eligible):
-        block(BROKER_TRUTH_CRITICAL, "live_money_eligible", "live_money_eligible=true blocks PAPER entry.")
-    if bool(authority_input.paper_proof):
-        block(BROKER_TRUTH_CRITICAL, "paper_proof_true", "paper_proof=true blocks PAPER entry.")
-
-    try:
-        quantity = float(authority_input.quantity)
-    except (TypeError, ValueError):
-        quantity = 0.0
-    try:
-        max_quantity = float(authority_input.max_quantity)
-    except (TypeError, ValueError):
-        max_quantity = 0.0
-    if quantity <= 0.0 or max_quantity <= 0.0 or quantity > max_quantity:
-        block(
-            BROKER_TRUTH_CRITICAL,
-            "invalid_quantity",
-            f"PAPER entry quantity {quantity} exceeds configured cap {max_quantity} or is not positive.",
+    current_state = evaluate_current_state_authority(
+        CurrentStateAuthorityInput(
+            account_id=authority_input.account_id,
+            instrument=instrument,
+            action=authority_input.action,
+            quantity=authority_input.quantity,
+            paper_only=authority_input.paper_only,
+            live_money_eligible=authority_input.live_money_eligible,
+            paper_proof=authority_input.paper_proof,
+            flat_start_required=authority_input.flat_start_required,
+            max_quantity=authority_input.max_quantity,
+            broker_positions_snapshot=authority_input.broker_positions_snapshot,
+            broker_open_orders_snapshot=authority_input.broker_open_orders_snapshot,
+            open_order_truth=authority_input.open_order_truth,
+            runtime_price=authority_input.runtime_price,
+            contract=authority_input.contract,
+            require_resolved_contract=authority_input.require_resolved_contract,
+            price_max_age_seconds=authority_input.price_max_age_seconds,
+            now=now,
+            diagnostics=diagnostics,
         )
-
-    positions = _broker_positions(authority_input.broker_positions_snapshot)
-    positions_known = _positions_known(authority_input.broker_positions_snapshot)
-    if not positions_known:
-        block(BROKER_TRUTH_CRITICAL, "broker_positions_unavailable", "Broker positions are unavailable or incomplete.")
-    track_b_positions = [row for row in positions if _is_track_b_futures_position(row)]
-    nonflat_positions = [row for row in track_b_positions if abs(_float(row.get("quantity"))) > 1e-9]
-    instrument_nonflat_positions = [row for row in nonflat_positions if _position_matches_instrument(row, instrument)]
-    if authority_input.flat_start_required and instrument_nonflat_positions:
-        block(
-            BROKER_TRUTH_CRITICAL,
-            "broker_nonflat_flat_start_violation",
-            "Flat-start PAPER entry is blocked by actual same-instrument broker futures exposure.",
-            broker_positions=instrument_nonflat_positions,
-        )
-
-    open_orders = _broker_open_orders(authority_input.broker_open_orders_snapshot)
-    open_orders_known = _open_orders_known(authority_input.broker_open_orders_snapshot)
-    if not open_orders_known:
-        block(BROKER_TRUTH_CRITICAL, "broker_open_orders_unavailable", "Broker open orders are unavailable or incomplete.")
-    track_b_open_orders = [row for row in open_orders if _is_track_b_order(row)]
-    if track_b_open_orders:
-        block(
-            BROKER_TRUTH_CRITICAL,
-            "duplicate_or_conflicting_working_order",
-            "PAPER entry is blocked by actual Track B broker working orders.",
-            broker_open_orders=track_b_open_orders,
-        )
-
-    unknown_order_count = _unknown_order_count(authority_input.open_order_truth)
-    if unknown_order_count > 0:
-        block(
-            BROKER_TRUTH_CRITICAL,
-            "unknown_open_orders",
-            f"PAPER entry is blocked by {unknown_order_count} unknown broker open order(s).",
-            unknown_order_count=unknown_order_count,
-        )
-
-    price_status = _runtime_price_status(authority_input.runtime_price, now=now, max_age_seconds=authority_input.price_max_age_seconds)
-    if not price_status["available"]:
-        block(MARKET_TRUTH_CRITICAL, "runtime_price_unavailable", "Runtime market price is missing or invalid.")
-    elif not price_status["fresh"]:
-        block(
-            MARKET_TRUTH_CRITICAL,
-            "runtime_price_stale",
-            "Runtime market price is stale.",
-            price_age_seconds=price_status.get("age_seconds"),
-        )
-
-    contract_status = _contract_identity_status(
-        authority_input.contract,
-        expected_instrument=instrument,
-        require_resolved_contract=authority_input.require_resolved_contract,
     )
-    if not contract_status["valid"]:
-        block(MARKET_TRUTH_CRITICAL, contract_status["reason"], contract_status["detail"])
+    blockers.extend(dict(row) for row in current_state.get("blockers") or [] if isinstance(row, Mapping))
 
     allowed = not blockers
     return {
@@ -166,19 +116,12 @@ def evaluate_broker_market_truth_entry_authority(
         "diagnostics": diagnostics,
         "authority_scope": "BROKER_AND_MARKET_TRUTH_ONLY",
         "broker_truth": {
-            "positions_known": positions_known,
-            "track_b_position_count": len(track_b_positions),
-            "track_b_nonflat_position_count": len(nonflat_positions),
-            "instrument_nonflat_position_count": len(instrument_nonflat_positions),
-            "open_orders_known": open_orders_known,
-            "track_b_open_order_count": len(track_b_open_orders),
-            "unknown_order_count": unknown_order_count,
+            **dict(current_state.get("broker_truth") or {}),
         },
         "market_truth": {
-            "instrument": instrument,
-            "price": price_status,
-            "contract": contract_status,
+            **dict(current_state.get("market_truth") or {}),
         },
+        "current_state_authority": current_state,
     }
 
 
@@ -481,7 +424,7 @@ def _contract_identity_candidate(row: Mapping[str, Any], *, instrument: str, sou
         or ""
     ).strip().upper()
     if not symbol:
-        symbol = "".join(ch for ch in local_symbol.upper() if ch.isalpha())[:3]
+        symbol = track_b_root_from_local_symbol(local_symbol)
     if symbol != instrument:
         return {}
     expiry = str(row.get("expiry") or row.get("lastTradeDateOrContractMonth") or "").strip()
@@ -579,33 +522,13 @@ def _broker_positions(snapshot: Mapping[str, Any]) -> list[dict[str, Any]]:
     return [dict(row) for row in list(snapshot.get("positions") or []) if isinstance(row, Mapping)]
 
 
-def _positions_known(snapshot: Mapping[str, Any]) -> bool:
-    if snapshot.get("ok") is not True:
-        return False
-    if "positions" not in snapshot:
-        return False
-    return str(snapshot.get("account") or snapshot.get("selected_account_id") or "").strip() == EXPECTED_PAPER_ACCOUNT
-
-
-def _broker_open_orders(snapshot: Mapping[str, Any]) -> list[dict[str, Any]]:
-    return [dict(row) for row in list(snapshot.get("open_orders") or []) if isinstance(row, Mapping)]
-
-
-def _open_orders_known(snapshot: Mapping[str, Any]) -> bool:
-    if snapshot.get("ok") is not True:
-        return False
-    if snapshot.get("open_orders_complete") is not True:
-        return False
-    return str(snapshot.get("account") or snapshot.get("selected_account_id") or "").strip() == EXPECTED_PAPER_ACCOUNT
-
-
 def _is_track_b_futures_position(row: Mapping[str, Any]) -> bool:
     sec_type = str(row.get("security_type") or row.get("secType") or "").strip().upper()
     symbol = str(row.get("symbol") or row.get("track_b_root") or "").strip().upper()
     local_symbol = str(row.get("local_symbol") or row.get("localSymbol") or "").strip().upper()
     if sec_type and sec_type != "FUT":
         return False
-    root = symbol or "".join(ch for ch in local_symbol if ch.isalpha())[:3]
+    root = symbol or track_b_root_from_local_symbol(local_symbol)
     return root in TRACK_B_FUTURES_SYMBOLS
 
 
@@ -618,110 +541,6 @@ def _position_matches_instrument(row: Mapping[str, Any], instrument: str) -> boo
         return True
     local_symbol = str(row.get("local_symbol") or row.get("localSymbol") or "").strip().upper()
     return bool(local_symbol) and local_symbol.startswith(expected)
-
-
-def _is_track_b_order(row: Mapping[str, Any]) -> bool:
-    symbol = str(row.get("symbol") or row.get("track_b_root") or "").strip().upper()
-    local_symbol = str(row.get("local_symbol") or row.get("localSymbol") or "").strip().upper()
-    sec_type = str(row.get("security_type") or row.get("secType") or "").strip().upper()
-    if sec_type and sec_type != "FUT":
-        return False
-    root = symbol or "".join(ch for ch in local_symbol if ch.isalpha())[:3]
-    return root in TRACK_B_FUTURES_SYMBOLS
-
-
-def _unknown_order_count(open_order_truth: Mapping[str, Any]) -> int:
-    for key in (
-        "unknown_open_order_count",
-        "unknown_broker_open_order_count",
-        "unknown_order_count",
-    ):
-        value = _int_or_none(open_order_truth.get(key))
-        if value is not None:
-            return max(0, value)
-    unknown_orders = open_order_truth.get("unknown_orders") or open_order_truth.get("unknown_broker_open_orders") or []
-    if isinstance(unknown_orders, list):
-        return len(unknown_orders)
-    classification = str(open_order_truth.get("classification") or "").strip().upper()
-    return 0 if classification in {"", "NO_OPEN_ORDERS"} else 0
-
-
-def _runtime_price_status(price_payload: Mapping[str, Any], *, now: datetime, max_age_seconds: float) -> dict[str, Any]:
-    price = _float_or_none(price_payload.get("price") or price_payload.get("last") or price_payload.get("close"))
-    timestamp = _parse_datetime(price_payload.get("timestamp") or price_payload.get("generated_at") or price_payload.get("bar_end"))
-    available = price is not None and price > 0.0 and timestamp is not None
-    age_seconds = None
-    fresh = False
-    if timestamp is not None:
-        timestamp = timestamp if timestamp.tzinfo else timestamp.replace(tzinfo=timezone.utc)
-        age_seconds = max(0.0, (now.astimezone(timezone.utc) - timestamp.astimezone(timezone.utc)).total_seconds())
-        fresh = age_seconds <= max_age_seconds
-    return {
-        "available": available,
-        "fresh": bool(available and fresh),
-        "price": price,
-        "timestamp": None if timestamp is None else timestamp.isoformat(),
-        "age_seconds": age_seconds,
-        "max_age_seconds": max_age_seconds,
-        "source": price_payload.get("source"),
-    }
-
-
-def _contract_identity_status(
-    contract: Mapping[str, Any],
-    *,
-    expected_instrument: str,
-    require_resolved_contract: bool,
-) -> dict[str, Any]:
-    symbol = str(contract.get("symbol") or contract.get("instrument") or "").strip().upper()
-    local_symbol = str(contract.get("local_symbol") or contract.get("localSymbol") or "").strip()
-    expiry = str(contract.get("expiry") or contract.get("contract_month") or "").strip()
-    con_id = _int_or_none(contract.get("con_id") or contract.get("conId"))
-    if expected_instrument and symbol and symbol != expected_instrument:
-        return {
-            "valid": False,
-            "reason": "contract_instrument_mismatch",
-            "detail": f"Resolved contract symbol {symbol} does not match intent instrument {expected_instrument}.",
-        }
-    if not symbol:
-        return {"valid": False, "reason": "invalid_instrument", "detail": "Resolved contract instrument is missing."}
-    if require_resolved_contract and (con_id is None or con_id <= 0):
-        return {"valid": False, "reason": "unresolved_con_id", "detail": "Resolved contract con_id must be positive."}
-    if require_resolved_contract and not local_symbol:
-        return {"valid": False, "reason": "unresolved_local_symbol", "detail": "Resolved contract localSymbol is missing."}
-    if require_resolved_contract and not expiry:
-        return {"valid": False, "reason": "unresolved_expiry", "detail": "Resolved contract expiry is missing."}
-    return {
-        "valid": True,
-        "reason": None,
-        "detail": "Resolved contract identity is valid.",
-        "symbol": symbol,
-        "local_symbol": local_symbol or None,
-        "expiry": expiry or None,
-        "con_id": con_id,
-    }
-
-
-def _parse_datetime(value: Any) -> datetime | None:
-    text = str(value or "").strip()
-    if not text:
-        return None
-    try:
-        return datetime.fromisoformat(text.replace("Z", "+00:00"))
-    except ValueError:
-        return None
-
-
-def _float_or_none(value: Any) -> float | None:
-    try:
-        return float(value)
-    except (TypeError, ValueError):
-        return None
-
-
-def _float(value: Any) -> float:
-    parsed = _float_or_none(value)
-    return 0.0 if parsed is None else parsed
 
 
 def _int_or_none(value: Any) -> int | None:
