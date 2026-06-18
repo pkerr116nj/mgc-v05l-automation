@@ -1867,6 +1867,42 @@ def test_auto_selected_missing_account_fails_closed(tmp_path: Path) -> None:
     assert payload["broker_state_mutated"] is False
 
 
+def test_synthetic_exit_authority_uses_broker_short_direction_for_buy_to_close(tmp_path: Path) -> None:
+    config = _seed(
+        tmp_path,
+        completed_bars=3,
+        position_overrides={"quantity": "-1", "side": "SHORT"},
+    )
+
+    candidate = attach_module._synthetic_exit_authority_candidate_for_config(
+        config=config,
+        now=NOW,
+        close_action="SELL",
+    )
+
+    assert candidate["position_side"] == "SHORT"
+    assert candidate["candidate_close_action"] == "BUY"
+    assert candidate["close_action_diagnostics"]["requested_close_action"] == "SELL"
+    assert candidate["close_action_diagnostics"]["broker_position_close_action"] == "BUY"
+    assert candidate["authority_decision"]["decision"] in {"ALLOWED", "DEGRADED_ALLOWED"}
+
+
+def test_synthetic_exit_authority_uses_broker_long_direction_for_sell_to_close(tmp_path: Path) -> None:
+    config = _seed(tmp_path, completed_bars=3)
+
+    candidate = attach_module._synthetic_exit_authority_candidate_for_config(
+        config=config,
+        now=NOW,
+        close_action="BUY",
+    )
+
+    assert candidate["position_side"] == "LONG"
+    assert candidate["candidate_close_action"] == "SELL"
+    assert candidate["close_action_diagnostics"]["requested_close_action"] == "BUY"
+    assert candidate["close_action_diagnostics"]["broker_position_close_action"] == "SELL"
+    assert candidate["authority_decision"]["decision"] in {"ALLOWED", "DEGRADED_ALLOWED"}
+
+
 def _seed(
     tmp_path: Path,
     *,

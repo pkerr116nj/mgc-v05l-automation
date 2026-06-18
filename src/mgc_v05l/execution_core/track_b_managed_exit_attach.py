@@ -1408,6 +1408,7 @@ def _synthetic_exit_authority_candidate_for_config(
     if qty <= Decimal("0"):
         return {}
     side = "LONG" if (_decimal(broker_position.get("quantity")) or Decimal("0")) > 0 else "SHORT"
+    broker_close_action = close_action_for_position_side(side)
     intent = ExitIntent(
         exit_intent_id=f"exit_intent_attach_{config.account_id}_{config.local_symbol}_{config.con_id}".lower(),
         execution_domain=ExecutionDomain.TRACK_B_PAPER,
@@ -1417,7 +1418,7 @@ def _synthetic_exit_authority_candidate_for_config(
         con_id=config.con_id,
         position_side=side,
         owned_qty=str(qty),
-        close_action=close_action,
+        close_action=broker_close_action,
         close_qty=str(config.quantity),
         remaining_qty_after=str(max(qty - Decimal(str(config.quantity)), Decimal("0"))),
         close_qty_source=CloseQtySource.RISK_POLICY,
@@ -1503,6 +1504,9 @@ def _synthetic_exit_authority_candidate_for_config(
             "open_order_truth_classification": open_order_truth.get("classification"),
             "broker_session_authority_classification": broker_session_authority.get("classification"),
             "managed_order_registry_classification": managed_orders.get("classification"),
+            "requested_close_action": close_action,
+            "broker_position_close_action": broker_close_action,
+            "close_action_source": "broker_position_direction",
         },
     )
     decision = validate_exit_authority(intent=intent, current_state=state, validated_at=now)
@@ -1522,6 +1526,11 @@ def _synthetic_exit_authority_candidate_for_config(
         "exit_intent": intent.to_json_dict(),
         "authority_decision": decision.to_json_dict(),
         "block_reasons": list(decision.block_reasons),
+        "close_action_diagnostics": {
+            "requested_close_action": close_action,
+            "broker_position_close_action": broker_close_action,
+            "close_action_source": "broker_position_direction",
+        },
     }
 
 
