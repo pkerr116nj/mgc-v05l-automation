@@ -572,7 +572,12 @@ def _attach_config(*, config: TrackBManagedExitActuatorConfig, position: Mapping
         lane_id=str(candidate.get("lane_id") or position.get("lane_id") or lifecycle_position.get("lane_id") or ""),
         lifecycle_id=str(candidate.get("lifecycle_id") or ""),
         instrument_family=symbol,
-        contract_key=str(position.get("contract_key") or lifecycle_position.get("contract_key") or f"{symbol}-202606"),
+        contract_key=str(
+            broker_position.get("contract_key")
+            or position.get("contract_key")
+            or lifecycle_position.get("contract_key")
+            or f"{symbol}-202606"
+        ),
         local_symbol=local_symbol,
         con_id=_int(candidate.get("con_id") or broker_position.get("con_id")),
         expiry=str(broker_position.get("expiry") or lifecycle_position.get("expiry") or ""),

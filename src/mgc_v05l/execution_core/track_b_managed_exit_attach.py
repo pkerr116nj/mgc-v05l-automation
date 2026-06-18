@@ -601,9 +601,16 @@ def _apply_managed_exit(
         managed_exit_policy_id=managed_exit_policy_id,
     )
     if exit_authority_allows and not _mapping(lifecycle_report.get("entry_fill")):
-        recovered_entry_fill = _entry_fill_from_current_broker_position_for_risk_reducing_exit(
-            config=config,
-            now=now,
+        recovered_entry_fill = (
+            _entry_fill_from_selected_broker_position_for_risk_reducing_exit(
+                config=config,
+                selected_position=selected_position,
+                now=now,
+            )
+            or _entry_fill_from_current_broker_position_for_risk_reducing_exit(
+                config=config,
+                now=now,
+            )
         )
         if recovered_entry_fill:
             lifecycle_report = {
@@ -835,6 +842,49 @@ def _entry_fill_from_selected_managed_position(selected_position: Mapping[str, A
     return {}
 
 
+def _entry_fill_from_selected_broker_position_for_risk_reducing_exit(
+    *,
+    config: TrackBManagedExitAttachConfig,
+    selected_position: Mapping[str, Any] | None,
+    now: datetime,
+) -> dict[str, Any]:
+    selected = _mapping(selected_position)
+    broker_position = _mapping(selected.get("broker_position"))
+    if not _broker_position_matches_config_for_risk_reducing_exit(config=config, broker_position=broker_position):
+        return {}
+    price = (
+        broker_position.get("entry_price")
+        or broker_position.get("avg_entry_price")
+        or broker_position.get("average_cost")
+        or broker_position.get("avg_cost")
+    )
+    if price in {None, ""}:
+        return {}
+    quantity = _decimal(broker_position.get("quantity"))
+    filled_at = (
+        broker_position.get("entry_time")
+        or broker_position.get("entry_timestamp")
+        or selected.get("entry_time")
+        or selected.get("entry_timestamp")
+        or broker_position.get("updated_at")
+        or now.isoformat()
+    )
+    return {
+        "broker_order_id": str(
+            broker_position.get("entry_order_id")
+            or selected.get("entry_order_id")
+            or ""
+        ),
+        "perm_id": str(broker_position.get("entry_perm_id") or selected.get("entry_perm_id") or ""),
+        "execution_id": str(broker_position.get("entry_exec_id") or selected.get("entry_exec_id") or ""),
+        "exec_id": str(broker_position.get("entry_exec_id") or selected.get("entry_exec_id") or ""),
+        "price": str(price),
+        "quantity": str(abs(quantity or Decimal(str(config.quantity)))),
+        "filled_at": str(filled_at),
+        "source": "SELECTED_BROKER_POSITION_RISK_REDUCING_EXIT_EVIDENCE",
+    }
+
+
 def _entry_fill_from_current_broker_position_for_risk_reducing_exit(
     *,
     config: TrackBManagedExitAttachConfig,
@@ -876,6 +926,31 @@ def _entry_fill_from_current_broker_position_for_risk_reducing_exit(
     }
 
 
+def _broker_position_matches_config_for_risk_reducing_exit(
+    *,
+    config: TrackBManagedExitAttachConfig,
+    broker_position: Mapping[str, Any],
+) -> bool:
+    if not broker_position:
+        return False
+    account = _valid_account_id(broker_position.get("account_id") or broker_position.get("account"))
+    if account and account != config.account_id:
+        return False
+    local_symbol = str(broker_position.get("local_symbol") or broker_position.get("localSymbol") or "")
+    if local_symbol and local_symbol != config.local_symbol:
+        return False
+    con_id = _int_or_none(broker_position.get("con_id") or broker_position.get("conId"))
+    if con_id is not None and con_id != config.con_id:
+        return False
+    quantity = _decimal(broker_position.get("quantity"))
+    if quantity is None or quantity == Decimal("0"):
+        return False
+    if abs(quantity) != Decimal(str(config.quantity)):
+        return False
+    expected_side = "LONG" if quantity > 0 else "SHORT"
+    return expected_side == _normalized_position_side(config.side)
+
+
 def _first(value: Any) -> Any:
     if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
         return value[0] if value else None
@@ -896,14 +971,20 @@ def _select_active_managed_exit_due_position(
 ) -> dict[str, Any]:
     if config.auto_select_active_managed_position is not True:
         return {}
-    candidates = [
+    due_candidates = [
         dict(item)
         for item in managed_position_registry.get("managed_positions") or []
         if isinstance(item, Mapping)
         and str(item.get("classification") or "") == "OPEN_MANAGED_EXIT_DUE"
         and item.get("exit_due") is True
-        and item.get("attention_required") is not True
     ]
+    candidates = [item for item in due_candidates if item.get("attention_required") is not True]
+    exact_lifecycle = [item for item in due_candidates if str(item.get("lifecycle_id") or "") == config.lifecycle_id]
+    if len(exact_lifecycle) == 1 and _selected_due_position_can_override_attention_required(
+        config=config,
+        selected_position=exact_lifecycle[0],
+    ):
+        return exact_lifecycle[0]
     if not candidates:
         return {}
     exact_lifecycle = [item for item in candidates if str(item.get("lifecycle_id") or "") == config.lifecycle_id]
@@ -911,10 +992,20 @@ def _select_active_managed_exit_due_position(
         return exact_lifecycle[0]
     exact_contract = [
         item
+        for item in due_candidates
+        if str(item.get("local_symbol") or "") == config.local_symbol
+        and _int_or_none(item.get("con_id")) == config.con_id
+    ]
+    if len(exact_contract) == 1 and _selected_due_position_can_override_attention_required(
+        config=config,
+        selected_position=exact_contract[0],
+    ):
+        return exact_contract[0]
+    exact_contract = [
+        item
         for item in candidates
         if str(item.get("local_symbol") or "") == config.local_symbol
         and _int_or_none(item.get("con_id")) == config.con_id
-        and str(item.get("contract_key") or "") == config.contract_key
     ]
     if len(exact_contract) == 1:
         return exact_contract[0]
@@ -923,6 +1014,19 @@ def _select_active_managed_exit_due_position(
     if len(candidates) == 1:
         return candidates[0]
     return {}
+
+
+def _selected_due_position_can_override_attention_required(
+    *,
+    config: TrackBManagedExitAttachConfig,
+    selected_position: Mapping[str, Any],
+) -> bool:
+    if selected_position.get("attention_required") is not True:
+        return True
+    return _broker_position_matches_config_for_risk_reducing_exit(
+        config=config,
+        broker_position=_mapping(selected_position.get("broker_position")),
+    )
 
 
 def _has_explicit_managed_exit_target(config: TrackBManagedExitAttachConfig) -> bool:
@@ -1035,7 +1139,12 @@ def _config_for_selected_managed_position(
         ),
         lifecycle_id=str(selected_position.get("lifecycle_id") or lifecycle_position.get("lifecycle_id") or config.lifecycle_id),
         instrument_family=instrument_family,
-        contract_key=str(selected_position.get("contract_key") or lifecycle_position.get("contract_key") or config.contract_key),
+        contract_key=str(
+            broker_position.get("contract_key")
+            or selected_position.get("contract_key")
+            or lifecycle_position.get("contract_key")
+            or config.contract_key
+        ),
         local_symbol=str(selected_position.get("local_symbol") or lifecycle_position.get("local_symbol") or config.local_symbol),
         con_id=_int_or_none(selected_position.get("con_id") or lifecycle_position.get("con_id")) or config.con_id,
         expiry=str(broker_position.get("expiry") or lifecycle_position.get("expiry") or config.expiry),
@@ -1731,12 +1840,19 @@ def _selected_current_scope_lifecycle_matches(
     lifecycle_classification = str(lifecycle_report.get("paper_lifecycle_classification") or "")
     if lifecycle_classification == "TRACK_B_STRATEGY_PAPER_OPEN_MANAGED":
         return True
-    if not _selected_position_confirms_broker_backed_current_exposure(selected_position):
+    if not _selected_position_confirms_broker_backed_current_exposure(
+        config=config,
+        selected_position=selected_position,
+    ):
         return False
     return lifecycle_classification == "TRACK_B_STRATEGY_PAPER_REVIEW_REQUIRED"
 
 
-def _selected_position_confirms_broker_backed_current_exposure(selected_position: Mapping[str, Any] | None) -> bool:
+def _selected_position_confirms_broker_backed_current_exposure(
+    *,
+    config: TrackBManagedExitAttachConfig,
+    selected_position: Mapping[str, Any] | None,
+) -> bool:
     selected = _mapping(selected_position)
     if not selected:
         return False
@@ -1749,9 +1865,16 @@ def _selected_position_confirms_broker_backed_current_exposure(selected_position
     broker_position = _mapping(selected.get("broker_position"))
     if not broker_position:
         return False
-    if _decimal(broker_position.get("quantity")) == Decimal("0"):
+    if not _broker_position_matches_config_for_risk_reducing_exit(config=config, broker_position=broker_position):
         return False
-    return bool(_entry_fill_from_selected_managed_position(selected))
+    return bool(
+        _entry_fill_from_selected_managed_position(selected)
+        or _entry_fill_from_selected_broker_position_for_risk_reducing_exit(
+            config=config,
+            selected_position=selected,
+            now=datetime.now(UTC),
+        )
+    )
 
 
 def _retryable_unmutated_close_review(
@@ -2070,6 +2193,15 @@ def _lifecycle_report_path(
         path_value = source.get("paper_lifecycle_report_path")
         if path_value:
             return config.resolve(Path(str(path_value)))
+    selected_lifecycle_id = str(selected.get("lifecycle_id") or lifecycle_position.get("lifecycle_id") or "").strip()
+    if selected_lifecycle_id:
+        selected_lifecycle_path = (
+            config.resolve(config.lifecycle_output_root)
+            / selected_lifecycle_id
+            / "track_b_strategy_managed_paper_lifecycle_report.json"
+        )
+        if selected_lifecycle_path.exists():
+            return selected_lifecycle_path
     position = (live_position_status.get("positions_by_instrument") or {}).get(config.contract_key)
     if isinstance(position, Mapping) and position.get("paper_lifecycle_report_path"):
         return config.resolve(Path(str(position.get("paper_lifecycle_report_path"))))

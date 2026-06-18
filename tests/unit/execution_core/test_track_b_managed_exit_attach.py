@@ -1014,6 +1014,88 @@ def test_auto_selects_current_exit_due_managed_position_instead_of_stale_default
     assert payload["managed_exit_due_automation"]["classification"] == "MANAGED_EXIT_DUE_READY_FOR_APPLY"
 
 
+def test_auto_selects_exact_conid_position_when_requested_contract_key_is_stale(tmp_path: Path) -> None:
+    current_lifecycle_id = "reserved_submit_es_london_open_active_participation_short_current"
+    strategy_id = "es_london_open_active_participation_short"
+    config = _seed(
+        tmp_path,
+        completed_bars=3,
+        config_overrides={
+            "strategy_id": strategy_id,
+            "lane_id": strategy_id,
+            "lifecycle_id": current_lifecycle_id,
+            "instrument_family": "ES",
+            "contract_key": "ES-202606",
+            "local_symbol": "ESU6",
+            "con_id": 649180671,
+            "expiry": "20260918",
+            "side": "SHORT",
+            "managed_exit_policy_id": "GLOBEX_ACTIVE_EVIDENCE_TIMEBOX_15M_EXIT_V1",
+            "exit_profile_id": "ES_GLOBEX_ACTIVE_EVIDENCE_TIMEBOX_15M_V1",
+        },
+        position_overrides={"quantity": "-1", "side": "SHORT", "average_cost": "377585.25"},
+    )
+    lifecycle_path = (
+        tmp_path
+        / "outputs/track_b_execution_core/track_b_strategy_managed_paper_lifecycle"
+        / current_lifecycle_id
+        / "track_b_strategy_managed_paper_lifecycle_report.json"
+    )
+    _write_json(
+        tmp_path / "outputs/track_b_execution_core/managed_positions/latest_managed_positions.json",
+        {
+            "classification": "OPEN_MANAGED_EXIT_DUE",
+            "managed_positions": [
+                {
+                    "classification": "OPEN_MANAGED_EXIT_DUE",
+                    "exit_due": True,
+                    "attention_required": True,
+                    "symbol": "ES",
+                    "contract_key": "ES-202609",
+                    "local_symbol": "ESU6",
+                    "con_id": 649180671,
+                    "quantity": "1",
+                    "side": "SHORT",
+                    "strategy_id": strategy_id,
+                    "lane_id": strategy_id,
+                    "lifecycle_id": current_lifecycle_id,
+                    "managed_exit_policy_id": "GLOBEX_ACTIVE_EVIDENCE_TIMEBOX_15M_EXIT_V1",
+                    "broker_position": {
+                        "account_id": config.account_id,
+                        "contract_key": "ES-202609",
+                        "local_symbol": "ESU6",
+                        "con_id": 649180671,
+                        "quantity": "-1.0",
+                        "average_cost": "377585.25",
+                        "expiry": "20260918",
+                    },
+                    "lifecycle_position": {
+                        "account_id": config.account_id,
+                        "instrument_family": "ES",
+                        "contract_key": "ES-202609",
+                        "local_symbol": "ESU6",
+                        "con_id": 649180671,
+                        "quantity": "1",
+                        "side": "SHORT",
+                        "strategy_id": strategy_id,
+                        "lane_id": strategy_id,
+                        "lifecycle_id": current_lifecycle_id,
+                        "managed_exit_policy_id": "GLOBEX_ACTIVE_EVIDENCE_TIMEBOX_15M_EXIT_V1",
+                    },
+                }
+            ],
+        },
+    )
+
+    payload = build_track_b_managed_exit_attach_plan(config=config, now=NOW)
+
+    assert payload["classification"] == MANAGED_EXIT_TIMEBOX_CLOSE_ELIGIBLE
+    assert payload["target_identity"]["contract_key"] == "ES-202609"
+    assert payload["selected_managed_position"]["lifecycle_id"] == current_lifecycle_id
+    assert payload["source_artifact_paths"]["lifecycle_report"] == str(lifecycle_path)
+    assert payload["lifecycle_identity_verified"] is True
+
+
 def test_current_scope_selected_position_accepts_bridge_fill_lifecycle_report_identity(tmp_path: Path) -> None:
     current_lifecycle_id = "reserved_submit_mes_globex_active_participation_long_current"
     bridge_lifecycle_id = "bridge_fill_MES|1m|2026-06-08T06:55:00Z|BUY_TO_OPEN"
@@ -1200,6 +1282,117 @@ def test_apply_uses_current_scope_identity_when_bridge_fill_report_is_selected(
     assert seen["existing_lifecycle_report"]["trade_id"] == current_trade_id
     assert seen["existing_lifecycle_report"]["entry_intent"]["lifecycle_id"] == current_lifecycle_id
     assert seen["existing_lifecycle_report"]["entry_intent"]["trade_id"] == current_trade_id
+
+
+def test_apply_recovers_minimal_entry_fill_from_selected_broker_position_for_risk_reducing_close(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    lifecycle_id = "reserved_submit_es_london_open_active_participation_short_current"
+    strategy_id = "es_london_open_active_participation_short"
+    config = _seed(
+        tmp_path,
+        completed_bars=12,
+        config_overrides={
+            "apply": True,
+            "operator_authorized_managed_exit": True,
+            "strategy_id": strategy_id,
+            "lane_id": strategy_id,
+            "lifecycle_id": lifecycle_id,
+            "instrument_family": "ES",
+            "contract_key": "ES-202609",
+            "local_symbol": "ESU6",
+            "con_id": 649180671,
+            "expiry": "20260918",
+            "side": "SHORT",
+            "managed_exit_policy_id": "GLOBEX_ACTIVE_EVIDENCE_TIMEBOX_15M_EXIT_V1",
+            "exit_profile_id": "ES_GLOBEX_ACTIVE_EVIDENCE_TIMEBOX_15M_V1",
+        },
+        position_overrides={"quantity": "-1", "side": "SHORT", "average_cost": "377585.25"},
+    )
+    lifecycle_path = (
+        tmp_path
+        / "outputs/track_b_execution_core/track_b_strategy_managed_paper_lifecycle"
+        / lifecycle_id
+        / "track_b_strategy_managed_paper_lifecycle_report.json"
+    )
+    lifecycle = json.loads(lifecycle_path.read_text(encoding="utf-8"))
+    lifecycle.pop("entry_fill", None)
+    lifecycle["paper_lifecycle_classification"] = "TRACK_B_STRATEGY_PAPER_OPEN_MANAGED"
+    _write_json(lifecycle_path, lifecycle)
+    _write_json(
+        tmp_path / "outputs/track_b_execution_core/managed_positions/latest_managed_positions.json",
+        {
+            "classification": "OPEN_MANAGED_EXIT_DUE",
+            "managed_positions": [
+                {
+                    "classification": "OPEN_MANAGED_EXIT_DUE",
+                    "exit_due": True,
+                    "projection_authority_owner_confirmed": True,
+                    "attention_required": False,
+                    "symbol": "ES",
+                    "contract_key": "ES-202609",
+                    "local_symbol": "ESU6",
+                    "con_id": 649180671,
+                    "quantity": "1",
+                    "side": "SHORT",
+                    "strategy_id": strategy_id,
+                    "lane_id": strategy_id,
+                    "lifecycle_id": lifecycle_id,
+                    "managed_exit_policy_id": "GLOBEX_ACTIVE_EVIDENCE_TIMEBOX_15M_EXIT_V1",
+                    "broker_position": {
+                        "account_id": config.account_id,
+                        "local_symbol": "ESU6",
+                        "con_id": 649180671,
+                        "quantity": "-1.0",
+                        "average_cost": "377585.25",
+                        "updated_at": "2026-06-18T09:02:34+00:00",
+                    },
+                    "lifecycle_position": {
+                        "account_id": config.account_id,
+                        "instrument_family": "ES",
+                        "contract_key": "ES-202609",
+                        "local_symbol": "ESU6",
+                        "con_id": 649180671,
+                        "quantity": "1",
+                        "side": "SHORT",
+                        "strategy_id": strategy_id,
+                        "lane_id": strategy_id,
+                        "lifecycle_id": lifecycle_id,
+                        "managed_exit_policy_id": "GLOBEX_ACTIVE_EVIDENCE_TIMEBOX_15M_EXIT_V1",
+                        "paper_lifecycle_report_path": str(lifecycle_path),
+                    },
+                }
+            ],
+        },
+    )
+
+    class Result:
+        report_json = lifecycle_path
+        report = {
+            **lifecycle,
+            "paper_lifecycle_classification": "TRACK_B_STRATEGY_PAPER_OPEN_MANAGED",
+            "final_position_status": "OPEN_MANAGED",
+            "submit_attempted": False,
+            "broker_state_mutated": False,
+        }
+
+    seen: dict[str, Any] = {}
+
+    def fake_maintain(**kwargs: Any) -> Result:
+        seen["existing_lifecycle_report"] = kwargs["existing_lifecycle_report"]
+        return Result()
+
+    monkeypatch.setattr(attach_module, "maintain_open_track_b_strategy_managed_paper_lifecycle", fake_maintain)
+
+    payload = build_track_b_managed_exit_attach_plan(config=config, now=NOW)
+
+    assert payload["apply_enabled"] is True
+    assert payload["blockers"] == []
+    recovered = seen["existing_lifecycle_report"]["entry_fill"]
+    assert recovered["source"] == "SELECTED_BROKER_POSITION_RISK_REDUCING_EXIT_EVIDENCE"
+    assert recovered["price"] == "377585.25"
+    assert recovered["quantity"] == "1.0"
 
 
 def test_apply_blocks_with_broker_unavailable_retryable_before_lifecycle_submit(

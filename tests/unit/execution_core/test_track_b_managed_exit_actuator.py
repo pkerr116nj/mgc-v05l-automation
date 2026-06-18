@@ -454,6 +454,49 @@ def test_guardian_close_candidate_mismatch_is_diagnostic_when_v11_allows(tmp_pat
     assert "GUARDIAN_EXACT_CLOSE_CANDIDATE_MISSING" in payload["eligible_positions"][0]["legacy_apply_blockers_diagnostic"]
 
 
+def test_attach_config_prefers_current_broker_contract_key_over_stale_row_key(tmp_path: Path) -> None:
+    inputs = _inputs(runtime_down=True)
+    position = inputs["managed_positions"]["managed_positions"][0]
+    position["contract_key"] = "ES-202606"
+    position["symbol"] = "ES"
+    position["local_symbol"] = "ESU6"
+    position["con_id"] = 649180671
+    position["broker_position"].update(
+        {
+            "symbol": "ES",
+            "track_b_root": "ES",
+            "local_symbol": "ESU6",
+            "con_id": 649180671,
+            "contract_key": "ES-202609",
+            "expiry": "20260918",
+        }
+    )
+    inputs["managed_orders"]["managed_orders"][0].update({"local_symbol": "ESU6", "con_id": 649180671})
+    inputs["guardian"]["managed_close_authority"]["candidates"][0].update(
+        {"symbol": "ES", "local_symbol": "ESU6", "con_id": 649180671}
+    )
+    inputs["safe_state"]["close_authority"]["guardian_close_candidates"][0].update(
+        {"symbol": "ES", "local_symbol": "ESU6", "con_id": 649180671}
+    )
+    inputs["reconciliation"]["registry_reconciliation"]["mapped_records"][0].update(
+        {"symbol": "ES", "local_symbol": "ESU6", "con_id": 649180671}
+    )
+    calls = []
+
+    payload = run_track_b_managed_exit_actuator(
+        config=TrackBManagedExitActuatorConfig(repo_root=tmp_path, apply=True, operator_authorized_managed_exit=True),
+        now=NOW,
+        input_overrides=inputs,
+        attach_runner=lambda config, now: calls.append(config) or _submitted_attach_result(),
+        write=False,
+    )
+
+    assert payload["classification"] == MANAGED_EXIT_ACTUATOR_APPLIED_OR_PENDING
+    assert calls[0].contract_key == "ES-202609"
+    assert calls[0].local_symbol == "ESU6"
+    assert calls[0].con_id == 649180671
+
+
 def _inputs(*, runtime_down: bool) -> dict:
     candidate = _candidate()
     return {
