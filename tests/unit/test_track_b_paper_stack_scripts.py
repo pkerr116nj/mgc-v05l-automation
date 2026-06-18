@@ -1630,6 +1630,8 @@ def test_paper_stack_start_cleans_stale_carrier_artifacts_and_detects_soak_child
     assert '"paper_runtime_config_paths.txt" in command' in source
     assert "ACTIVE_RUNTIME_CARRIER_PRESENT" in source
     assert "STALE_RUNTIME_CARRIER_ARTIFACTS_CLEANED" in source
+    assert "build_detached_runtime_child_status" in source
+    assert "track_b_paper_stack_wrapper_duplicate_carrier_monitor_refresh_failed" in source
 
 
 def test_paper_stack_start_requires_one_wrapper_parent_for_runtime_child() -> None:

@@ -385,6 +385,125 @@ def test_broker_truth_sweeper_prefers_freshest_broker_backed_same_contract_lifec
     )
 
 
+def test_broker_truth_sweeper_demotes_stale_broker_flat_rows(tmp_path: Path) -> None:
+    _write_json(
+        tmp_path / "outputs/reports/ibkr_read_only_verification/ibkr_positions_snapshot.json",
+        {
+            "account": "DUM882026",
+            "selected_account_id": "DUM882026",
+            "positions_complete": True,
+            "positions": [
+                {
+                    "account_id": "DUM882026",
+                    "security_type": "FUT",
+                    "symbol": "GC",
+                    "local_symbol": "GCQ6",
+                    "con_id": 732156872,
+                    "expiry": "20260827",
+                    "quantity": "-1.0",
+                },
+                {
+                    "account_id": "DUM882026",
+                    "security_type": "FUT",
+                    "symbol": "MGC",
+                    "local_symbol": "MGCQ6",
+                    "con_id": 732156883,
+                    "expiry": "20260827",
+                    "quantity": "0.0",
+                },
+                {
+                    "account_id": "DUM882026",
+                    "security_type": "FUT",
+                    "symbol": "ZB",
+                    "local_symbol": "ZBU6",
+                    "con_id": 840227357,
+                    "expiry": "20260921",
+                    "quantity": "0.0",
+                },
+            ],
+        },
+    )
+    _write_json(
+        tmp_path / "outputs/reports/ibkr_read_only_verification/ibkr_open_orders_snapshot.json",
+        {
+            "account": "DUM882026",
+            "selected_account_id": "DUM882026",
+            "open_orders_complete": True,
+            "open_orders": [],
+        },
+    )
+    registry = tmp_path / "outputs/track_b_execution_core/managed_positions/latest_managed_positions.json"
+    _write_json(
+        registry,
+        {
+            "classification": "OPEN_MANAGED_EXIT_DUE",
+            "managed_positions": [
+                {
+                    "classification": "OPEN_MANAGED_MATCHED",
+                    "account_id": "DUM882026",
+                    "local_symbol": "GCQ6",
+                    "con_id": 732156872,
+                    "quantity": "1",
+                    "aggregate_qty": "-1",
+                    "side": "SHORT",
+                    "lane_id": "gc_us_active_participation_short",
+                    "lifecycle_id": "life-gc",
+                    "trade_id": "trade-gc",
+                    "managed_exit_policy_id": "GLOBEX_ACTIVE_EVIDENCE_TIMEBOX_15M_EXIT_V1",
+                },
+                {
+                    "classification": "OPEN_MANAGED_EXIT_DUE",
+                    "account_id": "DUM882026",
+                    "local_symbol": "MGCQ6",
+                    "con_id": 732156883,
+                    "quantity": "1",
+                    "aggregate_qty": "-1",
+                    "side": "SHORT",
+                    "lane_id": "mgc_us_active_participation_short",
+                    "lifecycle_id": "life-mgc",
+                    "trade_id": "trade-mgc",
+                    "managed_exit_policy_id": "GLOBEX_ACTIVE_EVIDENCE_TIMEBOX_15M_EXIT_V1",
+                    "exit_due": True,
+                },
+                {
+                    "classification": "OPEN_MANAGED_EXIT_DUE",
+                    "account_id": "DUM882026",
+                    "local_symbol": "ZBU6",
+                    "con_id": 840227357,
+                    "quantity": "1",
+                    "aggregate_qty": "-1",
+                    "side": "SHORT",
+                    "lane_id": "zb_us_active_participation_short",
+                    "lifecycle_id": "life-zb",
+                    "trade_id": "trade-zb",
+                    "managed_exit_policy_id": "GLOBEX_ACTIVE_EVIDENCE_TIMEBOX_15M_EXIT_V1",
+                    "exit_due": True,
+                },
+            ],
+        },
+    )
+
+    report = _run_broker_truth_sweeper(
+        config=TrackBManagedExitServiceConfig(repo_root=tmp_path),
+        now=NOW,
+        write=True,
+    )
+
+    updated = json.loads(registry.read_text(encoding="utf-8"))
+    by_symbol = {row["local_symbol"]: row for row in updated["managed_positions"]}
+    assert report["classification"] == "MANAGED_EXIT_BROKER_TRUTH_SWEEP_DEMOTED_STALE_FLAT_ROWS"
+    assert updated["classification"] == "OPEN_MANAGED_MATCHED"
+    assert updated["managed_position_count"] == 1
+    assert updated["diagnostic_only_position_count"] == 2
+    assert by_symbol["GCQ6"]["classification"] == "OPEN_MANAGED_MATCHED"
+    assert by_symbol["MGCQ6"]["classification"] == "STALE_BROKER_FLAT_MANAGED_POSITION"
+    assert by_symbol["MGCQ6"]["diagnostic_only"] is True
+    assert by_symbol["MGCQ6"]["exit_due"] is False
+    assert by_symbol["ZBU6"]["classification"] == "STALE_BROKER_FLAT_MANAGED_POSITION"
+    assert by_symbol["ZBU6"]["diagnostic_only"] is True
+    assert by_symbol["ZBU6"]["exit_due"] is False
+
+
 def test_broker_truth_sweeper_adopts_broker_backed_zt_position(tmp_path: Path) -> None:
     _broker_truth(
         tmp_path,

@@ -1404,14 +1404,6 @@ def _run_broker_truth_sweeper(
             "submit_attempted": False,
         }
     broker_positions = _current_track_b_broker_positions(positions_snapshot)
-    if not broker_positions:
-        return {
-            "classification": "MANAGED_EXIT_BROKER_TRUTH_SWEEP_NO_POSITIONS",
-            "broker_position_count": 0,
-            "broker_open_order_count": len(_list(open_orders_snapshot.get("open_orders"))),
-            "broker_state_mutated": False,
-            "submit_attempted": False,
-        }
     registry_path = config.resolve(DEFAULT_MANAGED_POSITION_REGISTRY_ARTIFACT)
     registry = _read_json(registry_path)
     managed_positions = [_mapping(row) for row in _list(registry.get("managed_positions"))]
@@ -1420,6 +1412,14 @@ def _run_broker_truth_sweeper(
     diagnostics: list[dict[str, Any]] = []
     changed = False
     visible_positions: list[dict[str, Any]] = []
+    stale_flat_diagnostics = _demote_broker_flat_managed_positions(
+        managed_positions=managed_positions,
+        broker_positions=broker_positions,
+        now=now,
+    )
+    if stale_flat_diagnostics:
+        changed = True
+        diagnostics.extend(stale_flat_diagnostics)
     for broker_position in broker_positions:
         identity = _broker_position_identity(broker_position)
         if not identity.get("local_symbol") or not identity.get("con_id"):
@@ -1514,7 +1514,8 @@ def _run_broker_truth_sweeper(
                 "generated_at": now.isoformat(),
                 "classification": _managed_registry_classification(managed_positions),
                 "managed_positions": managed_positions,
-                "managed_position_count": len(managed_positions),
+                "managed_position_count": sum(1 for row in managed_positions if not _managed_position_diagnostic_only(row)),
+                "diagnostic_only_position_count": sum(1 for row in managed_positions if _managed_position_diagnostic_only(row)),
                 "broker_truth_sweeper": {
                     "classification": classification,
                     "generated_at": now.isoformat(),
@@ -1729,6 +1730,54 @@ def _managed_position_matches_broker_position(row: Mapping[str, Any], broker_pos
     if row_con_id and identity["con_id"] and row_con_id == identity["con_id"]:
         return True
     return bool(row_symbol and identity["local_symbol"] and row_symbol == identity["local_symbol"])
+
+
+def _demote_broker_flat_managed_positions(
+    *,
+    managed_positions: list[dict[str, Any]],
+    broker_positions: Sequence[Mapping[str, Any]],
+    now: datetime,
+) -> list[dict[str, Any]]:
+    diagnostics: list[dict[str, Any]] = []
+    for index, row in enumerate(list(managed_positions)):
+        if _managed_position_diagnostic_only(row) or not _managed_position_track_b_scope(row):
+            continue
+        if any(_managed_position_matches_broker_position(row, broker_position) for broker_position in broker_positions):
+            continue
+        managed_positions[index] = {
+            **dict(row),
+            "classification": "STALE_BROKER_FLAT_MANAGED_POSITION",
+            "previous_classification": row.get("classification"),
+            "diagnostic_only": True,
+            "current_hot_path_scope": "FULL_AUDIT_ONLY",
+            "freshness_state": "STALE_BROKER_FLAT",
+            "exit_due": False,
+            "broker_qty_match": False,
+            "broker_flat_confirmed_at": now.isoformat(),
+            "broker_flat_reason": "fresh_complete_broker_truth_has_no_current_position_for_managed_row",
+        }
+        diagnostics.append(
+            {
+                "classification": "STALE_BROKER_FLAT_MANAGED_POSITION",
+                "reason": "fresh_complete_broker_truth_has_no_current_position_for_managed_row",
+                "local_symbol": row.get("local_symbol") or _mapping(row.get("broker_position")).get("local_symbol"),
+                "con_id": row.get("con_id") or _mapping(row.get("broker_position")).get("con_id"),
+                "lifecycle_id": row.get("lifecycle_id"),
+                "trade_id": row.get("trade_id"),
+                "previous_classification": row.get("classification"),
+            }
+        )
+    return diagnostics
+
+
+def _managed_position_track_b_scope(row: Mapping[str, Any]) -> bool:
+    if row.get("paper_only") is False:
+        return False
+    instrument = _instrument_from_position(row)
+    if instrument in {"MES", "MNQ", "MGC", "ES", "NQ", "GC", "ZT", "ZF", "ZN", "ZB"}:
+        return True
+    local_symbol = str(row.get("local_symbol") or _mapping(row.get("broker_position")).get("local_symbol") or "").upper()
+    return any(local_symbol.startswith(root) for root in ("MES", "MNQ", "MGC", "ES", "NQ", "GC", "ZT", "ZF", "ZN", "ZB"))
 
 
 def _repair_managed_position_from_broker(
@@ -2312,6 +2361,8 @@ def _sweeper_classification(
 ) -> str:
     if any(str(row.get("classification") or "") == "MANAGED_EXIT_SERVICE_RESTART_OR_SCHEMA_REPAIR_REQUIRED" for row in diagnostics):
         return "MANAGED_EXIT_SERVICE_RESTART_OR_SCHEMA_REPAIR_REQUIRED"
+    if any(str(row.get("classification") or "") == "STALE_BROKER_FLAT_MANAGED_POSITION" for row in diagnostics):
+        return "MANAGED_EXIT_BROKER_TRUTH_SWEEP_DEMOTED_STALE_FLAT_ROWS"
     if any(str(row.get("classification") or "") == "STRAY_POSITION_REVIEW_REQUIRED" for row in visible_positions):
         return "MANAGED_EXIT_BROKER_TRUTH_SWEEP_REVIEW_REQUIRED"
     if any(str(row.get("reason") or "") == "broker_truth_position_adopted" for row in diagnostics):
@@ -2324,6 +2375,7 @@ def _sweeper_classification(
 def _publish_broker_truth_sweeper_diagnostic(report: Mapping[str, Any]) -> bool:
     return str(report.get("classification") or "") in {
         "MANAGED_EXIT_BROKER_TRUTH_SWEEP_ADOPTED",
+        "MANAGED_EXIT_BROKER_TRUTH_SWEEP_DEMOTED_STALE_FLAT_ROWS",
         "MANAGED_EXIT_BROKER_TRUTH_SWEEP_REPAIRED",
         "MANAGED_EXIT_BROKER_TRUTH_SWEEP_REVIEW_REQUIRED",
         "MANAGED_EXIT_SERVICE_RESTART_OR_SCHEMA_REPAIR_REQUIRED",
@@ -2331,7 +2383,7 @@ def _publish_broker_truth_sweeper_diagnostic(report: Mapping[str, Any]) -> bool:
 
 
 def _managed_registry_classification(managed_positions: Sequence[Mapping[str, Any]]) -> str:
-    classifications = {str(row.get("classification") or "") for row in managed_positions}
+    classifications = {str(row.get("classification") or "") for row in managed_positions if not _managed_position_diagnostic_only(row)}
     if "STRAY_POSITION_REVIEW_REQUIRED" in classifications:
         return "STRAY_POSITION_REVIEW_REQUIRED"
     if "OPEN_MANAGED_EXIT_DUE" in classifications:

@@ -2393,7 +2393,7 @@ release_runtime_scope_lock_on_wrapper_exit() {
 }
 trap 'wrapper_exit_code=\$?; write_detached_child_final_status_on_wrapper_exit "\${wrapper_exit_code}"; release_runtime_scope_lock_on_wrapper_exit' EXIT
 verify_single_runtime_carrier_on_wrapper_start() {
-  "${PYTHON_BIN}" - <<'PY' "${REPO_ROOT}" "${WRAPPER_PATH}" "${SCOPED_CONFIG_PATH}" "\$\$" "${RUNTIME_LOG}" "${STACK_PROFILE}"
+  "${PYTHON_BIN}" - <<'PY' "${REPO_ROOT}" "${WRAPPER_PATH}" "${SCOPED_CONFIG_PATH}" "\$\$" "${RUNTIME_LOG}" "${STACK_PROFILE}" "${DETACHED_CHILD_STATUS_FILE}" "${RUNTIME_DIR}/paper_runtime_truth.json" "${POST_TRUTH_PROGRESS_FILE}" "${runtime_instance_id}" "${source_commit}" "${PYTHON_BIN}" "${PID_FILE}" "${CONFIG_PATHS_FILE}"
 import json
 import subprocess
 import sys
@@ -2406,6 +2406,14 @@ scoped_config_path = str(Path(sys.argv[3]))
 current_pid = int(sys.argv[4])
 runtime_log = Path(sys.argv[5])
 stack_profile = sys.argv[6]
+detached_child_status_file = Path(sys.argv[7])
+runtime_truth_file = Path(sys.argv[8])
+post_truth_progress_file = Path(sys.argv[9])
+runtime_instance_id = sys.argv[10]
+source_commit = sys.argv[11]
+python_bin = sys.argv[12]
+pid_file = Path(sys.argv[13])
+config_paths_file = Path(sys.argv[14])
 
 ps = subprocess.run(
     ["ps", "-axo", "pid=,ppid=,command="],
@@ -2449,6 +2457,36 @@ for line in ps.stdout.splitlines():
         )
 
 if active:
+    active_child = next((row for row in active if row.get("role") == "runtime_child"), None)
+    if active_child is not None:
+        try:
+            from mgc_v05l.execution_core.track_b_detached_runtime_monitor import (
+                build_detached_runtime_child_status,
+            )
+
+            build_detached_runtime_child_status(
+                event="heartbeat",
+                status_path=detached_child_status_file,
+                pid=int(active_child["pid"]),
+                observed_at=datetime.now(timezone.utc),
+                repo_root=Path(repo_root),
+                log_file=runtime_log,
+                pid_file=pid_file,
+                config_paths_file=config_paths_file,
+                runtime_truth_file=runtime_truth_file,
+                post_truth_progress_file=post_truth_progress_file,
+                runtime_instance_id=runtime_instance_id,
+                source_commit=source_commit,
+                python_bin=python_bin,
+                child_command=active_child.get("command"),
+                parent_pid=int(active_child.get("ppid") or 0),
+            )
+        except Exception as exc:
+            runtime_log.parent.mkdir(parents=True, exist_ok=True)
+            with runtime_log.open("a", encoding="utf-8") as handle:
+                handle.write("track_b_paper_stack_wrapper_duplicate_carrier_monitor_refresh_failed ")
+                handle.write(json.dumps({"error": str(exc)}, sort_keys=True))
+                handle.write("\n")
     payload = {
         "classification": "BLOCKED_DUPLICATE_RUNTIME_CARRIER",
         "generated_at": datetime.now(timezone.utc).isoformat(),
