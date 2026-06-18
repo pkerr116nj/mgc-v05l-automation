@@ -84,6 +84,20 @@ def _broker_truth(
     )
 
 
+def _write_phase1_5m_bars(tmp_path: Path, symbol: str, bar_ends: list[str]) -> None:
+    _write_json(
+        tmp_path
+        / "outputs/track_b_execution_core/phase1_runtime_market_data"
+        / symbol
+        / "5m"
+        / "latest_runtime_candles.json",
+        {
+            "generated_at": NOW.isoformat(),
+            "bars": [{"bar_end": value, "close": "106.75"} for value in bar_ends],
+        },
+    )
+
+
 def _write_live_entry_fill(
     tmp_path: Path,
     *,
@@ -522,6 +536,73 @@ def test_broker_truth_sweeper_adopts_broker_backed_zf_position(tmp_path: Path) -
     assert position["lane_id"] == "zf_globex_active_participation_long"
     assert position["managed_exit_policy_id"] == "GLOBEX_ACTIVE_EVIDENCE_TIMEBOX_15M_EXIT_V1"
     assert position["entry_time"] == "2026-06-18T06:30:03.350715+00:00"
+
+
+def test_broker_truth_sweeper_refreshes_rates_exit_due_from_phase1_bars(tmp_path: Path) -> None:
+    _broker_truth(
+        tmp_path,
+        symbol="ZF",
+        local_symbol="ZFU6",
+        con_id=842590380,
+        expiry="20260930",
+        quantity="-1.0",
+    )
+    registry = tmp_path / "outputs/track_b_execution_core/managed_positions/latest_managed_positions.json"
+    lifecycle_id = "reserved_submit_zf_london_late_active_participation_short"
+    _write_json(
+        registry,
+        {
+            "classification": "OPEN_MANAGED_MATCHED",
+            "managed_positions": [
+                {
+                    "classification": "OPEN_MANAGED_MATCHED",
+                    "account_id": "DUM882026",
+                    "symbol": "ZF",
+                    "track_b_root": "ZF",
+                    "local_symbol": "ZFU6",
+                    "con_id": 842590380,
+                    "quantity": "1",
+                    "aggregate_qty": "-1",
+                    "side": "SHORT",
+                    "lane_id": "zf_london_late_active_participation_short",
+                    "strategy_id": "zf_london_late_active_participation_short",
+                    "lifecycle_id": lifecycle_id,
+                    "trade_id": "trade-zf",
+                    "managed_exit_policy_id": "GLOBEX_ACTIVE_EVIDENCE_TIMEBOX_15M_EXIT_V1",
+                    "entry_time": "2026-06-18T10:11:44+00:00",
+                    "bars_since_entry": 1,
+                    "exit_due": False,
+                    "exit_due_state": "NOT_DUE_OR_UNKNOWN",
+                }
+            ],
+        },
+    )
+    _write_phase1_5m_bars(
+        tmp_path,
+        "ZF",
+        [
+            "2026-06-18T10:15:00+00:00",
+            "2026-06-18T10:20:00+00:00",
+            "2026-06-18T10:25:00+00:00",
+        ],
+    )
+
+    report = _run_broker_truth_sweeper(
+        config=TrackBManagedExitServiceConfig(repo_root=tmp_path),
+        now=NOW,
+        write=True,
+    )
+
+    updated = json.loads(registry.read_text(encoding="utf-8"))
+    [position] = updated["managed_positions"]
+    assert report["classification"] == "MANAGED_EXIT_BROKER_TRUTH_SWEEP_REPAIRED"
+    assert position["classification"] == "OPEN_MANAGED_EXIT_DUE"
+    assert position["bars_since_entry"] == 3
+    assert position["exit_due"] is True
+    assert position["exit_due_state"] == "EXIT_DUE"
+    assert position["required_close_action"] == "BUY"
+    assert position["required_close_quantity"] == "1"
+    assert position["exit_due_refresh"]["source"] == "phase1_runtime_market_data_5m"
 
 
 def test_broker_truth_sweeper_repairs_zt_policy_from_registry_metadata(tmp_path: Path) -> None:

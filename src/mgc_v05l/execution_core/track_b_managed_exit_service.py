@@ -79,6 +79,9 @@ DEFAULT_MANAGED_POSITION_REGISTRY_ARTIFACT = (
 DEFAULT_OPERATOR_MANAGED_POSITION_ARTIFACT = (
     Path("outputs") / "operator_dashboard" / "runtime" / "latest_track_b_managed_positions.json"
 )
+DEFAULT_PHASE1_RUNTIME_MARKET_DATA_ROOT = (
+    Path("outputs") / "track_b_execution_core" / "phase1_runtime_market_data"
+)
 DEFAULT_STRATEGY_LIFECYCLE_ROOT = (
     Path("outputs") / "track_b_execution_core" / "track_b_strategy_managed_paper_lifecycle"
 )
@@ -1413,6 +1416,7 @@ def _run_broker_truth_sweeper(
     registry = _read_json(registry_path)
     managed_positions = [_mapping(row) for row in _list(registry.get("managed_positions"))]
     terminal_records = load_live_trade_registry_records(repo_root=config.repo_root)
+    market_data_root = config.resolve(DEFAULT_PHASE1_RUNTIME_MARKET_DATA_ROOT)
     diagnostics: list[dict[str, Any]] = []
     changed = False
     visible_positions: list[dict[str, Any]] = []
@@ -1453,6 +1457,7 @@ def _run_broker_truth_sweeper(
                 broker_position=broker_position,
                 lifecycle=lifecycle,
                 terminal_records=terminal_records,
+                market_data_root=market_data_root,
                 now=now,
             )
             managed_positions.append(adopted)
@@ -1484,6 +1489,7 @@ def _run_broker_truth_sweeper(
             existing,
             broker_position,
             terminal_records=terminal_records,
+            market_data_root=market_data_root,
             now=now,
         )
         visible_positions.append(repaired)
@@ -1730,6 +1736,7 @@ def _repair_managed_position_from_broker(
     broker_position: Mapping[str, Any],
     *,
     terminal_records: Sequence[Any] = (),
+    market_data_root: Path,
     now: datetime,
 ) -> dict[str, Any]:
     repaired = dict(managed_position)
@@ -1788,7 +1795,13 @@ def _repair_managed_position_from_broker(
         repaired["attention_required"] = True
     elif str(repaired.get("classification") or "") in {"", "LIFECYCLE_WITHOUT_BROKER", "NO_MANAGED_POSITIONS"}:
         repaired["classification"] = "OPEN_MANAGED_MATCHED"
-    return repaired
+    return _refresh_managed_exit_timebox_state(
+        managed_position=repaired,
+        broker_position=broker_position,
+        terminal_records=terminal_records,
+        market_data_root=market_data_root,
+        now=now,
+    )
 
 
 def _adopt_broker_position(
@@ -1796,6 +1809,7 @@ def _adopt_broker_position(
     broker_position: Mapping[str, Any],
     lifecycle: Mapping[str, Any] | None,
     terminal_records: Sequence[Any] = (),
+    market_data_root: Path,
     now: datetime,
 ) -> dict[str, Any]:
     identity = _broker_position_identity(broker_position)
@@ -1820,7 +1834,7 @@ def _adopt_broker_position(
     entry_price = lifecycle.get("entry_price") or lifecycle.get("avg_entry_price")
     if not entry_price and entry_fill is not None and getattr(entry_fill, "price", None) is not None:
         entry_price = str(getattr(entry_fill, "price"))
-    return {
+    adopted = {
         "classification": classification,
         "source": "BROKER_TRUTH_SWEEPER",
         "account_id": identity["account_id"],
@@ -1852,6 +1866,212 @@ def _adopt_broker_position(
         "broker_truth_swept_at": now.isoformat(),
         "review_reason": None if policy_id else "managed_exit_policy_unresolved",
     }
+    return _refresh_managed_exit_timebox_state(
+        managed_position=adopted,
+        broker_position=broker_position,
+        terminal_records=terminal_records,
+        market_data_root=market_data_root,
+        now=now,
+    )
+
+
+def _refresh_managed_exit_timebox_state(
+    *,
+    managed_position: Mapping[str, Any],
+    broker_position: Mapping[str, Any],
+    terminal_records: Sequence[Any],
+    market_data_root: Path,
+    now: datetime,
+) -> dict[str, Any]:
+    refreshed = dict(managed_position)
+    policy_id = _string_or_none(refreshed.get("managed_exit_policy_id"))
+    required_bars = _required_completed_5m_bars_for_policy(policy_id or "")
+    if required_bars is None:
+        return refreshed
+
+    symbol = _string_or_none(
+        refreshed.get("symbol")
+        or refreshed.get("track_b_root")
+        or refreshed.get("instrument_family")
+        or _instrument_from_position(broker_position)
+    )
+    entry_time = _managed_position_entry_time(
+        managed_position=refreshed,
+        broker_position=broker_position,
+        terminal_records=terminal_records,
+    )
+    if not symbol or entry_time is None:
+        refreshed["exit_due_refresh"] = {
+            "classification": "MANAGED_EXIT_DUE_REFRESH_BLOCKED",
+            "reason": "symbol_or_entry_time_missing",
+            "policy_id": policy_id,
+            "refreshed_at": now.isoformat(),
+        }
+        return refreshed
+
+    phase1_bars = _phase1_completed_5m_bars_since_entry(
+        symbol=symbol,
+        entry_time=entry_time,
+        market_data_root=market_data_root,
+    )
+    if phase1_bars is None:
+        refreshed["exit_due_refresh"] = {
+            "classification": "MANAGED_EXIT_DUE_REFRESH_BLOCKED",
+            "reason": "phase1_5m_candles_unavailable",
+            "policy_id": policy_id,
+            "symbol": symbol,
+            "entry_time": entry_time.isoformat(),
+            "refreshed_at": now.isoformat(),
+        }
+        return refreshed
+
+    signed_broker_qty = _decimal(broker_position.get("quantity") or broker_position.get("signed_qty"))
+    exit_due = phase1_bars >= required_bars and signed_broker_qty is not None and signed_broker_qty != 0
+    refreshed["bars_since_entry"] = phase1_bars
+    refreshed["exit_due"] = exit_due
+    refreshed["exit_due_state"] = "EXIT_DUE" if exit_due else "NOT_DUE_OR_UNKNOWN"
+    refreshed["exit_due_refresh"] = {
+        "classification": "MANAGED_EXIT_DUE_REFRESHED_FROM_PHASE1",
+        "source": "phase1_runtime_market_data_5m",
+        "policy_id": policy_id,
+        "symbol": symbol,
+        "entry_time": entry_time.isoformat(),
+        "required_completed_5m_bars": required_bars,
+        "bars_since_entry": phase1_bars,
+        "refreshed_at": now.isoformat(),
+    }
+    if exit_due:
+        refreshed["classification"] = "OPEN_MANAGED_EXIT_DUE"
+        refreshed["attention_required"] = False
+        refreshed["required_close_action"] = _required_close_action(
+            side=refreshed.get("side"),
+            signed_broker_qty=signed_broker_qty,
+        )
+        refreshed["required_close_quantity"] = _decimal_display(abs(signed_broker_qty))
+    else:
+        if str(refreshed.get("classification") or "") == "OPEN_MANAGED_EXIT_DUE":
+            refreshed["classification"] = "OPEN_MANAGED_MATCHED"
+        refreshed["required_close_action"] = None
+        refreshed["required_close_quantity"] = None
+    return refreshed
+
+
+def _required_completed_5m_bars_for_policy(policy: str) -> int | None:
+    return {
+        "PAPER_DIAGNOSTIC_TIME_BOXED_3X5M_EXIT_V1": 3,
+        "FORCED_SESSION_SEGMENT_LOCAL_EXIT_V1": 3,
+        "CHANGEOVER_0300_LONG_TIMEBOX_6H_EXIT_V1": 72,
+        "CHANGEOVER_0700_LONG_TIMEBOX_4H_EXIT_V1": 48,
+        "US_SESSION_CONTINUATION_TIMEBOX_2H_EXIT_V1": 24,
+        "US_ACTIVE_EVIDENCE_TIMEBOX_60M_EXIT_V1": 12,
+        "GLOBEX_ACTIVE_EVIDENCE_TIMEBOX_15M_EXIT_V1": 3,
+        "GLOBEX_ACTIVE_EVIDENCE_TIMEBOX_60M_EXIT_V1": 3,
+        "GLOBEX_REOPEN_FIRST_CANDLE_60M_TIMEBOX_SHADOW_EXIT_V1": 12,
+    }.get(policy)
+
+
+def _phase1_completed_5m_bars_since_entry(
+    *,
+    symbol: str,
+    entry_time: datetime,
+    market_data_root: Path,
+) -> int | None:
+    payload = _read_json(market_data_root / symbol / "5m" / "latest_runtime_candles.json")
+    bars = _runtime_bars(payload)
+    if not bars:
+        return None
+    completed = 0
+    for bar in bars:
+        bar_time = _bar_end_time(bar)
+        if bar_time is not None and bar_time > entry_time:
+            completed += 1
+    return completed
+
+
+def _runtime_bars(payload: Mapping[str, Any]) -> list[dict[str, Any]]:
+    for key in ("bars", "candles", "candle_history"):
+        rows = [_mapping(item) for item in _list(payload.get(key))]
+        if rows:
+            return rows
+    return []
+
+
+def _bar_end_time(bar: Mapping[str, Any]) -> datetime | None:
+    for key in ("bar_end", "end", "timestamp", "ts", "datetime", "time"):
+        parsed = _parse_time(bar.get(key))
+        if parsed is not None:
+            return parsed
+    return None
+
+
+def _managed_position_entry_time(
+    *,
+    managed_position: Mapping[str, Any],
+    broker_position: Mapping[str, Any],
+    terminal_records: Sequence[Any],
+) -> datetime | None:
+    lifecycle_position = _mapping(managed_position.get("lifecycle_position"))
+    explicit = _parse_time(
+        managed_position.get("entry_timestamp")
+        or managed_position.get("entry_time")
+        or lifecycle_position.get("entry_timestamp")
+        or lifecycle_position.get("entry_time")
+    )
+    if explicit is not None:
+        return explicit
+    for unit in (_mapping(item) for item in _list(managed_position.get("lifecycle_units"))):
+        explicit = _parse_time(unit.get("entry_timestamp") or unit.get("entry_time"))
+        if explicit is not None:
+            return explicit
+    entry_fill = _entry_fill_event_from_registry(
+        position=managed_position,
+        broker_position=broker_position,
+        terminal_records=terminal_records,
+    )
+    generated_at = getattr(entry_fill, "generated_at", None) if entry_fill is not None else None
+    return _ensure_utc(generated_at)
+
+
+def _required_close_action(*, side: Any, signed_broker_qty: Decimal | None) -> str | None:
+    normalized_side = str(side or "").upper()
+    if normalized_side == "LONG":
+        return "SELL"
+    if normalized_side == "SHORT":
+        return "BUY"
+    if signed_broker_qty is None or signed_broker_qty == 0:
+        return None
+    return "SELL" if signed_broker_qty > 0 else "BUY"
+
+
+def _decimal_display(value: Decimal | None) -> str | None:
+    if value is None:
+        return None
+    return format(value.normalize(), "f")
+
+
+def _parse_time(value: object) -> datetime | None:
+    if isinstance(value, datetime):
+        return _ensure_utc(value)
+    if value in {None, ""}:
+        return None
+    text = str(value).strip()
+    if not text:
+        return None
+    if text.endswith("Z"):
+        text = f"{text[:-1]}+00:00"
+    try:
+        parsed = datetime.fromisoformat(text)
+    except ValueError:
+        return None
+    return _ensure_utc(parsed)
+
+
+def _ensure_utc(value: datetime | None) -> datetime | None:
+    if value is None:
+        return None
+    if value.tzinfo is None:
+        return value.replace(tzinfo=UTC)
+    return value.astimezone(UTC)
 
 
 def _best_lifecycle_for_broker_position(
