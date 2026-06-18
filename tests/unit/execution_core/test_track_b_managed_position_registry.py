@@ -1453,6 +1453,10 @@ def test_validated_expanded_futures_project_from_normalized_contract_identity(tm
         ("NQ", "NQU6", 770561204, "20260918", "NQ-202609"),
         ("MNQ", "MNQU6", 793356225, "20260918", "MNQ-202609"),
         ("MES", "MESU6", 793356217, "20260918", "MES-202609"),
+        ("ZT", "ZTU6", 842590391, "20260930", "ZT-202609"),
+        ("ZF", "ZFU6", 842590380, "20260930", "ZF-202609"),
+        ("ZN", "ZNU6", 840227361, "20260921", "ZN-202609"),
+        ("ZB", "ZBU6", 840227357, "20260921", "ZB-202609"),
     )
     broker_positions = [
         {
@@ -1597,6 +1601,10 @@ def test_fresh_broker_snapshot_registry_fill_projects_validated_futures_when_rec
         ("NQ", "NQU6", 770561204, "20260918"),
         ("MNQ", "MNQU6", 793356225, "20260918"),
         ("MES", "MESU6", 793356217, "20260918"),
+        ("ZT", "ZTU6", 842590391, "20260930"),
+        ("ZF", "ZFU6", 842590380, "20260930"),
+        ("ZN", "ZNU6", 840227361, "20260921"),
+        ("ZB", "ZBU6", 840227357, "20260921"),
     )
     _seed_base(tmp_path)
     _write_json(

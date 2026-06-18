@@ -1037,7 +1037,18 @@ def _validated_track_b_futures_position(row: Mapping[str, Any]) -> bool:
         or identity.get("symbol")
         or ""
     ).strip().upper()
-    return identity.get("resolved") is True and symbol in {"MGC", "GC", "ES", "NQ", "MNQ", "MES"}
+    return identity.get("resolved") is True and symbol in {
+        "MGC",
+        "GC",
+        "ES",
+        "NQ",
+        "MNQ",
+        "MES",
+        "ZT",
+        "ZF",
+        "ZN",
+        "ZB",
+    }
 
 
 def _registry_lifecycle_candidates_for_broker_positions(
