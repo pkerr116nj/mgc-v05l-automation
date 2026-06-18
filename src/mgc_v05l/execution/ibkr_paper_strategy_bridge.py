@@ -3278,9 +3278,12 @@ def _build_static_preflight_checks(
         _check("paper_only_intent", bool(intent.paper_only), True, "Intent must remain explicitly paper-only."),
         _check(
             "strategy_allowlist",
-            intent.strategy_id in _SUPPORTED_STRATEGY_IDS or bool(lane_adapter) or active_profile_lane_allowed,
+            intent.strategy_id in _SUPPORTED_STRATEGY_IDS or bool(lane_adapter) or active_profile_lane_allowed or leak_test_authorized,
             True,
             (
+                "Dedicated leak-test caller supplied a valid lane-specific authorization artifact."
+                if leak_test_authorized
+                else
                 str(active_profile_lane.get("detail") or "")
                 if active_profile_lane
                 else "Only the ATP Companion baseline and explicitly ported paper strategy lane identities are allowed in the paper bridge."
@@ -3308,11 +3311,18 @@ def _build_static_preflight_checks(
         ),
         _check(
             "selected_lane_adapter_present",
-            (bool(lane_adapter) or active_profile_lane_allowed)
-            if intent.strategy_id not in {"ATP_COMPANION_V1_ASIA_US", "ATP_COMPANION_V1_GC_ASIA_US", "ATP_COMPANION_V1_GC_ASIA_US_PRODUCTION_TRACK"}
-            else True,
+            leak_test_authorized
+            or (
+                (bool(lane_adapter) or active_profile_lane_allowed)
+                if intent.strategy_id
+                not in {"ATP_COMPANION_V1_ASIA_US", "ATP_COMPANION_V1_GC_ASIA_US", "ATP_COMPANION_V1_GC_ASIA_US_PRODUCTION_TRACK"}
+                else True
+            ),
             True,
             (
+                "Dedicated leak-test caller supplied a valid lane-specific authorization artifact."
+                if leak_test_authorized
+                else
                 "Active runtime profile lane roster supplies the PAPER bridge adapter."
                 if active_profile_lane_allowed
                 else "Non-ATP paper strategy lanes require an explicit bridge adapter before submit-capable routing is allowed."
@@ -3446,9 +3456,8 @@ def _broker_market_truth_entry_authority_applies(
         return False
     if str(config.caller_path or "").strip() not in _APPROVED_RUNTIME_CALLER_PATHS:
         return False
-    route_destination = str(expected_target.get("route_destination") or "").strip()
     active_profile_lane = dict(expected_target.get("active_profile_lane") or {})
-    return route_destination == "ibkr_paper_bridge_submit_capable" or bool(active_profile_lane)
+    return active_profile_lane.get("passed") is True
 
 
 def _broker_market_truth_entry_authority_for_bridge(
@@ -6498,7 +6507,11 @@ def _active_evidence_entry_pricing_reference(
             "block_submit": False,
         }
     runtime_age = _float_or_none(runtime_snapshot.get("runtime_data_age_seconds"))
-    if runtime_price is not None and runtime_age is not None and runtime_age <= _ACTIVE_EVIDENCE_RUNTIME_MAX_AGE_SECONDS:
+    active_evidence_runtime_max_age = max(
+        _ACTIVE_EVIDENCE_RUNTIME_MAX_AGE_SECONDS,
+        _ENTRY_RUNTIME_CANDLE_MAX_AGE_SECONDS,
+    )
+    if runtime_price is not None and runtime_age is not None and runtime_age <= active_evidence_runtime_max_age:
         offset_ticks = _entry_paper_marketable_fallback_offset_ticks(
             reference_price=runtime_price,
             min_tick=min_tick,
@@ -7090,10 +7103,11 @@ def _duplicate_entry_guard_for_bridge(
         (action == "BUY" and current_position_quantity > 0)
         or (action == "SELL" and current_position_quantity < 0)
     )
+    broker_supported_ownership_matches = bool(matching_open_orders) or current_same_side_position
     blockers: list[str] = []
     if matching_open_orders:
         blockers.append("equivalent_same_lane_open_order")
-    if ownership_matches:
+    if ownership_matches and broker_supported_ownership_matches:
         blockers.append("equivalent_recent_submit_or_fill_evidence")
     if current_same_side_position and ownership_matches:
         blockers.append("same_side_broker_position_with_same_lane_ownership")
@@ -7116,6 +7130,7 @@ def _duplicate_entry_guard_for_bridge(
             "current_position_quantity": current_position_quantity,
             "matching_open_orders": matching_open_orders[:5],
             "matching_submit_ownership": ownership_matches[:5],
+            "stale_submit_ownership_diagnostic": [],
             "paper_only": True,
             "live_money_eligible": False,
             "paper_proof_invoked": False,
@@ -7132,6 +7147,9 @@ def _duplicate_entry_guard_for_bridge(
         "con_id": con_id,
         "expiry": expiry or None,
         "current_position_quantity": current_position_quantity,
+        "stale_submit_ownership_diagnostic": (
+            ownership_matches[:5] if ownership_matches and not broker_supported_ownership_matches else []
+        ),
         "paper_only": True,
         "live_money_eligible": False,
         "paper_proof_invoked": False,

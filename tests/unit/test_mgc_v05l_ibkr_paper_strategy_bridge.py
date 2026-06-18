@@ -859,6 +859,77 @@ def test_duplicate_entry_guard_blocks_same_lane_contract_side(tmp_path: Path) ->
     assert "equivalent_recent_submit_or_fill_evidence" in result["blockers"]
 
 
+def test_duplicate_entry_guard_treats_stale_ownership_as_diagnostic_when_broker_flat(tmp_path: Path) -> None:
+    config = _mes_runtime_config(tmp_path)
+    now = datetime(2026, 6, 17, 7, 15, 9, tzinfo=timezone.utc)
+    _write_submit_ownership(
+        tmp_path,
+        {
+            "mode": "PAPER",
+            "account_id": "DUM882026",
+            "state": "BROKER_POSITION_OBSERVED_ADOPTION_REQUIRED",
+            "created_at": "2026-06-17T07:15:08.366407+00:00",
+            "updated_at": "2026-06-17T07:15:09.380693+00:00",
+            "lane_id": "mes_london_open_active_participation_long",
+            "strategy_id": "mes_london_open_active_participation_long",
+            "intent_type": "BUY_TO_OPEN",
+            "action": "BUY",
+            "symbol": "MES",
+            "local_symbol": "MESU6",
+            "expiry": "20260918",
+            "con_id": 793356217,
+            "qty": 1,
+            "broker_order_id": "9",
+            "client_id": 9885,
+            "perm_id": 2130844547,
+            "runtime_pid": 78570,
+        },
+    )
+
+    result = bridge_module._duplicate_entry_guard_for_bridge(
+        config=config,
+        intent=_intent_from_config(config),
+        positions={"positions": []},
+        open_orders={"open_orders": []},
+        qualified_contract_report=_mes_qualified_contract(),
+        now=now,
+    )
+
+    assert result["classification"] == "DUPLICATE_ENTRY_GUARD_ALLOWED"
+    assert result["allowed"] is True
+    assert result["stale_submit_ownership_diagnostic"]
+
+
+def test_duplicate_entry_guard_blocks_real_working_order_even_when_broker_flat(tmp_path: Path) -> None:
+    config = _mes_runtime_config(tmp_path)
+    now = datetime(2026, 6, 17, 7, 15, 9, tzinfo=timezone.utc)
+
+    result = bridge_module._duplicate_entry_guard_for_bridge(
+        config=config,
+        intent=_intent_from_config(config),
+        positions={"positions": []},
+        open_orders={
+            "open_orders": [
+                {
+                    "account_id": "DUM882026",
+                    "action": "BUY",
+                    "local_symbol": "MESU6",
+                    "expiry": "20260918",
+                    "con_id": 793356217,
+                    "quantity": 1,
+                    "order_ref": "MES_LONDON_OPEN_ACTIVE_PARTICIPATION_LONG",
+                }
+            ]
+        },
+        qualified_contract_report=_mes_qualified_contract(),
+        now=now,
+    )
+
+    assert result["classification"] == "DUPLICATE_ENTRY_BLOCKED"
+    assert result["allowed"] is False
+    assert "equivalent_same_lane_open_order" in result["blockers"]
+
+
 def test_duplicate_entry_guard_allows_different_lane_or_symbol(tmp_path: Path) -> None:
     config = _mes_runtime_config(tmp_path, lane_id="mes_london_open_active_participation_short")
     now = datetime(2026, 6, 17, 7, 15, 9, tzinfo=timezone.utc)
@@ -1252,7 +1323,7 @@ def test_active_evidence_sell_runtime_reference_uses_aggressive_paper_offset(tmp
     assert pricing["block_submit"] is False
 
 
-def test_active_evidence_runtime_reference_too_stale_blocks_submit(tmp_path: Path) -> None:
+def test_active_evidence_runtime_reference_with_submit_latency_remains_usable(tmp_path: Path) -> None:
     _write_runtime_1m_candle(tmp_path, symbol="MNQ", close=29752.0)
     config = _config(
         tmp_path,
@@ -1276,6 +1347,35 @@ def test_active_evidence_runtime_reference_too_stale_blocks_submit(tmp_path: Pat
     )
 
     assert pricing["pricing_reference_age_seconds"] == 100.0
+    assert pricing["execution_price_source"] == "RUNTIME_DATABENTO_1M_CLOSE"
+    assert pricing["limit_price"] is not None
+    assert pricing["block_submit"] is False
+
+
+def test_active_evidence_runtime_reference_too_stale_blocks_submit(tmp_path: Path) -> None:
+    _write_runtime_1m_candle(tmp_path, symbol="MNQ", close=29752.0)
+    config = _config(
+        tmp_path,
+        strategy_id="mnq_us_active_participation_long",
+        symbol="MNQ",
+        contract_month="202606",
+        caller_metadata=_approved_runtime_metadata(
+            strategy_id="mnq_us_active_participation_long",
+            source_instrument="MNQ",
+            executable_proxy="MNQ",
+            bridge_proxy_mode="MNQ_SIGNAL_DIRECT_PHASE1",
+        ),
+    )
+
+    pricing = _entry_execution_pricing_for_bridge(
+        config=config,
+        intent=_intent_from_config(config),
+        quote_context=_quote_context(ask=29714.0),
+        qualified_contract_report=_qualified_contract_report(),
+        now=datetime(2026, 5, 14, 12, 28, 10, tzinfo=timezone.utc),
+    )
+
+    assert pricing["pricing_reference_age_seconds"] == 190.0
     assert pricing["limit_price"] is None
     assert pricing["block_submit"] is True
     assert pricing["block_reason"] == "ACTIVE_EVIDENCE_ENTRY_REFERENCE_STALE"
