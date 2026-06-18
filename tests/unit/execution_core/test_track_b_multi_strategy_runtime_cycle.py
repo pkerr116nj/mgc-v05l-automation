@@ -26,6 +26,16 @@ def aware_now() -> datetime:
     return datetime(2026, 5, 5, 1, 30, tzinfo=timezone.utc)
 
 
+def test_exchange_for_contract_key_routes_rates_to_cbot_and_metals_to_comex() -> None:
+    assert cycle_module._exchange_for_contract_key("ZT-202609") == "CBOT"
+    assert cycle_module._exchange_for_contract_key("ZF-202609") == "CBOT"
+    assert cycle_module._exchange_for_contract_key("ZN-202609") == "CBOT"
+    assert cycle_module._exchange_for_contract_key("ZB-202609") == "CBOT"
+    assert cycle_module._exchange_for_contract_key("MGC-202608") == "COMEX"
+    assert cycle_module._exchange_for_contract_key("GC-202608") == "COMEX"
+    assert cycle_module._exchange_for_contract_key("MNQ-202609") == "CME"
+
+
 class Calls:
     def __init__(self) -> None:
         self.strategy: list[str] = []

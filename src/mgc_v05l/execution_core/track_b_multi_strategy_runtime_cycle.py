@@ -469,7 +469,7 @@ def _run_strategy_paper_runner(
             allowlisted_local_symbol=config.allowlisted_local_symbol,
             con_id=config.con_id,
             tick_size=config.tick_size,
-            exchange="CME" if str(config.contract_key).startswith(("MNQ-", "NQ-", "MES-", "ES-")) else "COMEX",
+            exchange=_exchange_for_contract_key(config.contract_key),
             databento_continuous_symbol="MNQ.v.0" if str(config.contract_key).startswith("MNQ-") else "MGC.v.0",
             dataset="GLBX.MDP3",
             proof_timing_status=config.proof_timing_status,
@@ -1622,6 +1622,15 @@ def _existing_optional_path(path: Path | None) -> Path | None:
     if path is None:
         return None
     return path if path.exists() else None
+
+
+def _exchange_for_contract_key(contract_key: object) -> str:
+    symbol = str(contract_key or "").split("-", 1)[0].strip().upper()
+    if symbol in {"ZT", "ZF", "ZN", "ZB"}:
+        return "CBOT"
+    if symbol in {"MNQ", "NQ", "MES", "ES"}:
+        return "CME"
+    return "COMEX"
 
 
 def _reason_no_signal_chosen(

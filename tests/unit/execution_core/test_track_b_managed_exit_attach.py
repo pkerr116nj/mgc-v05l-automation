@@ -90,6 +90,62 @@ def test_buy_to_close_without_bid_ask_uses_fresh_close_plus_aggressive_paper_off
     assert payload["close_intent_preview"]["close_limit_price"] == "30564.75"
 
 
+def test_managed_exit_attach_uses_validated_cbot_metadata_for_rates_contracts(tmp_path: Path) -> None:
+    config = _seed(
+        tmp_path,
+        completed_bars=3,
+        config_overrides={
+            "instrument_family": "ZF",
+            "contract_key": "ZF-202609",
+            "local_symbol": "ZFU6",
+            "con_id": 842590380,
+            "expiry": "20260930",
+            "tick_size": "0.0078125",
+        },
+        position_overrides={
+            "instrument_family": "ZF",
+            "contract_key": "ZF-202609",
+            "local_symbol": "ZFU6",
+            "con_id": 842590380,
+        },
+    )
+
+    metadata = attach_module._broker_bound_contract_metadata(config)
+
+    assert metadata["exchange"] == "CBOT"
+    assert metadata["currency"] == "USD"
+    assert metadata["multiplier"] == "1000"
+    assert attach_module._default_exchange("ZF") == "CBOT"
+
+
+def test_managed_exit_attach_keeps_comex_metadata_for_metals(tmp_path: Path) -> None:
+    config = _seed(
+        tmp_path,
+        completed_bars=3,
+        config_overrides={
+            "instrument_family": "MGC",
+            "contract_key": "MGC-202608",
+            "local_symbol": "MGCQ6",
+            "con_id": 732156883,
+            "expiry": "20260827",
+            "tick_size": "0.1",
+        },
+        position_overrides={
+            "instrument_family": "MGC",
+            "contract_key": "MGC-202608",
+            "local_symbol": "MGCQ6",
+            "con_id": 732156883,
+        },
+    )
+
+    metadata = attach_module._broker_bound_contract_metadata(config)
+
+    assert metadata["exchange"] == "COMEX"
+    assert metadata["currency"] == "USD"
+    assert metadata["multiplier"] == "10"
+    assert attach_module._default_exchange("MGC") == "COMEX"
+
+
 def test_sell_to_close_without_bid_ask_uses_fresh_close_minus_aggressive_paper_offset(tmp_path: Path) -> None:
     config = _seed(tmp_path, completed_bars=3)
 

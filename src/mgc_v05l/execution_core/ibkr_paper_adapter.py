@@ -691,20 +691,40 @@ class IbkrPaperAdapter:
         check = dict(contract_check or _contract_consistency_check(entry))
         if not check["contract_consistency_check_passed"]:
             raise IbkrPaperConfigError(f"CONTRACT_EXPIRY_MISMATCH_PRE_SUBMIT: {check['contract_mismatch_reason']}")
+        canonical_fields = check.get("canonical_broker_contract_fields") or {}
         contract = self._contract_cls()
-        contract.symbol = str(entry.get("symbol") or "")
-        contract.secType = str(entry.get("security_type") or entry.get("secType") or "FUT")
-        contract.exchange = str(entry.get("exchange") or "")
-        contract.currency = str(entry.get("currency") or "USD")
-        contract.lastTradeDateOrContractMonth = str(
-            check.get("submitted_lastTradeDateOrContractMonth") or entry.get("expiry") or entry.get("contract_month") or ""
+        contract.symbol = str(canonical_fields.get("symbol") or entry.get("symbol") or "")
+        contract.secType = str(
+            canonical_fields.get("secType") or entry.get("security_type") or entry.get("secType") or "FUT"
         )
-        if entry.get("local_symbol"):
-            contract.localSymbol = str(entry["local_symbol"])
-        if entry.get("con_id") is not None:
-            contract.conId = int(entry["con_id"])
-        if entry.get("multiplier") is not None:
-            contract.multiplier = str(entry["multiplier"])
+        contract.exchange = str(canonical_fields.get("exchange") or entry.get("exchange") or "")
+        contract.currency = str(canonical_fields.get("currency") or entry.get("currency") or "USD")
+        contract.lastTradeDateOrContractMonth = str(
+            check.get("submitted_lastTradeDateOrContractMonth")
+            or entry.get("expiry")
+            or entry.get("contract_month")
+            or ""
+        )
+        local_symbol = canonical_fields.get("localSymbol") or entry.get("local_symbol")
+        if local_symbol:
+            contract.localSymbol = str(local_symbol)
+        con_id = (
+            canonical_fields.get("conId")
+            if canonical_fields.get("conId") not in {None, ""}
+            else entry.get("con_id")
+        )
+        if con_id is not None:
+            contract.conId = int(con_id)
+        multiplier = (
+            canonical_fields.get("multiplier")
+            if canonical_fields.get("multiplier") not in {None, ""}
+            else entry.get("multiplier")
+        )
+        if multiplier is not None:
+            contract.multiplier = str(multiplier)
+        trading_class = canonical_fields.get("tradingClass") or entry.get("trading_class")
+        if trading_class:
+            contract.tradingClass = str(trading_class)
         return contract
 
     def _order_from_intent(self, order_intent: OrderIntent) -> Any:

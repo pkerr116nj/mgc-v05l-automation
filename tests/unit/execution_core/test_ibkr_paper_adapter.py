@@ -618,6 +618,44 @@ def test_submit_limit_order_canonicalizes_mes_shorthand_expiry() -> None:
     assert diagnostics["contract_fields_submitted_to_ibkr"]["lastTradeDateOrContractMonth"] == "20260618"
 
 
+def test_submit_limit_order_routes_rates_contracts_to_validated_cbot_exchange() -> None:
+    zf_allowlist = {
+        "ZF-202609": {
+            "symbol": "ZF",
+            "security_type": "FUT",
+            "exchange": "COMEX",
+            "currency": "USD",
+            "local_symbol": "ZFU6",
+            "con_id": "842590380",
+            "contract_month": "202609",
+            "expiry": "202609",
+            "multiplier": "1000",
+            "tick_size": "0.0078125",
+        }
+    }
+    paper = adapter(submit_enabled=True, module_loader=fake_ibapi_loader(), contract_allowlist=zf_allowlist)
+    paper.connect()
+
+    paper.submit_limit_order(
+        submit_attempt=submit_attempt(broker_order_id="1001"),
+        order_intent=order_intent(
+            symbol="ZF",
+            contract_key="ZF-202609",
+            action="SELL",
+            limit_price="107.25",
+        ),
+    )
+
+    placed = paper.bridge_for_test().placed_orders[0]
+    diagnostics = paper.submit_diagnostics("submit-1")
+    assert placed["contract"].exchange == "CBOT"
+    assert placed["contract"].localSymbol == "ZFU6"
+    assert placed["contract"].conId == 842590380
+    assert placed["contract"].lastTradeDateOrContractMonth == "20260930"
+    assert diagnostics["canonical_broker_contract_fields"]["exchange"] == "CBOT"
+    assert diagnostics["contract_fields_submitted_to_ibkr"]["exchange"] == "CBOT"
+
+
 @pytest.mark.parametrize(
     ("field", "value", "message"),
     [

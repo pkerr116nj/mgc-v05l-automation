@@ -58,6 +58,7 @@ from mgc_v05l.execution_core.track_b_paper_trade_ledger import (
 from mgc_v05l.execution_core.track_b_position_truth_monitor import DEFAULT_POSITION_TRUTH_ARTIFACT
 from mgc_v05l.execution_core.track_b_runtime_safe_state_envelope import DEFAULT_RUNTIME_SAFE_STATE_ENVELOPE_ARTIFACT
 from mgc_v05l.execution_core.track_b_broker_session_authority import DEFAULT_BROKER_SESSION_AUTHORITY_ARTIFACT
+from mgc_v05l.execution_core.track_b_contract_identity import normalize_track_b_contract_identity
 from mgc_v05l.execution_core.track_b_strategy_managed_paper_lifecycle import (
     DEFAULT_TRACK_B_STRATEGY_MANAGED_PAPER_LIFECYCLE_OUTPUT_ROOT,
     TrackBManagedExitPolicy,
@@ -623,6 +624,7 @@ def _apply_managed_exit(
                 ),
             }
     entry_intent = lifecycle_report.get("entry_intent") if isinstance(lifecycle_report.get("entry_intent"), Mapping) else {}
+    contract_metadata = _broker_bound_contract_metadata(config)
     lifecycle_config = TrackBStrategyManagedPaperLifecycleConfig(
         mode=config.mode,
         account_id=config.account_id,
@@ -652,8 +654,8 @@ def _apply_managed_exit(
         client_id=config.client_id,
         order_type="LMT",
         time_in_force="DAY",
-        exchange="CME" if config.instrument_family.upper() in {"MNQ", "NQ", "ES", "MES"} else "COMEX",
-        currency="USD",
+        exchange=contract_metadata.get("exchange") or _default_exchange(config.instrument_family),
+        currency=contract_metadata.get("currency") or "USD",
         tick_size=config.tick_size,
         source_id="track_b_managed_exit_attach",
         output_root=config.lifecycle_output_root,
@@ -962,6 +964,36 @@ def _normalized_position_side(value: object) -> str:
     if text in {"SELL", "SHORT", "SELL_TO_OPEN"}:
         return "SHORT"
     return "LONG"
+
+
+def _broker_bound_contract_metadata(config: TrackBManagedExitAttachConfig) -> dict[str, str]:
+    identity = normalize_track_b_contract_identity(
+        {
+            "symbol": config.instrument_family,
+            "instrument_family": config.instrument_family,
+            "contract_key": config.contract_key,
+            "local_symbol": config.local_symbol,
+            "con_id": config.con_id,
+            "expiry": config.expiry,
+        },
+        account_id=config.account_id,
+    )
+    if identity.get("resolved") is True:
+        return {
+            "exchange": str(identity.get("exchange") or "").strip().upper(),
+            "currency": str(identity.get("currency") or "USD").strip().upper(),
+            "multiplier": str(identity.get("multiplier") or "").strip(),
+        }
+    return {}
+
+
+def _default_exchange(instrument: object) -> str:
+    symbol = str(instrument or "").strip().upper()
+    if symbol in {"ZT", "ZF", "ZN", "ZB"}:
+        return "CBOT"
+    if symbol in {"MNQ", "NQ", "ES", "MES"}:
+        return "CME"
+    return "COMEX"
 
 
 def _select_active_managed_exit_due_position(

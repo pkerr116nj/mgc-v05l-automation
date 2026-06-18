@@ -25,6 +25,25 @@ def test_exact_local_symbol_resolves_canonical_mes_expiry_without_con_id() -> No
     assert identity.multiplier == "5"
 
 
+def test_rates_contract_resolves_validated_cbot_exchange_even_with_stale_default_exchange() -> None:
+    identity = canonicalize_broker_bound_contract_identity(
+        base={
+            "symbol": "ZF",
+            "local_symbol": "ZFU6",
+            "con_id": 842590380,
+            "expiry": "202609",
+            "exchange": "COMEX",
+        }
+    )
+
+    assert identity is not None
+    assert identity.con_id == "842590380"
+    assert identity.local_symbol == "ZFU6"
+    assert identity.expiry == "20260930"
+    assert identity.exchange == "CBOT"
+    assert identity.multiplier == "1000"
+
+
 def test_contract_identity_blocks_conid_expiry_mismatch() -> None:
     with pytest.raises(BrokerContractIdentityError, match="conflicts with canonical IBKR expiry"):
         canonicalize_broker_bound_contract_identity(
