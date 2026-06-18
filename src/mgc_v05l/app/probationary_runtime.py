@@ -851,7 +851,7 @@ def _source_instrument_from_lane_spec(spec: ProbationaryPaperLaneSpec) -> str:
         return source
     for value in (*spec.observed_instruments, *spec.long_sources, *spec.short_sources):
         candidate = str(value or "").strip().upper()
-        for instrument in ("MNQ", "MES", "MGC", "GC", "NQ", "ES"):
+        for instrument in ("MNQ", "MES", "MGC", "GC", "NQ", "ES", "ZT", "ZF", "ZN", "ZB"):
             if instrument in candidate:
                 return instrument
     return source
@@ -859,7 +859,7 @@ def _source_instrument_from_lane_spec(spec: ProbationaryPaperLaneSpec) -> str:
 
 def _active_evidence_bridge_adapter_for_spec(spec: ProbationaryPaperLaneSpec) -> dict[str, Any] | None:
     source_instrument = _source_instrument_from_lane_spec(spec)
-    if source_instrument not in {"MNQ", "MES", "MGC", "GC", "NQ", "ES"}:
+    if source_instrument not in {"MNQ", "MES", "MGC", "GC", "NQ", "ES", "ZT", "ZF", "ZN", "ZB"}:
         return None
     lane_tokens = " ".join(
         str(value or "")

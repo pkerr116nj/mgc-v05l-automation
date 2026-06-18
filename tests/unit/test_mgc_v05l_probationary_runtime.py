@@ -8464,6 +8464,43 @@ def test_active_evidence_adapter_preserves_validated_contract_identity() -> None
     assert target["con_id"] == 649180671
 
 
+def test_rates_active_evidence_adapter_uses_bridge_authority() -> None:
+    spec = ProbationaryPaperLaneSpec(
+        lane_id="zn_globex_active_participation_long",
+        display_name="ZN Globex long",
+        symbol="ZN",
+        long_sources=("PAPER_ACTIVE_EVIDENCE_ZN_GLOBEX_PARTICIPATION_LONG_V1",),
+        short_sources=(),
+        session_restriction="GLOBEX",
+        point_value=Decimal("1000"),
+        strategy_family="paper_active_evidence",
+        strategy_identity_root="PAPER_ACTIVE_EVIDENCE_ZN_GLOBEX_PARTICIPATION_LONG_V1",
+        managed_exit_policy_id="GLOBEX_ACTIVE_EVIDENCE_TIMEBOX_60M_EXIT_V1",
+        execution_mode=probationary_runtime_module.PAPER_EXECUTION_MODE_IBKR_BRIDGE,
+        current_order_destination="ibkr_paper_bridge_submit_capable",
+        bridge_execution_target={
+            "symbol": "ZN",
+            "contract_month": "202609",
+            "expiry": "20260930",
+            "con_id": 842590388,
+            "local_symbol": "ZNU6",
+            "exchange": "CBOT",
+            "currency": "USD",
+            "multiplier": "1000",
+        },
+    )
+
+    adapter = probationary_runtime_module._active_evidence_bridge_adapter_for_spec(spec)  # noqa: SLF001
+
+    assert adapter is not None
+    assert adapter["source_instrument"] == "ZN"
+    assert adapter["current_order_destination"] == "ibkr_paper_bridge_submit_capable"
+    target = adapter["bridge_execution_target"]
+    assert target["symbol"] == "ZN"
+    assert target["local_symbol"] == "ZNU6"
+    assert target["con_id"] == 842590388
+
+
 def test_rejected_submit_with_broker_exposure_is_adopted_after_fresh_truth(tmp_path: Path) -> None:
     settings = _build_probationary_settings(tmp_path).model_copy(update={"symbol": "ES"})
     repositories = RepositorySet(build_engine(settings.database_url))

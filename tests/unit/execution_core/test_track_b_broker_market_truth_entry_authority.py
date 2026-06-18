@@ -224,6 +224,90 @@ def test_mnq_position_blocks_mnq_but_allows_mes_flat_start() -> None:
     assert mes_result["broker_truth"]["instrument_nonflat_position_count"] == 0
 
 
+def test_rates_position_blocks_same_rate_but_allows_other_rates_flat_start() -> None:
+    rates_lanes = (
+        "zf_globex_active_participation_long",
+        "zn_globex_active_participation_long",
+        "zb_globex_active_participation_long",
+    )
+    zf_position = _positions(
+        rows=[
+            {
+                "account_id": "DUM882026",
+                "security_type": "FUT",
+                "symbol": "ZF",
+                "local_symbol": "ZFU6",
+                "quantity": "1",
+            }
+        ]
+    )
+
+    zf_result = evaluate_broker_market_truth_entry_authority(
+        _input(
+            lane_id="zf_globex_active_participation_long",
+            instrument="ZF",
+            active_profile_lane_ids=rates_lanes,
+            broker_positions_snapshot=zf_position,
+            runtime_price={
+                "price": 106.83,
+                "timestamp": "2026-06-11T14:00:00+00:00",
+            },
+            contract={
+                "symbol": "ZF",
+                "contract_month": "202609",
+                "expiry": "20260930",
+                "local_symbol": "ZFU6",
+                "con_id": 842590380,
+            },
+        )
+    )
+    zn_result = evaluate_broker_market_truth_entry_authority(
+        _input(
+            lane_id="zn_globex_active_participation_long",
+            instrument="ZN",
+            active_profile_lane_ids=rates_lanes,
+            broker_positions_snapshot=zf_position,
+            runtime_price={
+                "price": 110.50,
+                "timestamp": "2026-06-11T14:00:00+00:00",
+            },
+            contract={
+                "symbol": "ZN",
+                "contract_month": "202609",
+                "expiry": "20260930",
+                "local_symbol": "ZNU6",
+                "con_id": 842590388,
+            },
+        )
+    )
+    zb_result = evaluate_broker_market_truth_entry_authority(
+        _input(
+            lane_id="zb_globex_active_participation_long",
+            instrument="ZB",
+            active_profile_lane_ids=rates_lanes,
+            broker_positions_snapshot=zf_position,
+            runtime_price={
+                "price": 117.25,
+                "timestamp": "2026-06-11T14:00:00+00:00",
+            },
+            contract={
+                "symbol": "ZB",
+                "contract_month": "202609",
+                "expiry": "20260930",
+                "local_symbol": "ZBU6",
+                "con_id": 842590397,
+            },
+        )
+    )
+
+    assert zf_result["classification"] == BROKER_MARKET_TRUTH_ENTRY_BLOCKED
+    assert "broker_nonflat_flat_start_violation" in zf_result["block_reasons"]
+    assert zn_result["classification"] == BROKER_MARKET_TRUTH_ENTRY_ALLOWED
+    assert zn_result["broker_truth"]["instrument_nonflat_position_count"] == 0
+    assert zb_result["classification"] == BROKER_MARKET_TRUTH_ENTRY_ALLOWED
+    assert zb_result["broker_truth"]["instrument_nonflat_position_count"] == 0
+
+
 def test_unknown_order_blocks() -> None:
     classification, reasons = _classification(open_order_truth={"unknown_open_order_count": 1})
 
