@@ -59,6 +59,13 @@ from mgc_v05l.execution_core.track_b_position_truth_monitor import DEFAULT_POSIT
 from mgc_v05l.execution_core.track_b_runtime_safe_state_envelope import DEFAULT_RUNTIME_SAFE_STATE_ENVELOPE_ARTIFACT
 from mgc_v05l.execution_core.track_b_broker_session_authority import DEFAULT_BROKER_SESSION_AUTHORITY_ARTIFACT
 from mgc_v05l.execution_core.track_b_contract_identity import normalize_track_b_contract_identity
+from mgc_v05l.execution_core.track_b_current_state_authority import (
+    current_state_same_contract,
+    normalize_current_broker_position,
+    open_order_truth_unknown_count,
+    same_contract_unknown_order_count,
+    same_contract_working_close_qty,
+)
 from mgc_v05l.execution_core.track_b_strategy_managed_paper_lifecycle import (
     DEFAULT_TRACK_B_STRATEGY_MANAGED_PAPER_LIFECYCLE_OUTPUT_ROOT,
     TrackBManagedExitPolicy,
@@ -1542,16 +1549,15 @@ def _exact_broker_position_for_config(
     for row in position_truth.get("broker_positions") or []:
         if not isinstance(row, Mapping):
             continue
-        account = _valid_account_id(row.get("account_id") or row.get("account"))
-        row_con_id = _int_or_none(row.get("con_id") or row.get("conId"))
-        row_symbol = str(row.get("symbol") or row.get("instrument_family") or row.get("instrument") or "").strip()
-        if (
-            account == config.account_id
-            and str(row.get("local_symbol") or row.get("localSymbol") or "") == config.local_symbol
-            and (row_con_id is None or row_con_id == config.con_id)
-            and (not row_symbol or row_symbol == config.instrument_family)
-        ):
-            return dict(row)
+        normalized = normalize_current_broker_position(
+            row,
+            account_id=config.account_id,
+            instrument=config.instrument_family,
+            local_symbol=config.local_symbol,
+            con_id=config.con_id,
+        )
+        if normalized:
+            return normalized
     return {}
 
 
@@ -1561,16 +1567,13 @@ def _same_contract_working_close_qty_for_config(
     managed_orders: Mapping[str, Any],
     open_order_truth: Mapping[str, Any],
 ) -> Decimal:
-    total = Decimal("0")
-    rows = [*(managed_orders.get("managed_orders") or []), *(open_order_truth.get("broker_open_orders") or [])]
-    for row in rows:
-        if not isinstance(row, Mapping):
-            continue
-        if str(row.get("local_symbol") or row.get("contract") or "") != config.local_symbol:
-            continue
-        if row.get("working") is True or str(row.get("status") or "").upper() in {"SUBMITTED", "PRESUBMITTED", "PENDING_SUBMIT"}:
-            total += abs(_decimal(row.get("remaining_quantity") or row.get("quantity")) or Decimal("0"))
-    return total
+    _ = managed_orders
+    return same_contract_working_close_qty(
+        open_order_truth=open_order_truth,
+        account_id=config.account_id,
+        local_symbol=config.local_symbol,
+        con_id=config.con_id,
+    )
 
 
 def _same_contract_unknown_order_count_for_config(
@@ -1578,19 +1581,16 @@ def _same_contract_unknown_order_count_for_config(
     config: TrackBManagedExitAttachConfig,
     open_order_truth: Mapping[str, Any],
 ) -> int:
-    return sum(
-        1
-        for row in open_order_truth.get("unknown_open_orders") or []
-        if isinstance(row, Mapping)
-        and str(row.get("local_symbol") or row.get("contract") or "") == config.local_symbol
+    return same_contract_unknown_order_count(
+        open_order_truth=open_order_truth,
+        account_id=config.account_id,
+        local_symbol=config.local_symbol,
+        con_id=config.con_id,
     )
 
 
 def _unknown_open_order_count(open_order_truth: Mapping[str, Any]) -> int:
-    try:
-        return int(open_order_truth.get("unknown_open_order_count") or 0)
-    except (TypeError, ValueError):
-        return len([row for row in open_order_truth.get("unknown_open_orders") or [] if isinstance(row, Mapping)])
+    return open_order_truth_unknown_count(open_order_truth)
 
 
 def _safe_state_has_hard_halt(safe_state: Mapping[str, Any]) -> bool:
@@ -2118,25 +2118,29 @@ def _duplicate_close_order(
     open_order_truth: Mapping[str, Any],
     close_action: str,
 ) -> str | None:
-    text = " ".join(
-        str(value or "")
-        for value in (
-            managed_orders.get("classification"),
-            open_order_truth.get("classification"),
-        )
-    ).upper()
-    if "DUPLICATE" in text or "WORKING_CLOSE_ORDER" in text or "OPEN_CLOSE_ORDER_WORKING" in text:
-        return f"Existing/duplicate close order state blocks attach: {text.strip()}."
-    for order in managed_orders.get("managed_orders") or []:
+    _ = managed_orders
+    text = str(open_order_truth.get("classification") or "").upper()
+    if "UNKNOWN" in text:
+        return f"Unknown broker open-order state blocks attach: {text.strip()}."
+    for order in [*(open_order_truth.get("broker_open_orders") or []), *(open_order_truth.get("open_orders") or [])]:
         if not isinstance(order, Mapping):
             continue
         if (
-            order.get("working") is True
-            and str(order.get("local_symbol") or order.get("contract") or "") == config.local_symbol
-            and str(order.get("action") or "") == close_action
-            and _decimal(order.get("quantity")) == Decimal(str(config.quantity))
+            current_state_same_contract(
+                order,
+                account_id=config.account_id,
+                local_symbol=config.local_symbol,
+                con_id=config.con_id,
+            )
+            and (
+                order.get("working") is True
+                or str(order.get("status") or order.get("order_status") or "").upper()
+                in {"SUBMITTED", "PRESUBMITTED", "PENDING_SUBMIT"}
+            )
+            and str(order.get("action") or order.get("order_action") or "").upper() == close_action
+            and _decimal(order.get("remaining_quantity") or order.get("quantity")) == Decimal(str(config.quantity))
         ):
-            return "Exact working close order already exists."
+            return "Exact broker working close order already exists."
     return None
 
 

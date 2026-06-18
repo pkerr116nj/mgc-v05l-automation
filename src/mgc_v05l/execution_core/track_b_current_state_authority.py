@@ -11,9 +11,11 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from decimal import Decimal, InvalidOperation
 from typing import Any, Mapping
 
 from mgc_v05l.execution_core.track_b_broker_startup_authority import TRACK_B_FUTURES_ROOTS
+from mgc_v05l.execution_core.track_b_contract_identity import normalize_track_b_contract_row
 
 CURRENT_STATE_AUTHORITY_ALLOWED = "CURRENT_STATE_AUTHORITY_ALLOWED"
 CURRENT_STATE_AUTHORITY_BLOCKED = "CURRENT_STATE_AUTHORITY_BLOCKED"
@@ -257,6 +259,169 @@ def open_order_truth_unknown_count(open_order_truth: Mapping[str, Any]) -> int:
     return 0
 
 
+def normalize_current_broker_position(
+    row: Mapping[str, Any],
+    *,
+    account_id: str,
+    instrument: str,
+    local_symbol: str,
+    con_id: int,
+) -> dict[str, Any]:
+    """Normalize a current broker-position row for entry/exit authority.
+
+    Fresh IBKR snapshots sometimes carry only ``local_symbol``/expiry and no
+    con_id. The shared contract resolver gets first chance to prove exact
+    identity; legacy exact rows with both local symbol and con_id remain
+    accepted for older fixtures and archived artifacts.
+    """
+
+    account = str(row.get("account_id") or row.get("account") or account_id or "").strip()
+    if account != str(account_id or "").strip():
+        return {}
+    quantity = decimal_or_zero(row.get("quantity") or row.get("position") or row.get("signed_qty"))
+    if quantity == Decimal("0"):
+        return {}
+
+    normalized = normalize_track_b_contract_row(row, account_id=account)
+    identity = normalized.get("contract_identity") if isinstance(normalized.get("contract_identity"), Mapping) else {}
+    resolved = bool(identity.get("resolved"))
+    row_local_symbol = str(normalized.get("local_symbol") or row.get("local_symbol") or row.get("localSymbol") or "").strip().upper()
+    row_con_id = int_or_none(normalized.get("con_id") or row.get("con_id") or row.get("conId") or row.get("qualified_contract_identifier"))
+    row_symbol = str(
+        normalized.get("track_b_root")
+        or normalized.get("symbol")
+        or normalized.get("instrument")
+        or row.get("track_b_root")
+        or row.get("symbol")
+        or row.get("instrument")
+        or ""
+    ).strip().upper()
+    expected_symbol = str(instrument or "").strip().upper()
+    expected_local_symbol = str(local_symbol or "").strip().upper()
+    expected_con_id = int(con_id or 0)
+
+    if resolved:
+        if expected_symbol and row_symbol != expected_symbol:
+            return {}
+        if expected_local_symbol and row_local_symbol != expected_local_symbol:
+            return {}
+        if expected_con_id > 0 and row_con_id != expected_con_id:
+            return {}
+    else:
+        exact_legacy_identity = bool(
+            expected_local_symbol
+            and row_local_symbol == expected_local_symbol
+            and (
+                (expected_con_id > 0 and row_con_id == expected_con_id)
+                or (row_con_id is None and expected_symbol and row_symbol == expected_symbol)
+            )
+        )
+        instrument_only_identity = bool(
+            expected_symbol
+            and row_symbol == expected_symbol
+            and not expected_local_symbol
+            and expected_con_id <= 0
+        )
+        if not (exact_legacy_identity or instrument_only_identity):
+            return {}
+
+    return {
+        **dict(row),
+        **{key: value for key, value in dict(normalized).items() if key != "quantity"},
+        "account_id": account,
+        "local_symbol": row_local_symbol or expected_local_symbol,
+        "con_id": int(row_con_id or expected_con_id),
+        "symbol": row_symbol or expected_symbol,
+        "track_b_root": row_symbol or expected_symbol,
+        "quantity": str(quantity),
+        "contract_identity": identity or normalized.get("contract_identity") or {},
+    }
+
+
+def current_state_same_contract(
+    row: Mapping[str, Any],
+    *,
+    account_id: str,
+    local_symbol: str,
+    con_id: int,
+) -> bool:
+    broker = row.get("broker_position") if isinstance(row.get("broker_position"), Mapping) else {}
+    account = str(row.get("account_id") or row.get("account") or broker.get("account_id") or broker.get("account") or account_id or "").strip()
+    if account != str(account_id or "").strip():
+        return False
+    normalized = normalize_track_b_contract_row({**dict(broker), **dict(row)}, account_id=account)
+    row_local_symbol = str(
+        normalized.get("local_symbol")
+        or row.get("local_symbol")
+        or row.get("localSymbol")
+        or row.get("contract")
+        or broker.get("local_symbol")
+        or broker.get("localSymbol")
+        or ""
+    ).strip().upper()
+    row_con_id = int_or_none(
+        normalized.get("con_id")
+        or row.get("con_id")
+        or row.get("conId")
+        or broker.get("con_id")
+        or broker.get("conId")
+    )
+    expected_local_symbol = str(local_symbol or "").strip().upper()
+    expected_con_id = int(con_id or 0)
+    return bool(
+        (expected_con_id > 0 and row_con_id == expected_con_id)
+        or (expected_local_symbol and row_local_symbol == expected_local_symbol)
+    )
+
+
+def same_contract_working_close_qty(
+    *,
+    open_order_truth: Mapping[str, Any],
+    account_id: str,
+    local_symbol: str,
+    con_id: int,
+) -> Decimal:
+    """Return broker-confirmed working close quantity for the exact contract.
+
+    This intentionally ignores managed-order registry rows. Registry duplicate
+    rows are diagnostics; fresh broker open-order truth is the authority.
+    """
+
+    total = Decimal("0")
+    rows = [*list_or_empty(open_order_truth.get("broker_open_orders")), *list_or_empty(open_order_truth.get("open_orders"))]
+    for row in (mapping_or_empty(item) for item in rows):
+        if not current_state_same_contract(row, account_id=account_id, local_symbol=local_symbol, con_id=con_id):
+            continue
+        if row.get("working") is False:
+            continue
+        status = str(row.get("status") or row.get("order_status") or "").strip().upper()
+        if status and status not in {"SUBMITTED", "PRESUBMITTED", "PENDING_SUBMIT", "PENDING_SUBMITTING", "API_PENDING", "HELD"}:
+            continue
+        total += abs(decimal_or_zero(row.get("remaining_quantity") or row.get("remaining") or row.get("quantity") or "0"))
+    return total
+
+
+def same_contract_unknown_order_count(
+    *,
+    open_order_truth: Mapping[str, Any],
+    account_id: str,
+    local_symbol: str,
+    con_id: int,
+) -> int:
+    total_unknown = open_order_truth_unknown_count(open_order_truth)
+    rows = [
+        *list_or_empty(open_order_truth.get("unknown_open_orders")),
+        *list_or_empty(open_order_truth.get("unknown_orders")),
+        *list_or_empty(open_order_truth.get("unknown_broker_open_orders")),
+    ]
+    scoped = sum(
+        1
+        for row in (mapping_or_empty(item) for item in rows)
+        if current_state_same_contract(row, account_id=account_id, local_symbol=local_symbol, con_id=con_id)
+    )
+    return max(total_unknown, scoped)
+
+
 def runtime_price_status(price_payload: Mapping[str, Any], *, now: datetime, max_age_seconds: float) -> dict[str, Any]:
     price = float_or_none(price_payload.get("price") or price_payload.get("last") or price_payload.get("close"))
     timestamp = parse_datetime(price_payload.get("timestamp") or price_payload.get("generated_at") or price_payload.get("bar_end"))
@@ -340,3 +505,18 @@ def int_or_none(value: Any) -> int | None:
         return int(value)
     except (TypeError, ValueError):
         return None
+
+
+def decimal_or_zero(value: Any) -> Decimal:
+    try:
+        return Decimal(str(value or "0"))
+    except (InvalidOperation, ValueError):
+        return Decimal("0")
+
+
+def mapping_or_empty(value: Any) -> dict[str, Any]:
+    return dict(value) if isinstance(value, Mapping) else {}
+
+
+def list_or_empty(value: Any) -> list[Any]:
+    return value if isinstance(value, list) else []

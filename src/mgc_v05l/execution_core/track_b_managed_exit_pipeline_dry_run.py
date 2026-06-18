@@ -25,6 +25,13 @@ from mgc_v05l.execution_core.models import TrackBModelError, require_aware_datet
 from mgc_v05l.execution_core.track_b_atomic_io import write_json_atomic
 from mgc_v05l.execution_core.track_b_broker_position_guardian import DEFAULT_BROKER_POSITION_GUARDIAN_ARTIFACT
 from mgc_v05l.execution_core.track_b_broker_session_authority import DEFAULT_BROKER_SESSION_AUTHORITY_ARTIFACT
+from mgc_v05l.execution_core.track_b_current_state_authority import (
+    current_state_same_contract,
+    normalize_current_broker_position,
+    open_order_truth_unknown_count,
+    same_contract_unknown_order_count,
+    same_contract_working_close_qty,
+)
 from mgc_v05l.execution_core.track_b_exit_authority_contract import (
     AttributionStatus,
     ExecutionDomain,
@@ -584,33 +591,13 @@ def _normalize_position_state_candidate(*, row: Mapping[str, Any], intent: ExitI
 
 
 def _normalize_broker_position_candidate(*, row: Mapping[str, Any], intent: ExitIntent) -> dict[str, Any]:
-    account = str(row.get("account_id") or row.get("account") or intent.account_id)
-    local_symbol = str(row.get("local_symbol") or row.get("localSymbol") or "").upper()
-    con_id = _int(
-        row.get("con_id")
-        or row.get("conId")
-        or row.get("qualified_contract_identifier")
-        or row.get("qualified_con_id")
+    return normalize_current_broker_position(
+        row,
+        account_id=intent.account_id,
+        instrument=intent.instrument,
+        local_symbol=intent.local_symbol,
+        con_id=intent.con_id,
     )
-    quantity = _decimal(row.get("quantity") or row.get("position") or row.get("signed_qty"))
-    if account != intent.account_id or abs(quantity) <= Decimal("0"):
-        return {}
-    if local_symbol and local_symbol != intent.local_symbol:
-        return {}
-    if con_id > 0 and con_id != intent.con_id:
-        return {}
-    row_instrument = str(row.get("track_b_root") or row.get("symbol") or row.get("instrument") or "").upper()
-    if not local_symbol and con_id == 0 and row_instrument and row_instrument != intent.instrument:
-        return {}
-    return {
-        **dict(row),
-        "account_id": account,
-        "local_symbol": local_symbol or intent.local_symbol,
-        "con_id": con_id or intent.con_id,
-        "symbol": row.get("symbol") or row.get("instrument") or row.get("track_b_root") or intent.instrument,
-        "track_b_root": row.get("track_b_root") or row.get("instrument") or row.get("symbol") or intent.instrument,
-        "quantity": str(quantity),
-    }
 
 
 def _broker_positions_snapshot_complete(snapshot: Mapping[str, Any]) -> bool:
@@ -624,38 +611,34 @@ def _broker_positions_snapshot_complete(snapshot: Mapping[str, Any]) -> bool:
 
 
 def _same_contract_working_close_qty(*, intent: ExitIntent, inputs: Mapping[str, Mapping[str, Any]]) -> Decimal:
-    total = Decimal("0")
-    rows = [*_list(inputs["open_order_truth"].get("broker_open_orders")), *_list(inputs["open_order_truth"].get("open_orders"))]
-    rows.extend(_list(inputs["managed_orders"].get("managed_orders")))
-    for row in (_mapping(item) for item in rows):
-        if not _same_contract(row=row, intent=intent):
-            continue
-        if row.get("working") is False:
-            continue
-        quantity = _decimal(row.get("remaining_quantity") or row.get("quantity") or "0")
-        total += abs(quantity or intent.close_qty)
-    return total
-
-
-def _same_contract_unknown_order_count(*, intent: ExitIntent, inputs: Mapping[str, Mapping[str, Any]]) -> int:
-    rows = [*_list(inputs["open_order_truth"].get("unknown_open_orders")), *_list(inputs["reconciliation"].get("unknown_broker_open_orders"))]
-    return sum(1 for row in (_mapping(item) for item in rows) if _same_contract(row=row, intent=intent))
-
-
-def _unknown_open_order_count(inputs: Mapping[str, Mapping[str, Any]]) -> int:
-    return max(
-        _int(inputs["reconciliation"].get("unknown_broker_open_order_count")),
-        _int(inputs["open_order_truth"].get("unknown_open_order_count")),
-        len(_list(inputs["open_order_truth"].get("unknown_open_orders"))),
+    return same_contract_working_close_qty(
+        open_order_truth=inputs["open_order_truth"],
+        account_id=intent.account_id,
+        local_symbol=intent.local_symbol,
+        con_id=intent.con_id,
     )
 
 
+def _same_contract_unknown_order_count(*, intent: ExitIntent, inputs: Mapping[str, Mapping[str, Any]]) -> int:
+    return same_contract_unknown_order_count(
+        open_order_truth=inputs["open_order_truth"],
+        account_id=intent.account_id,
+        local_symbol=intent.local_symbol,
+        con_id=intent.con_id,
+    )
+
+
+def _unknown_open_order_count(inputs: Mapping[str, Mapping[str, Any]]) -> int:
+    return open_order_truth_unknown_count(inputs["open_order_truth"])
+
+
 def _same_contract(*, row: Mapping[str, Any], intent: ExitIntent) -> bool:
-    broker = _mapping(row.get("broker_position"))
-    account = str(row.get("account_id") or row.get("account") or broker.get("account_id") or intent.account_id)
-    local_symbol = str(row.get("local_symbol") or row.get("contract") or broker.get("local_symbol") or "").upper()
-    con_id = _int(row.get("con_id") or broker.get("con_id"))
-    return account == intent.account_id and (local_symbol == intent.local_symbol or con_id == intent.con_id)
+    return current_state_same_contract(
+        row,
+        account_id=intent.account_id,
+        local_symbol=intent.local_symbol,
+        con_id=intent.con_id,
+    )
 
 
 def _reconciliation_clean(reconciliation: Mapping[str, Any]) -> bool:

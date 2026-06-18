@@ -211,14 +211,19 @@ def test_blocked_on_duplicate_close_order(tmp_path: Path) -> None:
     config = _seed(
         tmp_path,
         completed_bars=12,
-        managed_order_overrides={
-            "classification": "WORKING_CLOSE_ORDER",
-            "managed_orders": [
+        open_order_overrides={
+            "classification": "OPEN_CLOSE_ORDER_WORKING",
+            "unknown_open_order_count": 0,
+            "broker_open_orders": [
                 {
                     "working": True,
+                    "account_id": "DUM882026",
                     "local_symbol": "MNQM6",
+                    "con_id": 770561201,
                     "action": "SELL",
                     "quantity": "1",
+                    "remaining_quantity": "1",
+                    "status": "Submitted",
                 }
             ],
         },
@@ -228,6 +233,32 @@ def test_blocked_on_duplicate_close_order(tmp_path: Path) -> None:
 
     assert payload["classification"] == MANAGED_EXIT_BLOCKED_DUPLICATE_CLOSE_ORDER
     assert payload["duplicate_close_order_detected"] is True
+
+
+def test_stale_managed_order_duplicate_is_diagnostic_when_fresh_open_orders_clean(tmp_path: Path) -> None:
+    config = _seed(
+        tmp_path,
+        completed_bars=3,
+        open_order_overrides={"classification": "NO_OPEN_ORDERS", "unknown_open_order_count": 0, "broker_open_orders": []},
+        managed_order_overrides={
+            "classification": "WORKING_CLOSE_ORDER",
+            "managed_orders": [
+                {
+                    "working": True,
+                    "local_symbol": "MNQM6",
+                    "con_id": 770561201,
+                    "action": "SELL",
+                    "quantity": "1",
+                }
+            ],
+        },
+    )
+
+    payload = build_track_b_managed_exit_attach_plan(config=config, now=NOW)
+
+    assert payload["classification"] == MANAGED_EXIT_TIMEBOX_CLOSE_ELIGIBLE
+    assert payload["duplicate_close_order_detected"] is False
+    assert payload["exit_authority_contract"]["decision"]["decision"] in {"ALLOWED", "DEGRADED_ALLOWED"}
 
 
 def test_prior_lifecycle_close_submit_is_diagnostic_when_fresh_order_truth_has_no_close(

@@ -286,6 +286,94 @@ def test_reconciliation_missing_row_uses_fresh_broker_snapshot_fallback(tmp_path
     assert decision["authority_decision"]["hard_required_checks"]["known_current_broker_position"]["passed"] is True
 
 
+def test_fresh_broker_snapshot_local_symbol_expiry_without_con_id_uses_shared_identity_for_rates(tmp_path: Path) -> None:
+    inputs = _inputs(broker_positions=[])
+    inputs["reconciliation"].update(
+        {
+            "classification": "TRACK_B_PAPER_BROKER_RECONCILIATION_BLOCKED",
+            "broker_reconciled": False,
+            "track_b_broker_positions": [],
+            "track_b_broker_position_count": 0,
+        }
+    )
+    inputs["broker_positions_snapshot"] = {
+        "generated_at": NOW.isoformat(),
+        "positions_complete": True,
+        "positions": [
+            {
+                "account_id": "DUM882026",
+                "local_symbol": "ZFU6",
+                "expiry": "20260930",
+                "symbol": "ZF",
+                "quantity": "-1",
+                "security_type": "FUT",
+            }
+        ],
+        "live_money_eligible": False,
+        "paper_proof_invoked": False,
+    }
+    exit_decision = {
+        "schema_version": "track_b_exit_decision_report_v1",
+        "generated_at": NOW.isoformat(),
+        "classification": "EXIT_DECISION_READY",
+        "decisions": [
+            _decision(
+                decision_id="zf_due",
+                reason="timebox_exit_due",
+                local_symbol="ZFU6",
+                con_id=842590380,
+                instrument="ZF",
+                side="SHORT",
+                lifecycle_id="life-zf",
+                trade_id="trade-zf",
+                strategy_id="zf_strategy",
+                lane_id="zf_lane",
+            )
+        ],
+        "live_money_eligible": False,
+        "paper_proof_invoked": False,
+    }
+
+    payload = _build(tmp_path, inputs, input_overrides={"exit_decision": exit_decision})
+
+    assert payload["classification"] == ManagedExitPipelineDryRunClassification.EXIT_INTENT_ALLOWED.value
+    decision = payload["exit_authority_decisions"][0]
+    assert decision["local_symbol"] == "ZFU6"
+    assert decision["close_action"] == "BUY"
+    assert decision["decision"] == "ALLOWED"
+    assert decision["authority_decision"]["hard_required_checks"]["contract_matches"]["passed"] is True
+
+
+def test_stale_managed_order_working_close_does_not_block_when_fresh_open_orders_clean(tmp_path: Path) -> None:
+    inputs = _inputs()
+    inputs["open_order_truth"].update({"classification": "NO_OPEN_ORDERS", "broker_open_orders": [], "open_orders": []})
+    inputs["managed_orders"].update(
+        {
+            "classification": "WORKING_CLOSE_ORDER",
+            "managed_orders": [
+                {
+                    "working": True,
+                    "account_id": "DUM882026",
+                    "local_symbol": "MESM6",
+                    "con_id": 770561194,
+                    "action": "BUY",
+                    "quantity": "1",
+                }
+            ],
+        }
+    )
+
+    payload = _build(tmp_path, inputs, decision_inputs={"life-mes": {"timebox_due": True}})
+
+    assert payload["classification"] == ManagedExitPipelineDryRunClassification.EXIT_INTENT_ALLOWED.value
+    decision = payload["exit_authority_decisions"][0]
+    assert decision["decision"] == "ALLOWED"
+    assert (
+        decision["authority_decision"]["hard_required_checks"]["same_contract_working_close_does_not_over_close"]["passed"]
+        is True
+    )
+
+
 def test_unknown_same_contract_order_still_blocks_after_broker_snapshot_fallback(tmp_path: Path) -> None:
     inputs = _inputs(broker_positions=[])
     inputs["broker_positions_snapshot"] = {
