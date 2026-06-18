@@ -373,7 +373,7 @@ def test_startup_reconciliation_safely_clears_stale_internal_pending_order_marke
     assert strategy_engine.state.strategy_status is StrategyStatus.READY
 
 
-def test_internal_broker_quantity_mismatch_moves_to_reconciling_and_freezes_entries(tmp_path: Path) -> None:
+def test_internal_broker_quantity_mismatch_confirms_flat_when_broker_truth_is_flat(tmp_path: Path) -> None:
     _, _, strategy_engine, execution_engine = _build_runtime(tmp_path)
     now = datetime.now(timezone.utc)
     strategy_engine._state = replace(  # noqa: SLF001
@@ -397,10 +397,11 @@ def test_internal_broker_quantity_mismatch_moves_to_reconciling_and_freezes_entr
         execution_engine=execution_engine,
     )
 
-    assert payload["classification"] == "unsafe_ambiguity"
-    assert strategy_engine.state.strategy_status is StrategyStatus.RECONCILING
-    assert strategy_engine.state.entries_enabled is False
-    assert strategy_engine.state.reconcile_required is True
+    assert payload["classification"] == "safe_repair"
+    assert "confirm_flat_from_current_broker_truth" in payload["repair_actions"]
+    assert strategy_engine.state.strategy_status is StrategyStatus.READY
+    assert strategy_engine.state.entries_enabled is True
+    assert strategy_engine.state.reconcile_required is False
 
 
 def test_missing_fill_acknowledgement_triggers_reconciling(tmp_path: Path) -> None:
@@ -537,7 +538,39 @@ def test_safe_flat_repair_returns_to_ready(tmp_path: Path) -> None:
     )
 
     assert payload["classification"] == "safe_repair"
-    assert "confirm_flat_from_broker_fill" in payload["repair_actions"]
+    assert "confirm_flat_from_current_broker_truth" in payload["repair_actions"]
+    assert strategy_engine.state.strategy_status is StrategyStatus.READY
+    assert strategy_engine.state.position_side is PositionSide.FLAT
+    assert strategy_engine.state.internal_position_qty == 0
+
+
+def test_broker_flat_truth_clears_stale_internal_position_without_fill_ack(tmp_path: Path) -> None:
+    _, _repositories, strategy_engine, execution_engine = _build_runtime(tmp_path)
+    now = datetime.now(timezone.utc)
+    strategy_engine._state = replace(  # noqa: SLF001
+        strategy_engine.state,
+        position_side=PositionSide.SHORT,
+        internal_position_qty=1,
+        broker_position_qty=1,
+        entry_price=Decimal("100"),
+        strategy_status=StrategyStatus.IN_SHORT_K,
+    )
+    execution_engine.broker.restore_state(
+        position=PaperPosition(quantity=0, average_price=None),
+        open_order_ids=[],
+        order_status={},
+        last_fill_timestamp=None,
+    )
+
+    payload = strategy_engine.apply_reconciliation(
+        occurred_at=now,
+        trigger="scheduled_heartbeat",
+        execution_engine=execution_engine,
+    )
+
+    assert payload["classification"] == "safe_repair"
+    assert "confirm_flat_from_current_broker_truth" in payload["repair_actions"]
+    assert payload["freeze_new_entries"] is False
     assert strategy_engine.state.strategy_status is StrategyStatus.READY
     assert strategy_engine.state.position_side is PositionSide.FLAT
     assert strategy_engine.state.internal_position_qty == 0
@@ -635,7 +668,7 @@ def test_heartbeat_reconcile_safe_repair_applies_and_persists_event(tmp_path: Pa
     assert recon_rows[0]["trigger"] == "heartbeat"
 
 
-def test_heartbeat_reconcile_unresolved_mismatch_moves_to_reconciling(tmp_path: Path) -> None:
+def test_heartbeat_reconcile_broker_flat_truth_repairs_stale_internal_position(tmp_path: Path) -> None:
     settings, repositories, strategy_engine, execution_engine = _build_runtime(tmp_path)
     now = datetime.now(timezone.utc)
     strategy_engine._state = replace(  # noqa: SLF001
@@ -663,10 +696,10 @@ def test_heartbeat_reconcile_unresolved_mismatch_moves_to_reconciling(tmp_path: 
 
     assert ran is True
     assert payload is not None
-    assert payload["classification"] == "unsafe_ambiguity"
-    assert heartbeat_status["status"] == "RECONCILING"
-    assert strategy_engine.state.strategy_status is StrategyStatus.RECONCILING
-    assert strategy_engine.state.entries_enabled is False
+    assert payload["classification"] == "safe_repair"
+    assert heartbeat_status["status"] == "SAFE_REPAIR"
+    assert strategy_engine.state.strategy_status is StrategyStatus.READY
+    assert strategy_engine.state.entries_enabled is True
     with repositories.engine.begin() as connection:
         recon_rows = connection.execute(select(reconciliation_events_table)).mappings().all()
     assert len(recon_rows) == 1
@@ -732,7 +765,7 @@ def test_heartbeat_reconcile_degrades_cleanly_when_broker_truth_is_unavailable(t
     assert len(recon_rows) == 1
 
 
-def test_repeated_identical_heartbeat_mismatch_does_not_persist_duplicate_events(tmp_path: Path) -> None:
+def test_repeated_flat_truth_heartbeat_repairs_then_reports_clean(tmp_path: Path) -> None:
     settings, repositories, strategy_engine, execution_engine = _build_runtime(tmp_path)
     now = datetime.now(timezone.utc)
     strategy_engine._state = replace(  # noqa: SLF001
@@ -769,8 +802,9 @@ def test_repeated_identical_heartbeat_mismatch_does_not_persist_duplicate_events
 
     assert second_ran is True
     assert second_payload is not None
-    assert second_payload["classification"] == "unsafe_ambiguity"
-    assert second_status["status"] == "RECONCILING"
+    assert first_payload["classification"] == "safe_repair"
+    assert second_payload["classification"] == "clean"
+    assert second_status["status"] == "CLEAN"
     assert second_status["reconciliation_applied"] is False
     with repositories.engine.begin() as connection:
         recon_rows = connection.execute(select(reconciliation_events_table)).mappings().all()

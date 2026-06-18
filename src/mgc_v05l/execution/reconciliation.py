@@ -23,6 +23,7 @@ RECONCILIATION_SAFE_CLASSES = {
 
 RECONCILIATION_REPAIR_CLEAR_STALE_OPEN_ORDER = "clear_stale_open_order_markers"
 RECONCILIATION_REPAIR_CONFIRM_FLAT = "confirm_flat_from_broker_fill"
+RECONCILIATION_REPAIR_CONFIRM_FLAT_FROM_BROKER_TRUTH = "confirm_flat_from_current_broker_truth"
 RECONCILIATION_REPAIR_SYNC_BROKER_QTY = "sync_internal_broker_position_qty"
 RECONCILIATION_REPAIR_SYNC_BROKER_AVG_PRICE = "sync_entry_price_from_broker_average_price"
 RECONCILIATION_REPAIR_ADOPT_BROKER_POSITION = "adopt_broker_position_from_fresh_broker_truth"
@@ -321,6 +322,33 @@ class ReconciliationCoordinator:
                 mismatches=tuple(mismatches),
                 repair_actions=tuple(repair_actions),
                 recommended_action="Safe cleanup will clear the stale strategy open-order marker while preserving the open position.",
+                notes=tuple(notes),
+                freeze_new_entries=False,
+                requires_review=False,
+                requires_fault=False,
+                clean=False,
+                internal_snapshot=internal,
+                broker_snapshot=broker,
+                state_hint="ready",
+            )
+
+        if (
+            broker.position_quantity == 0
+            and not broker_open_order_ids
+            and internal.expected_signed_quantity != 0
+            and not open_order_uncertainty
+        ):
+            repair_actions.append(RECONCILIATION_REPAIR_CONFIRM_FLAT_FROM_BROKER_TRUTH)
+            notes.append(
+                "Fresh broker truth is flat with no open orders, so stale internal exposure can be cleared "
+                "without requiring a newer fill publication."
+            )
+            return ReconciliationOutcome(
+                trigger=trigger,
+                classification=RECONCILIATION_CLASS_SAFE_REPAIR,
+                mismatches=tuple(mismatches),
+                repair_actions=tuple(repair_actions),
+                recommended_action="Safe flat repair will clear stale internal exposure using current broker truth.",
                 notes=tuple(notes),
                 freeze_new_entries=False,
                 requires_review=False,

@@ -3695,8 +3695,13 @@ def test_runtime_pidfile_replaces_dead_stale_pid(tmp_path: Path, monkeypatch: py
     assert _process_running(-1) is False
 
 
-def test_restore_startup_unresolved_mismatch_escalates_to_reconciling(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    _settings, _spec, lane_settings, repositories, lane_logger, build_runtime = _build_standard_lane_restart_fixture(tmp_path)
+def test_restore_startup_broker_flat_truth_clears_stale_internal_position(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _settings, _spec, lane_settings, repositories, lane_logger, build_runtime = _build_standard_lane_restart_fixture(
+        tmp_path,
+        lane_id="mgc_asian_drift_late_join_missing_anchor_long",
+    )
     seed_execution_engine = ExecutionEngine(broker=PaperBroker())
     seed_engine = StrategyEngine(
         settings=lane_settings,
@@ -3728,14 +3733,19 @@ def test_restore_startup_unresolved_mismatch_escalates_to_reconciling(tmp_path: 
     startup_fault = lane_runtime.restore_startup()
     payload = json.loads((lane_logger.artifact_dir / "restore_validation_latest.json").read_text(encoding="utf-8"))
 
-    assert startup_fault == "paper_startup_reconciliation_failed"
-    assert payload["restore_result"] == "RECONCILING"
-    assert restart_engine.state.reconcile_required is True
-    assert restart_engine.state.fault_code == "reconciliation_unsafe_ambiguity"
+    assert startup_fault is None
+    assert payload["restore_result"] == "SAFE_CLEANUP_READY"
+    assert restart_engine.state.strategy_status is StrategyStatus.READY
+    assert restart_engine.state.position_side is PositionSide.FLAT
+    assert restart_engine.state.reconcile_required is False
+    assert restart_engine.state.fault_code is None
 
 
 def test_restore_startup_unsafe_ambiguity_escalates_to_fault(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    _settings, _spec, lane_settings, repositories, lane_logger, build_runtime = _build_standard_lane_restart_fixture(tmp_path)
+    _settings, _spec, lane_settings, repositories, lane_logger, build_runtime = _build_standard_lane_restart_fixture(
+        tmp_path,
+        lane_id="mgc_asian_drift_late_join_missing_anchor_long",
+    )
     seed_execution_engine = ExecutionEngine(broker=PaperBroker())
     seed_engine = StrategyEngine(
         settings=lane_settings,

@@ -23,6 +23,7 @@ from ..execution.reconciliation import (
     RECONCILIATION_REPAIR_ADOPT_BROKER_POSITION,
     RECONCILIATION_REPAIR_CLEAR_STALE_OPEN_ORDER,
     RECONCILIATION_REPAIR_CONFIRM_FLAT,
+    RECONCILIATION_REPAIR_CONFIRM_FLAT_FROM_BROKER_TRUTH,
     RECONCILIATION_REPAIR_SYNC_BROKER_AVG_PRICE,
     RECONCILIATION_REPAIR_SYNC_BROKER_QTY,
     ReconciliationCoordinator,
@@ -217,7 +218,10 @@ class StrategyReconciler:
             for repair in outcome.repair_actions:
                 if repair == RECONCILIATION_REPAIR_CLEAR_STALE_OPEN_ORDER:
                     repaired = replace(repaired, open_broker_order_id=None)
-                elif repair == RECONCILIATION_REPAIR_CONFIRM_FLAT:
+                elif repair in {
+                    RECONCILIATION_REPAIR_CONFIRM_FLAT,
+                    RECONCILIATION_REPAIR_CONFIRM_FLAT_FROM_BROKER_TRUTH,
+                }:
                     repaired = _normalize_confirmed_flat_state(
                         repaired,
                     )
