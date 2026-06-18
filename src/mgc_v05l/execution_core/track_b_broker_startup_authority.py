@@ -6,8 +6,17 @@ from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
 from typing import Any, Mapping, Sequence
 
+from mgc_v05l.execution_core.track_b_current_state_authority import (
+    TRACK_B_FUTURES_ROOTS,
+    broker_open_orders,
+    broker_positions,
+    current_state_same_contract,
+    is_track_b_futures_position,
+    is_track_b_order,
+    normalize_current_broker_position,
+    open_order_truth_unknown_count,
+)
 
-TRACK_B_FUTURES_ROOTS = frozenset({"MES", "MNQ", "MGC", "GC", "NQ", "ES", "ZT", "ZF", "ZN", "ZB"})
 FRESH_COMPLETE_CLEAN_BROKER_TRUTH = "FRESH_COMPLETE_CLEAN_BROKER_TRUTH"
 FRESH_COMPLETE_MANAGED_BROKER_TRUTH = "FRESH_COMPLETE_MANAGED_BROKER_TRUTH"
 BROKER_TRUTH_NOT_STARTUP_CLEAN = "BROKER_TRUTH_NOT_STARTUP_CLEAN"
@@ -83,11 +92,11 @@ def classify_fresh_complete_clean_broker_truth(
     if broker_truth_status.get("open_orders_complete") is not True:
         blockers.append("broker_open_orders_incomplete")
 
-    positions = _position_rows(positions_snapshot) or _position_rows(broker_truth_status)
+    positions = tuple(broker_positions(positions_snapshot) or _position_rows(broker_truth_status))
     track_b_positions = tuple(row for row in positions if _is_track_b_future(row, roots) and _quantity(row) != 0.0)
-    open_orders = _open_order_rows(open_orders_snapshot) or _open_order_rows(broker_truth_status)
-    track_b_open_orders = tuple(row for row in open_orders if _is_track_b_future(row, roots))
-    unrelated_open_orders = tuple(row for row in open_orders if not _is_track_b_future(row, roots))
+    open_orders = tuple(broker_open_orders(open_orders_snapshot) or _open_order_rows(broker_truth_status))
+    track_b_open_orders = tuple(row for row in open_orders if _is_track_b_order(row, roots))
+    unrelated_open_orders = tuple(row for row in open_orders if not _is_track_b_order(row, roots))
     same_contract_conflicts = _same_contract_order_conflicts(
         broker_positions=track_b_positions,
         open_orders=track_b_open_orders,
@@ -110,7 +119,6 @@ def classify_fresh_complete_clean_broker_truth(
         broker_truth_status,
         open_orders_snapshot,
         open_order_truth,
-        reconciliation,
         roots=roots,
     )
     unrelated_open_order_count = len(unrelated_open_orders)
@@ -121,7 +129,10 @@ def classify_fresh_complete_clean_broker_truth(
     elif broker_open_order_count != 0:
         blockers.append("track_b_futures_open_orders_present")
 
-    unknown_open_order_count = _unknown_open_order_count(broker_truth_status, open_orders_snapshot, open_order_truth, reconciliation)
+    unknown_open_order_count = max(
+        _unknown_open_order_count(broker_truth_status, open_orders_snapshot),
+        open_order_truth_unknown_count(open_order_truth),
+    )
     if unknown_open_order_count != 0:
         blockers.append("unknown_open_orders_present")
 
@@ -183,12 +194,13 @@ def _open_order_rows(payload: Mapping[str, Any]) -> tuple[Mapping[str, Any], ...
 
 
 def _is_track_b_future(row: Mapping[str, Any], roots: frozenset[str]) -> bool:
-    sec_type = str(row.get("security_type") or row.get("secType") or "FUT").upper()
-    if sec_type and sec_type != "FUT":
-        return False
-    symbol = str(row.get("symbol") or "").upper()
-    local_symbol = str(row.get("local_symbol") or row.get("localSymbol") or "").upper()
-    return symbol in roots or any(local_symbol.startswith(root) for root in roots)
+    _ = roots
+    return is_track_b_futures_position(row)
+
+
+def _is_track_b_order(row: Mapping[str, Any], roots: frozenset[str]) -> bool:
+    _ = roots
+    return is_track_b_order(row)
 
 
 def _quantity(row: Mapping[str, Any]) -> float:
@@ -257,7 +269,17 @@ def _managed_position_matches_broker_position(
     broker_position: Mapping[str, Any],
     expected_account_id: str | None,
 ) -> bool:
-    broker_account = _text(broker_position.get("account_id") or broker_position.get("account"))
+    broker_symbol = _text(broker_position.get("symbol") or broker_position.get("track_b_root") or broker_position.get("instrument"))
+    broker_local_symbol = _text(broker_position.get("local_symbol") or broker_position.get("localSymbol"))
+    broker_con_id = _int(broker_position.get("con_id") or broker_position.get("conId"), default=0)
+    normalized_broker = normalize_current_broker_position(
+        broker_position,
+        account_id=expected_account_id or _text(broker_position.get("account_id") or broker_position.get("account")),
+        instrument=broker_symbol,
+        local_symbol=broker_local_symbol,
+        con_id=broker_con_id,
+    ) or dict(broker_position)
+    broker_account = _text(normalized_broker.get("account_id") or normalized_broker.get("account"))
     managed_broker = _mapping(managed_position.get("broker_position"))
     lifecycle = _mapping(managed_position.get("lifecycle_position"))
     managed_account = _text(
@@ -273,9 +295,9 @@ def _managed_position_matches_broker_position(
     if broker_account and managed_account and broker_account != managed_account:
         return False
 
-    broker_con_id = _text(broker_position.get("con_id") or broker_position.get("conId"))
+    broker_con_id = _text(normalized_broker.get("con_id") or normalized_broker.get("conId"))
     managed_con_id = _text(managed_position.get("con_id") or managed_broker.get("con_id") or lifecycle.get("con_id"))
-    broker_local_symbol = _text(broker_position.get("local_symbol") or broker_position.get("localSymbol"))
+    broker_local_symbol = _text(normalized_broker.get("local_symbol") or normalized_broker.get("localSymbol"))
     managed_local_symbol = _text(
         managed_position.get("local_symbol")
         or managed_position.get("localSymbol")
@@ -302,7 +324,7 @@ def _managed_position_matches_broker_position(
     if not _text(managed_position.get("managed_exit_policy_id") or lifecycle.get("managed_exit_policy_id")):
         return False
 
-    return _signed_quantity(managed_position) == _decimal_quantity(broker_position)
+    return _signed_quantity(managed_position) == _decimal_quantity(normalized_broker)
 
 
 def _managed_position_is_current_open(row: Mapping[str, Any]) -> bool:
@@ -384,13 +406,12 @@ def _same_contract_order_conflicts(
 
 
 def _same_contract(left: Mapping[str, Any], right: Mapping[str, Any]) -> bool:
-    left_con_id = _text(left.get("con_id") or left.get("conId"))
-    right_con_id = _text(right.get("con_id") or right.get("conId"))
-    if left_con_id and right_con_id:
-        return left_con_id == right_con_id
-    left_local = _text(left.get("local_symbol") or left.get("localSymbol"))
-    right_local = _text(right.get("local_symbol") or right.get("localSymbol"))
-    return bool(left_local and right_local and left_local == right_local)
+    return current_state_same_contract(
+        right,
+        account_id=_text(left.get("account_id") or left.get("account")),
+        local_symbol=_text(left.get("local_symbol") or left.get("localSymbol")),
+        con_id=_int(left.get("con_id") or left.get("conId")),
+    )
 
 
 def _unknown_open_order_count(*payloads: Mapping[str, Any]) -> int:

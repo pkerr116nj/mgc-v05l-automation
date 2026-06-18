@@ -25,6 +25,27 @@ def test_clean_fresh_broker_truth_downgrades_stale_derived_artifacts() -> None:
     assert "open_order_truth_classification:ORDER_TRUTH_STALE" in authority.diagnostics
 
 
+def test_stale_reconciliation_unknown_orders_are_diagnostic_when_current_order_truth_is_clean() -> None:
+    authority = classify_fresh_complete_clean_broker_truth(
+        broker_truth_status=_status(),
+        positions_snapshot=_positions(),
+        open_orders_snapshot=_orders(),
+        reconciliation={
+            "classification": "TRACK_B_PAPER_BROKER_RECONCILIATION_BLOCKED",
+            "unknown_broker_open_order_count": 4,
+            "track_b_broker_open_order_count": 3,
+        },
+        open_order_truth={"classification": "NO_OPEN_ORDERS", "unknown_open_order_count": 0},
+        expected_account_id="DUM882026",
+    )
+
+    assert authority.broker_truth_clean is True
+    assert authority.blockers == ()
+    assert authority.broker_open_order_count == 0
+    assert authority.unknown_open_order_count == 0
+    assert "reconciliation_classification:TRACK_B_PAPER_BROKER_RECONCILIATION_BLOCKED" in authority.diagnostics
+
+
 def test_actual_broker_position_blocks_startup_authority() -> None:
     positions = _positions()
     positions["positions"][0]["quantity"] = "1"

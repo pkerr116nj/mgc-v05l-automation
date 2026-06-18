@@ -590,6 +590,7 @@ def test_stale_dirty_reconciliation_is_diagnostic_when_broker_truth_is_flat_and_
             "current_scope_review_required_count": 2,
             "track_b_broker_position_count": 2,
             "track_b_broker_open_order_count": 1,
+            "unknown_broker_open_order_count": 3,
         }
     )
     reconciliation_path.write_text(json.dumps(reconciliation), encoding="utf-8")
@@ -597,7 +598,9 @@ def test_stale_dirty_reconciliation_is_diagnostic_when_broker_truth_is_flat_and_
     result = _classification(tmp_path)
 
     assert result["allowed"] is True
+    assert result["unknown_open_order_count"] == 0
     assert "broker_reconciliation_dirty" not in _codes(result)
+    assert "unknown_open_orders_present" not in _codes(result)
     assert "review_required_current_scope" not in _codes(result)
     assert {
         "broker_reconciliation_dirty_diagnostic",

@@ -14,7 +14,6 @@ from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
 from typing import Any, Mapping
 
-from mgc_v05l.execution_core.track_b_broker_startup_authority import TRACK_B_FUTURES_ROOTS
 from mgc_v05l.execution_core.track_b_contract_identity import normalize_track_b_contract_row
 
 CURRENT_STATE_AUTHORITY_ALLOWED = "CURRENT_STATE_AUTHORITY_ALLOWED"
@@ -26,6 +25,7 @@ RISK_TRUTH_CRITICAL = "RISK_TRUTH_CRITICAL"
 DIAGNOSTIC_ONLY = "DIAGNOSTIC_ONLY"
 
 EXPECTED_PAPER_ACCOUNT = "DUM882026"
+TRACK_B_FUTURES_ROOTS = frozenset({"MES", "MNQ", "MGC", "GC", "NQ", "ES", "ZT", "ZF", "ZN", "ZB"})
 TRACK_B_FUTURES_SYMBOLS = set(TRACK_B_FUTURES_ROOTS)
 DEFAULT_PRICE_MAX_AGE_SECONDS = 180.0
 

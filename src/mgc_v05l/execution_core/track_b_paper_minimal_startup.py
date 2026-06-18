@@ -16,9 +16,9 @@ from pathlib import Path
 from typing import Any, Mapping, Sequence
 
 from mgc_v05l.execution_core.track_b_broker_startup_authority import (
-    TRACK_B_FUTURES_ROOTS,
     classify_fresh_complete_clean_broker_truth,
 )
+from mgc_v05l.execution_core.track_b_current_state_authority import is_track_b_futures_position
 
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
@@ -649,12 +649,7 @@ def _fresh_ibkr_read_only_broker_truth(
 
 
 def _is_track_b_futures_position_row(row: Mapping[str, Any]) -> bool:
-    security_type = str(row.get("security_type") or row.get("secType") or "").strip().upper()
-    if security_type != "FUT":
-        return False
-    symbol = str(row.get("symbol") or row.get("track_b_root") or "").strip().upper()
-    local_symbol = str(row.get("local_symbol") or row.get("localSymbol") or "").strip().upper()
-    return symbol in TRACK_B_FUTURES_ROOTS or any(local_symbol.startswith(root) for root in TRACK_B_FUTURES_ROOTS)
+    return is_track_b_futures_position(row)
 
 
 def _explicit_paper_profile(config_paths: Sequence[str]) -> str | None:
