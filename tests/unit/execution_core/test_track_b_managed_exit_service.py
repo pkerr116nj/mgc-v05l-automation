@@ -464,6 +464,66 @@ def test_broker_truth_sweeper_adopts_broker_backed_zt_position(tmp_path: Path) -
     assert position["entry_price"] == "103.1875"
 
 
+def test_broker_truth_sweeper_adopts_broker_backed_zf_position(tmp_path: Path) -> None:
+    _broker_truth(
+        tmp_path,
+        symbol="ZF",
+        local_symbol="ZFU6",
+        con_id=842590380,
+        expiry="20260930",
+        quantity="1.0",
+    )
+    registry = tmp_path / "outputs/track_b_execution_core/managed_positions/latest_managed_positions.json"
+    _write_json(registry, {"classification": "NO_MANAGED_POSITIONS", "managed_positions": []})
+    lifecycle_id = "bridge_fill_ZF|1m|2026-06-17T23:24:00Z|BUY_TO_OPEN"
+    _write_live_entry_fill(
+        tmp_path,
+        trade_id="trade-zf",
+        lifecycle_id=lifecycle_id,
+        lane_id="zf_globex_active_participation_long",
+        generated_at=datetime(2026, 6, 18, 6, 30, 3, 350715, tzinfo=UTC),
+        symbol="ZF",
+        local_symbol="ZFU6",
+        con_id=842590380,
+        side="LONG",
+        action="BUY",
+        order_id="1",
+        perm_id="2007198161",
+        exec_id="0000e1a7.6a48e639.01.01",
+        price="106.8359375",
+    )
+    _write_live_lifecycle_open(
+        tmp_path,
+        trade_id="trade-zf",
+        lifecycle_id=lifecycle_id,
+        lane_id="zf_globex_active_participation_long",
+        generated_at=datetime(2026, 6, 18, 6, 31, 45, tzinfo=UTC),
+        symbol="ZF",
+        local_symbol="ZFU6",
+        con_id=842590380,
+        side="LONG",
+        action="BUY",
+        policy_id="GLOBEX_ACTIVE_EVIDENCE_TIMEBOX_15M_EXIT_V1",
+    )
+
+    report = _run_broker_truth_sweeper(
+        config=TrackBManagedExitServiceConfig(repo_root=tmp_path),
+        now=NOW,
+        write=True,
+    )
+
+    updated = json.loads(registry.read_text(encoding="utf-8"))
+    [position] = updated["managed_positions"]
+    assert report["classification"] == "MANAGED_EXIT_BROKER_TRUTH_SWEEP_ADOPTED"
+    assert position["classification"] == "OPEN_MANAGED_MATCHED"
+    assert position["local_symbol"] == "ZFU6"
+    assert position["con_id"] == 842590380
+    assert position["side"] == "LONG"
+    assert position["lane_id"] == "zf_globex_active_participation_long"
+    assert position["managed_exit_policy_id"] == "GLOBEX_ACTIVE_EVIDENCE_TIMEBOX_15M_EXIT_V1"
+    assert position["entry_time"] == "2026-06-18T06:30:03.350715+00:00"
+
+
 def test_broker_truth_sweeper_repairs_zt_policy_from_registry_metadata(tmp_path: Path) -> None:
     _broker_truth(
         tmp_path,
