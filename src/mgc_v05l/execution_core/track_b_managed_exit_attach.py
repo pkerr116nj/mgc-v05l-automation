@@ -1936,8 +1936,6 @@ def _prior_lifecycle_close_is_stale_diagnostic(
 ) -> bool:
     if not prior_lifecycle_close:
         return False
-    if "close fill" not in prior_lifecycle_close.lower():
-        return False
     if duplicate_close:
         return False
     return exit_authority_allows and position_ok

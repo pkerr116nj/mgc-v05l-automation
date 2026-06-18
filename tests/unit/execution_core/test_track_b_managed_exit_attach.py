@@ -174,11 +174,15 @@ def test_blocked_on_duplicate_close_order(tmp_path: Path) -> None:
     assert payload["duplicate_close_order_detected"] is True
 
 
-def test_blocked_when_lifecycle_already_has_prior_close_submit(tmp_path: Path) -> None:
+def test_prior_lifecycle_close_submit_is_diagnostic_when_fresh_order_truth_has_no_close(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
     config = _seed(
         tmp_path,
         completed_bars=3,
         config_overrides={"apply": True, "operator_authorized_managed_exit": True},
+        open_order_overrides={"classification": "NO_OPEN_ORDERS", "unknown_open_order_count": 0},
     )
     lifecycle_path = (
         tmp_path
@@ -195,14 +199,34 @@ def test_blocked_when_lifecycle_already_has_prior_close_submit(tmp_path: Path) -
     }
     _write_json(lifecycle_path, lifecycle)
 
+    class Result:
+        report_json = lifecycle_path
+        report = {
+            **lifecycle,
+            "paper_lifecycle_classification": "TRACK_B_STRATEGY_PAPER_OPEN_MANAGED",
+            "final_position_status": "OPEN_MANAGED",
+            "broker_state_mutated": False,
+            "submit_attempted": False,
+            "close_submit_attempt": None,
+        }
+
+    called: dict[str, Any] = {}
+
+    def fake_maintain(**kwargs: Any) -> Result:
+        called["maintain"] = kwargs
+        return Result()
+
+    monkeypatch.setattr(attach_module, "maintain_open_track_b_strategy_managed_paper_lifecycle", fake_maintain)
+
     payload = build_track_b_managed_exit_attach_plan(config=config, now=NOW)
 
-    assert payload["classification"] == MANAGED_EXIT_BLOCKED_DUPLICATE_CLOSE_ORDER
-    assert payload["apply_enabled"] is False
-    assert payload["submit_attempted"] is False
+    assert payload["classification"] == "TRACK_B_STRATEGY_PAPER_OPEN_MANAGED"
+    assert payload["apply_enabled"] is True
     assert payload["broker_state_mutated"] is False
-    assert payload["duplicate_close_order_detected"] is True
-    assert "broker order 36" in payload["prior_lifecycle_close_submit_blocker"]
+    assert payload["duplicate_close_order_detected"] is False
+    assert payload["prior_lifecycle_close_submit_blocker"] is None
+    assert "broker order 36" in payload["prior_lifecycle_close_stale_diagnostic"]
+    assert called["maintain"]["existing_lifecycle_report"]["close_submit_attempt"]["broker_order_id"] == "36"
 
 
 def test_prior_lifecycle_close_fill_is_diagnostic_when_broker_risk_still_open_and_v11_allows(
