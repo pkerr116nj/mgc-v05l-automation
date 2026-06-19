@@ -794,7 +794,12 @@ def _write_symbol_runtime_artifacts_from_bars(
     generated_at: datetime,
     raw_dbn_path: Path,
 ) -> list[Path]:
-    one_minute = [dict(bar) for bar in bars]
+    source_one_minute = [dict(bar) for bar in bars]
+    one_minute = _merge_existing_runtime_1m_bars(
+        config=config,
+        symbol=symbol,
+        bars=source_one_minute,
+    )
     timeframe_bars = _timeframe_bars(one_minute)
     written: list[Path] = []
     for timeframe in PHASE1_RUNTIME_TIMEFRAMES:
@@ -809,13 +814,27 @@ def _write_symbol_runtime_artifacts_from_bars(
         )
         path = _runtime_candle_path_for_listener(config=config, symbol=symbol, timeframe=timeframe)
         existing = _read_json(path)
-        if payload["realtime_feed_confirmed"] is not True and isinstance(existing, dict):
-            if _phase1_payload_confirmed_fresh(
-                payload=existing,
-                live_symbol=live_symbol,
-                symbol=symbol,
-                timeframe=timeframe,
-                now=generated_at,
+        existing_confirmed = isinstance(existing, dict) and _phase1_payload_confirmed_fresh(
+            payload=existing,
+            live_symbol=live_symbol,
+            symbol=symbol,
+            timeframe=timeframe,
+            now=generated_at,
+        )
+        source_payload = _runtime_payload_for_service(
+            config=config,
+            live_symbol=live_symbol,
+            symbol=symbol,
+            timeframe=timeframe,
+            generated_at=generated_at,
+            bars=_timeframe_bars(source_one_minute).get(timeframe, []),
+            raw_dbn_path=raw_dbn_path,
+        )
+        if existing_confirmed:
+            if payload["realtime_feed_confirmed"] is not True or source_payload["realtime_feed_confirmed"] is not True:
+                continue
+            if _parse_datetime(existing.get("last_completed_bar_ts")) == _parse_datetime(
+                payload.get("last_completed_bar_ts")
             ):
                 continue
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -832,6 +851,20 @@ def _write_symbol_runtime_artifacts_from_bars(
         )
         written.extend(backfill_written)
     return written
+
+
+def _merge_existing_runtime_1m_bars(
+    *,
+    config: Phase1DatabentoLiveListenerConfig,
+    symbol: str,
+    bars: Sequence[Mapping[str, Any]],
+) -> list[dict[str, Any]]:
+    existing_payload = _read_json(_runtime_candle_path_for_listener(config=config, symbol=symbol, timeframe="1m"))
+    existing_bars: list[dict[str, Any]] = []
+    if isinstance(existing_payload, Mapping):
+        existing_bars = _normalize_live_1m_candles(existing_payload)
+    merged = _dedupe_phase1_bars([*existing_bars, *[dict(bar) for bar in bars]])
+    return merged[-int(config.max_bars) :]
 
 
 def _write_intraday_backfill_artifacts_from_bars(
@@ -1285,7 +1318,7 @@ def _live_config_for_symbol(
 
 
 def _normalize_live_1m_candles(payload: Mapping[str, Any]) -> list[dict[str, Any]]:
-    raw = payload.get("candles") or payload.get("candle_history") or []
+    raw = payload.get("candles") or payload.get("candle_history") or payload.get("bars") or []
     bars: list[dict[str, Any]] = []
     if not isinstance(raw, list):
         return bars
@@ -1321,6 +1354,52 @@ def _normalize_live_1m_candles(payload: Mapping[str, Any]) -> list[dict[str, Any
     return sorted(bars, key=lambda item: str(item["bar_end"]))
 
 
+def _dense_no_trade_1m_candles(
+    one_minute: Sequence[Mapping[str, Any]],
+    *,
+    max_gap_minutes: int = 10,
+) -> list[dict[str, Any]]:
+    """Fill sparse Databento OHLCV no-trade minutes for derived runtime bars."""
+
+    source = [dict(bar) for bar in one_minute]
+    if len(source) < 2:
+        return source
+    dense: list[dict[str, Any]] = []
+    previous_end: datetime | None = None
+    previous_close: float | None = None
+    max_gap = max(int(max_gap_minutes), 1)
+    for bar in source:
+        current_end = _parse_datetime(bar.get("bar_end"))
+        if current_end is None:
+            continue
+        if previous_end is not None and previous_close is not None:
+            missing_minutes = int((current_end - previous_end).total_seconds() // 60) - 1
+            if 0 < missing_minutes <= max_gap:
+                for offset in range(1, missing_minutes + 1):
+                    end = previous_end + timedelta(minutes=offset)
+                    dense.append(
+                        {
+                            "bar_start": (end - timedelta(minutes=1)).isoformat(),
+                            "bar_end": end.isoformat(),
+                            "open": previous_close,
+                            "high": previous_close,
+                            "low": previous_close,
+                            "close": previous_close,
+                            "volume": 0.0,
+                            "completed": True,
+                            "synthetic_no_trade": True,
+                            "source": "DATABENTO_OHLCV_1M_NO_TRADE_GAP_FILL",
+                        }
+                    )
+        dense.append(bar)
+        previous_end = current_end
+        try:
+            previous_close = float(bar.get("close"))
+        except (TypeError, ValueError):
+            previous_close = None
+    return dense
+
+
 def _fallback_legacy_live_event(
     *, config: Phase1DatabentoLiveRuntimeCandlesConfig, symbol: str
 ) -> dict[str, Any] | None:
@@ -1343,10 +1422,11 @@ def _fallback_legacy_live_event(
 def _timeframe_bars(one_minute: list[dict[str, Any]]) -> dict[str, list[dict[str, Any]]]:
     if not one_minute:
         return {}
+    dense_one_minute = _dense_no_trade_1m_candles(one_minute)
     return {
         "1m": one_minute,
-        "3m": _aggregate_bars(one_minute, minutes=3),
-        "5m": _aggregate_bars(one_minute, minutes=5),
+        "3m": _aggregate_bars(dense_one_minute, minutes=3),
+        "5m": _aggregate_bars(dense_one_minute, minutes=5),
     }
 
 

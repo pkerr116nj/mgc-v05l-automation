@@ -587,6 +587,119 @@ def test_live_listener_rolls_1m_3m_5m_artifacts_from_live_records(tmp_path: Path
         assert payload["live_money_eligible"] is False
 
 
+def test_live_listener_gap_fills_sparse_rates_ohlcv_for_derived_timeframes(tmp_path: Path) -> None:
+    now = datetime(2026, 6, 19, 11, 36, tzinfo=timezone.utc)
+    records = [
+        FakeOhlcvRecord(symbol="ZT", ts_event=datetime(2026, 6, 19, 11, minute, tzinfo=timezone.utc))
+        for minute in (27, 28, 29, 30, 31, 33, 34, 35)
+    ]
+    client = FakeLiveClient(records)
+
+    result = run_phase1_databento_live_listener(
+        config=_listener_config(tmp_path, symbols=("ZT",), now=now),
+        live_client_factory=lambda _key: client,
+        now_func=lambda: now,
+    )
+
+    assert result.status["realtime_feed_confirmed_count"] == 1
+    one_minute_payload = json.loads(
+        (
+            tmp_path
+            / "outputs"
+            / "track_b_execution_core"
+            / "phase1_runtime_market_data"
+            / "ZT"
+            / "1m"
+            / "latest_runtime_candles.json"
+        ).read_text(encoding="utf-8")
+    )
+    assert one_minute_payload["bar_count"] == 8
+
+    five_minute_payload = json.loads(
+        (
+            tmp_path
+            / "outputs"
+            / "track_b_execution_core"
+            / "phase1_runtime_market_data"
+            / "ZT"
+            / "5m"
+            / "latest_runtime_candles.json"
+        ).read_text(encoding="utf-8")
+    )
+    assert five_minute_payload["realtime_feed_confirmed"] is True
+    assert five_minute_payload["last_completed_bar_ts"] == "2026-06-19T11:35:00+00:00"
+    latest_bucket = five_minute_payload["bars"][-1]
+    assert latest_bucket["source_bar_count"] == 5
+    assert latest_bucket["bar_end"] == "2026-06-19T11:35:00+00:00"
+
+
+def test_live_listener_restart_merges_existing_hot_1m_before_derived_rollups(tmp_path: Path) -> None:
+    now = datetime(2026, 6, 19, 11, 36, tzinfo=timezone.utc)
+    existing_rows = [
+        {
+            "bar_start": (datetime(2026, 6, 19, 11, minute, tzinfo=timezone.utc) - timedelta(minutes=1)).isoformat(),
+            "bar_end": datetime(2026, 6, 19, 11, minute, tzinfo=timezone.utc).isoformat(),
+            "open": 102.0,
+            "high": 102.0,
+            "low": 102.0,
+            "close": 102.0,
+            "volume": 1.0,
+            "completed": True,
+        }
+        for minute in (27, 28, 29, 30, 31, 33, 34, 35)
+    ]
+    one_minute_path = (
+        tmp_path
+        / "outputs"
+        / "track_b_execution_core"
+        / "phase1_runtime_market_data"
+        / "ZT"
+        / "1m"
+        / "latest_runtime_candles.json"
+    )
+    one_minute_path.parent.mkdir(parents=True, exist_ok=True)
+    one_minute_path.write_text(
+        json.dumps(
+            {
+                "source": "DATABENTO_REALTIME_PHASE1",
+                "generated_at": now.isoformat(),
+                "symbol": "ZT",
+                "timeframe": "1m",
+                "bar_count": len(existing_rows),
+                "last_completed_bar_ts": existing_rows[-1]["bar_end"],
+                "historical_seed_ready": False,
+                "realtime_feed_confirmed": True,
+                "research_artifact_used": False,
+                "archive_artifact_used": False,
+                "bars": existing_rows,
+            }
+        ),
+        encoding="utf-8",
+    )
+    client = FakeLiveClient([FakeOhlcvRecord(symbol="ZT", ts_event=datetime(2026, 6, 19, 2, 45, tzinfo=timezone.utc))])
+
+    result = run_phase1_databento_live_listener(
+        config=_listener_config(tmp_path, symbols=("ZT",), now=now),
+        live_client_factory=lambda _key: client,
+        now_func=lambda: now,
+    )
+
+    assert result.status["realtime_feed_confirmed_count"] == 1
+    five_minute_payload = json.loads(
+        (
+            tmp_path
+            / "outputs"
+            / "track_b_execution_core"
+            / "phase1_runtime_market_data"
+            / "ZT"
+            / "5m"
+            / "latest_runtime_candles.json"
+        ).read_text(encoding="utf-8")
+    )
+    assert five_minute_payload["realtime_feed_confirmed"] is True
+    assert five_minute_payload["last_completed_bar_ts"] == "2026-06-19T11:35:00+00:00"
+
+
 def test_live_listener_stale_sparse_data_fails_closed(tmp_path: Path) -> None:
     client = FakeLiveClient(_live_records(1))
 
