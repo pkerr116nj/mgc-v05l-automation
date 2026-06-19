@@ -2060,7 +2060,7 @@ if progress:
         progress_fresh_for_post_truth_startup = (
             progress_pid == pid
             and (not progress_runtime or not truth_runtime or progress_runtime == truth_runtime)
-            and progress_state in {"STARTED", "IN_PROGRESS", "COMPLETED"}
+            and progress_state in {"STARTED", "IN_PROGRESS", "COMPLETED", "AWAITING_SUBMIT_AUTHORITY", "TRADING_LOOP_ENTERED"}
             and progress_stage in {"authority_refresh", "watchdog_liveness_refresh", "lane_restore", "runtime_cycle"}
             and (datetime.now(timezone.utc) - progress_generated).total_seconds() <= 15
         )

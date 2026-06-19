@@ -197,6 +197,8 @@ def test_paper_minimal_start_accepts_post_truth_progress_heartbeat_without_first
     assert "paper_post_truth_startup_progress.json" in source
     assert "progress_fresh_for_post_truth_startup" in verifier_block
     assert "and not progress_fresh_for_post_truth_startup" in verifier_block
+    assert '"AWAITING_SUBMIT_AUTHORITY"' in verifier_block
+    assert '"TRADING_LOOP_ENTERED"' in verifier_block
     assert "AWAITING_SUBMIT_AUTHORITY" in progress_block
     assert "TRADING_LOOP_ENTERED" in progress_block
     assert (
