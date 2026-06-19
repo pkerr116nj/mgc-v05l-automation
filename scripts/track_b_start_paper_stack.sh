@@ -2244,24 +2244,12 @@ if not isinstance(truth, dict):
     print("false")
     raise SystemExit(0)
 if isinstance(marker, dict):
-    if marker.get("stage") != "runtime_cycle" or marker.get("state") not in {
-        "STARTED",
-        "IN_PROGRESS",
-        "COMPLETED",
-        "AWAITING_SUBMIT_AUTHORITY",
-        "TRADING_LOOP_ENTERED",
-    }:
+    if marker.get("stage") != "runtime_cycle" or marker.get("state") != "AWAITING_SUBMIT_AUTHORITY":
         print("false")
         raise SystemExit(0)
 elif progress.get("state") != "AWAITING_SUBMIT_AUTHORITY":
     print("false")
     raise SystemExit(0)
-if isinstance(marker, dict) and marker.get("state") == "COMPLETED":
-    marker_at = parse_ts(marker.get("generated_at") or marker.get("heartbeat_at"))
-    truth_at = parse_ts(truth.get("generated_at"))
-    if marker_at is not None and truth_at is not None and truth_at <= marker_at:
-        print("false")
-        raise SystemExit(0)
 print("true")
 PY
 }
@@ -2956,18 +2944,9 @@ if paper_minimal_startup_enabled; then
             write_startup_artifact "RUNTIME_RUNNING_WAITING_FOR_DETACHED_CHILD_AUTHORITY" "Runtime matched PAPER_MINIMAL_STARTUP_V1 shape; waiting for fresh detached-child monitor authority before durable readiness." "${pid}" >/dev/null
             continue
           fi
-          if (( SECONDS - stable_since >= STABLE_SECONDS )); then
-            update_detached_child_monitor "${pid}" >/dev/null || true
-            detached_child_ready="$(detached_child_ready_authority "${pid}" 2>/dev/null || true)"
-            if [[ "${detached_child_ready}" != "true" ]]; then
-              write_startup_artifact "RUNTIME_EXITED_BEFORE_DURABLE_READY" "Runtime passed the stability window, but refreshed detached-child monitor authority did not prove a live durable runtime." "${pid}"
-              exit 1
-            fi
-            write_runtime_submit_authority_grant "${pid}"
-            write_startup_artifact "READY_SUBMIT_CAPABLE" "Track B PAPER runtime started through direct PAPER_MINIMAL_STARTUP_V1 process path, matched required runtime shape, survived ${STABLE_SECONDS}s, received explicit wrapper-owned submit authority, and retained authoritative wrapper/child ownership; runtime truth advancement is diagnostic after shape verification." "${pid}"
+          write_runtime_submit_authority_grant "${pid}"
+          write_startup_artifact "READY_SUBMIT_CAPABLE" "Track B PAPER runtime reached AWAITING_SUBMIT_AUTHORITY with same-PID commit/profile/lane-count shape and authoritative wrapper/child ownership; wrapper wrote explicit submit authority without a later liveness-window race." "${pid}"
           exit 0
-          fi
-          write_startup_artifact "RUNTIME_RUNNING_WAITING_FOR_MINIMAL_STARTUP_STABILITY" "Runtime matched PAPER_MINIMAL_STARTUP_V1 shape; waiting for ${STABLE_SECONDS}s same-PID liveness and advancing runtime truth or post-truth startup progress." "${pid}" >/dev/null
         else
           stable_since=0
           first_truth_generated_at=""
@@ -3014,9 +2993,9 @@ if paper_minimal_startup_enabled; then
     update_detached_child_monitor "${observed_runtime_pid}" >/dev/null || true
     truth_generated_at="$(verify_direct_paper_runtime_shape "${observed_runtime_pid}" "${source_commit}" 2>/dev/null || true)"
     detached_child_ready="$(detached_child_ready_authority "${observed_runtime_pid}" 2>/dev/null || true)"
-    if [[ -n "${truth_generated_at}" && "${detached_child_ready}" == "true" ]] && (( SECONDS - candidate_seen_since >= STABLE_SECONDS )); then
+    if [[ -n "${truth_generated_at}" && "${detached_child_ready}" == "true" ]]; then
       write_runtime_submit_authority_grant "${observed_runtime_pid}"
-      write_startup_artifact "READY_SUBMIT_CAPABLE" "Track B PAPER runtime reached grant-eligible monitor authority at the startup deadline, matched required runtime shape, survived ${STABLE_SECONDS}s same-PID liveness, and received explicit wrapper-owned submit authority." "${observed_runtime_pid}"
+      write_startup_artifact "READY_SUBMIT_CAPABLE" "Track B PAPER runtime reached AWAITING_SUBMIT_AUTHORITY at the startup deadline with matching same-PID runtime shape and authoritative wrapper/child ownership; wrapper wrote explicit submit authority without a later liveness-window race." "${observed_runtime_pid}"
       exit 0
     fi
   fi
