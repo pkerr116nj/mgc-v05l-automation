@@ -2905,6 +2905,7 @@ fi
 if paper_minimal_startup_enabled; then
   deadline=$((SECONDS + WAIT_SECONDS))
   candidate_pid=""
+  candidate_seen_since=0
   stable_since=0
   first_truth_generated_at=""
   last_truth_generated_at=""
@@ -2921,6 +2922,7 @@ if paper_minimal_startup_enabled; then
       update_detached_child_monitor "${pid}" >/dev/null || true
       if [[ "${candidate_pid}" != "${pid}" ]]; then
         candidate_pid="${pid}"
+        candidate_seen_since="${SECONDS}"
         stable_since=0
         first_truth_generated_at=""
         last_truth_generated_at=""
@@ -2930,11 +2932,13 @@ if paper_minimal_startup_enabled; then
         truth_generated_at="$(verify_direct_paper_runtime_shape "${pid}" "${source_commit}" 2>/dev/null || true)"
         if [[ -n "${truth_generated_at}" ]]; then
           if [[ "${stable_since}" -eq 0 ]]; then
-            stable_since="${SECONDS}"
+            stable_since="${candidate_seen_since}"
+            if [[ "${stable_since}" -le 0 ]]; then
+              stable_since="${SECONDS}"
+            fi
             first_truth_generated_at="${truth_generated_at}"
             last_truth_generated_at="${truth_generated_at}"
             write_startup_artifact "RUNTIME_RUNNING_WAITING_FOR_MINIMAL_STARTUP_STABILITY" "Runtime matched PAPER_MINIMAL_STARTUP_V1 shape; waiting for ${STABLE_SECONDS}s same-PID liveness and advancing runtime truth or post-truth startup progress." "${pid}" >/dev/null
-            continue
           fi
           if [[ "${truth_generated_at}" != "${last_truth_generated_at}" ]]; then
             last_truth_generated_at="${truth_generated_at}"

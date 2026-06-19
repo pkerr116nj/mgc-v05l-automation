@@ -160,6 +160,9 @@ def test_paper_minimal_start_does_not_loop_waiting_for_runtime_truth_advancement
     assert "RUNTIME_EXITED_BEFORE_DURABLE_READY" in minimal_wait_block
     assert "STABLE_SECONDS" in minimal_wait_block
     assert "candidate_pid" in minimal_wait_block
+    assert "candidate_seen_since" in minimal_wait_block
+    assert 'candidate_seen_since="${SECONDS}"' in minimal_wait_block
+    assert 'stable_since="${candidate_seen_since}"' in minimal_wait_block
     assert "first_truth_generated_at" in minimal_wait_block
     assert "last_truth_generated_at" in minimal_wait_block
     assert "truth_advanced" in minimal_wait_block
