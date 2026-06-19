@@ -2918,6 +2918,7 @@ if paper_minimal_startup_enabled; then
     fi
     if [[ -n "${pid}" ]] && ps -p "${pid}" >/dev/null 2>&1; then
       observed_runtime_pid="${pid}"
+      update_detached_child_monitor "${pid}" >/dev/null || true
       if [[ "${candidate_pid}" != "${pid}" ]]; then
         candidate_pid="${pid}"
         stable_since=0

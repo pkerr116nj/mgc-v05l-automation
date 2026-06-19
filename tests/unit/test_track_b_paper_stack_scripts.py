@@ -164,6 +164,9 @@ def test_paper_minimal_start_does_not_loop_waiting_for_runtime_truth_advancement
     assert "last_truth_generated_at" in minimal_wait_block
     assert "truth_advanced" in minimal_wait_block
     assert "detached_child_ready_authority" in minimal_wait_block
+    assert minimal_wait_block.index('update_detached_child_monitor "${pid}"') < minimal_wait_block.index(
+        'truth_generated_at="$(verify_direct_paper_runtime_shape'
+    )
     assert 'payload.get("child_final_status") != "RUNNING"' in source
     assert 'payload.get("process_alive") is not True' in source
     assert 'classification not in {"RUNTIME_CHILD_RUNNING_CYCLE_OBSERVED", "RUNTIME_CHILD_RUNNING_INITIAL_TRUTH"}' in source
