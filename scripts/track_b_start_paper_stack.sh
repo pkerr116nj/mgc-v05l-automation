@@ -3010,6 +3010,16 @@ if paper_minimal_startup_enabled; then
       exit 1
     fi
   done
+  if [[ -n "${observed_runtime_pid}" && "${candidate_pid}" == "${observed_runtime_pid}" && "${candidate_seen_since}" -gt 0 ]] && ps -p "${observed_runtime_pid}" >/dev/null 2>&1; then
+    update_detached_child_monitor "${observed_runtime_pid}" >/dev/null || true
+    truth_generated_at="$(verify_direct_paper_runtime_shape "${observed_runtime_pid}" "${source_commit}" 2>/dev/null || true)"
+    detached_child_ready="$(detached_child_ready_authority "${observed_runtime_pid}" 2>/dev/null || true)"
+    if [[ -n "${truth_generated_at}" && "${detached_child_ready}" == "true" ]] && (( SECONDS - candidate_seen_since >= STABLE_SECONDS )); then
+      write_runtime_submit_authority_grant "${observed_runtime_pid}"
+      write_startup_artifact "READY_SUBMIT_CAPABLE" "Track B PAPER runtime reached grant-eligible monitor authority at the startup deadline, matched required runtime shape, survived ${STABLE_SECONDS}s same-PID liveness, and received explicit wrapper-owned submit authority." "${observed_runtime_pid}"
+      exit 0
+    fi
+  fi
   write_startup_artifact "BLOCKED_START_TIMEOUT" "Runtime did not reach the required PAPER_MINIMAL_STARTUP_V1 direct-process runtime shape, same-PID liveness, and advancing runtime truth or post-truth startup progress before timeout." ""
   exit 1
 fi

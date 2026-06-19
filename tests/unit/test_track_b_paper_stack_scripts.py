@@ -179,6 +179,9 @@ def test_paper_minimal_start_does_not_loop_waiting_for_runtime_truth_advancement
     assert "same-PID liveness" in minimal_wait_block
     assert 'elif [[ -n "${pid}" ]]; then' in minimal_wait_block
     assert "Runtime wrote PID" in minimal_wait_block
+    assert 'candidate_pid}" == "${observed_runtime_pid}' in minimal_wait_block
+    assert 'write_runtime_submit_authority_grant "${observed_runtime_pid}"' in minimal_wait_block
+    assert "reached grant-eligible monitor authority at the startup deadline" in minimal_wait_block
 
 
 def test_paper_minimal_start_accepts_post_truth_progress_heartbeat_without_first_truth_ready() -> None:
