@@ -1583,11 +1583,104 @@ PY
   return 0
 }
 
+run_minimal_startup_broker_truth_refresh() {
+  STARTUP_PREFLIGHT_DEPENDENCY_REFRESH_ATTEMPTED="true"
+  local broker_truth_stdout="${STACK_DIR}/.minimal_startup_broker_truth.$$.json"
+  local broker_truth_stderr="${STACK_DIR}/.minimal_startup_broker_truth.$$.stderr"
+  local broker_truth_rc=0
+
+  set +e
+  "${PYTHON_BIN}" -m mgc_v05l.app.ibkr_broker_truth_refresher \
+    --once \
+    --read-only \
+    --mode PAPER \
+    --account-id DUM882026 \
+    > "${broker_truth_stdout}" 2> "${broker_truth_stderr}"
+  broker_truth_rc=$?
+  set -e
+
+  STARTUP_PREFLIGHT_DEPENDENCY_REFRESH_STEPS_JSON="$("${PYTHON_BIN}" -c '
+import json
+import sys
+from pathlib import Path
+
+stdout_path = Path(sys.argv[1])
+stderr_path = Path(sys.argv[2])
+rc = int(sys.argv[3])
+payload = {}
+try:
+    payload = json.loads(stdout_path.read_text(encoding="utf-8"))
+except (OSError, json.JSONDecodeError):
+    payload = {}
+print(json.dumps([{
+    "step": "minimal_startup_broker_truth_refresh",
+    "return_code": rc,
+    "classification": payload.get("classification") or "UNKNOWN",
+    "artifact_path": str(stdout_path),
+    "stderr_path": str(stderr_path),
+}]))
+' "${broker_truth_stdout}" "${broker_truth_stderr}" "${broker_truth_rc}")"
+  STARTUP_PREFLIGHT_DEPENDENCY_REFRESH_FAILURES_JSON="$("${PYTHON_BIN}" -c '
+import json
+import sys
+from pathlib import Path
+
+stdout_path = Path(sys.argv[1])
+stderr_path = Path(sys.argv[2])
+rc = int(sys.argv[3])
+payload = {}
+try:
+    payload = json.loads(stdout_path.read_text(encoding="utf-8"))
+except (OSError, json.JSONDecodeError):
+    payload = {}
+classification = str(payload.get("classification") or "")
+if rc == 0 and classification == "BROKER_TRUTH_REFRESH_READY":
+    print("[]")
+else:
+    print(json.dumps([{
+        "step": "minimal_startup_broker_truth_refresh",
+        "code": "minimal_startup_broker_truth_refresh_failed",
+        "return_code": rc,
+        "classification": classification or "UNKNOWN",
+        "stderr_path": str(stderr_path),
+    }]))
+' "${broker_truth_stdout}" "${broker_truth_stderr}" "${broker_truth_rc}")"
+
+  if [[ "${broker_truth_rc}" != "0" ]]; then
+    STARTUP_PREFLIGHT_REFRESH_CLASSIFICATION="BROKER_TRUTH_REFRESH_FAILED"
+    STARTUP_PREFLIGHT_REFRESHED_ARTIFACT_PATHS_JSON="$("${PYTHON_BIN}" -c 'import json,sys; print(json.dumps([sys.argv[1], sys.argv[2]]))' "${broker_truth_stdout}" "${broker_truth_stderr}")"
+    STARTUP_PREFLIGHT_REMAINING_START_BLOCKERS_JSON='[{"code":"broker_truth_refresh_failed","source":"broker_truth","detail":"Minimal startup could not refresh fresh IBKR broker truth before evaluating startup authority."}]'
+    return 1
+  fi
+
+  STARTUP_PREFLIGHT_REFRESHED_ARTIFACT_PATHS_JSON="$("${PYTHON_BIN}" -c '
+import json
+import sys
+from pathlib import Path
+
+paths = [sys.argv[1], sys.argv[2]]
+try:
+    payload = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+except (OSError, json.JSONDecodeError):
+    payload = {}
+for key in ("positions_snapshot_path", "open_orders_snapshot_path", "latest_attempt_status_path"):
+    value = payload.get(key)
+    if value:
+        paths.append(str(value))
+print(json.dumps(paths))
+' "${broker_truth_stdout}" "${broker_truth_stderr}")"
+  return 0
+}
+
 run_paper_minimal_startup_preflight() {
   STARTUP_PREFLIGHT_REFRESH_ATTEMPTED="true"
   STARTUP_PREFLIGHT_DEPENDENCY_REFRESH_ATTEMPTED="false"
   STARTUP_MODE="PAPER_MINIMAL_STARTUP_V1"
   local result_json="${STACK_DIR}/.paper_minimal_startup_v1.$$.json"
+  if ! run_minimal_startup_broker_truth_refresh; then
+    write_startup_artifact "BLOCKED_PAPER_MINIMAL_STARTUP_V1" "PAPER_MINIMAL_STARTUP_V1 could not refresh fresh broker truth before evaluating startup authority." ""
+    return 1
+  fi
   set +e
   "${PYTHON_BIN}" -m mgc_v05l.execution_core.track_b_paper_minimal_startup \
     --repo-root "${REPO_ROOT}" \

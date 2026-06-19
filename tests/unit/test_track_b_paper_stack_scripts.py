@@ -300,6 +300,7 @@ def test_paper_stack_start_has_minimal_startup_v1_path_for_explicit_paper_starts
 
     assert "PAPER_MINIMAL_STARTUP_V1" in source
     assert "track_b_paper_minimal_startup" in source
+    assert "run_minimal_startup_broker_truth_refresh" in source
     assert "BLOCKED_PAPER_MINIMAL_STARTUP_V1" in source
     assert "run_paper_minimal_startup_preflight" in source
     assert "TRACK_B_PAPER_MINIMAL_STARTUP_V1" in source
@@ -313,8 +314,16 @@ def test_paper_stack_minimal_startup_path_does_not_invoke_full_rebuild_before_la
         source.index("if paper_minimal_startup_enabled; then", source.index("\nwrite_runtime_config_paths_file\n"))
         : source.index("if ! paper_minimal_startup_enabled; then", source.index("\nwrite_runtime_config_paths_file\n"))
     ]
+    minimal_preflight_function = source[
+        source.index("\nrun_minimal_startup_broker_truth_refresh() {")
+        : source.index("\n\nscreen_available() {")
+    ]
 
     assert "run_paper_minimal_startup_preflight" in minimal_launch_block
+    assert minimal_preflight_function.index("run_minimal_startup_broker_truth_refresh") < minimal_preflight_function.index(
+        "track_b_paper_minimal_startup"
+    )
+    assert "ibkr_broker_truth_refresher" in minimal_preflight_function
     assert "run_startup_preflight_evidence_refresh" not in minimal_launch_block
     assert "track_b_control_plane_snapshot" not in minimal_launch_block
     assert "track_b_shared_truth_refresh_cli" not in minimal_launch_block
