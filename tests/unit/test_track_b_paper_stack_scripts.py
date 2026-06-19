@@ -136,7 +136,7 @@ def test_paper_minimal_start_requires_durable_liveness_and_shape() -> None:
 
     assert "verify_direct_paper_runtime_shape" in minimal_wait_block
     assert "READY_SUBMIT_CAPABLE" in minimal_wait_block
-    assert "AWAITING_SUBMIT_AUTHORITY with same-PID" in minimal_wait_block
+    assert "current-state submit authority with same-PID" in minimal_wait_block
     assert "RUNTIME_RUNNING_WAITING_FOR_MINIMAL_STARTUP_STABILITY" in minimal_wait_block
 
 
@@ -172,15 +172,17 @@ def test_paper_minimal_start_does_not_loop_waiting_for_runtime_truth_advancement
     assert 'payload.get("child_final_status") != "RUNNING"' in source
     assert 'payload.get("process_alive") is not True' in source
     assert 'classification not in {"RUNTIME_CHILD_RUNNING_CYCLE_OBSERVED", "RUNTIME_CHILD_RUNNING_INITIAL_TRUTH"}' in source
-    assert 'progress.get("state") != "AWAITING_SUBMIT_AUTHORITY"' in source
+    assert 'progress.get("state") not in {"AWAITING_SUBMIT_AUTHORITY", "TRADING_LOOP_ENTERED"}' in source
     assert "RUNTIME_RUNNING_WAITING_FOR_DETACHED_CHILD_AUTHORITY" in minimal_wait_block
-    assert 'marker.get("state") != "AWAITING_SUBMIT_AUTHORITY"' in source
-    assert "without a later liveness-window race" in minimal_wait_block
+    assert '"TRADING_LOOP_ENTERED"' in source
+    assert "paper_runtime_submit_authority_grant.json is diagnostic only" in minimal_wait_block
     assert 'elif [[ -n "${pid}" ]]; then' in minimal_wait_block
     assert "Runtime wrote PID" in minimal_wait_block
     assert 'candidate_pid}" == "${observed_runtime_pid}' in minimal_wait_block
-    assert 'write_runtime_submit_authority_grant "${observed_runtime_pid}"' in minimal_wait_block
-    assert "reached AWAITING_SUBMIT_AUTHORITY at the startup deadline" in minimal_wait_block
+    assert 'write_runtime_submit_authority_grant "${observed_runtime_pid}"' not in minimal_wait_block
+    assert "write_runtime_submit_authority_grant" not in source
+    assert "MGC_TRACK_B_PAPER_RUNTIME_SUBMIT_GRANT_FILE" not in source
+    assert "reached current-state submit authority at the startup deadline" in minimal_wait_block
 
 
 def test_paper_minimal_start_accepts_post_truth_progress_heartbeat_without_first_truth_ready() -> None:
@@ -222,10 +224,10 @@ def test_paper_minimal_start_accepts_post_truth_progress_heartbeat_without_first
     assert "treating progress as diagnostic" in minimal_wait_block
     assert "truth_advanced=\"false\"" in minimal_wait_block
     assert '[[ "${truth_advanced}" == "true" ]]' not in minimal_wait_block
-    assert "without a later liveness-window race" in minimal_wait_block
-    assert "write_runtime_submit_authority_grant" in source
-    assert "MGC_TRACK_B_PAPER_RUNTIME_SUBMIT_GRANT_FILE" in source
-    assert "AWAITING_SUBMIT_AUTHORITY with same-PID commit/profile/lane-count shape" in minimal_wait_block
+    assert "paper_runtime_submit_authority_grant.json is diagnostic only" in minimal_wait_block
+    assert "write_runtime_submit_authority_grant" not in source
+    assert "MGC_TRACK_B_PAPER_RUNTIME_SUBMIT_GRANT_FILE" not in source
+    assert "current-state submit authority with same-PID commit/profile/lane-count shape" in minimal_wait_block
 
 
 def test_paper_minimal_shape_verifier_checks_commit_profile_lane_count_and_truth_freshness() -> None:

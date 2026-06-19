@@ -162,6 +162,31 @@ def test_paper_post_truth_startup_progress_marker_is_diagnostic_only(tmp_path: P
     assert path.with_name("paper_post_truth_startup_progress_events.jsonl").exists()
 
 
+def test_paper_runtime_enters_loop_without_submit_grant_file(tmp_path: Path) -> None:
+    settings = SimpleNamespace(
+        probationary_artifacts_path=tmp_path / "paper_session",
+        probationary_paper_execution_test_mule_enabled=False,
+    )
+    runtime_started_at = datetime(2026, 6, 19, 10, 56, tzinfo=timezone.utc)
+
+    assert probationary_runtime_module._enter_probationary_paper_runtime_current_state_submit_authority(
+        settings=settings,
+        lanes=[],
+        runtime_instance_id="track-b-paper-stack-test",
+        runtime_started_at=runtime_started_at,
+        cycle=1,
+    )
+
+    progress_path = settings.probationary_artifacts_path / "runtime" / "paper_post_truth_startup_progress.json"
+    progress = json.loads(progress_path.read_text(encoding="utf-8"))
+    assert progress["stage"] == "runtime_cycle"
+    assert progress["state"] == "TRADING_LOOP_ENTERED"
+    assert progress["submit_authority"] is True
+    assert progress["broker_mutation_allowed"] is True
+    assert progress["payload"]["submit_authority_source"] == "current_state_authority"
+    assert "grant" not in progress["payload"]
+
+
 def test_paper_runtime_truth_artifact_schema_contains_operational_fields(tmp_path: Path) -> None:
     settings = SimpleNamespace(
         probationary_artifacts_path=tmp_path / "paper_session",
