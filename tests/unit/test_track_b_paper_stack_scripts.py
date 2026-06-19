@@ -193,7 +193,8 @@ def test_paper_minimal_start_accepts_post_truth_progress_heartbeat_without_first
     assert "paper_post_truth_startup_progress.json" in source
     assert "progress_fresh_for_post_truth_startup" in verifier_block
     assert "and not progress_fresh_for_post_truth_startup" in verifier_block
-    assert 'progress_state not in {"STARTED", "IN_PROGRESS", "COMPLETED"}' in progress_block
+    assert "AWAITING_SUBMIT_AUTHORITY" in progress_block
+    assert "TRADING_LOOP_ENTERED" in progress_block
     assert (
         'progress_stage not in {"authority_refresh", "watchdog_liveness_refresh", "lane_restore", "runtime_cycle"}'
         in progress_block
@@ -211,6 +212,9 @@ def test_paper_minimal_start_accepts_post_truth_progress_heartbeat_without_first
     assert "truth_advanced=\"false\"" in minimal_wait_block
     assert '[[ "${truth_advanced}" == "true" ]]' not in minimal_wait_block
     assert "runtime truth advancement is diagnostic after shape verification" in minimal_wait_block
+    assert "write_runtime_submit_authority_grant" in source
+    assert "MGC_TRACK_B_PAPER_RUNTIME_SUBMIT_GRANT_FILE" in source
+    assert "received explicit wrapper-owned submit authority" in minimal_wait_block
 
 
 def test_paper_minimal_shape_verifier_checks_commit_profile_lane_count_and_truth_freshness() -> None:

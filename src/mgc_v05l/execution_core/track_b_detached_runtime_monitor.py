@@ -182,6 +182,8 @@ def _progress_marker(payload: Mapping[str, Any], pid: int) -> dict[str, Any]:
         "runtime_instance_id": payload.get("runtime_instance_id"),
         "stage": payload.get("stage"),
         "state": payload.get("state"),
+        "submit_authority": payload.get("submit_authority") is True,
+        "broker_mutation_allowed": payload.get("broker_mutation_allowed") is True,
         "payload": payload.get("payload") if isinstance(payload.get("payload"), Mapping) else None,
     }
 

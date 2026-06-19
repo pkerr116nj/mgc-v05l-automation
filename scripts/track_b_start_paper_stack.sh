@@ -27,6 +27,7 @@ CONFIG_PATHS_FILE="${RUNTIME_DIR}/paper_runtime_config_paths.txt"
 POST_TRUTH_PROGRESS_FILE="${RUNTIME_DIR}/paper_post_truth_startup_progress.json"
 LAUNCH_STATUS_FILE="${RUNTIME_DIR}/probationary_paper_launch_status.json"
 DETACHED_CHILD_STATUS_FILE="${RUNTIME_DIR}/probationary_paper_detached_child_status.json"
+RUNTIME_SUBMIT_GRANT_FILE="${RUNTIME_DIR}/paper_runtime_submit_authority_grant.json"
 WRAPPER_PATH="${RUNTIME_DIR}/track_b_paper_stack_runtime_wrapper.sh"
 LAUNCHCTL_LABEL_FILE="${PID_FILE}.launchctl_label"
 LAUNCHCTL_STDOUT_FILE="${PID_FILE}.launchctl_submit.stdout"
@@ -2066,7 +2067,15 @@ if progress_runtime and truth_runtime and progress_runtime != truth_runtime:
     raise SystemExit(1)
 progress_state = str(progress.get("state") or "").strip().upper()
 progress_stage = str(progress.get("stage") or "").strip()
-if progress_state not in {"STARTED", "IN_PROGRESS", "COMPLETED"}:
+if progress_state not in {
+    "STARTED",
+    "IN_PROGRESS",
+    "COMPLETED",
+    "AWAITING_SUBMIT_AUTHORITY",
+    "TRADING_LOOP_ENTERED",
+    "BLOCKED_SUBMIT_AUTHORITY_GRANT_MISSING",
+    "BLOCKED_SUBMIT_AUTHORITY_GRANT_TIMEOUT",
+}:
     raise SystemExit(1)
 if progress_stage not in {"authority_refresh", "watchdog_liveness_refresh", "lane_restore", "runtime_cycle"}:
     raise SystemExit(1)
@@ -2136,7 +2145,13 @@ marker = payload.get("last_runtime_cycle_marker")
 if not isinstance(marker, dict):
     print("false")
     raise SystemExit(0)
-if marker.get("stage") != "runtime_cycle" or marker.get("state") not in {"STARTED", "IN_PROGRESS", "COMPLETED"}:
+if marker.get("stage") != "runtime_cycle" or marker.get("state") not in {
+    "STARTED",
+    "IN_PROGRESS",
+    "COMPLETED",
+    "AWAITING_SUBMIT_AUTHORITY",
+    "TRADING_LOOP_ENTERED",
+}:
     print("false")
     raise SystemExit(0)
 truth = payload.get("runtime_truth_marker")
@@ -2171,6 +2186,35 @@ if int(payload.get("child_pid") or payload.get("pid") or 0) != expected_pid:
 if payload.get("child_final_status") == "RUNNING" and payload.get("process_alive") is True:
     raise SystemExit(1)
 print(str(payload.get("classification") or "RUNTIME_EXITED_BEFORE_DURABLE_READY"))
+PY
+}
+
+write_runtime_submit_authority_grant() {
+  local pid="$1"
+  "${PYTHON_BIN}" - "${RUNTIME_SUBMIT_GRANT_FILE}" "${pid}" "${runtime_instance_id}" "${source_commit}" <<'PY'
+import json
+import sys
+from datetime import datetime, timezone
+from pathlib import Path
+
+path = Path(sys.argv[1])
+payload = {
+    "schema_version": "track_b_paper_runtime_submit_authority_grant_v1",
+    "generated_at": datetime.now(timezone.utc).isoformat(),
+    "runtime_pid": int(sys.argv[2]),
+    "producer_pid": int(sys.argv[2]),
+    "runtime_instance_id": sys.argv[3],
+    "source_commit": sys.argv[4],
+    "submit_authority": True,
+    "paper_only": True,
+    "live_money_eligible": False,
+    "paper_proof_invoked": False,
+    "authority_source": "track_b_start_paper_stack_durable_liveness_window",
+}
+path.parent.mkdir(parents=True, exist_ok=True)
+tmp = path.with_name(f".{path.name}.{sys.argv[2]}.tmp")
+tmp.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+tmp.replace(path)
 PY
 }
 
@@ -2332,6 +2376,7 @@ export MGC_TRACK_B_PAPER_STACK_OWNED_MANAGED_EXPOSURE_RESTORE_JSON='${STARTUP_OW
 export MGC_TRACK_B_PAPER_MINIMAL_STARTUP_V1="${PAPER_MINIMAL_STARTUP_V1}"
 export MGC_TRACK_B_PAPER_MINIMAL_STARTUP_CLASSIFICATION="${STARTUP_PREFLIGHT_REFRESH_CLASSIFICATION}"
 export MGC_TRACK_B_PAPER_STACK_RUNTIME_SCOPE_LOCK_DIR="${START_LOCK_DIR}"
+export MGC_TRACK_B_PAPER_RUNTIME_SUBMIT_GRANT_FILE="${RUNTIME_SUBMIT_GRANT_FILE}"
 mkdir -p "${RUNTIME_DIR}"
 runtime_pid=""
 runtime_child_started_at=""
@@ -2540,6 +2585,7 @@ then
   exit 0
 fi
 printf '%s\n' "track_b_paper_stack_wrapper_start generated_at=\$(date -u +%Y-%m-%dT%H:%M:%SZ) repo_root=${REPO_ROOT} config_stack=${config_stack}" >> "${RUNTIME_LOG}"
+rm -f "${RUNTIME_SUBMIT_GRANT_FILE}" >/dev/null 2>&1 || true
 runtime_child_started_at="\$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 runtime_child_command="bash ${SCRIPT_DIR}/run_probationary_paper_soak.sh --pid-file ${PID_FILE} --log-file ${RUNTIME_LOG} --config-paths-file ${CONFIG_PATHS_FILE} --launch-status-file ${LAUNCH_STATUS_FILE} --schwab-config ${REPO_ROOT}/config/schwab.local.json"
 bash "${SCRIPT_DIR}/run_probationary_paper_soak.sh" \
@@ -2814,7 +2860,8 @@ if paper_minimal_startup_enabled; then
               write_startup_artifact "RUNTIME_EXITED_BEFORE_DURABLE_READY" "Runtime passed the stability window, but refreshed detached-child monitor authority did not prove a live durable runtime." "${pid}"
               exit 1
             fi
-            write_startup_artifact "READY_SUBMIT_CAPABLE" "Track B PAPER runtime started through direct PAPER_MINIMAL_STARTUP_V1 process path, matched required runtime shape, survived ${STABLE_SECONDS}s, and retained authoritative wrapper/child ownership; runtime truth advancement is diagnostic after shape verification." "${pid}"
+            write_runtime_submit_authority_grant "${pid}"
+            write_startup_artifact "READY_SUBMIT_CAPABLE" "Track B PAPER runtime started through direct PAPER_MINIMAL_STARTUP_V1 process path, matched required runtime shape, survived ${STABLE_SECONDS}s, received explicit wrapper-owned submit authority, and retained authoritative wrapper/child ownership; runtime truth advancement is diagnostic after shape verification." "${pid}"
           exit 0
           fi
           write_startup_artifact "RUNTIME_RUNNING_WAITING_FOR_MINIMAL_STARTUP_STABILITY" "Runtime matched PAPER_MINIMAL_STARTUP_V1 shape; waiting for ${STABLE_SECONDS}s same-PID liveness and advancing runtime truth or post-truth startup progress." "${pid}" >/dev/null

@@ -93,6 +93,38 @@ def test_running_child_with_runtime_cycle_marker_is_observable(tmp_path: Path) -
     assert payload["classification"] == "RUNTIME_CHILD_RUNNING_CYCLE_OBSERVED"
     assert payload["process_alive"] is True
     assert payload["runtime_cycle_marker_observed"] is True
+    assert payload["last_runtime_cycle_marker"]["submit_authority"] is False
+
+
+def test_running_child_records_trading_loop_submit_authority_marker(tmp_path: Path) -> None:
+    pid = os.getpid()
+    truth = tmp_path / "truth.json"
+    progress = tmp_path / "progress.json"
+    status = tmp_path / "child_status.json"
+    _write_json(truth, {"producer_pid": pid, "generated_at": "2026-06-16T12:00:00+00:00"})
+    _write_json(
+        progress,
+        {
+            "producer_pid": pid,
+            "stage": "runtime_cycle",
+            "state": "TRADING_LOOP_ENTERED",
+            "submit_authority": True,
+            "broker_mutation_allowed": True,
+        },
+    )
+
+    payload = build_detached_runtime_child_status(
+        event="heartbeat",
+        status_path=status,
+        pid=pid,
+        runtime_truth_file=truth,
+        post_truth_progress_file=progress,
+    )
+
+    assert payload["classification"] == "RUNTIME_CHILD_RUNNING_CYCLE_OBSERVED"
+    assert payload["last_runtime_cycle_marker"]["state"] == "TRADING_LOOP_ENTERED"
+    assert payload["last_runtime_cycle_marker"]["submit_authority"] is True
+    assert payload["last_runtime_cycle_marker"]["broker_mutation_allowed"] is True
 
 
 def test_signal_exit_records_signal_without_ready_classification(tmp_path: Path) -> None:

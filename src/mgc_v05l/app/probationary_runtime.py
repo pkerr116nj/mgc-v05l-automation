@@ -7899,6 +7899,19 @@ class ProbationaryPaperSupervisor:
                     state="STARTED",
                     payload={"cycle": cycles + 1},
                 )
+                if not _await_probationary_paper_runtime_submit_authority_grant(
+                    settings=self._settings,
+                    lanes=self._lanes,
+                    runtime_instance_id=self._runtime_instance_id,
+                    runtime_started_at=self._runtime_started_at,
+                    cycle=cycles + 1,
+                ):
+                    stop_reason = "submit_authority_grant_missing_or_timeout"
+                    return self._finalize_summary(
+                        new_bars=new_bars,
+                        reconciliation_clean=False,
+                        stop_reason=stop_reason,
+                    )
                 risk_state = _ensure_probationary_paper_risk_state_session(
                     risk_state,
                     _resolve_probationary_supervisor_session_date(self._settings, self._lanes),
@@ -10219,6 +10232,8 @@ def _write_paper_post_truth_startup_progress(
     state: str,
     detail: str | None = None,
     payload: Mapping[str, Any] | None = None,
+    submit_authority: bool = False,
+    broker_mutation_allowed: bool = False,
 ) -> Path:
     path = _paper_post_truth_startup_progress_path(settings)
     now = datetime.now(timezone.utc)
@@ -10235,8 +10250,8 @@ def _write_paper_post_truth_startup_progress(
         "paper_only": True,
         "live_money_eligible": False,
         "paper_proof_invoked": False,
-        "submit_authority": False,
-        "broker_mutation_allowed": False,
+        "submit_authority": bool(submit_authority),
+        "broker_mutation_allowed": bool(broker_mutation_allowed),
     }
     if payload:
         record["payload"] = dict(payload)
@@ -10248,6 +10263,145 @@ def _write_paper_post_truth_startup_progress(
     with events_path.open("a", encoding="utf-8") as handle:
         handle.write(json.dumps(record, sort_keys=True, default=str) + "\n")
     return path
+
+
+def _probationary_paper_runtime_submit_grant_file() -> Path | None:
+    raw_path = str(os.environ.get("MGC_TRACK_B_PAPER_RUNTIME_SUBMIT_GRANT_FILE") or "").strip()
+    if not raw_path:
+        return None
+    return Path(raw_path)
+
+
+def _parse_optional_datetime(value: Any) -> datetime | None:
+    if not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def _probationary_paper_runtime_submit_grant_valid(
+    *,
+    path: Path,
+    runtime_instance_id: str,
+    source_commit: str,
+    producer_pid: int,
+    max_age_seconds: float,
+) -> tuple[bool, str]:
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return False, "grant_file_missing"
+    except (OSError, json.JSONDecodeError):
+        return False, "grant_file_unreadable"
+    if not isinstance(payload, Mapping):
+        return False, "grant_payload_not_object"
+    if payload.get("submit_authority") is not True:
+        return False, "grant_submit_authority_false"
+    if payload.get("paper_only") is not True:
+        return False, "grant_not_paper_only"
+    if payload.get("live_money_eligible") is not False:
+        return False, "grant_live_money_not_false"
+    if payload.get("paper_proof_invoked") is not False:
+        return False, "grant_paper_proof_not_false"
+    if str(payload.get("runtime_instance_id") or "") != str(runtime_instance_id):
+        return False, "grant_runtime_instance_mismatch"
+    if str(payload.get("source_commit") or "") != str(source_commit):
+        return False, "grant_source_commit_mismatch"
+    if _optional_int(payload.get("runtime_pid") or payload.get("producer_pid")) != producer_pid:
+        return False, "grant_runtime_pid_mismatch"
+    generated_at = _parse_optional_datetime(payload.get("generated_at"))
+    if generated_at is None:
+        return False, "grant_generated_at_missing"
+    age_seconds = max((datetime.now(timezone.utc) - generated_at).total_seconds(), 0.0)
+    if age_seconds > max_age_seconds:
+        return False, "grant_stale"
+    return True, "grant_valid"
+
+
+def _await_probationary_paper_runtime_submit_authority_grant(
+    *,
+    settings: StrategySettings,
+    lanes: Sequence[ProbationaryPaperLaneRuntime],
+    runtime_instance_id: str,
+    runtime_started_at: datetime,
+    cycle: int,
+) -> bool:
+    grant_path = _probationary_paper_runtime_submit_grant_file()
+    runtime_identity = _current_runtime_identity_payload()
+    source_commit = str(runtime_identity.get("source_runtime_git_head") or "")
+    if grant_path is None:
+        _write_paper_post_truth_startup_progress(
+            settings=settings,
+            runtime_instance_id=runtime_instance_id,
+            runtime_started_at=runtime_started_at,
+            stage="runtime_cycle",
+            state="BLOCKED_SUBMIT_AUTHORITY_GRANT_MISSING",
+            detail=(
+                "PAPER runtime reached the trading loop without wrapper-owned submit authority. "
+                "Lane processing was not entered."
+            ),
+            payload={"cycle": cycle},
+        )
+        return False
+
+    timeout_seconds = float(os.environ.get("MGC_TRACK_B_PAPER_RUNTIME_SUBMIT_GRANT_TIMEOUT_SECONDS") or 240.0)
+    poll_seconds = float(os.environ.get("MGC_TRACK_B_PAPER_RUNTIME_SUBMIT_GRANT_POLL_SECONDS") or 1.0)
+    deadline = time_module.monotonic() + max(timeout_seconds, 1.0)
+    last_reason = "grant_not_checked"
+    while time_module.monotonic() <= deadline:
+        valid, reason = _probationary_paper_runtime_submit_grant_valid(
+            path=grant_path,
+            runtime_instance_id=runtime_instance_id,
+            source_commit=source_commit,
+            producer_pid=os.getpid(),
+            max_age_seconds=max(timeout_seconds, 30.0),
+        )
+        last_reason = reason
+        if valid:
+            _write_paper_post_truth_startup_progress(
+                settings=settings,
+                runtime_instance_id=runtime_instance_id,
+                runtime_started_at=runtime_started_at,
+                stage="runtime_cycle",
+                state="TRADING_LOOP_ENTERED",
+                detail="Wrapper-owned PAPER submit authority grant accepted; lane processing may begin.",
+                payload={"cycle": cycle, "submit_grant_path": str(grant_path)},
+                submit_authority=True,
+                broker_mutation_allowed=True,
+            )
+            _write_probationary_paper_runtime_truth(
+                settings=settings,
+                lanes=lanes,
+                runtime_instance_id=runtime_instance_id,
+                runtime_started_at=runtime_started_at,
+            )
+            return True
+        _write_paper_post_truth_startup_progress(
+            settings=settings,
+            runtime_instance_id=runtime_instance_id,
+            runtime_started_at=runtime_started_at,
+            stage="runtime_cycle",
+            state="AWAITING_SUBMIT_AUTHORITY",
+            detail="Waiting for wrapper-owned PAPER submit authority before broker-submitting lane processing.",
+            payload={"cycle": cycle, "submit_grant_path": str(grant_path), "grant_status": last_reason},
+        )
+        time_module.sleep(max(poll_seconds, 0.1))
+
+    _write_paper_post_truth_startup_progress(
+        settings=settings,
+        runtime_instance_id=runtime_instance_id,
+        runtime_started_at=runtime_started_at,
+        stage="runtime_cycle",
+        state="BLOCKED_SUBMIT_AUTHORITY_GRANT_TIMEOUT",
+        detail="Timed out waiting for wrapper-owned PAPER submit authority; lane processing was not entered.",
+        payload={"cycle": cycle, "submit_grant_path": str(grant_path), "grant_status": last_reason},
+    )
+    return False
 
 
 class _PaperPostTruthProgressHeartbeat:
