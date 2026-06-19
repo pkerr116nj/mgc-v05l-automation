@@ -631,7 +631,7 @@ def _managed_positions(
             "close_order_state": effective_close_order_state,
             "managed_order_state": managed_order_state,
             "reconciliation_status": _reconciliation_status(broker=broker, lifecycle=lifecycle, review=review),
-            "attention_required": classification
+            "attention_required": effective_classification
             in {
                 BROKER_BACKED_ADOPTION_REQUIRED,
                 MANAGED_POSITION_METADATA_INCOMPLETE,
@@ -1235,7 +1235,10 @@ def _position_classification(
     close_order_state: Mapping[str, Any] | None,
     source_stale: Mapping[str, Any],
 ) -> str:
-    if source_stale.get("stale") is True:
+    if source_stale.get("stale") is True and not _fresh_broker_position_overrides_stale_reconciliation(
+        broker=broker,
+        source_stale=source_stale,
+    ):
         return STALE_MANAGED_POSITION_EVIDENCE
     lifecycle_review = (
         _truthy(lifecycle_report.get("review_required"))
@@ -1287,6 +1290,20 @@ def _exit_due_classification(
     if _signed_lifecycle_quantity(lifecycle) is None or _decimal((broker or {}).get("quantity")) is None:
         return classification
     return OPEN_MANAGED_MATCHED
+
+
+def _fresh_broker_position_overrides_stale_reconciliation(
+    *,
+    broker: Mapping[str, Any] | None,
+    source_stale: Mapping[str, Any],
+) -> bool:
+    if not broker:
+        return False
+    stale_sources = {str(source or "") for source in source_stale.get("stale_sources") or []}
+    if stale_sources != {"reconciliation"}:
+        return False
+    identity = _mapping(broker.get("contract_identity"))
+    return identity.get("resolved") is True and _broker_position_nonzero(broker)
 
 
 def _position_freshness_state(*, source_stale: Mapping[str, Any]) -> str:

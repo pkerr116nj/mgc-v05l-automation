@@ -897,6 +897,120 @@ def test_stale_dependency_does_not_invent_exit_due_without_bar_evidence(tmp_path
     assert position["freshness_state"] == "STALE_DEPENDENCY"
 
 
+def test_stale_reconciliation_does_not_erase_fresh_broker_backed_managed_position(tmp_path: Path) -> None:
+    broker = {
+        "account_id": "DUM882026",
+        "security_type": "FUT",
+        "symbol": "MNQ",
+        "track_b_root": "MNQ",
+        "local_symbol": "MNQU6",
+        "con_id": 793356225,
+        "expiry": "20260918",
+        "quantity": "-1.0",
+    }
+    lifecycle = {
+        **_lifecycle_position(bars_since_fill=1),
+        "trade_id": "trade_mnq_current",
+        "contract_key": "MNQ-202609",
+        "local_symbol": "MNQU6",
+        "con_id": 793356225,
+    }
+    _seed_base(tmp_path, broker_positions=[broker], lifecycle_positions=[lifecycle])
+    _write_lifecycle_report(tmp_path, lifecycle_id=lifecycle["lifecycle_id"], bars_since_fill=1)
+    _write_json(
+        tmp_path / "outputs" / "reports" / "ibkr_read_only_verification" / "ibkr_positions_snapshot.json",
+        {
+            "account": "DUM882026",
+            "positions_complete": True,
+            "positions": [broker],
+        },
+    )
+    _write_json(
+        tmp_path / "outputs" / "reports" / "ibkr_read_only_verification" / "ibkr_open_orders_snapshot.json",
+        {
+            "account": "DUM882026",
+            "open_orders_complete": True,
+            "open_orders": [],
+        },
+    )
+    reconciliation_path = (
+        tmp_path
+        / "outputs"
+        / "reports"
+        / "track_b_paper_broker_reconciliation"
+        / "latest_track_b_paper_broker_reconciliation.json"
+    )
+    reconciliation = json.loads(reconciliation_path.read_text(encoding="utf-8"))
+    reconciliation["generated_at"] = (NOW - timedelta(minutes=10)).isoformat()
+    reconciliation_path.write_text(json.dumps(reconciliation, indent=2, sort_keys=True), encoding="utf-8")
+
+    payload = build_track_b_managed_position_registry(
+        config=TrackBManagedPositionRegistryConfig(repo_root=tmp_path),
+        now=NOW,
+    )
+
+    assert payload["source_freshness"]["stale_sources"] == ["reconciliation"]
+    assert payload["classification"] == OPEN_MANAGED_MATCHED
+    position = payload["managed_positions"][0]
+    assert position["classification"] == OPEN_MANAGED_MATCHED
+    assert position["attention_required"] is False
+    assert position["side"] == "SHORT"
+    assert position["signed_broker_qty"] == "-1"
+    assert position["signed_lifecycle_qty"] == "-1"
+
+
+def test_stale_reconciliation_does_not_hide_fresh_broker_backed_adoption_candidate(tmp_path: Path) -> None:
+    broker = {
+        "account_id": "DUM882026",
+        "security_type": "FUT",
+        "symbol": "MNQ",
+        "track_b_root": "MNQ",
+        "local_symbol": "MNQU6",
+        "con_id": 793356225,
+        "expiry": "20260918",
+        "quantity": "-1.0",
+    }
+    _seed_base(tmp_path, broker_positions=[broker])
+    _write_json(
+        tmp_path / "outputs" / "reports" / "ibkr_read_only_verification" / "ibkr_positions_snapshot.json",
+        {
+            "account": "DUM882026",
+            "positions_complete": True,
+            "positions": [broker],
+        },
+    )
+    _write_json(
+        tmp_path / "outputs" / "reports" / "ibkr_read_only_verification" / "ibkr_open_orders_snapshot.json",
+        {
+            "account": "DUM882026",
+            "open_orders_complete": True,
+            "open_orders": [],
+        },
+    )
+    reconciliation_path = (
+        tmp_path
+        / "outputs"
+        / "reports"
+        / "track_b_paper_broker_reconciliation"
+        / "latest_track_b_paper_broker_reconciliation.json"
+    )
+    reconciliation = json.loads(reconciliation_path.read_text(encoding="utf-8"))
+    reconciliation["generated_at"] = (NOW - timedelta(minutes=10)).isoformat()
+    reconciliation_path.write_text(json.dumps(reconciliation, indent=2, sort_keys=True), encoding="utf-8")
+
+    payload = build_track_b_managed_position_registry(
+        config=TrackBManagedPositionRegistryConfig(repo_root=tmp_path),
+        now=NOW,
+    )
+
+    assert payload["source_freshness"]["stale_sources"] == ["reconciliation"]
+    assert payload["classification"] == BROKER_BACKED_ADOPTION_REQUIRED
+    position = payload["managed_positions"][0]
+    assert position["classification"] == BROKER_BACKED_ADOPTION_REQUIRED
+    assert position["side"] == "SHORT"
+    assert position["signed_broker_qty"] == "-1"
+
+
 def test_close_working_comes_from_open_order_truth(tmp_path: Path) -> None:
     lifecycle = _lifecycle_position(bars_since_fill=2)
     _seed_base(
