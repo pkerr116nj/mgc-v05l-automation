@@ -9777,6 +9777,11 @@ def _build_probationary_paper_lane_settings(
         )
     if spec.live_poll_lookback_minutes is not None:
         updates["live_poll_lookback_minutes"] = spec.live_poll_lookback_minutes
+    if (
+        settings.mode is RuntimeMode.PAPER
+        and _effective_probationary_paper_execution_mode(spec) == PAPER_EXECUTION_MODE_IBKR_BRIDGE
+    ):
+        updates["probationary_paper_market_data_source"] = ProbationaryPaperMarketDataSource.PHASE1_RUNTIME_ARTIFACT
     if spec.lane_mode in {PAPER_EXECUTION_CANARY_MODE, PAPER_EXECUTION_TEST_MULE_MODE}:
         updates.update(
             {
@@ -18475,6 +18480,21 @@ def _uses_phase1_runtime_artifact_market_data(settings: StrategySettings) -> boo
     )
 
 
+def _paper_lane_specs_use_phase1_runtime_artifacts(settings: StrategySettings) -> bool:
+    if getattr(settings, "mode", None) is not RuntimeMode.PAPER:
+        return False
+    try:
+        specs = _load_probationary_paper_lane_specs(settings)
+    except Exception:
+        return False
+    if not specs:
+        return False
+    for spec in specs:
+        if _effective_probationary_paper_execution_mode(spec) != PAPER_EXECUTION_MODE_IBKR_BRIDGE:
+            return False
+    return True
+
+
 def _phase1_runtime_artifact_probe_symbols(settings: StrategySettings) -> list[str]:
     symbols: set[str] = set()
     try:
@@ -18795,7 +18815,7 @@ def _run_probationary_runtime_market_data_transport_probe(
     adapter: SchwabMarketDataAdapter | None = None,
     oauth_client: SchwabOAuthClient | None = None,
 ) -> dict[str, Any]:
-    if _uses_phase1_runtime_artifact_market_data(settings):
+    if _uses_phase1_runtime_artifact_market_data(settings) or _paper_lane_specs_use_phase1_runtime_artifacts(settings):
         payload = _phase1_runtime_artifact_transport_probe(settings)
         print(f"Probationary paper runtime artifact preflight: {json.dumps(payload, sort_keys=True)}", flush=True)
         return payload

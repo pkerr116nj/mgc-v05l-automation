@@ -90,6 +90,42 @@ def test_build_live_polling_service_selects_phase1_artifact_source_for_configure
     assert service._provenance_tag == "DATABENTO_REALTIME_PHASE1"  # noqa: SLF001
 
 
+def test_ibkr_paper_bridge_lane_uses_phase1_artifacts_even_when_profile_is_provider_live_poll(tmp_path: Path) -> None:
+    settings = _settings(tmp_path)
+    spec = probationary_runtime_module.ProbationaryPaperLaneSpec(
+        lane_id="mes_london_open_active_participation_long",
+        display_name="MES London Open Long",
+        symbol="MES",
+        long_sources=("PAPER_ACTIVE_EVIDENCE_MES_LONDON_OPEN_PARTICIPATION_LONG_V1",),
+        short_sources=(),
+        session_restriction="LONDON_OPEN",
+        point_value="5",
+        trade_size=1,
+        catastrophic_open_loss="-300",
+        lane_mode="PAPER_ONLY_ACTIVE_EVIDENCE_LANE",
+        strategy_family="paper_active_evidence",
+        runtime_kind="track_b_rule_runner_paper_strategy_engine",
+        execution_mode=probationary_runtime_module.PAPER_EXECUTION_MODE_IBKR_BRIDGE,
+        execution_timeframe="1m",
+        structural_signal_timeframe="1m",
+        artifact_timeframe="1m",
+        context_timeframes=("1m",),
+        live_poll_lookback_minutes=1440,
+        database_url=f"sqlite:///{tmp_path / 'lane.sqlite3'}",
+        artifacts_dir=str(tmp_path / "lane"),
+        paper_only=True,
+        runtime_overlay_params={
+            "execution_mode": probationary_runtime_module.PAPER_EXECUTION_MODE_IBKR_BRIDGE,
+            "current_order_destination": "ibkr_paper_bridge_submit_capable",
+        },
+    )
+
+    lane_settings = probationary_runtime_module._build_probationary_paper_lane_settings(settings, spec)
+
+    assert settings.probationary_paper_market_data_source is ProbationaryPaperMarketDataSource.PROVIDER_LIVE_POLL
+    assert lane_settings.probationary_paper_market_data_source is ProbationaryPaperMarketDataSource.PHASE1_RUNTIME_ARTIFACT
+
+
 def test_mnq_restored_review_overlay_selects_phase1_artifact_source() -> None:
     settings = load_settings_from_files(
         [
