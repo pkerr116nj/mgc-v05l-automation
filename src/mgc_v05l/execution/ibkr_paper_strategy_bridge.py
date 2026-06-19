@@ -126,6 +126,7 @@ from ..execution_core.track_b_live_trade_registry import (
     make_live_trade_registry_event,
     trade_id_from_live_identity,
 )
+from ..execution_core.bounded_jsonl import append_bounded_jsonl
 
 _EXPECTED_MODE = "PAPER"
 _EXPECTED_HOST = "127.0.0.1"
@@ -1644,10 +1645,8 @@ def write_ibkr_paper_strategy_bridge_artifacts(
         render_ibkr_paper_strategy_bridge_markdown(artifacts.report),
         encoding="utf-8",
     )
-    with (reports_dir / f"{_ARTIFACT_STEM}_audit.jsonl").open("a", encoding="utf-8") as handle:
-        for row in artifacts.audit_events:
-            handle.write(json.dumps(row, sort_keys=True))
-            handle.write("\n")
+    for row in artifacts.audit_events:
+        append_bounded_jsonl(reports_dir / f"{_ARTIFACT_STEM}_audit.jsonl", row)
     (reports_dir / "per_strategy_paper_status_summary.json").write_text(
         json.dumps(_per_strategy_status_summary(artifacts.report), indent=2, sort_keys=True),
         encoding="utf-8",

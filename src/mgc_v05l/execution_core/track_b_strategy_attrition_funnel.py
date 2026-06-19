@@ -16,6 +16,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
+from mgc_v05l.execution_core.bounded_jsonl import append_bounded_jsonl
 from mgc_v05l.execution_core.models import to_jsonable
 
 
@@ -127,11 +128,8 @@ def record_strategy_funnel_events(
     rows = [to_jsonable(dict(event)) for event in events]
     if not rows:
         return StrategyFunnelWriteResult(event_path=resolved, events_written=0)
-    resolved.parent.mkdir(parents=True, exist_ok=True)
-    with resolved.open("a", encoding="utf-8") as handle:
-        for row in rows:
-            handle.write(json.dumps(row, sort_keys=True))
-            handle.write("\n")
+    for row in rows:
+        append_bounded_jsonl(resolved, row)
     return StrategyFunnelWriteResult(event_path=resolved, events_written=len(rows))
 
 

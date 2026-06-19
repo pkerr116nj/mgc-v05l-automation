@@ -13,6 +13,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Mapping
 
+from mgc_v05l.execution_core.bounded_jsonl import append_bounded_jsonl
 from mgc_v05l.execution_core.track_b_atomic_io import write_json_atomic
 
 DEFAULT_BROKER_SESSION_AUTHORITY_ARTIFACT = (
@@ -180,9 +181,7 @@ def write_broker_session_authority(
     write_json_atomic(Path(output_path), authority)
     if history_path is None:
         return
-    history_path.parent.mkdir(parents=True, exist_ok=True)
-    with history_path.open("a", encoding="utf-8") as handle:
-        handle.write(json.dumps(dict(authority), sort_keys=True) + "\n")
+    append_bounded_jsonl(history_path, dict(authority))
 
 
 def load_broker_session_authority(path: Path) -> dict[str, Any]:

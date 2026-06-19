@@ -13,6 +13,7 @@ from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any, Mapping
 
+from mgc_v05l.execution_core.bounded_jsonl import append_bounded_jsonl
 from mgc_v05l.execution_core.track_b_atomic_io import write_json_atomic
 from mgc_v05l.execution_core.track_b_lifecycle_state_transition import normalize_lifecycle_state, requires_operator_action
 from mgc_v05l.execution_core.track_b_projection_metadata import build_projection_metadata
@@ -241,10 +242,8 @@ def write_track_b_position_truth(
             build_dashboard_position_truth_projection(authority_payload=payload, authority_path=output_path),
         )
     if events:
-        event_log_path.parent.mkdir(parents=True, exist_ok=True)
-        with event_log_path.open("a", encoding="utf-8") as handle:
-            for event in events:
-                handle.write(json.dumps(event, sort_keys=True) + "\n")
+        for event in events:
+            append_bounded_jsonl(event_log_path, event)
     return output_path, events
 
 

@@ -122,6 +122,7 @@ from ..execution_core.track_b_authority_refresh_heartbeat import (
     refresh_track_b_paper_authority_if_due,
 )
 from ..execution_core.track_b_atomic_io import write_json_atomic
+from ..execution_core.bounded_jsonl import append_bounded_jsonl, write_bounded_jsonl
 from ..execution_core.track_b_live_runtime_environment_watchdog import (
     TrackBLiveRuntimeEnvironmentWatchdogConfig,
     run_track_b_live_runtime_environment_watchdog_if_due,
@@ -10265,8 +10266,7 @@ def _write_paper_post_truth_startup_progress(
     tmp.write_text(json.dumps(record, indent=2, sort_keys=True, default=str) + "\n", encoding="utf-8")
     tmp.replace(path)
     events_path = path.with_name("paper_post_truth_startup_progress_events.jsonl")
-    with events_path.open("a", encoding="utf-8") as handle:
-        handle.write(json.dumps(record, sort_keys=True, default=str) + "\n")
+    append_bounded_jsonl(events_path, record)
     return path
 
 
@@ -11626,9 +11626,7 @@ def _write_probationary_paper_risk_artifacts(
             settings.probationary_artifacts_path / "risk_trigger_events.jsonl",
             settings.probationary_artifacts_path / "paper_risk_events.jsonl",
         ):
-            with path.open("a", encoding="utf-8") as handle:
-                handle.write(json.dumps(event, sort_keys=True))
-                handle.write("\n")
+            append_bounded_jsonl(path, event)
 
 
 def _write_probationary_supervisor_operator_status(
@@ -11991,10 +11989,7 @@ def _write_same_underlying_conflict_review_store(path: Path, records: dict[str, 
 
 
 def _append_same_underlying_conflict_event(path: Path, payload: dict[str, Any]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("a", encoding="utf-8") as handle:
-        handle.write(json.dumps(payload, sort_keys=True))
-        handle.write("\n")
+    append_bounded_jsonl(path, payload)
 
 
 def _parse_same_underlying_iso_datetime(value: str | None) -> datetime | None:
@@ -15146,11 +15141,7 @@ def _strategy_activity_instrumentation_root(repo_root: Path) -> Path:
 
 
 def _append_jsonl_record(path: Path, row: dict[str, Any]) -> Path:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("a", encoding="utf-8") as handle:
-        handle.write(json.dumps(row, sort_keys=True))
-        handle.write("\n")
-    return path
+    return append_bounded_jsonl(path, row)
 
 
 def _append_csv_record(path: Path, *, fieldnames: Sequence[str], row: dict[str, Any]) -> Path:
@@ -19075,12 +19066,7 @@ def _read_jsonl_tail(path: Path, *, limit: int) -> list[dict[str, Any]]:
 
 
 def _write_jsonl(path: Path, rows: Iterable[dict[str, Any]]) -> Path:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("w", encoding="utf-8") as handle:
-        for row in rows:
-            handle.write(json.dumps(row, sort_keys=True))
-            handle.write("\n")
-    return path
+    return write_bounded_jsonl(path, rows)
 
 
 def _atpe_canary_root_dir() -> Path:

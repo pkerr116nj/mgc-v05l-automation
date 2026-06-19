@@ -15,6 +15,8 @@ from enum import Enum
 from pathlib import Path
 from typing import Any, Mapping
 
+from mgc_v05l.execution_core.bounded_jsonl import append_bounded_jsonl
+
 from .models import require_aware_datetime, to_jsonable
 
 
@@ -299,9 +301,7 @@ def append_submit_intent_ownership_record(
     validate_submit_intent_ownership_payload(payload)
     payload = dict(payload)
     payload["digest"] = submit_intent_ownership_digest(payload)
-    jsonl_path.parent.mkdir(parents=True, exist_ok=True)
-    with jsonl_path.open("a", encoding="utf-8") as handle:
-        handle.write(json.dumps(to_jsonable(payload), sort_keys=True) + "\n")
+    append_bounded_jsonl(jsonl_path, to_jsonable(payload))
     records = load_submit_intent_ownership_records(jsonl_path)
     latest_view = _latest_view(records=records, generated_at=payload["updated_at"])
     latest_path.parent.mkdir(parents=True, exist_ok=True)

@@ -15,6 +15,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
+from mgc_v05l.execution_core.bounded_jsonl import append_bounded_jsonl
 from mgc_v05l.execution_core.track_b_atomic_io import write_json_atomic
 from mgc_v05l.execution_core.track_b_agent_health import DEFAULT_AGENT_HEALTH_ARTIFACT
 from mgc_v05l.execution_core.track_b_agent_registry import DEFAULT_AGENT_REGISTRY_ARTIFACT
@@ -224,10 +225,8 @@ def write_track_b_crash_loop_protection(
             build_dashboard_crash_loop_projection(authority_payload=payload, authority_path=authority_path),
         )
     if events:
-        event_log_path.parent.mkdir(parents=True, exist_ok=True)
-        with event_log_path.open("a", encoding="utf-8") as handle:
-            for event in events:
-                handle.write(json.dumps(event, sort_keys=True) + "\n")
+        for event in events:
+            append_bounded_jsonl(event_log_path, event)
     return authority_path, events
 
 

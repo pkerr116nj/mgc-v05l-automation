@@ -15,6 +15,8 @@ from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any, Iterable, Mapping
 
+from mgc_v05l.execution_core.bounded_jsonl import append_bounded_jsonl
+
 from .models import require_aware_datetime, to_jsonable
 from .track_b_lifecycle_state_transition import (
     CLOSED_FLAT,
@@ -190,10 +192,9 @@ def reconcile_app_only_unfilled_managed_lifecycles(
             reconciliation_records.append(_app_only_unfilled_reconciliation_record(target=target, evidence=evidence, now=actual_now))
 
     if reconciliation_records:
-        with ledger_path.open("a", encoding="utf-8") as handle:
-            for record in reconciliation_records:
-                handle.write(json.dumps(to_jsonable(record), sort_keys=True) + "\n")
-                records.append(record)
+        for record in reconciliation_records:
+            append_bounded_jsonl(ledger_path, to_jsonable(record))
+            records.append(record)
 
     summaries = build_track_b_paper_trade_summaries(
         ledger_records=records,
@@ -327,10 +328,9 @@ def reconcile_leak_test_adopted_entry_settled_flat_lifecycles(
             )
 
     if reconciliation_records:
-        with ledger_path.open("a", encoding="utf-8") as handle:
-            for record in reconciliation_records:
-                handle.write(json.dumps(to_jsonable(record), sort_keys=True) + "\n")
-                records.append(record)
+        for record in reconciliation_records:
+            append_bounded_jsonl(ledger_path, to_jsonable(record))
+            records.append(record)
 
     summaries = build_track_b_paper_trade_summaries(
         ledger_records=records,
@@ -450,8 +450,7 @@ def reconcile_duplicate_exit_overfill_scoped_remediation(
             broker_open_orders_snapshot_json=broker_open_orders_snapshot_json,
             now=actual_now,
         )
-        with ledger_path.open("a", encoding="utf-8") as handle:
-            handle.write(json.dumps(to_jsonable(reconciliation_record), sort_keys=True) + "\n")
+        append_bounded_jsonl(ledger_path, to_jsonable(reconciliation_record))
         records.append(reconciliation_record)
         wrote = True
 
@@ -587,10 +586,9 @@ def reconcile_ibkr_contract_rejected_managed_lifecycles(
             )
 
     if reconciliation_records:
-        with ledger_path.open("a", encoding="utf-8") as handle:
-            for record in reconciliation_records:
-                handle.write(json.dumps(to_jsonable(record), sort_keys=True) + "\n")
-                records.append(record)
+        for record in reconciliation_records:
+            append_bounded_jsonl(ledger_path, to_jsonable(record))
+            records.append(record)
 
     summaries = build_track_b_paper_trade_summaries(
         ledger_records=records,
@@ -730,8 +728,7 @@ def reconcile_manually_flattened_proof_lifecycle(
             recovery_report_json=recovery_report_json,
             now=actual_now,
         )
-        with ledger_path.open("a", encoding="utf-8") as handle:
-            handle.write(json.dumps(to_jsonable(reconciliation_record), sort_keys=True) + "\n")
+        append_bounded_jsonl(ledger_path, to_jsonable(reconciliation_record))
         records.append(reconciliation_record)
         wrote = True
 
@@ -801,8 +798,7 @@ def update_track_b_paper_trade_ledger_from_runner_report(
     )
     wrote = False
     if trade_record is not None and _should_append_trade_record(existing_records, trade_record):
-        with ledger_jsonl.open("a", encoding="utf-8") as handle:
-            handle.write(json.dumps(to_jsonable(trade_record), sort_keys=True) + "\n")
+        append_bounded_jsonl(ledger_jsonl, to_jsonable(trade_record))
         existing_records.append(trade_record)
         wrote = True
 
@@ -870,8 +866,7 @@ def update_track_b_paper_trade_ledger_from_filled_bridge_result(
     )
     wrote = False
     if trade_record is not None and _should_append_trade_record(existing_records, trade_record):
-        with ledger_jsonl.open("a", encoding="utf-8") as handle:
-            handle.write(json.dumps(to_jsonable(trade_record), sort_keys=True) + "\n")
+        append_bounded_jsonl(ledger_jsonl, to_jsonable(trade_record))
         existing_records.append(trade_record)
         wrote = True
 

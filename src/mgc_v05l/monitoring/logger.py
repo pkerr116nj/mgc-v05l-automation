@@ -10,6 +10,8 @@ from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
+from mgc_v05l.execution_core.bounded_jsonl import append_bounded_jsonl
+
 
 def get_logger(name: str) -> logging.Logger:
     """Return a standard logger pending structured logging configuration."""
@@ -173,10 +175,7 @@ class StructuredLogger:
         path = self._artifact_dir / file_name
         record = dict(payload)
         record.setdefault("logged_at", datetime.now(timezone.utc).isoformat())
-        with path.open("a", encoding="utf-8") as handle:
-            handle.write(json.dumps(record, sort_keys=True, default=_json_default))
-            handle.write("\n")
-        return path
+        return append_bounded_jsonl(path, record)
 
     def _write_json(self, file_name_or_path: str | Path, payload: dict[str, Any]) -> Path:
         path = file_name_or_path if isinstance(file_name_or_path, Path) else self._artifact_dir / file_name_or_path

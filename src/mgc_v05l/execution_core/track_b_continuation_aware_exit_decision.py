@@ -12,6 +12,7 @@ from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
+from mgc_v05l.execution_core.bounded_jsonl import append_bounded_jsonl
 from mgc_v05l.execution_core.track_b_atomic_io import write_json_atomic
 
 
@@ -607,9 +608,7 @@ def write_continuation_aware_exit_preview_artifacts(
     payload["close_intent_preview"] = close_preview
 
     write_json_atomic(output_path, payload)
-    event_log_path.parent.mkdir(parents=True, exist_ok=True)
-    with event_log_path.open("a", encoding="utf-8") as handle:
-        handle.write(json.dumps(payload, sort_keys=True) + "\n")
+    append_bounded_jsonl(event_log_path, payload)
     return {
         "latest_preview_path": str(output_path),
         "event_log_path": str(event_log_path),

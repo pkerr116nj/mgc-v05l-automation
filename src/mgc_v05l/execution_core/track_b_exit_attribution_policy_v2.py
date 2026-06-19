@@ -16,6 +16,7 @@ from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
+from mgc_v05l.execution_core.bounded_jsonl import append_bounded_jsonl
 from mgc_v05l.execution_core.models import to_jsonable
 from mgc_v05l.execution_core.track_b_atomic_io import write_json_atomic
 
@@ -1097,9 +1098,7 @@ def _read_jsonl(path: Path) -> list[dict[str, Any]]:
 
 
 def _append_jsonl(path: Path, payload: Mapping[str, Any]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("a", encoding="utf-8") as handle:
-        handle.write(json.dumps(to_jsonable(payload), sort_keys=True) + "\n")
+    append_bounded_jsonl(path, to_jsonable(payload))
 
 
 def _walk_mappings(value: Any) -> list[Mapping[str, Any]]:

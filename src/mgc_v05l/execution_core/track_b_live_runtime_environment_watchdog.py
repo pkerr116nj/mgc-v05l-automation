@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import Any, Callable, Mapping, Sequence
 
 from mgc_v05l.execution.ibkr_paper_strategy_bridge import IbkrPaperStrategyBridgeConfig
+from mgc_v05l.execution_core.bounded_jsonl import append_bounded_jsonl
 from mgc_v05l.execution_core.track_b_atomic_io import write_json_atomic
 from mgc_v05l.execution_core.track_b_authority_refresh_heartbeat import (
     DEFAULT_AUTHORITY_REFRESH_HEARTBEAT_ARTIFACT,
@@ -361,9 +362,7 @@ def write_track_b_live_runtime_environment_watchdog(
 ) -> Path:
     output_path = write_json_atomic(config.resolve(config.output_path), dict(payload))
     event_path = config.resolve(config.events_path)
-    event_path.parent.mkdir(parents=True, exist_ok=True)
-    with event_path.open("a", encoding="utf-8") as handle:
-        handle.write(json.dumps(dict(payload), sort_keys=True) + "\n")
+    append_bounded_jsonl(event_path, dict(payload))
     return output_path
 
 

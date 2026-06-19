@@ -16,6 +16,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
+from mgc_v05l.execution_core.bounded_jsonl import append_bounded_jsonl
 from mgc_v05l.execution_core.track_b_atomic_io import write_json_atomic
 
 
@@ -150,9 +151,7 @@ def append_recovery_budget_event(
     event: Mapping[str, Any],
 ) -> Path:
     path = config.resolve(config.event_log_path)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("a", encoding="utf-8") as handle:
-        handle.write(json.dumps(dict(event), sort_keys=True) + "\n")
+    append_bounded_jsonl(path, dict(event))
     return path
 
 

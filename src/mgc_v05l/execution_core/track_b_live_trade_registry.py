@@ -14,6 +14,8 @@ from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any, Mapping
 
+from mgc_v05l.execution_core.bounded_jsonl import append_bounded_jsonl
+
 from .track_b_central_trade_registry import (
     TradeCurrentState,
     TradeEvent,
@@ -53,10 +55,7 @@ def append_live_trade_registry_event(
         }
     resolved_jsonl = _resolve(repo_root, jsonl_path)
     resolved_latest = _resolve(repo_root, latest_path)
-    resolved_jsonl.parent.mkdir(parents=True, exist_ok=True)
-    with resolved_jsonl.open("a", encoding="utf-8") as handle:
-        handle.write(json.dumps(event_payload, sort_keys=True))
-        handle.write("\n")
+    append_bounded_jsonl(resolved_jsonl, event_payload)
     latest_payload = {
         "schema_version": "track_b_live_trade_registry_latest_event_v1",
         "generated_at": _now().isoformat(),

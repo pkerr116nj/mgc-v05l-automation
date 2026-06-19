@@ -12,6 +12,8 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Mapping, Protocol, Sequence
 
+from mgc_v05l.execution_core.bounded_jsonl import append_bounded_jsonl
+
 from .models import to_jsonable
 
 EXPECTED_PAPER_ACCOUNT_ID = "DUM882026"
@@ -149,9 +151,7 @@ def append_paper_order_control_record(
     validate_paper_order_record(payload)
     payload = dict(payload)
     payload.setdefault("recorded_at", datetime.now(UTC).isoformat())
-    jsonl_path.parent.mkdir(parents=True, exist_ok=True)
-    with jsonl_path.open("a", encoding="utf-8") as handle:
-        handle.write(json.dumps(to_jsonable(payload), sort_keys=True) + "\n")
+    append_bounded_jsonl(jsonl_path, to_jsonable(payload))
     records = load_paper_order_control_records(jsonl_path)
     latest = {
         "schema_version": SCHEMA_VERSION,

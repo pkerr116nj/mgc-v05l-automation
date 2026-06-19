@@ -14,6 +14,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Callable, Mapping
 
+from mgc_v05l.execution_core.bounded_jsonl import append_bounded_jsonl
 from mgc_v05l.execution_core.track_b_position_truth_monitor import DEFAULT_TRADE_OUTCOME_EVENTS
 
 DEFAULT_NOTIFICATION_EVENTS = (
@@ -235,10 +236,8 @@ def _state_signature(state: Any) -> str:
 
 
 def _append_jsonl(path: Path, rows: list[Mapping[str, Any]]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("a", encoding="utf-8") as handle:
-        for row in rows:
-            handle.write(json.dumps(dict(row), sort_keys=True) + "\n")
+    for row in rows:
+        append_bounded_jsonl(path, dict(row))
 
 
 def _read_json(path: Path) -> dict[str, Any]:
