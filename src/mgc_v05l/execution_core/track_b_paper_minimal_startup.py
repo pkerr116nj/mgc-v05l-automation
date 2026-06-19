@@ -83,6 +83,9 @@ DEFAULT_IBKR_BROKER_TRUTH_REFRESH_STATUS_PATH = (
 DEFAULT_MANAGED_POSITION_REGISTRY_PATH = (
     Path("outputs") / "track_b_execution_core" / "managed_positions" / "latest_managed_positions.json"
 )
+DEFAULT_APPROVED_PAPER_STACK_PROFILE_PATH = (
+    Path("outputs") / "track_b_execution_core" / "runtime_recovery" / "approved_paper_stack_profile.json"
+)
 
 
 @dataclass(frozen=True)
@@ -104,6 +107,7 @@ class TrackBPaperMinimalStartupConfig:
     ibkr_open_orders_snapshot_path: Path = DEFAULT_IBKR_OPEN_ORDERS_SNAPSHOT_PATH
     ibkr_broker_truth_refresh_status_path: Path = DEFAULT_IBKR_BROKER_TRUTH_REFRESH_STATUS_PATH
     managed_position_registry_path: Path = DEFAULT_MANAGED_POSITION_REGISTRY_PATH
+    approved_paper_stack_profile_path: Path = DEFAULT_APPROVED_PAPER_STACK_PROFILE_PATH
 
     def resolve(self, path: Path) -> Path:
         return path if path.is_absolute() else self.repo_root / path
@@ -127,6 +131,7 @@ def build_track_b_paper_minimal_startup(
     ibkr_open_orders_snapshot = _read_json(config.resolve(config.ibkr_open_orders_snapshot_path))
     ibkr_broker_truth_refresh_status = _read_json(config.resolve(config.ibkr_broker_truth_refresh_status_path))
     managed_positions = _read_json(config.resolve(config.managed_position_registry_path))
+    approved_profile = _read_json(config.resolve(config.approved_paper_stack_profile_path))
 
     blockers: list[dict[str, Any]] = []
     warnings: list[dict[str, Any]] = []
@@ -160,7 +165,12 @@ def build_track_b_paper_minimal_startup(
     broker_open_order_count = _int_first(broker_truth_authority.get("broker_open_order_count"))
     unknown_open_orders = _int_first(broker_truth_authority.get("unknown_open_order_count"))
 
-    explicit_profile = _explicit_paper_profile(config_paths)
+    explicit_profile = _explicit_paper_profile(
+        config_paths,
+        approved_profile=approved_profile,
+        runtime_dir=config.resolve(config.config_paths_file).parent,
+        repo_root=config.repo_root,
+    )
     if not explicit_profile:
         block("explicit_paper_profile_missing", "No explicit paper_stack_* profile overlay is selected.", source="config")
 
@@ -258,6 +268,7 @@ def build_track_b_paper_minimal_startup(
             "ibkr_open_orders_snapshot": str(config.resolve(config.ibkr_open_orders_snapshot_path)),
             "ibkr_broker_truth_refresh_status": str(config.resolve(config.ibkr_broker_truth_refresh_status_path)),
             "managed_position_registry": str(config.resolve(config.managed_position_registry_path)),
+            "approved_paper_stack_profile": str(config.resolve(config.approved_paper_stack_profile_path)),
         },
 }
 
@@ -652,12 +663,39 @@ def _is_track_b_futures_position_row(row: Mapping[str, Any]) -> bool:
     return is_track_b_futures_position(row)
 
 
-def _explicit_paper_profile(config_paths: Sequence[str]) -> str | None:
+def _explicit_paper_profile(
+    config_paths: Sequence[str],
+    *,
+    approved_profile: Mapping[str, Any] | None = None,
+    runtime_dir: Path | None = None,
+    repo_root: Path | None = None,
+) -> str | None:
     for raw_path in reversed(config_paths):
         name = Path(str(raw_path)).name
         if name.startswith("paper_stack_") and name.endswith(".yaml"):
             return str(raw_path)
+    profile = _approved_paper_stack_profile_name(approved_profile or {})
+    if not profile or runtime_dir is None:
+        return None
+    candidate = runtime_dir / f"paper_stack_{profile}.yaml"
+    if candidate.exists():
+        return str(candidate)
+    if repo_root is not None:
+        repo_candidate = repo_root / candidate
+        if repo_candidate.exists():
+            return str(repo_candidate)
     return None
+
+
+def _approved_paper_stack_profile_name(payload: Mapping[str, Any]) -> str | None:
+    if payload.get("paper_only") is not True:
+        return None
+    if payload.get("live_money_eligible") is True or payload.get("paper_proof_invoked") is True:
+        return None
+    if payload.get("recovery_profile_approved") is False:
+        return None
+    profile = str(payload.get("approved_profile") or payload.get("recovery_requested_profile") or "").strip()
+    return profile or None
 
 
 def _config_account_id(config_in_force: Mapping[str, Any]) -> str | None:

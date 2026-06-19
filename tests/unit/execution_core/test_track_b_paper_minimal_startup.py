@@ -659,6 +659,31 @@ def test_missing_profile_config_blocks(tmp_path: Path) -> None:
     assert "explicit_paper_profile_missing" in _codes(result)
 
 
+def test_approved_paper_stack_profile_supplies_explicit_profile_when_config_paths_are_stale(tmp_path: Path) -> None:
+    config = _seed_minimal_ready(tmp_path)
+    (tmp_path / config.config_paths_file).write_text("/repo/config/base.yaml\n", encoding="utf-8")
+    runtime_dir = tmp_path / config.config_paths_file.parent
+    scoped_profile = runtime_dir / "paper_stack_mnq_mes_full_session_active_evidence.yaml"
+    scoped_profile.parent.mkdir(parents=True, exist_ok=True)
+    scoped_profile.write_text("profile: mnq_mes_full_session_active_evidence\n", encoding="utf-8")
+    _write_json(
+        tmp_path / config.approved_paper_stack_profile_path,
+        {
+            "schema_version": "track_b_approved_paper_stack_profile_v1",
+            "approved_profile": "mnq_mes_full_session_active_evidence",
+            "recovery_profile_approved": True,
+            "paper_only": True,
+            "live_money_eligible": False,
+            "paper_proof_invoked": False,
+        },
+    )
+
+    result = _classification(tmp_path)
+
+    assert "explicit_paper_profile_missing" not in _codes(result)
+    assert result["profile_overlay"] == str(scoped_profile)
+
+
 def test_non_paper_route_or_wrong_account_blocks(tmp_path: Path) -> None:
     config = _seed_minimal_ready(tmp_path)
     payload_path = tmp_path / config.config_in_force_path
