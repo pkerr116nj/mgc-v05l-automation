@@ -166,7 +166,8 @@ def test_paper_minimal_start_does_not_loop_waiting_for_runtime_truth_advancement
     assert "detached_child_ready_authority" in minimal_wait_block
     assert 'payload.get("child_final_status") != "RUNNING"' in source
     assert 'payload.get("process_alive") is not True' in source
-    assert 'payload.get("classification") != "RUNTIME_CHILD_RUNNING_CYCLE_OBSERVED"' in source
+    assert 'classification not in {"RUNTIME_CHILD_RUNNING_CYCLE_OBSERVED", "RUNTIME_CHILD_RUNNING_INITIAL_TRUTH"}' in source
+    assert 'progress.get("state") != "AWAITING_SUBMIT_AUTHORITY"' in source
     assert "RUNTIME_RUNNING_WAITING_FOR_DETACHED_CHILD_AUTHORITY" in minimal_wait_block
     assert "refreshed detached-child monitor authority did not prove" in minimal_wait_block
     assert "same-PID liveness" in minimal_wait_block

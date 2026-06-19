@@ -2231,27 +2231,33 @@ if int(payload.get("child_pid") or payload.get("pid") or 0) != expected_pid:
 if payload.get("child_final_status") != "RUNNING" or payload.get("process_alive") is not True:
     print("false")
     raise SystemExit(0)
-if payload.get("classification") != "RUNTIME_CHILD_RUNNING_CYCLE_OBSERVED":
+classification = payload.get("classification")
+if classification not in {"RUNTIME_CHILD_RUNNING_CYCLE_OBSERVED", "RUNTIME_CHILD_RUNNING_INITIAL_TRUTH"}:
     print("false")
     raise SystemExit(0)
 marker = payload.get("last_runtime_cycle_marker")
-if not isinstance(marker, dict):
-    print("false")
-    raise SystemExit(0)
-if marker.get("stage") != "runtime_cycle" or marker.get("state") not in {
-    "STARTED",
-    "IN_PROGRESS",
-    "COMPLETED",
-    "AWAITING_SUBMIT_AUTHORITY",
-    "TRADING_LOOP_ENTERED",
-}:
+progress = payload.get("last_post_truth_marker")
+if not isinstance(marker, dict) and not isinstance(progress, dict):
     print("false")
     raise SystemExit(0)
 truth = payload.get("runtime_truth_marker")
 if not isinstance(truth, dict):
     print("false")
     raise SystemExit(0)
-if marker.get("state") == "COMPLETED":
+if isinstance(marker, dict):
+    if marker.get("stage") != "runtime_cycle" or marker.get("state") not in {
+        "STARTED",
+        "IN_PROGRESS",
+        "COMPLETED",
+        "AWAITING_SUBMIT_AUTHORITY",
+        "TRADING_LOOP_ENTERED",
+    }:
+        print("false")
+        raise SystemExit(0)
+elif progress.get("state") != "AWAITING_SUBMIT_AUTHORITY":
+    print("false")
+    raise SystemExit(0)
+if isinstance(marker, dict) and marker.get("state") == "COMPLETED":
     marker_at = parse_ts(marker.get("generated_at") or marker.get("heartbeat_at"))
     truth_at = parse_ts(truth.get("generated_at"))
     if marker_at is not None and truth_at is not None and truth_at <= marker_at:
