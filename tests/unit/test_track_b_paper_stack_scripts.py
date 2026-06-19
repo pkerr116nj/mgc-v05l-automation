@@ -1663,6 +1663,7 @@ def test_paper_stack_start_requires_one_wrapper_parent_for_runtime_child() -> No
     assert '"pid=,ppid=,command="' in verify_block
     assert "wrapper_pids = []" in verify_block
     assert "runtime_parent_pid = None" in verify_block
+    assert '"run_probationary_paper_soak.sh" in command' in verify_block
     assert "len(wrapper_pids) != 1" in verify_block
     assert "runtime_parent_pid not in wrapper_pids" in verify_block
 

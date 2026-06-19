@@ -2115,10 +2115,9 @@ for line in ps.stdout.splitlines():
         continue
     if str(wrapper_path) in command and "track_b_paper_stack_runtime_wrapper.sh" in command:
         wrapper_pids.append(row_pid_int)
-    if (
-        str(repo_root) in command
-        and "mgc_v05l.app.main" in command
-        and "probationary-paper-soak" in command
+    if str(repo_root) in command and (
+        ("mgc_v05l.app.main" in command and "probationary-paper-soak" in command)
+        or "run_probationary_paper_soak.sh" in command
     ):
         runtime_pids.append(row_pid_int)
         runtime_parent_pid = ppid_int
