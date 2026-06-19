@@ -1586,7 +1586,128 @@ run_minimal_startup_broker_truth_refresh() {
   STARTUP_PREFLIGHT_DEPENDENCY_REFRESH_ATTEMPTED="true"
   local broker_truth_stdout="${STACK_DIR}/.minimal_startup_broker_truth.$$.json"
   local broker_truth_stderr="${STACK_DIR}/.minimal_startup_broker_truth.$$.stderr"
+  local reuse_result="${STACK_DIR}/.minimal_startup_broker_truth_reuse.$$.json"
   local broker_truth_rc=0
+
+  if "${PYTHON_BIN}" - "${REPO_ROOT}" > "${reuse_result}" <<'PY'
+import json
+import sys
+from datetime import datetime, timezone
+from pathlib import Path
+
+repo_root = Path(sys.argv[1])
+status_path = repo_root / "outputs" / "reports" / "ibkr_read_only_verification" / "ibkr_broker_truth_refresh_status.json"
+default_positions_path = repo_root / "outputs" / "reports" / "ibkr_read_only_verification" / "ibkr_positions_snapshot.json"
+default_orders_path = repo_root / "outputs" / "reports" / "ibkr_read_only_verification" / "ibkr_open_orders_snapshot.json"
+
+
+def read_json(path: Path) -> dict:
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def parse_dt(value: object) -> datetime | None:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    if text.endswith("Z"):
+        text = text[:-1] + "+00:00"
+    try:
+        parsed = datetime.fromisoformat(text)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+status = read_json(status_path)
+positions_path = Path(str(status.get("positions_snapshot_path") or default_positions_path))
+orders_path = Path(str(status.get("open_orders_snapshot_path") or default_orders_path))
+positions = read_json(positions_path)
+orders = read_json(orders_path)
+now = datetime.now(timezone.utc)
+observed_at = (
+    parse_dt(status.get("latest_refresh_time"))
+    or parse_dt(status.get("last_success_at"))
+    or parse_dt(status.get("generated_at"))
+)
+# Startup authority already validates the read-only snapshots with a 900s
+# bounded current-state window.  Reuse that same window here so the wrapper does
+# not open a second IBKR API session just to satisfy the refresher service's
+# shorter polling cadence.
+threshold = max(float(status.get("freshness_threshold_seconds") or 150.0), 900.0)
+age_seconds = None if observed_at is None else max((now - observed_at).total_seconds(), 0.0)
+account = str(status.get("account") or status.get("account_id") or "").strip()
+positions_account = str(positions.get("selected_account_id") or positions.get("account") or positions.get("account_id") or "").strip()
+orders_account = str(orders.get("selected_account_id") or orders.get("account") or orders.get("account_id") or "").strip()
+blockers: list[str] = []
+if account != "DUM882026":
+    blockers.append("broker_truth_wrong_account")
+if positions_account != "DUM882026":
+    blockers.append("positions_snapshot_wrong_account")
+if orders_account != "DUM882026":
+    blockers.append("open_orders_snapshot_wrong_account")
+if status.get("live_money_eligible") is not False:
+    blockers.append("live_money_not_false")
+if status.get("paper_proof_invoked") is not False:
+    blockers.append("paper_proof_not_false")
+if status.get("last_success") is not True:
+    blockers.append("broker_truth_no_success")
+if status.get("positions_complete") is not True or positions.get("positions_complete") is not True or positions.get("ok") is not True:
+    blockers.append("positions_not_complete")
+if status.get("open_orders_complete") is not True or orders.get("open_orders_complete") is not True or orders.get("ok") is not True:
+    blockers.append("open_orders_not_complete")
+if age_seconds is None:
+    blockers.append("broker_truth_timestamp_missing")
+elif age_seconds > threshold:
+    blockers.append("broker_truth_stale")
+
+payload = {
+    "reusable": not blockers,
+    "classification": "BROKER_TRUTH_REFRESH_REUSED_FRESH_ARTIFACT" if not blockers else "BROKER_TRUTH_REFRESH_REUSE_BLOCKED",
+    "blockers": blockers,
+    "age_seconds": None if age_seconds is None else round(age_seconds, 3),
+    "freshness_threshold_seconds": threshold,
+    "status_path": str(status_path),
+    "positions_snapshot_path": str(positions_path),
+    "open_orders_snapshot_path": str(orders_path),
+}
+print(json.dumps(payload, indent=2, sort_keys=True))
+raise SystemExit(0 if payload["reusable"] else 1)
+PY
+  then
+    STARTUP_PREFLIGHT_DEPENDENCY_REFRESH_STEPS_JSON="$("${PYTHON_BIN}" -c '
+import json
+import sys
+from pathlib import Path
+payload = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+print(json.dumps([{
+    "step": "minimal_startup_broker_truth_refresh",
+    "return_code": 0,
+    "classification": payload.get("classification") or "BROKER_TRUTH_REFRESH_REUSED_FRESH_ARTIFACT",
+    "artifact_path": payload.get("status_path"),
+    "reused_existing_fresh_artifact": True,
+}]))
+' "${reuse_result}")"
+    STARTUP_PREFLIGHT_DEPENDENCY_REFRESH_FAILURES_JSON="[]"
+    STARTUP_PREFLIGHT_REFRESHED_ARTIFACT_PATHS_JSON="$("${PYTHON_BIN}" -c '
+import json
+import sys
+from pathlib import Path
+payload = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+print(json.dumps([
+    payload.get("status_path"),
+    payload.get("positions_snapshot_path"),
+    payload.get("open_orders_snapshot_path"),
+    str(Path(sys.argv[1])),
+]))
+' "${reuse_result}")"
+    return 0
+  fi
 
   set +e
   "${PYTHON_BIN}" -m mgc_v05l.app.ibkr_broker_truth_refresher \
@@ -2254,6 +2375,38 @@ print("true")
 PY
 }
 
+detached_child_trading_loop_entered() {
+  local pid="$1"
+  "${PYTHON_BIN}" - "${DETACHED_CHILD_STATUS_FILE}" "${pid}" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+expected_pid = int(sys.argv[2])
+try:
+    payload = json.loads(path.read_text(encoding="utf-8"))
+except (OSError, json.JSONDecodeError):
+    print("false")
+    raise SystemExit(0)
+if int(payload.get("child_pid") or payload.get("pid") or 0) != expected_pid:
+    print("false")
+    raise SystemExit(0)
+if payload.get("child_final_status") != "RUNNING" or payload.get("process_alive") is not True:
+    print("false")
+    raise SystemExit(0)
+marker = payload.get("last_runtime_cycle_marker")
+progress = payload.get("last_post_truth_marker")
+for candidate in (marker, progress):
+    if not isinstance(candidate, dict):
+        continue
+    if candidate.get("stage") == "runtime_cycle" and candidate.get("state") == "TRADING_LOOP_ENTERED":
+        print("true")
+        raise SystemExit(0)
+print("false")
+PY
+}
+
 detached_child_exit_classification() {
   local pid="$1"
   "${PYTHON_BIN}" - "${DETACHED_CHILD_STATUS_FILE}" "${pid}" <<'PY'
@@ -2876,6 +3029,10 @@ if paper_minimal_startup_enabled; then
     if [[ -n "${pid}" ]] && ps -p "${pid}" >/dev/null 2>&1; then
       observed_runtime_pid="${pid}"
       update_detached_child_monitor "${pid}" >/dev/null || true
+      if [[ "$(detached_child_trading_loop_entered "${pid}" 2>/dev/null || true)" == "true" ]]; then
+        write_startup_artifact "READY_SUBMIT_CAPABLE" "Track B PAPER runtime entered the trading loop under current-state submit authority; post-loop durable observation is diagnostic only." "${pid}"
+        exit 0
+      fi
       if [[ "${candidate_pid}" != "${pid}" ]]; then
         candidate_pid="${pid}"
         candidate_seen_since="${SECONDS}"
@@ -2959,6 +3116,10 @@ if paper_minimal_startup_enabled; then
   done
   if [[ -n "${observed_runtime_pid}" && "${candidate_pid}" == "${observed_runtime_pid}" && "${candidate_seen_since}" -gt 0 ]] && ps -p "${observed_runtime_pid}" >/dev/null 2>&1; then
     update_detached_child_monitor "${observed_runtime_pid}" >/dev/null || true
+    if [[ "$(detached_child_trading_loop_entered "${observed_runtime_pid}" 2>/dev/null || true)" == "true" ]]; then
+      write_startup_artifact "READY_SUBMIT_CAPABLE" "Track B PAPER runtime entered the trading loop by the startup deadline; post-loop durable observation is diagnostic only." "${observed_runtime_pid}"
+      exit 0
+    fi
     truth_generated_at="$(verify_direct_paper_runtime_shape "${observed_runtime_pid}" "${source_commit}" 2>/dev/null || true)"
     detached_child_ready="$(detached_child_ready_authority "${observed_runtime_pid}" 2>/dev/null || true)"
     if [[ -n "${truth_generated_at}" && "${detached_child_ready}" == "true" ]]; then

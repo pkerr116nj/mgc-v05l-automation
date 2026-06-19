@@ -175,6 +175,8 @@ def test_paper_minimal_start_does_not_loop_waiting_for_runtime_truth_advancement
     assert 'progress.get("state") not in {"AWAITING_SUBMIT_AUTHORITY", "TRADING_LOOP_ENTERED"}' in source
     assert "RUNTIME_RUNNING_WAITING_FOR_DETACHED_CHILD_AUTHORITY" in minimal_wait_block
     assert '"TRADING_LOOP_ENTERED"' in source
+    assert "detached_child_trading_loop_entered" in minimal_wait_block
+    assert "post-loop durable observation is diagnostic only" in minimal_wait_block
     assert "paper_runtime_submit_authority_grant.json is diagnostic only" in minimal_wait_block
     assert 'elif [[ -n "${pid}" ]]; then' in minimal_wait_block
     assert "Runtime wrote PID" in minimal_wait_block
@@ -335,6 +337,10 @@ def test_paper_stack_minimal_startup_path_does_not_invoke_full_rebuild_before_la
     assert "run_paper_minimal_startup_preflight" in minimal_launch_block
     assert minimal_preflight_function.index("run_minimal_startup_broker_truth_refresh") < minimal_preflight_function.index(
         "track_b_paper_minimal_startup"
+    )
+    assert "BROKER_TRUTH_REFRESH_REUSED_FRESH_ARTIFACT" in minimal_preflight_function
+    assert minimal_preflight_function.index("BROKER_TRUTH_REFRESH_REUSED_FRESH_ARTIFACT") < minimal_preflight_function.index(
+        "ibkr_broker_truth_refresher"
     )
     assert "ibkr_broker_truth_refresher" in minimal_preflight_function
     assert "run_startup_preflight_evidence_refresh" not in minimal_launch_block
