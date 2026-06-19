@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import gzip
 import json
+import shutil
 from pathlib import Path
 
+import mgc_v05l.execution_core.generated_artifact_retention as retention_module
 from mgc_v05l.execution_core.generated_artifact_retention import (
     CHECK_WARN,
     ROTATED,
@@ -165,6 +167,91 @@ def test_check_reports_hot_path_thresholds_and_top_large_files(tmp_path: Path) -
     top_paths = [item["relative_path"] for item in payload["top_large_files"]]
     assert "outputs/reports/other_large.csv" in top_paths
     assert "outputs/probationary_pattern_engine/paper_session/live_timing_events.jsonl" in top_paths
+
+
+def test_route_dispatch_bridge_audit_stream_is_rotatable(tmp_path: Path) -> None:
+    target = (
+        tmp_path
+        / "outputs/reports/ibkr_runtime_route_dispatch/mnq_globex_active_participation_long/"
+        / "ibkr_paper_strategy_bridge_audit.jsonl"
+    )
+    _write_lines(target, line_count=4000, payload_size=350)
+    policy = _policy(
+        streams=[
+            {
+                "stream_id": "paper_bridge_route_dispatch_audits",
+                "patterns": [
+                    "outputs/reports/ibkr_runtime_route_dispatch/*/ibkr_paper_strategy_bridge_audit.jsonl"
+                ],
+                "max_file_size_mb": 1,
+                "keep_latest_tail_mb": 1,
+                "max_archives_per_stream": 8,
+            }
+        ]
+    )
+
+    payload = maintain_generated_artifacts(config=RetentionConfig(repo_root=tmp_path), policy=policy, apply=False)
+
+    action = payload["actions"][0]
+    assert action["status"] == "WOULD_ROTATE"
+    assert action["stream_id"] == "paper_bridge_route_dispatch_audits"
+    assert action["relative_path"].endswith("ibkr_paper_strategy_bridge_audit.jsonl")
+    assert target.exists()
+
+
+def test_archive_pruning_is_disabled_without_explicit_policy_approval(tmp_path: Path) -> None:
+    target = tmp_path / "outputs/reports/paper_strategy_monitor/paper_strategy_monitor_audit.jsonl"
+    archive_dir = tmp_path / "outputs/archive/paper_strategy_monitor"
+    archive_dir.mkdir(parents=True, exist_ok=True)
+    old_archive = archive_dir / "old_archive.jsonl.gz"
+    old_archive.write_text("keep", encoding="utf-8")
+    _write_lines(target, line_count=4000, payload_size=350)
+    policy = _policy(
+        streams=[
+            {
+                "stream_id": "paper_strategy_monitor",
+                "patterns": ["outputs/reports/paper_strategy_monitor/paper_strategy_monitor_audit.jsonl"],
+                "max_file_size_mb": 1,
+                "keep_latest_tail_mb": 1,
+                "max_archives_per_stream": 1,
+            }
+        ]
+    )
+
+    payload = maintain_generated_artifacts(config=RetentionConfig(repo_root=tmp_path), policy=policy, apply=True)
+
+    action = payload["actions"][0]
+    assert action["status"] == ROTATED
+    assert action["archive_prune_candidate_count"] >= 1
+    assert action["archive_prune_performed"] is False
+    assert old_archive.exists()
+    assert payload["source_delete_enabled"] is False
+    assert payload["archive_prune_enabled"] is False
+
+
+def test_disk_pressure_guard_reports_critical_without_source_mutation(monkeypatch, tmp_path: Path) -> None:
+    def fake_disk_usage(path: Path) -> shutil._ntuple_diskusage:
+        return shutil._ntuple_diskusage(total=100_000, used=96_000, free=4_000)
+
+    monkeypatch.setattr(retention_module.shutil, "disk_usage", fake_disk_usage)
+    policy = _policy(
+        streams=[
+            {
+                "stream_id": "paper_strategy_monitor",
+                "patterns": ["outputs/reports/paper_strategy_monitor/paper_strategy_monitor_audit.jsonl"],
+                "max_file_size_mb": 1,
+                "keep_latest_tail_mb": 1,
+                "max_archives_per_stream": 5,
+            }
+        ]
+    )
+
+    payload = check_generated_artifacts(config=RetentionConfig(repo_root=tmp_path), policy=policy)
+
+    assert payload["classification"] == CHECK_WARN
+    assert payload["disk_pressure"]["classification"] == "DISK_PRESSURE_CRITICAL"
+    assert payload["disk_pressure"]["disable_noisy_diagnostics_recommended"] is True
+    assert payload["source_mutation"] is False
 
 
 def _policy(*, streams: list[dict], protected_globs: list[str] | None = None) -> RetentionPolicy:

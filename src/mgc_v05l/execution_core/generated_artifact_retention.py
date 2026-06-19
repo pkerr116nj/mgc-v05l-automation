@@ -65,6 +65,11 @@ class RetentionPolicy:
     keep_latest_tail_mb: int
     max_archives_per_stream: int
     compression_enabled: bool
+    archive_prune_enabled: bool
+    warn_free_percent: float
+    critical_free_percent: float
+    warn_free_bytes_mb: int
+    critical_free_bytes_mb: int
     generated_roots: tuple[str, ...]
     forbidden_roots: tuple[str, ...]
     protected_globs: tuple[str, ...]
@@ -76,6 +81,7 @@ class RetentionPolicy:
         default_tail_mb = int(payload.get("keep_latest_tail_mb") or 256)
         default_archives = int(payload.get("max_archives_per_stream") or 5)
         default_compression = bool(payload.get("compression_enabled", True))
+        disk_pressure = payload.get("disk_pressure") if isinstance(payload.get("disk_pressure"), Mapping) else {}
         streams = []
         for item in _list(payload.get("streams")):
             streams.append(
@@ -95,6 +101,11 @@ class RetentionPolicy:
             keep_latest_tail_mb=default_tail_mb,
             max_archives_per_stream=default_archives,
             compression_enabled=default_compression,
+            archive_prune_enabled=bool(payload.get("archive_prune_enabled", False)),
+            warn_free_percent=float(disk_pressure.get("warn_free_percent") or 15.0),
+            critical_free_percent=float(disk_pressure.get("critical_free_percent") or 8.0),
+            warn_free_bytes_mb=int(disk_pressure.get("warn_free_bytes_mb") or 50 * 1024),
+            critical_free_bytes_mb=int(disk_pressure.get("critical_free_bytes_mb") or 20 * 1024),
             generated_roots=tuple(str(item).strip("/") for item in _list(payload.get("generated_roots"))),
             forbidden_roots=tuple(str(item).strip("/") for item in _list(payload.get("forbidden_roots"))),
             protected_globs=tuple(str(item) for item in _list(payload.get("protected_globs"))),
@@ -122,6 +133,7 @@ def load_policy(*, config: RetentionConfig) -> RetentionPolicy:
 def check_generated_artifacts(*, config: RetentionConfig, policy: RetentionPolicy | None = None) -> dict[str, Any]:
     actual_policy = policy or load_policy(config=config)
     candidates = list(_iter_stream_candidates(config=config, policy=actual_policy))
+    disk_pressure = _disk_pressure_summary(config=config, policy=actual_policy)
     violations = [
         item
         for item in candidates
@@ -136,7 +148,7 @@ def check_generated_artifacts(*, config: RetentionConfig, policy: RetentionPolic
         if item["exists"] and item["protected"] and int(item["size_bytes"]) > int(item["max_file_size_bytes"])
     ]
     large_files = _top_large_generated_files(config=config, policy=actual_policy, limit=config.top_limit)
-    classification = CHECK_WARN if violations else CHECK_OK
+    classification = CHECK_WARN if violations or disk_pressure["is_warning_or_critical"] else CHECK_OK
     return {
         "schema_version": "generated_artifact_retention_check_v1",
         "generated_at": _now().isoformat(),
@@ -146,6 +158,7 @@ def check_generated_artifacts(*, config: RetentionConfig, policy: RetentionPolic
         "broker_mutation": False,
         "runtime_restart": False,
         "source_mutation": False,
+        "disk_pressure": disk_pressure,
         "candidate_count": len(candidates),
         "violation_count": len(violations),
         "protected_over_threshold_count": len(protected_over_threshold),
@@ -177,6 +190,9 @@ def maintain_generated_artifacts(
         "broker_mutation": False,
         "runtime_restart": False,
         "source_mutation": False,
+        "source_delete_enabled": False,
+        "archive_prune_enabled": actual_policy.archive_prune_enabled,
+        "disk_pressure": _disk_pressure_summary(config=config, policy=actual_policy),
         "rotated_count": len(rotated),
         "action_count": len(actions),
         "actions": actions,
@@ -258,6 +274,8 @@ def _maintenance_action(
         "keep_latest_tail_bytes": stream.keep_latest_tail_bytes,
         "compression_enabled": stream.compression_enabled,
         "recreate_live_file": stream.recreate_live_file,
+        "source_delete_enabled": False,
+        "archive_prune_enabled": policy.archive_prune_enabled,
     }
     if not apply:
         return planned
@@ -282,7 +300,9 @@ def _maintenance_action(
     if stream.recreate_live_file:
         path.parent.mkdir(parents=True, exist_ok=True)
         path.touch()
-    _prune_archives(archive_path.parent, max_archives=stream.max_archives_per_stream)
+    prune_candidates = _archive_prune_candidates(archive_path.parent, max_archives=stream.max_archives_per_stream)
+    if policy.archive_prune_enabled:
+        _prune_archives(prune_candidates)
     return {
         **planned,
         "status": ROTATED,
@@ -290,6 +310,8 @@ def _maintenance_action(
         "archive_exists": archive_path.exists(),
         "live_exists": path.exists(),
         "live_size_bytes": path.stat().st_size if path.exists() else None,
+        "archive_prune_candidate_count": len(prune_candidates),
+        "archive_prune_performed": policy.archive_prune_enabled and bool(prune_candidates),
     }
 
 
@@ -385,16 +407,18 @@ def _write_tail(*, source: Path, destination: Path, max_bytes: int) -> None:
 
 def _archive_path(*, config: RetentionConfig, stream: StreamPolicy, source: Path) -> Path:
     stamp = _now().strftime("%Y%m%dT%H%M%SZ")
-    suffix = "".join(source.suffixes) or source.suffix
-    stem = source.name[: -len(suffix)] if suffix and source.name.endswith(suffix) else source.stem
-    archive_name = f"{stem}_{stamp}{suffix}"
+    relative_stem = _relative_posix(source.resolve(), config.repo_root).replace("/", "__")
+    archive_name = f"{relative_stem}_{stamp}"
     if stream.compression_enabled:
         archive_name += ".gz"
     archive_root = config.repo_root / "outputs" / "archive" / stream.stream_id
     candidate = archive_root / archive_name
     index = 1
     while candidate.exists():
-        candidate = archive_root / archive_name.replace(suffix, f"_{index}{suffix}", 1)
+        if stream.compression_enabled and archive_name.endswith(".gz"):
+            candidate = archive_root / f"{archive_name[:-3]}_{index}.gz"
+        else:
+            candidate = archive_root / f"{archive_name}_{index}"
         index += 1
     return candidate
 
@@ -412,12 +436,40 @@ def _verify_gzip(path: Path) -> None:
             pass
 
 
-def _prune_archives(archive_dir: Path, *, max_archives: int) -> None:
+def _archive_prune_candidates(archive_dir: Path, *, max_archives: int) -> list[Path]:
     if max_archives <= 0 or not archive_dir.exists():
-        return
+        return []
     archives = sorted((path for path in archive_dir.iterdir() if path.is_file()), key=lambda path: path.stat().st_mtime)
-    for old in archives[: max(0, len(archives) - max_archives)]:
+    return archives[: max(0, len(archives) - max_archives)]
+
+
+def _prune_archives(paths: Sequence[Path]) -> None:
+    for old in paths:
         old.unlink()
+
+
+def _disk_pressure_summary(*, config: RetentionConfig, policy: RetentionPolicy) -> dict[str, Any]:
+    usage = shutil.disk_usage(config.repo_root)
+    free_percent = (float(usage.free) / float(usage.total) * 100.0) if usage.total else 0.0
+    free_mb = int(usage.free / 1024 / 1024)
+    critical = free_percent <= policy.critical_free_percent or free_mb <= policy.critical_free_bytes_mb
+    warn = critical or free_percent <= policy.warn_free_percent or free_mb <= policy.warn_free_bytes_mb
+    classification = "DISK_PRESSURE_CRITICAL" if critical else "DISK_PRESSURE_WARN" if warn else "DISK_PRESSURE_OK"
+    return {
+        "classification": classification,
+        "total_bytes": int(usage.total),
+        "used_bytes": int(usage.used),
+        "free_bytes": int(usage.free),
+        "free_mb": free_mb,
+        "free_percent": round(free_percent, 3),
+        "warn_free_percent": policy.warn_free_percent,
+        "critical_free_percent": policy.critical_free_percent,
+        "warn_free_bytes_mb": policy.warn_free_bytes_mb,
+        "critical_free_bytes_mb": policy.critical_free_bytes_mb,
+        "is_warning_or_critical": warn,
+        "disable_noisy_diagnostics_recommended": critical,
+        "runtime_hot_state_delete_allowed": False,
+    }
 
 
 def _stream_for_id(*, policy: RetentionPolicy, stream_id: str) -> StreamPolicy:

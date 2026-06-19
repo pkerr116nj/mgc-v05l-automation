@@ -1,12 +1,20 @@
 {
   "schema_version": "generated_artifact_retention_policy_v1",
   "compression_enabled": true,
+  "archive_prune_enabled": false,
   "max_archives_per_stream": 5,
   "max_file_size_mb": 512,
   "keep_latest_tail_mb": 256,
+  "disk_pressure": {
+    "warn_free_percent": 15,
+    "critical_free_percent": 8,
+    "warn_free_bytes_mb": 51200,
+    "critical_free_bytes_mb": 20480
+  },
   "generated_roots": [
     "outputs",
-    "logs"
+    "logs",
+    "var"
   ],
   "forbidden_roots": [
     "src",
@@ -37,6 +45,18 @@
     "outputs/track_b_execution_core/lifecycle_stress/latest*"
   ],
   "streams": [
+    {
+      "stream_id": "paper_bridge_route_dispatch_audits",
+      "description": "High-volume IBKR PAPER bridge route-dispatch JSONL audit streams.",
+      "patterns": [
+        "outputs/reports/ibkr_runtime_route_dispatch/*/ibkr_paper_strategy_bridge_audit.jsonl"
+      ],
+      "max_file_size_mb": 512,
+      "keep_latest_tail_mb": 128,
+      "max_archives_per_stream": 8,
+      "compression_enabled": true,
+      "recreate_live_file": true
+    },
     {
       "stream_id": "paper_strategy_monitor",
       "description": "High-volume PAPER strategy monitor audit history.",
