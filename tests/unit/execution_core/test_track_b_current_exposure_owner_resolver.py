@@ -390,6 +390,106 @@ def test_fresh_submit_owner_with_exact_lifecycle_fill_beats_stale_same_contract_
     assert payload["stale_superseded_full_audit_only"][0]["trade_id"] == "trade_submit_owner_mes_globex_short"
 
 
+def test_newest_exact_broker_backed_lifecycle_report_is_adoptable_without_registry_record(tmp_path: Path) -> None:
+    broker_position = _broker_position(quantity="1")
+    broker_position.update({"symbol": "MGC", "track_b_root": "MGC", "local_symbol": "MGCQ6", "con_id": 732156883})
+    _write_lifecycle_report(
+        tmp_path,
+        "reserved_submit_mgc_us_active_participation_long_old",
+        _lifecycle_report(
+            trade_id="trade_old_mgc",
+            lifecycle_id="reserved_submit_mgc_us_active_participation_long_old",
+            symbol="MGC",
+            local_symbol="MGCQ6",
+            con_id=732156883,
+            order_id="3",
+            perm_id="1053015058",
+            exec_id="0000e1a7.6a4a4661.01.01",
+            filled_at=NOW - timedelta(hours=2),
+            lane_id="mgc_us_active_participation_long",
+        ),
+    )
+    _write_lifecycle_report(
+        tmp_path,
+        "reserved_submit_mgc_london_open_active_participation_long_current",
+        _lifecycle_report(
+            trade_id="trade_current_mgc",
+            lifecycle_id="reserved_submit_mgc_london_open_active_participation_long_current",
+            symbol="MGC",
+            local_symbol="MGCQ6",
+            con_id=732156883,
+            order_id="4",
+            perm_id="1053015857",
+            exec_id="0000e1a7.6a4a4af7.01.01",
+            filled_at=NOW,
+            lane_id="mgc_london_open_active_participation_long",
+        ),
+    )
+
+    payload = resolve_current_exposure_ownership(
+        config=CurrentExposureOwnerResolverConfig(repo_root=tmp_path),
+        broker_positions=[broker_position],
+        registry_records=[],
+    )
+
+    assert payload["classification"] == OWNED_MANAGED_EXPOSURE
+    exposure = payload["owned_exposures"][0]
+    assert exposure["reason_codes"] == ["EXACT_BROKER_BACKED_LIFECYCLE_REPORT_CAN_REPAIR_PROJECTION"]
+    assert exposure["trade_id"] == "trade_current_mgc"
+    assert exposure["lifecycle_id"] == "reserved_submit_mgc_london_open_active_participation_long_current"
+    assert exposure["lifecycle_position"]["entry_exec_ids"] == ["0000e1a7.6a4a4af7.01.01"]
+
+
+def test_same_fill_alias_lifecycle_reports_are_adoptable_without_registry_record(tmp_path: Path) -> None:
+    broker_position = _broker_position(quantity="-1")
+    broker_position.update({"symbol": "NQ", "track_b_root": "NQ", "local_symbol": "NQU6", "con_id": 770561204})
+    filled_at = NOW
+    _write_lifecycle_report(
+        tmp_path,
+        "bridge_fill_NQ|1m|2026-06-18T22:56:00Z|SELL_TO_OPEN",
+        _lifecycle_report(
+            trade_id="trade_bridge_fill_NQ_1m_2026-06-18T22_56_00Z_SELL_TO_OPEN",
+            lifecycle_id="bridge_fill_NQ|1m|2026-06-18T22:56:00Z|SELL_TO_OPEN",
+            symbol="NQ",
+            local_symbol="NQU6",
+            con_id=770561204,
+            order_id="3",
+            perm_id="1053015499",
+            exec_id="0000e1a7.6a4a48c8.01.01",
+            filled_at=filled_at,
+            lane_id="nq_globex_active_participation_short",
+        ),
+    )
+    _write_lifecycle_report(
+        tmp_path,
+        "reserved_submit_nq_globex_active_participation_short_current",
+        _lifecycle_report(
+            trade_id="trade_current_nq",
+            lifecycle_id="reserved_submit_nq_globex_active_participation_short_current",
+            symbol="NQ",
+            local_symbol="NQU6",
+            con_id=770561204,
+            order_id="3",
+            perm_id="1053015499",
+            exec_id="0000e1a7.6a4a48c8.01.01",
+            filled_at=filled_at,
+            lane_id="nq_globex_active_participation_short",
+        ),
+    )
+
+    payload = resolve_current_exposure_ownership(
+        config=CurrentExposureOwnerResolverConfig(repo_root=tmp_path),
+        broker_positions=[broker_position],
+        registry_records=[],
+    )
+
+    assert payload["classification"] == OWNED_MANAGED_EXPOSURE
+    exposure = payload["owned_exposures"][0]
+    assert exposure["trade_id"] == "trade_current_nq"
+    assert exposure["lifecycle_id"] == "reserved_submit_nq_globex_active_participation_short_current"
+    assert exposure["lifecycle_position"]["entry_exec_ids"] == ["0000e1a7.6a4a48c8.01.01"]
+
+
 def test_same_fill_duplicate_lifecycle_report_owners_collapse_to_one_owner(tmp_path: Path) -> None:
     trade_id = "trade_current_mnq"
     lifecycle_id = "reserved_submit_mnq_us_active_participation_long_20260604T144415893875Z_89996348b109"

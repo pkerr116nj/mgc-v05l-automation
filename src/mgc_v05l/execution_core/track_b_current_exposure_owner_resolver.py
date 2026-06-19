@@ -1016,7 +1016,84 @@ def _adoptable_lifecycle_report_for_broker_position(
         and int(report.get("con_id") or 0) == int(broker_position.get("con_id") or 0)
         and _signed_report_qty(report) == _decimal(broker_position.get("quantity"))
     ]
-    return matches[-1] if len(matches) == 1 else {}
+    if not matches:
+        return {}
+    matches = _dedupe_same_fill_adoptable_lifecycle_reports(matches)
+    ranked = sorted(
+        matches,
+        key=lambda report: _parse_optional_datetime(_entry_fill(report).get("filled_at"))
+        or datetime.min.replace(tzinfo=timezone.utc),
+        reverse=True,
+    )
+    newest = ranked[0]
+    newest_time = _parse_optional_datetime(_entry_fill(newest).get("filled_at"))
+    if newest_time is not None and sum(
+        1 for report in ranked if _parse_optional_datetime(_entry_fill(report).get("filled_at")) == newest_time
+    ) > 1:
+        return {}
+    return newest
+
+
+def _dedupe_same_fill_adoptable_lifecycle_reports(
+    reports: Sequence[Mapping[str, Any]],
+) -> list[dict[str, Any]]:
+    grouped: dict[str, list[dict[str, Any]]] = {}
+    ungrouped: list[dict[str, Any]] = []
+    for report in reports:
+        row = dict(report)
+        key = _lifecycle_report_fill_identity(row)
+        if not key:
+            ungrouped.append(row)
+            continue
+        grouped.setdefault(key, []).append(row)
+
+    active: list[dict[str, Any]] = list(ungrouped)
+    for rows in grouped.values():
+        if len(rows) == 1:
+            active.append(rows[0])
+            continue
+        active.append(_canonical_adoptable_lifecycle_report(rows))
+    return active
+
+
+def _canonical_adoptable_lifecycle_report(rows: Sequence[dict[str, Any]]) -> dict[str, Any]:
+    non_bridge = [
+        row for row in rows if not _report_lifecycle_id(row).startswith("bridge_fill_")
+    ]
+    if non_bridge:
+        return sorted(non_bridge, key=_adoptable_report_rank, reverse=True)[0]
+    return sorted(rows, key=_adoptable_report_rank, reverse=True)[0]
+
+
+def _adoptable_report_rank(report: Mapping[str, Any]) -> tuple[int, int, str, str]:
+    return (
+        1 if report.get("managed_exit_policy_id") else 0,
+        1 if report.get("lane_id") or report.get("strategy_id") else 0,
+        str(report.get("trade_id") or ""),
+        _report_lifecycle_id(report),
+    )
+
+
+def _lifecycle_report_fill_identity(report: Mapping[str, Any]) -> str:
+    fill = _entry_fill(report)
+    order_id = str(fill.get("order_id") or "").strip()
+    perm_id = str(fill.get("perm_id") or "").strip()
+    exec_id = str(fill.get("exec_id") or "").strip()
+    if not (order_id or perm_id or exec_id):
+        return ""
+    qty = _signed_report_qty(report)
+    return "|".join(
+        [
+            str(report.get("account_id") or "").strip().upper(),
+            str(report.get("con_id") or "").strip(),
+            str(report.get("local_symbol") or report.get("localSymbol") or "").strip().upper(),
+            _entry_side_from_report(report, fill),
+            _decimal_display(qty) or "",
+            order_id,
+            perm_id,
+            exec_id,
+        ]
+    )
 
 
 def _lifecycle_position_from_lifecycle_report(

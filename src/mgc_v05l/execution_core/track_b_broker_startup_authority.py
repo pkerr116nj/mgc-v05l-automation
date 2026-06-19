@@ -313,15 +313,20 @@ def _managed_position_matches_broker_position(
     if not identity_matches:
         return False
 
-    if not _managed_position_is_current_open(managed_position):
-        return False
     if managed_position.get("projection_authority_owner_confirmed") is False:
         return False
-    if not _text(managed_position.get("lifecycle_id") or lifecycle.get("lifecycle_id")):
+    lifecycle_id = _text(managed_position.get("lifecycle_id") or lifecycle.get("lifecycle_id"))
+    trade_id = _text(managed_position.get("trade_id") or lifecycle.get("trade_id"))
+    policy_id = _text(managed_position.get("managed_exit_policy_id") or lifecycle.get("managed_exit_policy_id"))
+    if not lifecycle_id:
         return False
-    if not _text(managed_position.get("trade_id") or lifecycle.get("trade_id")):
+    if not trade_id:
         return False
-    if not _text(managed_position.get("managed_exit_policy_id") or lifecycle.get("managed_exit_policy_id")):
+    if not policy_id:
+        return False
+    if not _managed_position_is_current_open(managed_position) and not _managed_position_is_startup_adoptable(
+        managed_position
+    ):
         return False
 
     return _signed_quantity(managed_position) == _decimal_quantity(normalized_broker)
@@ -330,6 +335,18 @@ def _managed_position_matches_broker_position(
 def _managed_position_is_current_open(row: Mapping[str, Any]) -> bool:
     classification = _text(row.get("classification"))
     return classification in {"OPEN_MANAGED", "OPEN_MANAGED_MATCHED", "OPEN_MANAGED_EXIT_DUE"} or row.get("exit_due") is True
+
+
+def _managed_position_is_startup_adoptable(row: Mapping[str, Any]) -> bool:
+    if row.get("projection_authority_owner_confirmed") is not True:
+        return False
+    classification = _text(row.get("classification"))
+    return classification in {
+        "BROKER_BACKED_ADOPTION_REQUIRED",
+        "REVIEW_REQUIRED",
+        "STALE_MANAGED_POSITION_EVIDENCE",
+        "STRAY_POSITION_REVIEW_REQUIRED",
+    }
 
 
 def _signed_quantity(row: Mapping[str, Any]) -> Decimal:
