@@ -10179,6 +10179,8 @@ def _build_probationary_paper_runtime_truth(
             "launcher_pid": _optional_int(os.environ.get("MGC_TRACK_B_PAPER_LAUNCHER_PID")),
             "expected_project_root": os.environ.get("MGC_TRACK_B_EXPECTED_PROJECT_ROOT"),
             "launcher_config_fingerprint": os.environ.get("MGC_TRACK_B_PAPER_CONFIG_FINGERPRINT"),
+            "profile": runtime_identity.get("profile"),
+            "stack_profile": runtime_identity.get("profile"),
             "lane_count": active_lane_count,
             "b_plus_threshold": resolved_b_plus_threshold,
             "test_mule_enabled": resolved_test_mule_enabled,
@@ -10597,6 +10599,8 @@ def _write_probationary_paper_pid_metadata(*, settings: StrategySettings, runtim
         "launcher_pid": existing.get("launcher_pid") or _optional_int(os.environ.get("MGC_TRACK_B_PAPER_LAUNCHER_PID")),
         "expected_project_root": existing.get("expected_project_root") or os.environ.get("MGC_TRACK_B_EXPECTED_PROJECT_ROOT"),
         "config_fingerprint": runtime_truth.get("config_fingerprint"),
+        "profile": runtime_truth.get("profile") or runtime_identity.get("profile"),
+        "stack_profile": runtime_truth.get("stack_profile") or runtime_truth.get("profile") or runtime_identity.get("profile"),
         "launcher_config_fingerprint": existing.get("launcher_config_fingerprint")
         or os.environ.get("MGC_TRACK_B_PAPER_CONFIG_FINGERPRINT"),
         "paper_runtime_truth_path": runtime_truth.get("paper_runtime_truth_path") or str(_paper_runtime_truth_path(settings)),

@@ -11794,6 +11794,33 @@ def test_runtime_identity_payload_includes_selected_paper_stack_profile(monkeypa
     assert payload["profile"] == "mnq_mes_full_session_active_evidence"
 
 
+def test_paper_runtime_truth_includes_selected_paper_stack_profile(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("MGC_TRACK_B_PAPER_STACK_PROFILE", "mnq_mes_full_session_active_evidence")
+    settings = SimpleNamespace(
+        probationary_artifacts_path=tmp_path / "paper_session",
+        probationary_paper_execution_test_mule_enabled=False,
+    )
+    started_at = datetime(2026, 5, 21, 12, 0, tzinfo=timezone.utc)
+
+    path = _write_probationary_paper_runtime_truth(
+        settings=settings,  # type: ignore[arg-type]
+        lanes=(),
+        runtime_instance_id="track-b-paper-runtime-test",
+        runtime_started_at=started_at,
+        lane_count=92,
+    )
+
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    metadata = json.loads((tmp_path / "paper_session" / "runtime" / "probationary_paper.pid.json").read_text())
+    assert payload["profile"] == "mnq_mes_full_session_active_evidence"
+    assert payload["stack_profile"] == "mnq_mes_full_session_active_evidence"
+    assert payload["lane_count"] == 92
+    assert metadata["profile"] == "mnq_mes_full_session_active_evidence"
+    assert metadata["stack_profile"] == "mnq_mes_full_session_active_evidence"
+
+
 def test_probationary_supervisor_survives_lane_auth_read_failure(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     settings = _build_probationary_paper_settings(tmp_path)
     root_logger = StructuredLogger(tmp_path / "root")
