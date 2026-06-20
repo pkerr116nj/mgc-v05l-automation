@@ -34,7 +34,36 @@ LAUNCHCTL_STDERR_FILE="${PID_FILE}.launchctl_submit.stderr"
 WAIT_SECONDS="${TRACK_B_PAPER_STACK_START_WAIT_SECONDS:-120}"
 STABLE_SECONDS="${TRACK_B_PAPER_STACK_STABLE_SECONDS:-30}"
 PREFERRED_CARRIER="${TRACK_B_PAPER_STACK_CARRIER:-auto}"
-STACK_PROFILE="${TRACK_B_PAPER_STACK_PROFILE:-canonical}"
+
+resolve_paper_stack_profile() {
+  if [[ -n "${TRACK_B_PAPER_STACK_PROFILE:-}" ]]; then
+    printf '%s\n' "${TRACK_B_PAPER_STACK_PROFILE}"
+    return 0
+  fi
+  if [[ -f "${APPROVED_PROFILE_ARTIFACT}" ]]; then
+    "${PYTHON_BIN}" - <<'PY' "${APPROVED_PROFILE_ARTIFACT}"
+import json
+import sys
+from pathlib import Path
+
+try:
+    payload = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+except Exception:
+    print("canonical")
+    raise SystemExit
+if payload.get("recovery_profile_approved") is True:
+    profile = str(payload.get("approved_profile") or payload.get("recovery_requested_profile") or "").strip()
+    if profile and profile != "canonical":
+        print(profile)
+        raise SystemExit
+print("canonical")
+PY
+    return 0
+  fi
+  printf '%s\n' "canonical"
+}
+
+STACK_PROFILE="$(resolve_paper_stack_profile)"
 START_LOCK_DIR="${RUNTIME_DIR}/paper_stack_${STACK_PROFILE}.runtime_scope.lock"
 START_LOCK_METADATA_FILE="${START_LOCK_DIR}/owner.json"
 RESTART_REQUESTED="${TRACK_B_PAPER_STACK_RESTART:-0}"

@@ -83,7 +83,12 @@ def test_paper_minimal_start_uses_direct_nohup_and_blocks_launchctl() -> None:
 def test_paper_stack_start_enforces_single_authoritative_runtime_scope_before_launch() -> None:
     source = START_SCRIPT.read_text(encoding="utf-8")
 
-    assert source.index('STACK_PROFILE="${TRACK_B_PAPER_STACK_PROFILE:-canonical}"') < source.index(
+    assert "resolve_paper_stack_profile()" in source
+    assert 'if [[ -n "${TRACK_B_PAPER_STACK_PROFILE:-}" ]]' in source
+    assert 'payload.get("recovery_profile_approved") is True' in source
+    assert 'payload.get("approved_profile")' in source
+    assert 'STACK_PROFILE="$(resolve_paper_stack_profile)"' in source
+    assert source.index('STACK_PROFILE="$(resolve_paper_stack_profile)"') < source.index(
         'START_LOCK_DIR="${RUNTIME_DIR}/paper_stack_${STACK_PROFILE}.runtime_scope.lock"'
     )
     assert "acquire_authoritative_runtime_scope_lock()" in source
