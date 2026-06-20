@@ -34,8 +34,25 @@ _REQUIRED_ROW_FIELDS = (
     "freshness_threshold_seconds",
     "notes",
 )
+_OPTIONAL_ROW_FIELDS = (
+    "session_calendar",
+    "market_freshness_policy",
+    "latest_bar_freshness_seconds",
+)
 _SUPPORTED_TOP_LEVEL_FIELDS = {"version", "symbols"}
-_SUPPORTED_ROW_FIELDS = set(_REQUIRED_ROW_FIELDS)
+_SUPPORTED_ROW_FIELDS = set(_REQUIRED_ROW_FIELDS) | set(_OPTIONAL_ROW_FIELDS)
+SESSION_CALENDAR_GLOBEX_FUTURES = "globex_futures"
+SESSION_CALENDAR_CME_CRYPTO_FUTURES = "cme_crypto_futures"
+MARKET_FRESHNESS_POLICY_LIQUID_TRADE_BARS = "liquid_trade_bar_required"
+MARKET_FRESHNESS_POLICY_THIN_QUOTE_FEED = "thin_quote_feed_live"
+_SUPPORTED_SESSION_CALENDARS = {
+    SESSION_CALENDAR_GLOBEX_FUTURES,
+    SESSION_CALENDAR_CME_CRYPTO_FUTURES,
+}
+_SUPPORTED_MARKET_FRESHNESS_POLICIES = {
+    MARKET_FRESHNESS_POLICY_LIQUID_TRADE_BARS,
+    MARKET_FRESHNESS_POLICY_THIN_QUOTE_FEED,
+}
 
 
 class TrackBLiveMarketDataSymbolConfigError(ValueError):
@@ -58,6 +75,9 @@ class TrackBLiveMarketDataSymbol:
     min_confirmed_bars: int
     freshness_threshold_seconds: int
     notes: str
+    session_calendar: str = SESSION_CALENDAR_GLOBEX_FUTURES
+    market_freshness_policy: str = MARKET_FRESHNESS_POLICY_LIQUID_TRADE_BARS
+    latest_bar_freshness_seconds: int | None = None
 
     def as_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -162,6 +182,25 @@ def _parse_symbol_row(raw_symbol: Any, *, index: int) -> TrackBLiveMarketDataSym
         min_confirmed_bars=_required_positive_int(raw_symbol, "min_confirmed_bars", index=index),
         freshness_threshold_seconds=_required_positive_int(raw_symbol, "freshness_threshold_seconds", index=index),
         notes=_optional_text(raw_symbol, "notes"),
+        session_calendar=_optional_choice(
+            raw_symbol,
+            "session_calendar",
+            choices=_SUPPORTED_SESSION_CALENDARS,
+            default=SESSION_CALENDAR_GLOBEX_FUTURES,
+            index=index,
+        ),
+        market_freshness_policy=_optional_choice(
+            raw_symbol,
+            "market_freshness_policy",
+            choices=_SUPPORTED_MARKET_FRESHNESS_POLICIES,
+            default=MARKET_FRESHNESS_POLICY_LIQUID_TRADE_BARS,
+            index=index,
+        ),
+        latest_bar_freshness_seconds=_optional_positive_int(
+            raw_symbol,
+            "latest_bar_freshness_seconds",
+            index=index,
+        ),
     )
 
 
@@ -202,6 +241,13 @@ def _validate_enabled_symbols(symbols: Sequence[TrackBLiveMarketDataSymbol]) -> 
         if row.databento_mapping_key in seen_databento_mappings:
             duplicate_databento_mappings.add(row.databento_mapping_key)
         seen_databento_mappings.add(row.databento_mapping_key)
+        if (
+            row.market_freshness_policy == MARKET_FRESHNESS_POLICY_THIN_QUOTE_FEED
+            and row.latest_bar_freshness_seconds is None
+        ):
+            raise TrackBLiveMarketDataSymbolConfigError(
+                f"Thin market symbol {row.symbol} must define latest_bar_freshness_seconds."
+            )
     if duplicate_databento_mappings:
         formatted = ", ".join(
             f"{dataset}/{schema}/{databento_symbol}"
@@ -255,6 +301,27 @@ def _optional_text(raw_symbol: Mapping[str, Any], field: str) -> str:
     return value.strip()
 
 
+def _optional_choice(
+    raw_symbol: Mapping[str, Any],
+    field: str,
+    *,
+    choices: set[str],
+    default: str,
+    index: int,
+) -> str:
+    value = raw_symbol.get(field)
+    if value is None:
+        return default
+    if not isinstance(value, str) or not value.strip():
+        raise TrackBLiveMarketDataSymbolConfigError(f"Symbol row {index} field {field} must be a non-empty string.")
+    normalized = value.strip()
+    if normalized not in choices:
+        raise TrackBLiveMarketDataSymbolConfigError(
+            f"Symbol row {index} field {field} has unsupported value {normalized!r}."
+        )
+    return normalized
+
+
 def _required_bool(raw_symbol: Mapping[str, Any], field: str, *, index: int) -> bool:
     value = raw_symbol.get(field)
     if not isinstance(value, bool):
@@ -264,6 +331,15 @@ def _required_bool(raw_symbol: Mapping[str, Any], field: str, *, index: int) -> 
 
 def _required_positive_int(raw_symbol: Mapping[str, Any], field: str, *, index: int) -> int:
     value = raw_symbol.get(field)
+    if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
+        raise TrackBLiveMarketDataSymbolConfigError(f"Symbol row {index} field {field} must be a positive integer.")
+    return value
+
+
+def _optional_positive_int(raw_symbol: Mapping[str, Any], field: str, *, index: int) -> int | None:
+    value = raw_symbol.get(field)
+    if value is None:
+        return None
     if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
         raise TrackBLiveMarketDataSymbolConfigError(f"Symbol row {index} field {field} must be a positive integer.")
     return value

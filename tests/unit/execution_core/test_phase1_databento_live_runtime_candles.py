@@ -407,7 +407,7 @@ def test_thin_symbol_realtime_confirmation_allows_old_last_trade_when_feed_is_li
     assert payload["realtime_feed_confirmed"] is True
     assert payload["realtime_feed_block_reason"] == "READY"
     assert payload["freshness_seconds"] == 300.0
-    assert payload["latest_bar_freshness_seconds"] == 1800.0
+    assert payload["latest_bar_freshness_seconds"] == 3600.0
 
 
 def test_fresh_merged_legacy_live_artifact_can_satisfy_phase1_contract(tmp_path: Path) -> None:

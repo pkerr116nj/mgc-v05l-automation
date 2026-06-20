@@ -153,6 +153,8 @@ symbols:
     timezone: America/New_York
     min_confirmed_bars: 8
     freshness_threshold_seconds: 300
+    market_freshness_policy: thin_quote_feed_live
+    latest_bar_freshness_seconds: 3600
     notes: Optional platinum context feed.
   - symbol: BTC
     enabled: true
@@ -167,6 +169,7 @@ symbols:
     timezone: America/New_York
     min_confirmed_bars: 8
     freshness_threshold_seconds: 300
+    session_calendar: cme_crypto_futures
     notes: Readiness-only full-size Bitcoin context feed; not runtime-active until separately approved.
   - symbol: MBT
     enabled: true
@@ -181,6 +184,9 @@ symbols:
     timezone: America/New_York
     min_confirmed_bars: 8
     freshness_threshold_seconds: 300
+    session_calendar: cme_crypto_futures
+    market_freshness_policy: thin_quote_feed_live
+    latest_bar_freshness_seconds: 3600
     notes: Micro Bitcoin execution feed for PAPER noisemaker lanes.
   - symbol: ETH
     enabled: true
@@ -195,6 +201,7 @@ symbols:
     timezone: America/New_York
     min_confirmed_bars: 8
     freshness_threshold_seconds: 300
+    session_calendar: cme_crypto_futures
     notes: Readiness-only full-size Ether context feed; not runtime-active until separately approved.
   - symbol: MET
     enabled: true
@@ -209,6 +216,9 @@ symbols:
     timezone: America/New_York
     min_confirmed_bars: 8
     freshness_threshold_seconds: 300
+    session_calendar: cme_crypto_futures
+    market_freshness_policy: thin_quote_feed_live
+    latest_bar_freshness_seconds: 3600
     notes: Micro Ether execution feed for PAPER noisemaker lanes.
   - symbol: SOL
     enabled: true
@@ -223,6 +233,7 @@ symbols:
     timezone: America/New_York
     min_confirmed_bars: 8
     freshness_threshold_seconds: 300
+    session_calendar: cme_crypto_futures
     notes: Readiness-only full-size Solana context feed; not runtime-active until separately approved.
   - symbol: MSL
     enabled: true
@@ -237,4 +248,7 @@ symbols:
     timezone: America/New_York
     min_confirmed_bars: 8
     freshness_threshold_seconds: 300
+    session_calendar: cme_crypto_futures
+    market_freshness_policy: thin_quote_feed_live
+    latest_bar_freshness_seconds: 3600
     notes: Micro Solana execution feed for PAPER noisemaker lanes.

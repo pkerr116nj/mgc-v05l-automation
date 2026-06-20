@@ -7,7 +7,7 @@ import json
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Mapping
 
 from mgc_v05l.execution_core.track_b_atomic_io import write_json_atomic
 from mgc_v05l.execution_core.phase1_runtime_ticker_registry import (
@@ -18,6 +18,9 @@ from mgc_v05l.execution_core.phase1_runtime_ticker_registry import (
 from mgc_v05l.market_data.phase1_market_session import (
     MARKET_CLOSED_NO_FRESH_BARS,
     classify_phase1_futures_market_session,
+    phase1_latest_bar_freshness_seconds,
+    phase1_symbol_allows_stale_trade_bars,
+    phase1_symbol_market_freshness_policy,
 )
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
@@ -194,6 +197,53 @@ def _artifact_check(
                     market_session=session,
                 )
         return _not_ready(path=path, reason=stale_reason, kind=kind, age_seconds=age_seconds, bar_count=bar_count)
+    latest_bar = _latest_bar_row(bars) if kind == "candles" and isinstance(bars, list) else {}
+    latest_bar_end = _parse_datetime(
+        latest_bar.get("bar_end")
+        or latest_bar.get("timestamp")
+        or latest_bar.get("time")
+        or latest_bar.get("bar_start")
+    )
+    latest_bar_age_seconds = None
+    latest_bar_freshness_seconds = None
+    stale_trade_bars_allowed = False
+    market_freshness_policy = phase1_symbol_market_freshness_policy(symbol) if kind == "candles" else ""
+    if kind == "candles":
+        latest_bar_freshness_seconds = phase1_latest_bar_freshness_seconds(symbol, freshness_seconds)
+        stale_trade_bars_allowed = phase1_symbol_allows_stale_trade_bars(symbol)
+        if latest_bar_end is None:
+            return _not_ready(
+                path=path,
+                reason="LATEST_TRADE_BAR_TIMESTAMP_MISSING",
+                kind=kind,
+                bar_count=bar_count,
+                historical_seed_ready=historical_seed_ready,
+                realtime_feed_confirmed=realtime_feed_confirmed,
+            )
+        latest_bar_age_seconds = max(0.0, (now - latest_bar_end).total_seconds())
+        if latest_bar_age_seconds > latest_bar_freshness_seconds and not stale_trade_bars_allowed:
+            session = classify_phase1_futures_market_session(now, symbol=symbol)
+            if session["classification"] == MARKET_CLOSED_NO_FRESH_BARS:
+                return _not_ready(
+                    path=path,
+                    reason=MARKET_CLOSED_NO_FRESH_BARS,
+                    kind=kind,
+                    detail=str(session.get("reason") or ""),
+                    age_seconds=latest_bar_age_seconds,
+                    bar_count=bar_count,
+                    historical_seed_ready=historical_seed_ready,
+                    realtime_feed_confirmed=realtime_feed_confirmed,
+                    market_session=session,
+                )
+            return _not_ready(
+                path=path,
+                reason="LATEST_TRADE_BARS_STALE",
+                kind=kind,
+                age_seconds=latest_bar_age_seconds,
+                bar_count=bar_count,
+                historical_seed_ready=historical_seed_ready,
+                realtime_feed_confirmed=realtime_feed_confirmed,
+            )
     return {
         "ready": True,
         "path": str(path),
@@ -202,6 +252,10 @@ def _artifact_check(
         "source_id": source_id,
         "age_seconds": age_seconds,
         "freshness_seconds": freshness_seconds,
+        "latest_bar_age_seconds": latest_bar_age_seconds,
+        "latest_bar_freshness_seconds": latest_bar_freshness_seconds,
+        "market_freshness_policy": market_freshness_policy,
+        "stale_trade_bars_allowed": stale_trade_bars_allowed,
         "bar_count": bar_count,
         "completed_candles_only": completed_only,
         "historical_seed_ready": historical_seed_ready,
@@ -234,6 +288,21 @@ def _not_ready(
         "realtime_feed_confirmed": realtime_feed_confirmed,
         "market_session": market_session or {},
     }
+
+
+def _latest_bar_row(rows: list[Any]) -> Mapping[str, Any]:
+    latest: Mapping[str, Any] = {}
+    latest_ts: datetime | None = None
+    for row in rows:
+        if not isinstance(row, Mapping):
+            continue
+        ts = _parse_datetime(row.get("bar_end") or row.get("timestamp") or row.get("time") or row.get("bar_start"))
+        if ts is None:
+            continue
+        if latest_ts is None or ts > latest_ts:
+            latest = row
+            latest_ts = ts
+    return latest
 
 
 def _runtime_path_policy_error(path: Path) -> str | None:

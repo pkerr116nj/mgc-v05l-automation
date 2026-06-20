@@ -3,22 +3,21 @@
 from __future__ import annotations
 
 from datetime import datetime, time
+from functools import lru_cache
 
+from mgc_v05l.execution_core.track_b_live_market_data_symbols import (
+    MARKET_FRESHNESS_POLICY_LIQUID_TRADE_BARS,
+    MARKET_FRESHNESS_POLICY_THIN_QUOTE_FEED,
+    SESSION_CALENDAR_CME_CRYPTO_FUTURES,
+    SESSION_CALENDAR_GLOBEX_FUTURES,
+    TrackBLiveMarketDataSymbol,
+    load_track_b_live_market_data_symbols,
+)
 from mgc_v05l.session_phase_labels import NEW_YORK
 
 
 MARKET_CLOSED_NO_FRESH_BARS = "MARKET_CLOSED_NO_FRESH_BARS"
 MARKET_OPEN_EXPECT_FRESH_BARS = "MARKET_OPEN_EXPECT_FRESH_BARS"
-CRYPTO_FUTURES_SYMBOLS = frozenset({"BTC", "MBT", "ETH", "MET", "SOL", "MSL"})
-THIN_LAST_TRADE_FRESHNESS_SECONDS_BY_SYMBOL = {
-    "BTC": 3600.0,
-    "MBT": 3600.0,
-    "ETH": 3600.0,
-    "MET": 3600.0,
-    "SOL": 3600.0,
-    "MSL": 3600.0,
-    "PL": 1800.0,
-}
 
 
 def classify_phase1_futures_market_session(now: datetime, *, symbol: str | None = None) -> dict[str, object]:
@@ -31,7 +30,7 @@ def classify_phase1_futures_market_session(now: datetime, *, symbol: str | None 
     closed = False
     reason = "GLOBEX_SESSION_OPEN"
 
-    if normalized_symbol in CRYPTO_FUTURES_SYMBOLS:
+    if phase1_symbol_session_calendar(normalized_symbol) == SESSION_CALENDAR_CME_CRYPTO_FUTURES:
         reason = "CRYPTO_FUTURES_SESSION_OPEN"
         if time(17, 0) <= local_time < time(18, 0):
             closed = True
@@ -74,7 +73,51 @@ def phase1_latest_bar_freshness_seconds(symbol: str | None, base_seconds: float)
     """
 
     normalized_symbol = str(symbol or "").strip().upper()
-    thin_tolerance = THIN_LAST_TRADE_FRESHNESS_SECONDS_BY_SYMBOL.get(normalized_symbol)
+    if phase1_symbol_market_freshness_policy(normalized_symbol) != MARKET_FRESHNESS_POLICY_THIN_QUOTE_FEED:
+        return float(base_seconds)
+    thin_tolerance = phase1_symbol_latest_bar_freshness_seconds(normalized_symbol)
     if thin_tolerance is None:
         return float(base_seconds)
     return max(float(base_seconds), float(thin_tolerance))
+
+
+def phase1_symbol_allows_stale_trade_bars(symbol: str | None) -> bool:
+    """Return true when feed liveness can satisfy readiness despite stale trade bars."""
+
+    return phase1_symbol_market_freshness_policy(symbol) == MARKET_FRESHNESS_POLICY_THIN_QUOTE_FEED
+
+
+def phase1_symbol_session_calendar(symbol: str | None) -> str:
+    row = _phase1_symbol_config(symbol)
+    if row is None:
+        return SESSION_CALENDAR_GLOBEX_FUTURES
+    return row.session_calendar
+
+
+def phase1_symbol_market_freshness_policy(symbol: str | None) -> str:
+    row = _phase1_symbol_config(symbol)
+    if row is None:
+        return MARKET_FRESHNESS_POLICY_LIQUID_TRADE_BARS
+    return row.market_freshness_policy
+
+
+def phase1_symbol_latest_bar_freshness_seconds(symbol: str | None) -> float | None:
+    row = _phase1_symbol_config(symbol)
+    if row is None or row.latest_bar_freshness_seconds is None:
+        return None
+    return float(row.latest_bar_freshness_seconds)
+
+
+def _phase1_symbol_config(symbol: str | None) -> TrackBLiveMarketDataSymbol | None:
+    normalized_symbol = str(symbol or "").strip().upper()
+    if not normalized_symbol:
+        return None
+    return _phase1_symbol_config_by_symbol().get(normalized_symbol)
+
+
+@lru_cache(maxsize=1)
+def _phase1_symbol_config_by_symbol() -> dict[str, TrackBLiveMarketDataSymbol]:
+    try:
+        return load_track_b_live_market_data_symbols().by_symbol()
+    except Exception:
+        return {}

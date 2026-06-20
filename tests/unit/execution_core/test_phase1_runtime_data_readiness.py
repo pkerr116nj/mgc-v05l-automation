@@ -35,6 +35,7 @@ def _write_artifact(
     payload_timeframe: str | None = None,
     historical_seed_ready: bool = False,
     realtime_feed_confirmed: bool = True,
+    latest_bar_end: datetime | None = None,
 ) -> Path:
     base = "phase1_runtime_market_data" if kind == "candles" else "phase1_runtime_features"
     filename = "latest_runtime_candles.json" if kind == "candles" else "latest_runtime_features.json"
@@ -50,6 +51,8 @@ def _write_artifact(
         "realtime_feed_confirmed": realtime_feed_confirmed,
         "bars" if kind == "candles" else "features": [{"bar_end": NOW.isoformat(), "close": 100.0}],
     }
+    if kind == "candles" and latest_bar_end is not None:
+        payload["bars"] = [{"bar_end": latest_bar_end.isoformat(), "close": 100.0}]
     path.write_text(json.dumps(payload), encoding="utf-8")
     return path
 
@@ -82,6 +85,53 @@ def test_stale_fixture_candles_fail_closed(tmp_path: Path) -> None:
 
     assert gc["runtime_candles_ready"] is False
     assert gc["candle_checks"]["1m"]["reason"] == "RUNTIME_CANDLES_STALE"
+
+
+def test_liquid_candles_require_fresh_latest_trade_bar(tmp_path: Path) -> None:
+    open_session_now = datetime(2026, 5, 11, 14, 0, tzinfo=timezone.utc)
+    path = _write_artifact(
+        tmp_path,
+        symbol="MNQ",
+        timeframe="1m",
+        generated_at=open_session_now,
+        latest_bar_end=open_session_now - timedelta(minutes=10),
+    )
+
+    check = _artifact_check(
+        path=path,
+        symbol="MNQ",
+        timeframe="1m",
+        now=open_session_now,
+        kind="candles",
+    )
+
+    assert check["ready"] is False
+    assert check["reason"] == "LATEST_TRADE_BARS_STALE"
+
+
+def test_configured_thin_candles_allow_stale_latest_trade_bar_when_feed_is_live(tmp_path: Path) -> None:
+    open_session_now = datetime(2026, 5, 11, 14, 0, tzinfo=timezone.utc)
+    for symbol in ("MBT", "MET", "MSL", "PL"):
+        path = _write_artifact(
+            tmp_path,
+            symbol=symbol,
+            timeframe="1m",
+            generated_at=open_session_now,
+            latest_bar_end=open_session_now - timedelta(minutes=20),
+        )
+
+        check = _artifact_check(
+            path=path,
+            symbol=symbol,
+            timeframe="1m",
+            now=open_session_now,
+            kind="candles",
+        )
+
+        assert check["ready"] is True
+        assert check["reason"] == "READY"
+        assert check["stale_trade_bars_allowed"] is True
+        assert check["latest_bar_age_seconds"] == 1200.0
 
 
 def test_weekend_halt_stale_candles_are_classified_market_closed(tmp_path: Path) -> None:

@@ -40,7 +40,11 @@ from mgc_v05l.execution_core.track_b_live_market_data_symbols import (
     load_track_b_live_market_data_symbols,
 )
 from mgc_v05l.execution_core.track_b_runtime_candle_capture_cli import _load_databento_api_key
-from mgc_v05l.market_data.phase1_market_session import phase1_latest_bar_freshness_seconds
+from mgc_v05l.market_data.phase1_market_session import (
+    phase1_latest_bar_freshness_seconds,
+    phase1_symbol_allows_stale_trade_bars,
+    phase1_symbol_market_freshness_policy,
+)
 from mgc_v05l.session_phase_labels import NEW_YORK, label_session_phase, session_restriction_matches_timestamp
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
@@ -1452,7 +1456,8 @@ def _runtime_payload(
     min_bars = _min_bars_for_timeframe_value(min_bars=live_symbol.min_confirmed_bars, timeframe=timeframe)
     fresh = age_seconds is not None and age_seconds <= latest_bar_freshness_seconds
     complete = len(bars) >= min_bars
-    realtime_confirmed = live_connected and fresh and complete
+    stale_trade_bars_allowed = phase1_symbol_allows_stale_trade_bars(live_symbol.symbol)
+    realtime_confirmed = live_connected and complete and (fresh or stale_trade_bars_allowed)
     return {
         "source": SOURCE_ID,
         "source_id": f"{config.source_id}_{symbol.lower()}",
@@ -1473,6 +1478,8 @@ def _runtime_payload(
         "freshness_seconds": freshness_seconds,
         "latest_bar_freshness_seconds": latest_bar_freshness_seconds,
         "latest_bar_age_seconds": age_seconds,
+        "market_freshness_policy": phase1_symbol_market_freshness_policy(live_symbol.symbol),
+        "stale_trade_bars_allowed": stale_trade_bars_allowed,
         "minimum_bar_count": min_bars,
         "historical_seed_ready": False,
         "realtime_feed_confirmed": realtime_confirmed,

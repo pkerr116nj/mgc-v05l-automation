@@ -5,6 +5,10 @@ from pathlib import Path
 import pytest
 
 from mgc_v05l.execution_core.track_b_live_market_data_symbols import (
+    MARKET_FRESHNESS_POLICY_LIQUID_TRADE_BARS,
+    MARKET_FRESHNESS_POLICY_THIN_QUOTE_FEED,
+    SESSION_CALENDAR_CME_CRYPTO_FUTURES,
+    SESSION_CALENDAR_GLOBEX_FUTURES,
     TrackBLiveMarketDataSymbolConfigError,
     load_track_b_live_market_data_symbols,
     parse_track_b_live_market_data_symbols,
@@ -57,14 +61,36 @@ def test_loads_default_track_b_live_market_data_symbols_config() -> None:
     namelist = load_track_b_live_market_data_symbols()
 
     assert namelist.version == 1
-    assert len(namelist.all_symbols()) == 11
+    assert len(namelist.all_symbols()) == 17
     assert [row.symbol for row in namelist.required_for_readiness_symbols()] == ["GC", "MGC", "ES", "MES", "NQ", "MNQ"]
-    assert [row.symbol for row in namelist.optional_symbols()] == ["ZT", "ZF", "ZN", "ZB", "PL"]
+    assert [row.symbol for row in namelist.optional_symbols()] == [
+        "ZT",
+        "ZF",
+        "ZN",
+        "ZB",
+        "PL",
+        "BTC",
+        "MBT",
+        "ETH",
+        "MET",
+        "SOL",
+        "MSL",
+    ]
     assert "MNQ.v.0" in namelist.enabled_databento_symbols()
     assert namelist.by_symbol()["MGC"].execution_symbol == "MGC"
     assert namelist.by_symbol()["MGC"].reference_symbol == "GC"
     assert namelist.by_symbol()["MES"].reference_symbol == "ES"
     assert namelist.by_symbol()["MNQ"].reference_symbol == "NQ"
+    assert namelist.by_symbol()["MNQ"].session_calendar == SESSION_CALENDAR_GLOBEX_FUTURES
+    assert namelist.by_symbol()["MNQ"].market_freshness_policy == MARKET_FRESHNESS_POLICY_LIQUID_TRADE_BARS
+    for symbol in ("MBT", "MET", "MSL"):
+        row = namelist.by_symbol()[symbol]
+        assert row.session_calendar == SESSION_CALENDAR_CME_CRYPTO_FUTURES
+        assert row.market_freshness_policy == MARKET_FRESHNESS_POLICY_THIN_QUOTE_FEED
+        assert row.latest_bar_freshness_seconds == 3600
+    assert namelist.by_symbol()["PL"].session_calendar == SESSION_CALENDAR_GLOBEX_FUTURES
+    assert namelist.by_symbol()["PL"].market_freshness_policy == MARKET_FRESHNESS_POLICY_THIN_QUOTE_FEED
+    assert namelist.by_symbol()["PL"].latest_bar_freshness_seconds == 3600
 
 
 def test_yaml_loader_reports_disabled_symbols_but_ignores_missing_disabled_databento_mapping(tmp_path: Path) -> None:
@@ -191,6 +217,25 @@ def test_enabled_symbol_missing_databento_mapping_fails_validation() -> None:
     rows[1] = {**rows[1], "databento_symbol": ""}
 
     with pytest.raises(TrackBLiveMarketDataSymbolConfigError, match="Enabled symbol MGC.*databento_symbol"):
+        parse_track_b_live_market_data_symbols(payload)
+
+
+def test_enabled_thin_symbol_requires_explicit_latest_bar_tolerance() -> None:
+    payload = valid_payload()
+    rows = payload["symbols"]
+    assert isinstance(rows, list)
+    rows.append(
+        symbol_row(
+            "PL",
+            execution_symbol="PL",
+            reference_symbol="PL",
+            databento_symbol="PL.v.0",
+            required_for_readiness=False,
+            market_freshness_policy=MARKET_FRESHNESS_POLICY_THIN_QUOTE_FEED,
+        )
+    )
+
+    with pytest.raises(TrackBLiveMarketDataSymbolConfigError, match="Thin market symbol PL"):
         parse_track_b_live_market_data_symbols(payload)
 
 

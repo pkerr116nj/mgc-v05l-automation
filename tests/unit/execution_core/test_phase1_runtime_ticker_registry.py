@@ -12,7 +12,25 @@ def test_registry_contains_exact_phase1_ticker_universe() -> None:
     registry = phase1_runtime_ticker_registry()
 
     assert tuple(registry) == PHASE1_RUNTIME_TICKER_ORDER
-    assert set(registry) == {"GC", "NQ", "ES", "MGC", "MNQ", "MES", "ZT", "ZF", "ZN", "ZB", "PL"}
+    assert set(registry) == {
+        "GC",
+        "NQ",
+        "ES",
+        "MGC",
+        "MNQ",
+        "MES",
+        "ZT",
+        "ZF",
+        "ZN",
+        "ZB",
+        "PL",
+        "BTC",
+        "MBT",
+        "ETH",
+        "MET",
+        "SOL",
+        "MSL",
+    }
     assert "RTY" not in registry
     assert "AAPL" not in registry
 
@@ -20,8 +38,23 @@ def test_registry_contains_exact_phase1_ticker_universe() -> None:
 def test_registry_classifies_full_size_micro_and_rates() -> None:
     registry = phase1_runtime_ticker_registry()
 
-    assert {symbol for symbol, item in registry.items() if item.contract_type == "full_size"} == {"GC", "NQ", "ES", "PL"}
-    assert {symbol for symbol, item in registry.items() if item.contract_type == "micro"} == {"MGC", "MNQ", "MES"}
+    assert {symbol for symbol, item in registry.items() if item.contract_type == "full_size"} == {
+        "GC",
+        "NQ",
+        "ES",
+        "PL",
+        "BTC",
+        "ETH",
+        "SOL",
+    }
+    assert {symbol for symbol, item in registry.items() if item.contract_type == "micro"} == {
+        "MGC",
+        "MNQ",
+        "MES",
+        "MBT",
+        "MET",
+        "MSL",
+    }
     assert {symbol for symbol, item in registry.items() if item.contract_type == "rates"} == {"ZT", "ZF", "ZN", "ZB"}
 
 
@@ -47,7 +80,7 @@ def test_registry_has_source_and_execution_support_without_strategy_approval() -
 def test_registry_rows_are_serializable() -> None:
     rows = phase1_runtime_ticker_rows()
 
-    assert len(rows) == 11
+    assert len(rows) == 17
     assert rows[0]["symbol"] == "GC"
-    assert rows[-1]["symbol"] == "PL"
+    assert rows[-1]["symbol"] == "MSL"
     assert all(row["live_money_eligible"] is False for row in rows)

@@ -420,8 +420,10 @@ def test_phase1_runtime_artifact_polling_client_treats_crypto_weekend_as_open(tm
         client.poll_live_bars(None, "1m", SchwabLivePollRequest(internal_symbol="MET"))
 
 
-def test_phase1_runtime_artifact_polling_client_allows_thin_symbol_old_last_trade_when_feed_is_fresh(
+@pytest.mark.parametrize("symbol", ["MBT", "MET", "MSL", "PL"])
+def test_phase1_runtime_artifact_polling_client_allows_configured_thin_symbol_old_last_trade_when_feed_is_fresh(
     tmp_path: Path,
+    symbol: str,
 ) -> None:
     root = tmp_path / "phase1_runtime_market_data"
     stale_bar = [
@@ -438,7 +440,7 @@ def test_phase1_runtime_artifact_polling_client_allows_thin_symbol_old_last_trad
     ]
     _write_phase1_runtime_artifact(
         root,
-        symbol="MET",
+        symbol=symbol,
         generated_at="2026-05-18T12:00:10+00:00",
         bars=stale_bar,
     )
@@ -447,7 +449,7 @@ def test_phase1_runtime_artifact_polling_client_allows_thin_symbol_old_last_trad
         now_fn=lambda: datetime.fromisoformat("2026-05-18T12:00:20+00:00"),
     )
 
-    bars = client.poll_live_bars(None, "1m", SchwabLivePollRequest(internal_symbol="MET"))
+    bars = client.poll_live_bars(None, "1m", SchwabLivePollRequest(internal_symbol=symbol))
 
     assert len(bars) == 1
     assert bars[0].end_ts == datetime.fromisoformat("2026-05-18T11:30:00+00:00")
@@ -483,7 +485,7 @@ def test_phase1_runtime_artifact_polling_client_still_blocks_liquid_symbol_old_l
         client.poll_live_bars(None, "1m", SchwabLivePollRequest(internal_symbol="MNQ"))
 
 
-def test_phase1_market_session_uses_crypto_futures_calendar_on_weekend() -> None:
+def test_phase1_market_session_uses_configured_crypto_futures_calendar_on_weekend() -> None:
     saturday = datetime.fromisoformat("2026-05-23T07:15:00+00:00")
 
     globex = classify_phase1_futures_market_session(saturday, symbol="ES")
