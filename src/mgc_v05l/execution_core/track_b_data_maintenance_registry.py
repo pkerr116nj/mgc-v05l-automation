@@ -73,6 +73,10 @@ _FUTURES_PLACEHOLDERS = (
     "NG",
     "BTC",
     "MBT",
+    "ETH",
+    "MET",
+    "SOL",
+    "MSL",
     "YM",
 )
 _ETF_PLACEHOLDERS = ("SPY", "QQQ", "TQQQ", "SQQQ")

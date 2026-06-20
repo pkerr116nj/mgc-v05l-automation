@@ -163,6 +163,55 @@ _BATCH1_ACTIVE_EVIDENCE_CONTRACTS: dict[str, dict[str, Any]] = {
         "min_tick": "5",
         "trading_class": "MBT",
     },
+    "ETH": {
+        "symbol": "ETH",
+        "broker_symbol": "ETHUSDRR",
+        "contract_month": "202609",
+        "expiry": "20260925",
+        "con_id": 772435593,
+        "local_symbol": "ETHU6",
+        "exchange": "CME",
+        "currency": "USD",
+        "multiplier": "50",
+        "min_tick": "0.5",
+        "trading_class": "ETH",
+    },
+    "MET": {
+        "symbol": "MET",
+        "contract_month": "202609",
+        "expiry": "20260925",
+        "con_id": 772435602,
+        "local_symbol": "METU6",
+        "exchange": "CME",
+        "currency": "USD",
+        "multiplier": "0.1",
+        "min_tick": "0.5",
+        "trading_class": "MET",
+    },
+    "SOL": {
+        "symbol": "SOL",
+        "contract_month": "202609",
+        "expiry": "20260925",
+        "con_id": 772435608,
+        "local_symbol": "SOLU6",
+        "exchange": "CME",
+        "currency": "USD",
+        "multiplier": "500",
+        "min_tick": "0.05",
+        "trading_class": "SOL",
+    },
+    "MSL": {
+        "symbol": "MSL",
+        "contract_month": "202609",
+        "expiry": "20260925",
+        "con_id": 772435607,
+        "local_symbol": "MSLU6",
+        "exchange": "CME",
+        "currency": "USD",
+        "multiplier": "25",
+        "min_tick": "0.05",
+        "trading_class": "MSL",
+    },
 }
 _GC_PHASE1_SUBMIT_LANE_IDS = (
     *_active_evidence_lane_ids("gc"),
@@ -264,6 +313,10 @@ _ZN_PHASE1_SUBMIT_LANE_IDS = (*_active_evidence_lane_ids("zn"),)
 _ZB_PHASE1_SUBMIT_LANE_IDS = (*_active_evidence_lane_ids("zb"),)
 _BTC_PHASE1_SUBMIT_LANE_IDS = (*_active_evidence_lane_ids("btc"),)
 _MBT_PHASE1_SUBMIT_LANE_IDS = (*_active_evidence_lane_ids("mbt"),)
+_ETH_PHASE1_SUBMIT_LANE_IDS = (*_active_evidence_lane_ids("eth"),)
+_MET_PHASE1_SUBMIT_LANE_IDS = (*_active_evidence_lane_ids("met"),)
+_SOL_PHASE1_SUBMIT_LANE_IDS = (*_active_evidence_lane_ids("sol"),)
+_MSL_PHASE1_SUBMIT_LANE_IDS = (*_active_evidence_lane_ids("msl"),)
 _PL_PHASE1_SUBMIT_LANE_IDS = (
     "atp_companion_v1_pl_asia_us",
     "atp_companion_v1_pl_asia_us_5m",
@@ -387,6 +440,10 @@ for symbol, lane_ids in (
     ("ZB", _ZB_PHASE1_SUBMIT_LANE_IDS),
     ("BTC", _BTC_PHASE1_SUBMIT_LANE_IDS),
     ("MBT", _MBT_PHASE1_SUBMIT_LANE_IDS),
+    ("ETH", _ETH_PHASE1_SUBMIT_LANE_IDS),
+    ("MET", _MET_PHASE1_SUBMIT_LANE_IDS),
+    ("SOL", _SOL_PHASE1_SUBMIT_LANE_IDS),
+    ("MSL", _MSL_PHASE1_SUBMIT_LANE_IDS),
 ):
     _SUBMIT_CAPABLE_LANE_ADAPTERS |= {
         lane_id: {

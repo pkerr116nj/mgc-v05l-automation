@@ -82,6 +82,41 @@ def test_mbt_contract_resolves_validated_micro_bitcoin_identity() -> None:
     assert identity.multiplier == "0.1"
 
 
+@pytest.mark.parametrize(
+    ("symbol", "local_symbol", "con_id", "canonical_symbol", "trading_class", "multiplier"),
+    (
+        ("ETH", "ETHU6", 772435593, "ETHUSDRR", "ETH", "50"),
+        ("MET", "METU6", 772435602, "MET", "MET", "0.1"),
+        ("SOL", "SOLU6", 772435608, "SOL", "SOL", "500"),
+        ("MSL", "MSLU6", 772435607, "MSL", "MSL", "25"),
+    ),
+)
+def test_ether_solana_contracts_resolve_validated_crypto_identities(
+    symbol: str,
+    local_symbol: str,
+    con_id: int,
+    canonical_symbol: str,
+    trading_class: str,
+    multiplier: str,
+) -> None:
+    identity = canonicalize_broker_bound_contract_identity(
+        base={
+            "symbol": symbol,
+            "local_symbol": local_symbol,
+            "con_id": con_id,
+            "expiry": "202609",
+        }
+    )
+
+    assert identity is not None
+    assert identity.symbol == canonical_symbol
+    assert identity.trading_class == trading_class
+    assert identity.local_symbol == local_symbol
+    assert identity.con_id == str(con_id)
+    assert identity.expiry == "20260925"
+    assert identity.multiplier == multiplier
+
+
 def test_contract_identity_blocks_conid_expiry_mismatch() -> None:
     with pytest.raises(BrokerContractIdentityError, match="conflicts with canonical IBKR expiry"):
         canonicalize_broker_bound_contract_identity(

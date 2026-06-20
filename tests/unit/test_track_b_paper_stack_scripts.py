@@ -241,7 +241,7 @@ def test_paper_minimal_shape_verifier_checks_commit_profile_lane_count_and_truth
 
     assert 'truth.get("source_commit") != expected_commit' in verifier_block
     assert 'config.get("profile") != expected_profile' in verifier_block
-    assert 'expected_lane_count = 78' in verifier_block
+    assert 'expected_lane_count = 92' in verifier_block
     assert 'truth.get("lane_count")' in verifier_block
     assert 'execution_modes != {"IBKR_PAPER_BRIDGE"}' in verifier_block
     assert 'truth.get("freshness_state")' in verifier_block
@@ -1638,7 +1638,7 @@ def test_thin_recovery_script_uses_broker_truth_and_direct_minimal_start_only() 
     assert "mnq_mes_full_session_active_evidence" in source
     assert "IBKR_PAPER_BRIDGE" in source
     assert "expected_lanes = int" in source
-    assert 'EXPECTED_LANES="${TRACK_B_PAPER_EXPECTED_LANE_COUNT:-78}"' in source
+    assert 'EXPECTED_LANES="${TRACK_B_PAPER_EXPECTED_LANE_COUNT:-92}"' in source
     assert "classify_fresh_complete_clean_broker_truth" in source
     assert "latest_managed_positions.json" in source
     assert "allow_known_managed_positions=True" in source
@@ -1714,7 +1714,7 @@ def test_paper_stack_start_has_session_coverage_active_evidence_profile() -> Non
     assert '"PAPER_ACTIVE_EVIDENCE_MNQ_GLOBEX_PARTICIPATION_SHORT_V1"' in source
     assert '"PAPER_ACTIVE_EVIDENCE_MES_GLOBEX_PARTICIPATION_LONG_V1"' in source
     assert '"PAPER_ACTIVE_EVIDENCE_MES_GLOBEX_PARTICIPATION_SHORT_V1"' in source
-    assert 'PROOF_REQUIRED_SYMBOLS="GC,MGC,NQ,ES,ZT,ZF,ZN,ZB,MBT,MNQ,MES"' in source
+    assert 'PROOF_REQUIRED_SYMBOLS="GC,MGC,NQ,ES,ZT,ZF,ZN,ZB,MBT,MET,MSL,MNQ,MES"' in source
 
 
 def test_paper_stack_start_has_london_open_active_evidence_extension_profile() -> None:
@@ -1767,7 +1767,7 @@ def test_paper_stack_start_has_full_session_active_evidence_profile() -> None:
     assert '"PAPER_WATCH_ACTIVE_EVIDENCE_MNQ_LONDON_LATE_LONG_SHADOW_V1"' in source
     assert '"PAPER_WATCH_ACTIVE_EVIDENCE_MES_LONDON_LATE_LONG_SHADOW_V1"' in source
     assert "FULL_SESSION_PROFILE_INITIAL_LONDON_LATE_SHORT_ONLY_ELEVATION" in source
-    assert 'PROOF_REQUIRED_SYMBOLS="GC,MGC,NQ,ES,ZT,ZF,ZN,ZB,MBT,MNQ,MES"' in source
+    assert 'PROOF_REQUIRED_SYMBOLS="GC,MGC,NQ,ES,ZT,ZF,ZN,ZB,MBT,MET,MSL,MNQ,MES"' in source
 
     block = source.split('elif [[ "${STACK_PROFILE}" == "mnq_mes_full_session_active_evidence" ]]; then', 1)[1]
     roster_json = block.split("cat > \"${SCOPED_ROSTER_PATH}\" <<'JSON'", 1)[1].split("\nJSON", 1)[0]
@@ -1791,7 +1791,7 @@ def test_paper_stack_start_has_full_session_active_evidence_profile() -> None:
     ]
     batch_ids = [
         f"PAPER_ACTIVE_EVIDENCE_{symbol}_{session}_PARTICIPATION_{side}_V1"
-        for symbol in ("MGC", "GC", "NQ", "ES", "ZT", "ZF", "ZN", "ZB", "MBT")
+        for symbol in ("MGC", "GC", "NQ", "ES", "ZT", "ZF", "ZN", "ZB", "MBT", "MET", "MSL")
         for session, side in (
             ("US", "LONG"),
             ("US", "SHORT"),
@@ -1804,13 +1804,17 @@ def test_paper_stack_start_has_full_session_active_evidence_profile() -> None:
     ]
     expected_ids = [*current_ids, *batch_ids, "MNQ_US_DERIVATIVE_BEAR_TURN_V1"]
     assert roster["enabled_strategy_ids"] == expected_ids
-    assert len(roster["enabled_strategy_ids"]) == 78
+    assert len(roster["enabled_strategy_ids"]) == 92
     assert any("_ZT_" in strategy_id for strategy_id in expected_ids)
     assert any("_ZF_" in strategy_id for strategy_id in expected_ids)
     assert any("_ZN_" in strategy_id for strategy_id in expected_ids)
     assert any("_ZB_" in strategy_id for strategy_id in expected_ids)
     assert any("_MBT_" in strategy_id for strategy_id in expected_ids)
+    assert any("_MET_" in strategy_id for strategy_id in expected_ids)
+    assert any("_MSL_" in strategy_id for strategy_id in expected_ids)
     assert not any("_BTC_" in strategy_id for strategy_id in expected_ids)
+    assert not any("_ETH_" in strategy_id for strategy_id in expected_ids)
+    assert not any("_SOL_" in strategy_id for strategy_id in expected_ids)
     assert not any("_PL_" in strategy_id for strategy_id in expected_ids)
     assert roster["shadow_only_strategy_ids"] == [
         "PAPER_WATCH_ACTIVE_EVIDENCE_MNQ_LONDON_LATE_LONG_SHADOW_V1",
@@ -1818,7 +1822,7 @@ def test_paper_stack_start_has_full_session_active_evidence_profile() -> None:
     ]
 
 
-def test_paper_stack_full_session_materializes_seventy_eight_lane_specs(tmp_path: Path) -> None:
+def test_paper_stack_full_session_materializes_ninety_two_lane_specs(tmp_path: Path) -> None:
     source = START_SCRIPT.read_text(encoding="utf-8")
     assert "materialize_scoped_lane_config_from_roster" in source
 
@@ -1861,7 +1865,7 @@ def test_paper_stack_full_session_materializes_seventy_eight_lane_specs(tmp_path
     assert "probationary_paper_runtime_exclusive_config: true" in generated
     raw_lanes = generated.split("probationary_paper_lanes_json: ", 1)[1].strip()
     lanes = json.loads(raw_lanes)
-    assert len(lanes) == 78
+    assert len(lanes) == 92
     assert [lane["long_sources"][0] for lane in lanes] == roster["enabled_strategy_ids"]
     assert {lane["execution_mode"] for lane in lanes} == {"IBKR_PAPER_BRIDGE"}
     assert {lane["current_order_destination"] for lane in lanes} == {"ibkr_paper_bridge_submit_capable"}
@@ -1883,6 +1887,8 @@ def test_paper_stack_full_session_materializer_fills_missing_lane_specs_from_con
                 "PAPER_ACTIVE_EVIDENCE_MGC_US_PARTICIPATION_LONG_V1",
                 "PAPER_ACTIVE_EVIDENCE_ZT_US_PARTICIPATION_LONG_V1",
                 "PAPER_ACTIVE_EVIDENCE_MBT_US_PARTICIPATION_LONG_V1",
+                "PAPER_ACTIVE_EVIDENCE_MET_US_PARTICIPATION_LONG_V1",
+                "PAPER_ACTIVE_EVIDENCE_MSL_US_PARTICIPATION_LONG_V1",
                 "PAPER_ACTIVE_EVIDENCE_MES_LONDON_LATE_PARTICIPATION_SHORT_V1",
                 "MNQ_US_DERIVATIVE_BEAR_TURN_V1",
             }
@@ -1924,7 +1930,7 @@ def test_paper_stack_full_session_materializer_fills_missing_lane_specs_from_con
     mes_late = by_source["PAPER_ACTIVE_EVIDENCE_MES_LONDON_LATE_PARTICIPATION_SHORT_V1"]
     mgc_us = by_source["PAPER_ACTIVE_EVIDENCE_MGC_US_PARTICIPATION_LONG_V1"]
     zt_us = by_source["PAPER_ACTIVE_EVIDENCE_ZT_US_PARTICIPATION_LONG_V1"]
-    assert len(lanes) == 78
+    assert len(lanes) == 92
     assert mes_late["lane_id"] == "mes_london_late_active_participation_short"
     assert mes_late["symbol"] == "MES"
     assert mes_late["session_restriction"] == "LONDON_LATE"
@@ -1953,6 +1959,20 @@ def test_paper_stack_full_session_materializer_fills_missing_lane_specs_from_con
     assert mbt_us["con_id"] == 772435596
     assert mbt_us["point_value"] == "0.1"
     assert mbt_us["session_restriction"] == "US"
+    met_us = by_source["PAPER_ACTIVE_EVIDENCE_MET_US_PARTICIPATION_LONG_V1"]
+    assert met_us["lane_id"] == "met_us_active_participation_long"
+    assert met_us["symbol"] == "MET"
+    assert met_us["local_symbol"] == "METU6"
+    assert met_us["con_id"] == 772435602
+    assert met_us["point_value"] == "0.1"
+    assert met_us["session_restriction"] == "US"
+    msl_us = by_source["PAPER_ACTIVE_EVIDENCE_MSL_US_PARTICIPATION_LONG_V1"]
+    assert msl_us["lane_id"] == "msl_us_active_participation_long"
+    assert msl_us["symbol"] == "MSL"
+    assert msl_us["local_symbol"] == "MSLU6"
+    assert msl_us["con_id"] == 772435607
+    assert msl_us["point_value"] == "25"
+    assert msl_us["session_restriction"] == "US"
     assert zt_us["runtime_overlay_params"]["input_event_path"].endswith(
         "latest_zt_us_active_participation_long_event_envelope.json"
     )

@@ -5,7 +5,25 @@ from __future__ import annotations
 from datetime import date, datetime
 from typing import Any
 
-_SUPPORTED_SOURCE_INSTRUMENTS = {"GC", "MGC", "NQ", "MNQ", "ES", "MES", "ZT", "ZF", "ZN", "ZB", "PL", "BTC", "MBT"}
+_SUPPORTED_SOURCE_INSTRUMENTS = {
+    "GC",
+    "MGC",
+    "NQ",
+    "MNQ",
+    "ES",
+    "MES",
+    "ZT",
+    "ZF",
+    "ZN",
+    "ZB",
+    "PL",
+    "BTC",
+    "MBT",
+    "ETH",
+    "MET",
+    "SOL",
+    "MSL",
+}
 _SOURCE_TO_PHASE1_EXECUTION_SYMBOL = {
     "GC": "GC",
     "MGC": "MGC",
@@ -20,6 +38,10 @@ _SOURCE_TO_PHASE1_EXECUTION_SYMBOL = {
     "PL": "PL",
     "BTC": "BTC",
     "MBT": "MBT",
+    "ETH": "ETH",
+    "MET": "MET",
+    "SOL": "SOL",
+    "MSL": "MSL",
 }
 _FIXED_GOLD_CONTRACT_MONTH = "202606"
 _PLATINUM_CONTRACT_MONTHS = (1, 4, 7, 10)
@@ -71,6 +93,42 @@ _CRYPTO_TARGETS = {
         "con_id": 772435596,
         "local_symbol": "MBTU6",
         "trading_class": "MBT",
+    },
+    "ETH": {
+        "broker_symbol": "ETHUSDRR",
+        "multiplier": "50",
+        "friendly_name": "Ether",
+        "expiry": "20260925",
+        "con_id": 772435593,
+        "local_symbol": "ETHU6",
+        "trading_class": "ETH",
+    },
+    "MET": {
+        "broker_symbol": "MET",
+        "multiplier": "0.1",
+        "friendly_name": "Micro Ether",
+        "expiry": "20260925",
+        "con_id": 772435602,
+        "local_symbol": "METU6",
+        "trading_class": "MET",
+    },
+    "SOL": {
+        "broker_symbol": "SOL",
+        "multiplier": "500",
+        "friendly_name": "Solana",
+        "expiry": "20260925",
+        "con_id": 772435608,
+        "local_symbol": "SOLU6",
+        "trading_class": "SOL",
+    },
+    "MSL": {
+        "broker_symbol": "MSL",
+        "multiplier": "25",
+        "friendly_name": "Micro Solana",
+        "expiry": "20260925",
+        "con_id": 772435607,
+        "local_symbol": "MSLU6",
+        "trading_class": "MSL",
     },
 }
 

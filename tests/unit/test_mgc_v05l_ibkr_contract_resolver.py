@@ -128,6 +128,36 @@ def test_ibkr_contract_resolver_supports_micro_bitcoin_futures() -> None:
     assert qualified.trading_class == "MBT"
 
 
+@pytest.mark.parametrize(
+    ("symbol", "broker_symbol", "local_symbol", "multiplier", "trading_class"),
+    (
+        ("ETH", "ETHUSDRR", "ETHU26", "50", "ETH"),
+        ("MET", "MET", "METU26", "0.1", "MET"),
+        ("SOL", "SOL", "SOLU26", "500", "SOL"),
+        ("MSL", "MSL", "MSLU26", "25", "MSL"),
+    ),
+)
+def test_ibkr_contract_resolver_supports_ether_solana_crypto_futures(
+    symbol: str,
+    broker_symbol: str,
+    local_symbol: str,
+    multiplier: str,
+    trading_class: str,
+) -> None:
+    resolver = IbkrContractResolver()
+
+    qualified = resolver.qualify_futures(symbol=symbol, expiry="202609")
+
+    assert qualified.internal_symbol == symbol
+    assert qualified.broker_symbol == broker_symbol
+    assert qualified.exchange == "CME"
+    assert qualified.currency == "USD"
+    assert qualified.expiry == "202609"
+    assert qualified.local_symbol == local_symbol
+    assert qualified.multiplier == multiplier
+    assert qualified.trading_class == trading_class
+
+
 def test_ibkr_contract_resolver_requires_calendar_month_expiry() -> None:
     resolver = IbkrContractResolver()
 

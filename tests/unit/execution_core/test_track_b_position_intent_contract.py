@@ -183,6 +183,34 @@ def test_batch1_active_evidence_position_intents_use_validated_contracts() -> No
             "20260925",
             "MBT-202609",
         ),
+        "PAPER_ACTIVE_EVIDENCE_ETH_US_PARTICIPATION_LONG_V1": (
+            "ETH",
+            "ETHU6",
+            772435593,
+            "20260925",
+            "ETH-202609",
+        ),
+        "PAPER_ACTIVE_EVIDENCE_MET_LONDON_OPEN_PARTICIPATION_SHORT_V1": (
+            "MET",
+            "METU6",
+            772435602,
+            "20260925",
+            "MET-202609",
+        ),
+        "PAPER_ACTIVE_EVIDENCE_SOL_US_PARTICIPATION_LONG_V1": (
+            "SOL",
+            "SOLU6",
+            772435608,
+            "20260925",
+            "SOL-202609",
+        ),
+        "PAPER_ACTIVE_EVIDENCE_MSL_LONDON_OPEN_PARTICIPATION_SHORT_V1": (
+            "MSL",
+            "MSLU6",
+            772435607,
+            "20260925",
+            "MSL-202609",
+        ),
     }
 
     for strategy_id, (symbol, local_symbol, con_id, expiry, contract_key) in expected.items():

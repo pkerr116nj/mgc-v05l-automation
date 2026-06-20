@@ -119,6 +119,34 @@ _FUTURES_TICK_METADATA: dict[str, FuturesTickMetadata] = {
         tick_value=Decimal("0.5"),
         exchange="CME",
     ),
+    "ETH": FuturesTickMetadata(
+        symbol="ETH",
+        min_tick=Decimal("0.5"),
+        multiplier=Decimal("50"),
+        tick_value=Decimal("25"),
+        exchange="CME",
+    ),
+    "MET": FuturesTickMetadata(
+        symbol="MET",
+        min_tick=Decimal("0.5"),
+        multiplier=Decimal("0.1"),
+        tick_value=Decimal("0.05"),
+        exchange="CME",
+    ),
+    "SOL": FuturesTickMetadata(
+        symbol="SOL",
+        min_tick=Decimal("0.05"),
+        multiplier=Decimal("500"),
+        tick_value=Decimal("25"),
+        exchange="CME",
+    ),
+    "MSL": FuturesTickMetadata(
+        symbol="MSL",
+        min_tick=Decimal("0.05"),
+        multiplier=Decimal("25"),
+        tick_value=Decimal("1.25"),
+        exchange="CME",
+    ),
 }
 
 

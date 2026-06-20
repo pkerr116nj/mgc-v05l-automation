@@ -449,6 +449,20 @@ elif [[ "${STACK_PROFILE}" == "mnq_mes_full_session_active_evidence" ]]; then
     "PAPER_ACTIVE_EVIDENCE_MBT_LONDON_OPEN_PARTICIPATION_LONG_V1",
     "PAPER_ACTIVE_EVIDENCE_MBT_LONDON_OPEN_PARTICIPATION_SHORT_V1",
     "PAPER_ACTIVE_EVIDENCE_MBT_LONDON_LATE_PARTICIPATION_SHORT_V1",
+    "PAPER_ACTIVE_EVIDENCE_MET_US_PARTICIPATION_LONG_V1",
+    "PAPER_ACTIVE_EVIDENCE_MET_US_PARTICIPATION_SHORT_V1",
+    "PAPER_ACTIVE_EVIDENCE_MET_GLOBEX_PARTICIPATION_LONG_V1",
+    "PAPER_ACTIVE_EVIDENCE_MET_GLOBEX_PARTICIPATION_SHORT_V1",
+    "PAPER_ACTIVE_EVIDENCE_MET_LONDON_OPEN_PARTICIPATION_LONG_V1",
+    "PAPER_ACTIVE_EVIDENCE_MET_LONDON_OPEN_PARTICIPATION_SHORT_V1",
+    "PAPER_ACTIVE_EVIDENCE_MET_LONDON_LATE_PARTICIPATION_SHORT_V1",
+    "PAPER_ACTIVE_EVIDENCE_MSL_US_PARTICIPATION_LONG_V1",
+    "PAPER_ACTIVE_EVIDENCE_MSL_US_PARTICIPATION_SHORT_V1",
+    "PAPER_ACTIVE_EVIDENCE_MSL_GLOBEX_PARTICIPATION_LONG_V1",
+    "PAPER_ACTIVE_EVIDENCE_MSL_GLOBEX_PARTICIPATION_SHORT_V1",
+    "PAPER_ACTIVE_EVIDENCE_MSL_LONDON_OPEN_PARTICIPATION_LONG_V1",
+    "PAPER_ACTIVE_EVIDENCE_MSL_LONDON_OPEN_PARTICIPATION_SHORT_V1",
+    "PAPER_ACTIVE_EVIDENCE_MSL_LONDON_LATE_PARTICIPATION_SHORT_V1",
     "MNQ_US_DERIVATIVE_BEAR_TURN_V1"
   ],
   "shadow_only_strategy_ids": [
@@ -466,7 +480,7 @@ JSON
   materialize_scoped_lane_config_from_roster "${SCOPED_ROSTER_PATH}" "$(scoped_profile_lane_source_config "${SCOPED_CONFIG_PATH}" "${RUNTIME_DIR}/paper_config_in_force.json")" "${SCOPED_CONFIG_PATH}" "${REPO_ROOT}"
   CANONICAL_CONFIGS+=("${SCOPED_CONFIG_PATH}")
   ROSTER_ENV_PATH="${SCOPED_ROSTER_PATH}"
-  PROOF_REQUIRED_SYMBOLS="GC,MGC,NQ,ES,ZT,ZF,ZN,ZB,MBT,MNQ,MES"
+  PROOF_REQUIRED_SYMBOLS="GC,MGC,NQ,ES,ZT,ZF,ZN,ZB,MBT,MET,MSL,MNQ,MES"
 elif [[ "${STACK_PROFILE}" != "canonical" ]]; then
   echo "BLOCKED_UNKNOWN_PROFILE: Unknown Track B PAPER stack profile: ${STACK_PROFILE}" >&2
   exit 2
@@ -2202,7 +2216,7 @@ if str(truth.get("heartbeat_state") or "").strip().upper() not in {"", "HEALTHY"
 lanes = [row for row in config.get("lanes") or [] if isinstance(row, dict)]
 active_lane_ids = [str(value) for value in config.get("active_lane_ids") or [] if str(value)]
 if expected_profile == "mnq_mes_full_session_active_evidence":
-    expected_lane_count = 78
+    expected_lane_count = 92
 else:
     expected_lane_count = len(active_lane_ids) or len(lanes)
 if len(lanes) != expected_lane_count:

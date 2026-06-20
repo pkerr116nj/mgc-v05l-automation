@@ -736,7 +736,7 @@ HUMAN_REVIEW_ONLY = TrackBStrategyRegistryEntry(
     accepted_rule_ids=("human_review_only", "mgc_ema_momentum_reclaim_long_v1"),
 )
 
-_BATCH1_ACTIVE_EVIDENCE_SYMBOLS = ("MGC", "GC", "NQ", "ES", "ZT", "ZF", "ZN", "ZB", "BTC", "MBT")
+_BATCH1_ACTIVE_EVIDENCE_SYMBOLS = ("MGC", "GC", "NQ", "ES", "ZT", "ZF", "ZN", "ZB", "BTC", "MBT", "ETH", "MET", "SOL", "MSL")
 _BATCH1_ACTIVE_EVIDENCE_SESSIONS = (
     ("US", "LONG", "US_ACTIVE_EVIDENCE_TIMEBOX_60M_EXIT_V1"),
     ("US", "SHORT", "US_ACTIVE_EVIDENCE_TIMEBOX_60M_EXIT_V1"),

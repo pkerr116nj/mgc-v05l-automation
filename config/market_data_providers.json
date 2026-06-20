@@ -249,6 +249,54 @@
       "exchange": "CME",
       "description": "Bitcoin futures volume-based front continuous"
     },
+    "ETH": {
+      "request_symbol": "ETH.v.0",
+      "dataset": "GLBX.MDP3",
+      "stype_in": "continuous",
+      "stype_out": "instrument_id",
+      "schema_by_timeframe": {
+        "1m": "ohlcv-1m"
+      },
+      "asset_class": "future",
+      "exchange": "CME",
+      "description": "Ether futures volume-based front continuous"
+    },
+    "MET": {
+      "request_symbol": "MET.v.0",
+      "dataset": "GLBX.MDP3",
+      "stype_in": "continuous",
+      "stype_out": "instrument_id",
+      "schema_by_timeframe": {
+        "1m": "ohlcv-1m"
+      },
+      "asset_class": "future",
+      "exchange": "CME",
+      "description": "Micro Ether futures volume-based front continuous"
+    },
+    "SOL": {
+      "request_symbol": "SOL.v.0",
+      "dataset": "GLBX.MDP3",
+      "stype_in": "continuous",
+      "stype_out": "instrument_id",
+      "schema_by_timeframe": {
+        "1m": "ohlcv-1m"
+      },
+      "asset_class": "future",
+      "exchange": "CME",
+      "description": "Solana futures volume-based front continuous"
+    },
+    "MSL": {
+      "request_symbol": "MSL.v.0",
+      "dataset": "GLBX.MDP3",
+      "stype_in": "continuous",
+      "stype_out": "instrument_id",
+      "schema_by_timeframe": {
+        "1m": "ohlcv-1m"
+      },
+      "asset_class": "future",
+      "exchange": "CME",
+      "description": "Micro Solana futures volume-based front continuous"
+    },
     "NG": {
       "request_symbol": "NG.v.0",
       "dataset": "GLBX.MDP3",

@@ -39,6 +39,10 @@ def test_phase1_execution_symbols_cover_gold_and_index_pairs() -> None:
     assert phase1_execution_symbol_for_source("ZN") == "ZN"
     assert phase1_execution_symbol_for_source("ZB") == "ZB"
     assert phase1_execution_symbol_for_source("PL") == "PL"
+    assert phase1_execution_symbol_for_source("ETH") == "ETH"
+    assert phase1_execution_symbol_for_source("MET") == "MET"
+    assert phase1_execution_symbol_for_source("SOL") == "SOL"
+    assert phase1_execution_symbol_for_source("MSL") == "MSL"
 
 
 def test_phase1_full_size_targets_are_direct_execution_targets() -> None:
@@ -129,6 +133,33 @@ def test_phase1_platinum_target_is_direct_nymex_execution_target() -> None:
     assert target["trading_class"] == "PL"
     assert target["phase1_proxy_mode"] == "DIRECT"
     assert target["contract_family"] == "Platinum"
+
+
+def test_phase1_crypto_targets_use_validated_september_contract_identity() -> None:
+    expected = {
+        "BTC": ("BRR", "BTCU6", "20260925", 772435574, "5", "Bitcoin", "BTC"),
+        "MBT": ("MBT", "MBTU6", "20260925", 772435596, "0.1", "Micro Bitcoin", "MBT"),
+        "ETH": ("ETHUSDRR", "ETHU6", "20260925", 772435593, "50", "Ether", "ETH"),
+        "MET": ("MET", "METU6", "20260925", 772435602, "0.1", "Micro Ether", "MET"),
+        "SOL": ("SOL", "SOLU6", "20260925", 772435608, "500", "Solana", "SOL"),
+        "MSL": ("MSL", "MSLU6", "20260925", 772435607, "25", "Micro Solana", "MSL"),
+    }
+    assert set(expected).issubset(supported_phase1_source_instruments())
+    for symbol, (broker_symbol, local_symbol, expiry, con_id, multiplier, contract_family, trading_class) in expected.items():
+        target = phase1_execution_target_for_source(symbol, now=date(2026, 6, 16))
+
+        assert target["symbol"] == symbol
+        assert target["broker_symbol"] == broker_symbol
+        assert target["contract_month"] == "202609"
+        assert target["local_symbol"] == local_symbol
+        assert target["expiry"] == expiry
+        assert target["con_id"] == con_id
+        assert target["exchange"] == "CME"
+        assert target["currency"] == "USD"
+        assert target["multiplier"] == multiplier
+        assert target["trading_class"] == trading_class
+        assert target["phase1_proxy_mode"] == "DIRECT"
+        assert target["contract_family"] == contract_family
 
 
 def test_equities_unsupported_rates_and_unapproved_futures_fail_closed() -> None:

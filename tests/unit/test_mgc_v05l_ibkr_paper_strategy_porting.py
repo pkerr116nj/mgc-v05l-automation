@@ -285,6 +285,10 @@ def test_batch1_active_evidence_lanes_use_validated_contract_bridge_targets() ->
         "zb_london_late_active_participation_short": ("ZB", "ZBU6", 840227357, "20260921", "1000", "0.03125"),
         "btc_us_active_participation_long": ("BTC", "BTCU6", 772435574, "20260925", "5", "5"),
         "mbt_london_open_active_participation_short": ("MBT", "MBTU6", 772435596, "20260925", "0.1", "5"),
+        "eth_us_active_participation_long": ("ETH", "ETHU6", 772435593, "20260925", "50", "0.5"),
+        "met_london_open_active_participation_short": ("MET", "METU6", 772435602, "20260925", "0.1", "0.5"),
+        "sol_us_active_participation_long": ("SOL", "SOLU6", 772435608, "20260925", "500", "0.05"),
+        "msl_london_open_active_participation_short": ("MSL", "MSLU6", 772435607, "20260925", "25", "0.05"),
     }
 
     for lane_id, (symbol, local_symbol, con_id, expiry, multiplier, min_tick) in expected_targets.items():

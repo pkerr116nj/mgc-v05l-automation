@@ -182,3 +182,59 @@ symbols:
     min_confirmed_bars: 8
     freshness_threshold_seconds: 300
     notes: Micro Bitcoin execution feed for PAPER noisemaker lanes.
+  - symbol: ETH
+    enabled: true
+    required_for_readiness: false
+    asset_class: futures
+    execution_symbol: ETH
+    reference_symbol: ETH
+    databento_symbol: ETH.v.0
+    dataset: GLBX.MDP3
+    schema: ohlcv-1m
+    venue: CME Globex
+    timezone: America/New_York
+    min_confirmed_bars: 8
+    freshness_threshold_seconds: 300
+    notes: Readiness-only full-size Ether context feed; not runtime-active until separately approved.
+  - symbol: MET
+    enabled: true
+    required_for_readiness: false
+    asset_class: futures
+    execution_symbol: MET
+    reference_symbol: MET
+    databento_symbol: MET.v.0
+    dataset: GLBX.MDP3
+    schema: ohlcv-1m
+    venue: CME Globex
+    timezone: America/New_York
+    min_confirmed_bars: 8
+    freshness_threshold_seconds: 300
+    notes: Micro Ether execution feed for PAPER noisemaker lanes.
+  - symbol: SOL
+    enabled: true
+    required_for_readiness: false
+    asset_class: futures
+    execution_symbol: SOL
+    reference_symbol: SOL
+    databento_symbol: SOL.v.0
+    dataset: GLBX.MDP3
+    schema: ohlcv-1m
+    venue: CME Globex
+    timezone: America/New_York
+    min_confirmed_bars: 8
+    freshness_threshold_seconds: 300
+    notes: Readiness-only full-size Solana context feed; not runtime-active until separately approved.
+  - symbol: MSL
+    enabled: true
+    required_for_readiness: false
+    asset_class: futures
+    execution_symbol: MSL
+    reference_symbol: MSL
+    databento_symbol: MSL.v.0
+    dataset: GLBX.MDP3
+    schema: ohlcv-1m
+    venue: CME Globex
+    timezone: America/New_York
+    min_confirmed_bars: 8
+    freshness_threshold_seconds: 300
+    notes: Micro Solana execution feed for PAPER noisemaker lanes.
