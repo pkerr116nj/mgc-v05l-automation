@@ -65,6 +65,30 @@ def test_batch1_active_evidence_specs_are_registered() -> None:
     )
 
 
+def test_crypto_active_evidence_specs_are_registered() -> None:
+    expected = [
+        f"PAPER_ACTIVE_EVIDENCE_{symbol}_{session}_PARTICIPATION_{side}_V1"
+        for symbol in ("MBT", "MET", "MSL")
+        for session, side in (
+            ("US", "LONG"),
+            ("US", "SHORT"),
+            ("GLOBEX", "LONG"),
+            ("GLOBEX", "SHORT"),
+            ("LONDON_OPEN", "LONG"),
+            ("LONDON_OPEN", "SHORT"),
+            ("LONDON_LATE", "SHORT"),
+        )
+    ]
+
+    assert set(expected).issubset(PAPER_ACTIVE_EVIDENCE_SPECS)
+    assert PAPER_ACTIVE_EVIDENCE_SPECS["PAPER_ACTIVE_EVIDENCE_MBT_US_PARTICIPATION_LONG_V1"].direction == "LONG"
+    assert PAPER_ACTIVE_EVIDENCE_SPECS["PAPER_ACTIVE_EVIDENCE_MET_US_PARTICIPATION_SHORT_V1"].direction == "SHORT"
+    assert (
+        PAPER_ACTIVE_EVIDENCE_SPECS["PAPER_ACTIVE_EVIDENCE_MSL_LONDON_LATE_PARTICIPATION_SHORT_V1"].overlay_label
+        == "PAPER_ONLY_LONDON_LATE_ACTIVE_EVIDENCE_LANE"
+    )
+
+
 def test_rule_runner_paper_engine_requires_timestamp_coherent_input() -> None:
     current = datetime(2026, 5, 27, 8, 0, tzinfo=UTC)
 
@@ -542,6 +566,30 @@ def test_paper_active_evidence_short_accepts_downward_reference_and_recent_close
 
     assert decision["accepted"] is True
     assert decision["primary_blocker"] is None
+
+
+def test_crypto_paper_active_evidence_sources_evaluate_predicates() -> None:
+    ny = ZoneInfo("America/New_York")
+    history = [
+        _bar(datetime(2026, 5, 28, 9, 30, tzinfo=ny), open_="64000", close="63950"),
+        _bar(datetime(2026, 5, 28, 10, 15, tzinfo=ny), open_="63980", close="64025"),
+    ]
+
+    long_decision = _paper_active_evidence_decision(
+        history,
+        source="PAPER_ACTIVE_EVIDENCE_MBT_US_PARTICIPATION_LONG_V1",
+        vwap=Decimal("64010"),
+    )
+    short_decision = _paper_active_evidence_decision(
+        history,
+        source="PAPER_ACTIVE_EVIDENCE_MBT_US_PARTICIPATION_SHORT_V1",
+        vwap=Decimal("64030"),
+    )
+
+    assert long_decision["primary_blocker"] != "unknown_paper_active_evidence_source"
+    assert long_decision["accepted"] is True
+    assert short_decision["primary_blocker"] != "unknown_paper_active_evidence_source"
+    assert short_decision["accepted"] is True
 
 
 def test_paper_active_evidence_long_treats_recent_close_direction_as_soft_evidence() -> None:

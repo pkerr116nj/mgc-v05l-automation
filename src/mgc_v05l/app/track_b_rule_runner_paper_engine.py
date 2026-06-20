@@ -318,7 +318,19 @@ PAPER_ACTIVE_EVIDENCE_SPECS: dict[str, _PaperActiveEvidenceSpec] = {
 }
 
 
-_BATCH1_ACTIVE_EVIDENCE_SYMBOLS = ("MGC", "GC", "NQ", "ES", "ZT", "ZF", "ZN", "ZB")
+_BATCH1_ACTIVE_EVIDENCE_SYMBOLS = (
+    "MGC",
+    "GC",
+    "NQ",
+    "ES",
+    "ZT",
+    "ZF",
+    "ZN",
+    "ZB",
+    "MBT",
+    "MET",
+    "MSL",
+)
 
 
 def _batch1_active_evidence_specs() -> dict[str, _PaperActiveEvidenceSpec]:
