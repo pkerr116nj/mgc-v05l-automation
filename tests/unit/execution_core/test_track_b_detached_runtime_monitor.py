@@ -74,6 +74,34 @@ def test_exit_before_runtime_cycle_is_blocked_with_exit_code(tmp_path: Path) -> 
     assert payload["termination_reason"] == "runtime_exited_after_initial_truth"
 
 
+def test_heartbeat_dead_pid_records_exited_status_with_log_tail(tmp_path: Path) -> None:
+    pid = 999990
+    truth = tmp_path / "truth.json"
+    progress = tmp_path / "progress.json"
+    log = tmp_path / "runtime.log"
+    status = tmp_path / "child_status.json"
+    _write_json(truth, {"producer_pid": pid, "generated_at": "2026-06-16T12:00:00+00:00"})
+    _write_json(progress, {"producer_pid": pid, "stage": "runtime_cycle", "state": "TRADING_LOOP_ENTERED"})
+    log.write_text("\n".join(f"line {index}" for index in range(30)) + "\n", encoding="utf-8")
+
+    payload = build_detached_runtime_child_status(
+        event="heartbeat",
+        status_path=status,
+        pid=pid,
+        runtime_truth_file=truth,
+        post_truth_progress_file=progress,
+        log_file=log,
+    )
+
+    assert payload["classification"] == "RUNTIME_CHILD_EXITED_STATUS_UNKNOWN_AFTER_CYCLE_MARKER"
+    assert payload["child_final_status"] == "EXITED"
+    assert payload["process_alive"] is False
+    assert payload["child_exit_code"] is None
+    assert payload["termination_reason"] == "child_not_alive_exit_status_unknown"
+    assert payload["log_tail"][0] == "line 5"
+    assert payload["log_tail"][-1] == "line 29"
+
+
 def test_running_child_with_runtime_cycle_marker_is_observable(tmp_path: Path) -> None:
     pid = os.getpid()
     truth = tmp_path / "truth.json"

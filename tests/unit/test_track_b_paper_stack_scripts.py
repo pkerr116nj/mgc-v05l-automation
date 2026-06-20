@@ -274,6 +274,21 @@ def test_paper_stack_startup_artifact_carries_launch_exit_status_when_available(
     assert '"termination_reason": "runtime_exited_after_initial_truth" if first_truth else "runtime_exited_before_runtime_truth"' in source
 
 
+def test_paper_stack_startup_artifact_refreshes_detached_child_status_from_os_truth() -> None:
+    source = START_SCRIPT.read_text(encoding="utf-8")
+    writer_block = source[
+        source.index("\nwrite_startup_artifact() {")
+        : source.index("\nwrite_approved_profile_artifact() {")
+    ]
+
+    assert "MGC_TRACK_B_RUNTIME_TRUTH_FILE" in writer_block
+    assert "MGC_TRACK_B_POST_TRUTH_PROGRESS_FILE" in writer_block
+    assert "MGC_TRACK_B_RUNTIME_LOG_FILE" in writer_block
+    assert "build_detached_runtime_child_status" in writer_block
+    assert 'event="heartbeat"' in writer_block
+    assert "status_path=detached_child_status_path" in writer_block
+
+
 def test_paper_stack_start_refreshes_authority_evidence_before_carrier_launch() -> None:
     source = START_SCRIPT.read_text(encoding="utf-8")
 

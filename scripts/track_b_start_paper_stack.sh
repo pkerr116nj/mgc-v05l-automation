@@ -584,6 +584,10 @@ write_startup_artifact() {
   MGC_TRACK_B_PAPER_STACK_STARTUP_MODE="${STARTUP_MODE}" \
   MGC_TRACK_B_PAPER_STACK_OWNED_MANAGED_EXPOSURE_RESTORE_JSON="${STARTUP_OWNED_MANAGED_EXPOSURE_RESTORE_JSON}" \
   MGC_TRACK_B_DETACHED_CHILD_STATUS_FILE="${DETACHED_CHILD_STATUS_FILE}" \
+  MGC_TRACK_B_RUNTIME_TRUTH_FILE="${RUNTIME_DIR}/paper_runtime_truth.json" \
+  MGC_TRACK_B_POST_TRUTH_PROGRESS_FILE="${POST_TRUTH_PROGRESS_FILE}" \
+  MGC_TRACK_B_RUNTIME_LOG_FILE="${RUNTIME_LOG}" \
+  MGC_TRACK_B_RUNTIME_PID_FILE="${PID_FILE}" \
   "${PYTHON_BIN}" - "$STARTUP_ARTIFACT" "$classification" "$detail" "$pid" "$REPO_ROOT" "$CONFIG_PATHS_FILE" "$STACK_PROFILE" "$LAUNCH_STATUS_FILE" <<'PY'
 import json
 import os
@@ -621,6 +625,35 @@ detached_child_status = (
     if os.environ.get("MGC_TRACK_B_DETACHED_CHILD_STATUS_FILE")
     else {}
 )
+detached_child_status_path = Path(os.environ.get("MGC_TRACK_B_DETACHED_CHILD_STATUS_FILE", ""))
+if detached_child_status and detached_child_status_path:
+    try:
+        child_pid = int(detached_child_status.get("child_pid") or detached_child_status.get("pid") or 0)
+    except (TypeError, ValueError):
+        child_pid = 0
+    if child_pid > 0:
+        try:
+            from mgc_v05l.execution_core.track_b_detached_runtime_monitor import build_detached_runtime_child_status
+
+            detached_child_status = build_detached_runtime_child_status(
+                event="heartbeat",
+                status_path=detached_child_status_path,
+                pid=child_pid,
+                started_at=detached_child_status.get("child_started_at"),
+                repo_root=Path(repo_root),
+                log_file=Path(os.environ["MGC_TRACK_B_RUNTIME_LOG_FILE"]),
+                pid_file=Path(os.environ["MGC_TRACK_B_RUNTIME_PID_FILE"]),
+                config_paths_file=Path(config_paths_file),
+                runtime_truth_file=Path(os.environ["MGC_TRACK_B_RUNTIME_TRUTH_FILE"]),
+                post_truth_progress_file=Path(os.environ["MGC_TRACK_B_POST_TRUTH_PROGRESS_FILE"]),
+                runtime_instance_id=detached_child_status.get("runtime_instance_id"),
+                source_commit=detached_child_status.get("source_commit"),
+                python_bin=detached_child_status.get("python_bin"),
+                child_command=detached_child_status.get("child_command"),
+                parent_pid=detached_child_status.get("supervisor_parent_pid"),
+            )
+        except Exception:
+            detached_child_status = _read_json(detached_child_status_path)
 exit_source = detached_child_status
 
 payload = {

@@ -44,6 +44,7 @@ def build_detached_runtime_child_status(
     progress_marker = _progress_marker(progress, pid)
     runtime_cycle_marker = progress_marker if progress_marker.get("stage") == "runtime_cycle" else {}
     process_alive = _pid_alive(pid)
+    log_tail = _log_tail(log_file)
 
     exit_signal = _exit_signal(exit_code)
     classification, final_status, termination_reason = _classify(
@@ -86,6 +87,7 @@ def build_detached_runtime_child_status(
         "runtime_cycle_marker_observed": bool(runtime_cycle_marker),
         "runtime_cycle_completed": runtime_cycle_marker.get("state") == "COMPLETED",
         "last_summary": summary or None,
+        "log_tail": log_tail,
         "paper_only": True,
         "live_money_eligible": False,
         "paper_proof_invoked": False,
@@ -119,7 +121,11 @@ def _classify(
             return "RUNTIME_CHILD_RUNNING_INITIAL_TRUTH", "RUNNING", None
         if process_alive:
             return "RUNTIME_CHILD_STARTED", "RUNNING", None
-        return "RUNTIME_CHILD_NOT_ALIVE", "NOT_ALIVE", "child_not_alive"
+        if runtime_cycle_marker:
+            return "RUNTIME_CHILD_EXITED_STATUS_UNKNOWN_AFTER_CYCLE_MARKER", "EXITED", "child_not_alive_exit_status_unknown"
+        if truth_marker:
+            return "RUNTIME_CHILD_EXITED_STATUS_UNKNOWN_AFTER_INITIAL_TRUTH", "EXITED", "child_not_alive_exit_status_unknown"
+        return "RUNTIME_CHILD_EXITED_STATUS_UNKNOWN", "EXITED", "child_not_alive_exit_status_unknown"
 
     if exit_signal is not None:
         if runtime_cycle_marker:
@@ -206,6 +212,16 @@ def _last_json_summary(path: Path | None) -> dict[str, Any]:
         if isinstance(payload, dict) and {"stop_reason", "reconciliation_clean"} & set(payload):
             return payload
     return {}
+
+
+def _log_tail(path: Path | None, *, max_lines: int = 25) -> list[str]:
+    if path is None:
+        return []
+    try:
+        rows = path.read_text(encoding="utf-8", errors="replace").splitlines()
+    except OSError:
+        return []
+    return rows[-max(max_lines, 0) :]
 
 
 def _read_json(path: Path | None) -> dict[str, Any]:
