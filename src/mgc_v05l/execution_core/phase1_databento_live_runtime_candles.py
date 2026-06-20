@@ -40,6 +40,7 @@ from mgc_v05l.execution_core.track_b_live_market_data_symbols import (
     load_track_b_live_market_data_symbols,
 )
 from mgc_v05l.execution_core.track_b_runtime_candle_capture_cli import _load_databento_api_key
+from mgc_v05l.market_data.phase1_market_session import phase1_latest_bar_freshness_seconds
 from mgc_v05l.session_phase_labels import NEW_YORK, label_session_phase, session_restriction_matches_timestamp
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
@@ -926,9 +927,10 @@ def _runtime_payload_for_service(
     normalized_bars = [dict(bar) for bar in bars]
     last_completed = _parse_datetime(normalized_bars[-1].get("bar_end")) if normalized_bars else None
     freshness_seconds = _freshness_seconds_for_timeframe(live_symbol=live_symbol, timeframe=timeframe)
+    latest_bar_freshness_seconds = _latest_bar_freshness_seconds_for_timeframe(live_symbol=live_symbol, timeframe=timeframe)
     age_seconds = None if last_completed is None else max(0.0, (generated_at - last_completed).total_seconds())
     min_bars = _min_bars_for_timeframe_value(min_bars=live_symbol.min_confirmed_bars, timeframe=timeframe)
-    fresh = age_seconds is not None and age_seconds <= freshness_seconds
+    fresh = age_seconds is not None and age_seconds <= latest_bar_freshness_seconds
     complete = len(normalized_bars) >= min_bars
     realtime_confirmed = fresh and complete
     return {
@@ -950,6 +952,7 @@ def _runtime_payload_for_service(
         "first_bar_ts": normalized_bars[0].get("bar_end") if normalized_bars else None,
         "last_completed_bar_ts": None if last_completed is None else last_completed.isoformat(),
         "freshness_seconds": freshness_seconds,
+        "latest_bar_freshness_seconds": latest_bar_freshness_seconds,
         "latest_bar_age_seconds": age_seconds,
         "minimum_bar_count": min_bars,
         "historical_seed_ready": False,
@@ -1444,9 +1447,10 @@ def _runtime_payload(
     generated_at = _coerce_now(generated_at)
     last_completed = _parse_datetime(bars[-1].get("bar_end")) if bars else None
     freshness_seconds = _freshness_seconds_for_timeframe(live_symbol=live_symbol, timeframe=timeframe)
+    latest_bar_freshness_seconds = _latest_bar_freshness_seconds_for_timeframe(live_symbol=live_symbol, timeframe=timeframe)
     age_seconds = None if last_completed is None else max(0.0, (generated_at - last_completed).total_seconds())
     min_bars = _min_bars_for_timeframe_value(min_bars=live_symbol.min_confirmed_bars, timeframe=timeframe)
-    fresh = age_seconds is not None and age_seconds <= freshness_seconds
+    fresh = age_seconds is not None and age_seconds <= latest_bar_freshness_seconds
     complete = len(bars) >= min_bars
     realtime_confirmed = live_connected and fresh and complete
     return {
@@ -1467,6 +1471,7 @@ def _runtime_payload(
         "first_bar_ts": bars[0].get("bar_end") if bars else None,
         "last_completed_bar_ts": None if last_completed is None else last_completed.isoformat(),
         "freshness_seconds": freshness_seconds,
+        "latest_bar_freshness_seconds": latest_bar_freshness_seconds,
         "latest_bar_age_seconds": age_seconds,
         "minimum_bar_count": min_bars,
         "historical_seed_ready": False,
@@ -1511,6 +1516,13 @@ def _freshness_seconds_for_timeframe(*, live_symbol: TrackBLiveMarketDataSymbol,
     if timeframe == "1m":
         return float(live_symbol.freshness_threshold_seconds)
     return max(float(live_symbol.freshness_threshold_seconds), FRESHNESS_SECONDS_BY_TIMEFRAME[timeframe])
+
+
+def _latest_bar_freshness_seconds_for_timeframe(*, live_symbol: TrackBLiveMarketDataSymbol, timeframe: str) -> float:
+    return phase1_latest_bar_freshness_seconds(
+        live_symbol.symbol,
+        _freshness_seconds_for_timeframe(live_symbol=live_symbol, timeframe=timeframe),
+    )
 
 
 def _blocked_row(

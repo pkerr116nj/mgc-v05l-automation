@@ -388,6 +388,28 @@ def test_realtime_confirmation_requires_fresh_complete_live_bars(tmp_path: Path)
     assert json.loads(nq_one_minute.read_text(encoding="utf-8"))["realtime_feed_block_reason"] == "INSUFFICIENT_LIVE_BARS"
 
 
+def test_thin_symbol_realtime_confirmation_allows_old_last_trade_when_feed_is_live(tmp_path: Path) -> None:
+    runner = RecordingRunner({"PL": _live_candles(10, end=NOW - timedelta(minutes=20))})
+
+    result = build_phase1_databento_live_runtime_candles(config=_config(tmp_path, symbols=("PL",)), live_runner=runner)
+
+    assert result.report["rows"][0]["realtime_feed_confirmed"] is True
+    one_minute = (
+        tmp_path
+        / "outputs"
+        / "track_b_execution_core"
+        / "phase1_runtime_market_data"
+        / "PL"
+        / "1m"
+        / "latest_runtime_candles.json"
+    )
+    payload = json.loads(one_minute.read_text(encoding="utf-8"))
+    assert payload["realtime_feed_confirmed"] is True
+    assert payload["realtime_feed_block_reason"] == "READY"
+    assert payload["freshness_seconds"] == 300.0
+    assert payload["latest_bar_freshness_seconds"] == 1800.0
+
+
 def test_fresh_merged_legacy_live_artifact_can_satisfy_phase1_contract(tmp_path: Path) -> None:
     legacy = (
         tmp_path

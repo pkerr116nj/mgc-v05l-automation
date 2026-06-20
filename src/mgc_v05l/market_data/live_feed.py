@@ -22,7 +22,11 @@ from .bar_models import build_bar_id
 from ..persistence.repositories import RepositorySet
 from .databento_provider import DatabentoHttpError, DatabentoMarketDataProvider
 from .canonical_maintenance import CanonicalMarketDataMaintenanceService
-from .phase1_market_session import MARKET_CLOSED_NO_FRESH_BARS, classify_phase1_futures_market_session
+from .phase1_market_session import (
+    MARKET_CLOSED_NO_FRESH_BARS,
+    classify_phase1_futures_market_session,
+    phase1_latest_bar_freshness_seconds,
+)
 from .provider_models import HistoricalBarsRequest
 from .schwab_adapter import SchwabMarketDataAdapter
 from .schwab_models import (
@@ -764,20 +768,24 @@ class Phase1RuntimeArtifactPollingClient:
             payload.get("freshness_seconds"),
             _PHASE1_RUNTIME_ARTIFACT_FRESHNESS_DEFAULT_SECONDS,
         )
+        latest_bar_threshold_seconds = _float_value(
+            payload.get("latest_bar_freshness_seconds") or payload.get("last_trade_freshness_seconds"),
+            phase1_latest_bar_freshness_seconds(internal_symbol, threshold_seconds),
+        )
         latest_age_seconds = max((now - latest_bar_end).total_seconds(), 0.0)
-        if latest_age_seconds > threshold_seconds:
+        if latest_age_seconds > latest_bar_threshold_seconds:
             session = classify_phase1_futures_market_session(now, symbol=internal_symbol)
             if session["classification"] == MARKET_CLOSED_NO_FRESH_BARS:
                 raise Phase1RuntimeArtifactMarketClosedError(
                     "Phase-1 runtime candle artifact has no fresh bars because the market is closed: "
                     f"classification={MARKET_CLOSED_NO_FRESH_BARS} "
                     f"session_reason={session.get('reason')} latest_bar={latest_bar_end.isoformat()} "
-                    f"age_seconds={latest_age_seconds:.3f} threshold_seconds={threshold_seconds:.3f} path={path}"
+                    f"age_seconds={latest_age_seconds:.3f} threshold_seconds={latest_bar_threshold_seconds:.3f} path={path}"
                 )
             raise Phase1RuntimeArtifactStaleError(
                 "Phase-1 runtime candle artifact is stale: "
                 f"latest_bar={latest_bar_end.isoformat()} age_seconds={latest_age_seconds:.3f} "
-                f"threshold_seconds={threshold_seconds:.3f} path={path}"
+                f"threshold_seconds={latest_bar_threshold_seconds:.3f} path={path}"
             )
         generated_at = _parse_optional_datetime(payload.get("generated_at"))
         if generated_at is not None:

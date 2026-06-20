@@ -420,6 +420,69 @@ def test_phase1_runtime_artifact_polling_client_treats_crypto_weekend_as_open(tm
         client.poll_live_bars(None, "1m", SchwabLivePollRequest(internal_symbol="MET"))
 
 
+def test_phase1_runtime_artifact_polling_client_allows_thin_symbol_old_last_trade_when_feed_is_fresh(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "phase1_runtime_market_data"
+    stale_bar = [
+        {
+            "bar_start": "2026-05-18T11:29:00+00:00",
+            "bar_end": "2026-05-18T11:30:00+00:00",
+            "open": 100,
+            "high": 101,
+            "low": 99,
+            "close": 100,
+            "volume": 10,
+            "completed": True,
+        }
+    ]
+    _write_phase1_runtime_artifact(
+        root,
+        symbol="MET",
+        generated_at="2026-05-18T12:00:10+00:00",
+        bars=stale_bar,
+    )
+    client = Phase1RuntimeArtifactPollingClient(
+        artifact_root=root,
+        now_fn=lambda: datetime.fromisoformat("2026-05-18T12:00:20+00:00"),
+    )
+
+    bars = client.poll_live_bars(None, "1m", SchwabLivePollRequest(internal_symbol="MET"))
+
+    assert len(bars) == 1
+    assert bars[0].end_ts == datetime.fromisoformat("2026-05-18T11:30:00+00:00")
+
+
+def test_phase1_runtime_artifact_polling_client_still_blocks_liquid_symbol_old_last_trade(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "phase1_runtime_market_data"
+    _write_phase1_runtime_artifact(
+        root,
+        symbol="MNQ",
+        generated_at="2026-05-18T12:00:10+00:00",
+        bars=[
+            {
+                "bar_start": "2026-05-18T11:29:00+00:00",
+                "bar_end": "2026-05-18T11:30:00+00:00",
+                "open": 100,
+                "high": 101,
+                "low": 99,
+                "close": 100,
+                "volume": 10,
+                "completed": True,
+            }
+        ],
+    )
+    client = Phase1RuntimeArtifactPollingClient(
+        artifact_root=root,
+        now_fn=lambda: datetime.fromisoformat("2026-05-18T12:00:20+00:00"),
+    )
+
+    with pytest.raises(Phase1RuntimeArtifactStaleError, match="stale"):
+        client.poll_live_bars(None, "1m", SchwabLivePollRequest(internal_symbol="MNQ"))
+
+
 def test_phase1_market_session_uses_crypto_futures_calendar_on_weekend() -> None:
     saturday = datetime.fromisoformat("2026-05-23T07:15:00+00:00")
 
