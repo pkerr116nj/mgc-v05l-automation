@@ -6,6 +6,7 @@ from pathlib import Path
 
 from mgc_v05l.execution_core.phase1_runtime_data_readiness import (
     Phase1RuntimeDataReadinessConfig,
+    _artifact_check,
     build_phase1_runtime_data_readiness,
     write_phase1_runtime_data_readiness_artifacts,
 )
@@ -100,6 +101,29 @@ def test_weekend_halt_stale_candles_are_classified_market_closed(tmp_path: Path)
     assert gc["candle_checks"]["1m"]["reason"] == "MARKET_CLOSED_NO_FRESH_BARS"
     assert gc["candle_checks"]["1m"]["market_session"]["market_closed"] is True
     assert artifacts.report["market_session"]["classification"] == "MARKET_CLOSED_NO_FRESH_BARS"
+
+
+def test_crypto_weekend_stale_candles_are_not_classified_market_closed(tmp_path: Path) -> None:
+    friday_close = datetime(2026, 5, 22, 21, 0, tzinfo=timezone.utc)
+    saturday = datetime(2026, 5, 23, 7, 15, tzinfo=timezone.utc)
+    path = _write_artifact(
+        tmp_path,
+        symbol="MET",
+        timeframe="1m",
+        generated_at=friday_close,
+    )
+
+    check = _artifact_check(
+        path=path,
+        symbol="MET",
+        timeframe="1m",
+        now=saturday,
+        kind="candles",
+    )
+
+    assert check["ready"] is False
+    assert check["reason"] == "RUNTIME_CANDLES_STALE"
+    assert check["market_session"] == {}
 
 
 def test_historical_seed_is_visible_but_does_not_confirm_realtime_readiness(tmp_path: Path) -> None:

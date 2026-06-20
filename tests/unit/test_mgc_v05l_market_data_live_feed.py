@@ -17,10 +17,16 @@ from mgc_v05l.market_data.live_feed import (
     LivePollingService,
     Phase1RuntimeArtifactMarketClosedError,
     Phase1RuntimeArtifactPollingClient,
+    Phase1RuntimeArtifactStaleError,
     databento_live_effective_end,
     databento_live_format_timestamp,
     phase1_runtime_artifact_poll_cache,
     _DatabentoRawLiveSession,
+)
+from mgc_v05l.market_data.phase1_market_session import (
+    MARKET_CLOSED_NO_FRESH_BARS,
+    MARKET_OPEN_EXPECT_FRESH_BARS,
+    classify_phase1_futures_market_session,
 )
 from mgc_v05l.market_data.databento_provider import DatabentoHttpError
 from mgc_v05l.market_data.schwab_models import SchwabLivePollRequest
@@ -384,6 +390,46 @@ def test_phase1_runtime_artifact_polling_client_classifies_weekend_halt_stale_ba
 
     with pytest.raises(Phase1RuntimeArtifactMarketClosedError, match="MARKET_CLOSED_NO_FRESH_BARS"):
         client.poll_live_bars(None, "1m", SchwabLivePollRequest(internal_symbol="MNQ"))
+
+
+def test_phase1_runtime_artifact_polling_client_treats_crypto_weekend_as_open(tmp_path: Path) -> None:
+    root = tmp_path / "phase1_runtime_market_data"
+    _write_phase1_runtime_artifact(
+        root,
+        symbol="MET",
+        generated_at="2026-05-22T21:00:00+00:00",
+        bars=[
+            {
+                "bar_start": "2026-05-22T20:58:00+00:00",
+                "bar_end": "2026-05-22T20:59:00+00:00",
+                "open": 100,
+                "high": 101,
+                "low": 99,
+                "close": 100,
+                "volume": 10,
+                "completed": True,
+            }
+        ],
+    )
+    client = Phase1RuntimeArtifactPollingClient(
+        artifact_root=root,
+        now_fn=lambda: datetime.fromisoformat("2026-05-23T07:15:00+00:00"),
+    )
+
+    with pytest.raises(Phase1RuntimeArtifactStaleError, match="stale"):
+        client.poll_live_bars(None, "1m", SchwabLivePollRequest(internal_symbol="MET"))
+
+
+def test_phase1_market_session_uses_crypto_futures_calendar_on_weekend() -> None:
+    saturday = datetime.fromisoformat("2026-05-23T07:15:00+00:00")
+
+    globex = classify_phase1_futures_market_session(saturday, symbol="ES")
+    crypto = classify_phase1_futures_market_session(saturday, symbol="MBT")
+
+    assert globex["classification"] == MARKET_CLOSED_NO_FRESH_BARS
+    assert globex["reason"] == "WEEKEND_GLOBEX_HALT_SATURDAY"
+    assert crypto["classification"] == MARKET_OPEN_EXPECT_FRESH_BARS
+    assert crypto["reason"] == "CRYPTO_FUTURES_SESSION_OPEN"
 
 
 def test_live_polling_service_persists_phase1_artifact_bars_without_duplicate_insertions(tmp_path: Path) -> None:

@@ -691,7 +691,7 @@ class Phase1RuntimeArtifactPollingClient:
         payload = self._read_payload(path)
         self._validate_payload(payload, internal_symbol=internal_symbol, internal_timeframe=internal_timeframe, path=path)
         bars = self._bars_from_payload(payload, internal_symbol=internal_symbol, internal_timeframe=internal_timeframe)
-        self._validate_freshness(payload, bars=bars, path=path)
+        self._validate_freshness(payload, bars=bars, path=path, internal_symbol=internal_symbol)
         if request.since is not None:
             since = request.since.astimezone(UTC)
             bars = [bar for bar in bars if bar.end_ts.astimezone(UTC) > since]
@@ -748,7 +748,14 @@ class Phase1RuntimeArtifactPollingClient:
                 f"Phase-1 runtime candle artifact timeframe mismatch: expected {internal_timeframe}, found {payload_timeframe}: {path}"
             )
 
-    def _validate_freshness(self, payload: Mapping[str, Any], *, bars: Sequence[Bar], path: Path) -> None:
+    def _validate_freshness(
+        self,
+        payload: Mapping[str, Any],
+        *,
+        bars: Sequence[Bar],
+        path: Path,
+        internal_symbol: str,
+    ) -> None:
         if not bars:
             raise Phase1RuntimeArtifactMissingError(f"Phase-1 runtime candle artifact contains no completed bars: {path}")
         now = self._now()
@@ -759,7 +766,7 @@ class Phase1RuntimeArtifactPollingClient:
         )
         latest_age_seconds = max((now - latest_bar_end).total_seconds(), 0.0)
         if latest_age_seconds > threshold_seconds:
-            session = classify_phase1_futures_market_session(now)
+            session = classify_phase1_futures_market_session(now, symbol=internal_symbol)
             if session["classification"] == MARKET_CLOSED_NO_FRESH_BARS:
                 raise Phase1RuntimeArtifactMarketClosedError(
                     "Phase-1 runtime candle artifact has no fresh bars because the market is closed: "
@@ -776,7 +783,7 @@ class Phase1RuntimeArtifactPollingClient:
         if generated_at is not None:
             generated_age_seconds = max((now - generated_at.astimezone(UTC)).total_seconds(), 0.0)
             if generated_age_seconds > threshold_seconds:
-                session = classify_phase1_futures_market_session(now)
+                session = classify_phase1_futures_market_session(now, symbol=internal_symbol)
                 if session["classification"] == MARKET_CLOSED_NO_FRESH_BARS:
                     raise Phase1RuntimeArtifactMarketClosedError(
                         "Phase-1 runtime candle artifact metadata has no fresh bars because the market is closed: "

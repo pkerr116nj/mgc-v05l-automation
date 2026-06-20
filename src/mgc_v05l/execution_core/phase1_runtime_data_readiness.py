@@ -180,7 +180,7 @@ def _artifact_check(
     if age_seconds > freshness_seconds:
         stale_reason = "RUNTIME_CANDLES_STALE" if kind == "candles" else "FEATURES_STALE"
         if kind == "candles":
-            session = classify_phase1_futures_market_session(now)
+            session = classify_phase1_futures_market_session(now, symbol=symbol)
             if session["classification"] == MARKET_CLOSED_NO_FRESH_BARS:
                 return _not_ready(
                     path=path,
