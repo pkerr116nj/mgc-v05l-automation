@@ -10,6 +10,7 @@ from mgc_v05l.execution_core.track_b_live_market_data_symbols import (
     SESSION_CALENDAR_CME_CRYPTO_FUTURES,
     SESSION_CALENDAR_GLOBEX_FUTURES,
     TrackBLiveMarketDataSymbolConfigError,
+    active_phase1_runtime_symbols,
     load_track_b_live_market_data_symbols,
     parse_track_b_live_market_data_symbols,
 )
@@ -62,6 +63,8 @@ def test_loads_default_track_b_live_market_data_symbols_config() -> None:
 
     assert namelist.version == 1
     assert len(namelist.all_symbols()) == 17
+    assert active_phase1_runtime_symbols() == tuple(row.symbol for row in namelist.enabled_symbols())
+    assert {"MBT", "MET", "MSL"}.issubset(active_phase1_runtime_symbols())
     assert [row.symbol for row in namelist.required_for_readiness_symbols()] == ["GC", "MGC", "ES", "MES", "NQ", "MNQ"]
     assert [row.symbol for row in namelist.optional_symbols()] == [
         "ZT",

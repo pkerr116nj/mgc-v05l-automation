@@ -460,6 +460,7 @@ def test_all_phase1_symbols_are_requested_and_fail_closed_without_records(tmp_pa
 
     result = build_phase1_databento_live_runtime_candles(config=_config(tmp_path), live_runner=runner)
 
+    assert {"MBT", "MET", "MSL"}.issubset(configured_symbols)
     assert {config.instrument_family for config in runner.configs} == set(configured_symbols)
     assert {config.databento_continuous_symbol for config in runner.configs} == set(_configured_databento_symbols())
     assert result.report["symbols"] == list(configured_symbols)
@@ -469,6 +470,28 @@ def test_all_phase1_symbols_are_requested_and_fail_closed_without_records(tmp_pa
     assert all(row["realtime_feed_confirmed"] is False for row in result.report["rows"])
     assert all(row["can_submit"] is False for row in result.report["rows"])
     assert all(row["live_money_eligible"] is False for row in result.report["rows"])
+
+
+def test_listener_default_selection_uses_shared_namelist_crypto_symbols(tmp_path: Path) -> None:
+    env_file = tmp_path / ".env.local"
+    env_file.write_text("DATABENTO_API_KEY=test-key\n", encoding="utf-8")
+
+    config = Phase1DatabentoLiveListenerConfig(
+        repo_root=tmp_path,
+        runtime_candle_root=Path("outputs") / "track_b_execution_core" / "phase1_runtime_market_data",
+        report_dir=Path("outputs") / "reports" / "phase1_databento_live_runtime_candles",
+        raw_dbn_root=Path("outputs") / "track_b_execution_core" / "phase1_databento_live_raw_dbn",
+        symbols=None,
+        env_file=env_file,
+        run_seconds=0.01,
+        now=NOW,
+    )
+    client = FakeLiveClient([])
+
+    run_phase1_databento_live_listener(config=config, live_client_factory=lambda _: client, now_func=lambda: NOW)
+
+    assert client.subscribe_kwargs is not None
+    assert {"MBT.v.0", "MET.v.0", "MSL.v.0"}.issubset(set(client.subscribe_kwargs["symbols"]))
 
 
 def test_multi_symbol_subscriptions_run_concurrently(tmp_path: Path) -> None:

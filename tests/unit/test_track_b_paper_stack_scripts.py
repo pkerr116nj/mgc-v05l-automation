@@ -9,6 +9,7 @@ START_SCRIPT = REPO_ROOT / "scripts" / "track_b_start_paper_stack.sh"
 STATUS_SCRIPT = REPO_ROOT / "scripts" / "track_b_status_paper_stack.sh"
 RECOVERY_SCRIPT = REPO_ROOT / "scripts" / "track_b_hourly_paper_runtime_recovery.sh"
 THIN_RECOVERY_SCRIPT = REPO_ROOT / "scripts" / "track_b_thin_paper_runtime_recovery.sh"
+START_PHASE1_SCRIPT = REPO_ROOT / "scripts" / "start-phase1-databento-live-candles"
 PAPER_CONFIG = REPO_ROOT / "config" / "probationary_pattern_engine_paper.yaml"
 GUARDED_ROSTER_CONFIG = REPO_ROOT / "config" / "track_b_guarded_paper_roster.json"
 
@@ -23,6 +24,15 @@ def test_paper_stack_start_uses_canonical_config_without_review_overlay() -> Non
     assert "config/probationary_pattern_engine_paper.yaml" in source
     assert "probationary_pattern_engine_paper_mnq_mgc_plus_mnq_us_intraday_review.yaml" in source
     assert "BLOCKED_FORBIDDEN_REVIEW_OVERLAY" in source
+
+
+def test_phase1_live_launcher_defaults_to_shared_namelist_without_symbol_override() -> None:
+    source = START_PHASE1_SCRIPT.read_text(encoding="utf-8")
+
+    assert 'SYMBOLS="${TRACK_B_PHASE1_LIVE_SYMBOLS:-}"' in source
+    assert 'cmd+=("--symbols" "${SYMBOLS}")' in source
+    assert "GC,NQ,ES,MGC,MNQ,MES,ZT,ZF,ZN,ZB,PL" not in source
+    assert "MBT,MET,MSL" not in source
 
 
 def test_paper_stack_start_launches_runtime_under_detached_parent_monitor() -> None:
@@ -1729,7 +1739,9 @@ def test_paper_stack_start_has_session_coverage_active_evidence_profile() -> Non
     assert '"PAPER_ACTIVE_EVIDENCE_MNQ_GLOBEX_PARTICIPATION_SHORT_V1"' in source
     assert '"PAPER_ACTIVE_EVIDENCE_MES_GLOBEX_PARTICIPATION_LONG_V1"' in source
     assert '"PAPER_ACTIVE_EVIDENCE_MES_GLOBEX_PARTICIPATION_SHORT_V1"' in source
-    assert 'PROOF_REQUIRED_SYMBOLS="GC,MGC,NQ,ES,ZT,ZF,ZN,ZB,MBT,MET,MSL,MNQ,MES"' in source
+    assert "phase1_symbols_csv_from_roster" in source
+    assert "active_phase1_runtime_symbols" in source
+    assert 'PROOF_REQUIRED_SYMBOLS="GC,MGC,NQ,ES,ZT,ZF,ZN,ZB,MBT,MET,MSL,MNQ,MES"' not in source
 
 
 def test_paper_stack_start_has_london_open_active_evidence_extension_profile() -> None:
@@ -1782,7 +1794,9 @@ def test_paper_stack_start_has_full_session_active_evidence_profile() -> None:
     assert '"PAPER_WATCH_ACTIVE_EVIDENCE_MNQ_LONDON_LATE_LONG_SHADOW_V1"' in source
     assert '"PAPER_WATCH_ACTIVE_EVIDENCE_MES_LONDON_LATE_LONG_SHADOW_V1"' in source
     assert "FULL_SESSION_PROFILE_INITIAL_LONDON_LATE_SHORT_ONLY_ELEVATION" in source
-    assert 'PROOF_REQUIRED_SYMBOLS="GC,MGC,NQ,ES,ZT,ZF,ZN,ZB,MBT,MET,MSL,MNQ,MES"' in source
+    assert "phase1_symbols_csv_from_roster" in source
+    assert "active_phase1_runtime_symbols" in source
+    assert 'PROOF_REQUIRED_SYMBOLS="GC,MGC,NQ,ES,ZT,ZF,ZN,ZB,MBT,MET,MSL,MNQ,MES"' not in source
 
     block = source.split('elif [[ "${STACK_PROFILE}" == "mnq_mes_full_session_active_evidence" ]]; then', 1)[1]
     roster_json = block.split("cat > \"${SCOPED_ROSTER_PATH}\" <<'JSON'", 1)[1].split("\nJSON", 1)[0]

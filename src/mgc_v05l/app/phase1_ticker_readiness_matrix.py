@@ -22,6 +22,10 @@ from mgc_v05l.execution_core.phase1_runtime_data_readiness import (
     Phase1RuntimeDataReadinessConfig,
     build_phase1_runtime_data_readiness,
 )
+from mgc_v05l.execution_core.phase1_runtime_ticker_registry import (
+    PHASE1_RUNTIME_TICKER_ORDER,
+    phase1_runtime_ticker_registry,
+)
 from mgc_v05l.execution_core.phase1_gc_paper_candidate import (
     CHOSEN_GC_STRATEGY_ID,
     Phase1GcCandidateConfig,
@@ -34,28 +38,7 @@ DEFAULT_MARKET_DATA_CONFIG_PATH = Path("config") / "market_data_providers.json"
 DEFAULT_GOVERNANCE_STATUS_PATH = Path("var") / "per_strategy_paper_status.json"
 DEFAULT_RUNTIME_CANDLE_DIR = DEFAULT_RUNTIME_CANDLE_ROOT
 DEFAULT_FEATURE_STATE_DIR = DEFAULT_RUNTIME_FEATURE_ROOT
-PHASE1_TICKER_ORDER = (
-    "GC",
-    "NQ",
-    "ES",
-    "MGC",
-    "MNQ",
-    "MES",
-    "ZT",
-    "ZF",
-    "ZN",
-    "ZB",
-    "PL",
-    "BTC",
-    "MBT",
-    "ETH",
-    "MET",
-    "SOL",
-    "MSL",
-)
-FULL_SIZE_CONTRACTS = {"GC", "NQ", "ES", "PL", "BTC", "ETH", "SOL"}
-MICRO_CONTRACTS = {"MGC", "MNQ", "MES", "MBT", "MET", "MSL"}
-RATES_CONTRACTS = {"ZT", "ZF", "ZN", "ZB"}
+PHASE1_TICKER_ORDER = PHASE1_RUNTIME_TICKER_ORDER
 QUANTITY_CAP = 1.0
 
 
@@ -94,6 +77,7 @@ def build_phase1_ticker_readiness_matrix(
         )
     )
     runtime_data_by_symbol = {str(row.get("symbol") or ""): row for row in runtime_data.rows}
+    ticker_registry = phase1_runtime_ticker_registry()
     gc_candidate_surface = _gc_candidate_surface(
         config=config,
         governance_rows=governance_rows,
@@ -105,6 +89,7 @@ def build_phase1_ticker_readiness_matrix(
             governance_rows=governance_rows,
             adapters=adapters,
             runtime_data_by_symbol=runtime_data_by_symbol,
+            ticker_registry=ticker_registry,
             gc_candidate_surface=gc_candidate_surface,
         )
         for symbol in PHASE1_TICKER_ORDER
@@ -187,6 +172,7 @@ def _ticker_row(
     governance_rows: list[dict[str, Any]],
     adapters: dict[str, dict[str, Any]],
     runtime_data_by_symbol: dict[str, dict[str, Any]],
+    ticker_registry: dict[str, Any],
     gc_candidate_surface: dict[str, Any],
 ) -> dict[str, Any]:
     target = phase1_execution_target_for_source(symbol)
@@ -240,6 +226,7 @@ def _ticker_row(
         runtime_data_ready=runtime_data_ready_for_candidate if candidate_visible else runtime_candles_ready and derived_features_ready,
         guarded_route_authorized=guarded_route_authorized,
     )
+    contract_type = getattr(ticker_registry.get(symbol), "contract_type", "")
     return {
         "approved_phase1_symbol": symbol,
         "source_symbol_supported": bool(source_supported),
@@ -287,9 +274,9 @@ def _ticker_row(
         "block_reason": block_reason,
         "live_money_eligible": False,
         "quantity_cap": QUANTITY_CAP,
-        "full_size_contract": symbol in FULL_SIZE_CONTRACTS,
-        "micro_contract": symbol in MICRO_CONTRACTS,
-        "rates_contract": symbol in RATES_CONTRACTS,
+        "full_size_contract": contract_type == "full_size",
+        "micro_contract": contract_type == "micro",
+        "rates_contract": contract_type == "rates",
         "exchange": str((target or {}).get("exchange") or ""),
         "contract_month": str((target or {}).get("contract_month") or ""),
         "multiplier": str((target or {}).get("multiplier") or ""),

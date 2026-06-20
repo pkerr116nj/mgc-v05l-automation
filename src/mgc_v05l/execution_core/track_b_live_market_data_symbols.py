@@ -13,6 +13,7 @@ from typing import Any, Mapping, Sequence
 
 
 DEFAULT_TRACK_B_LIVE_MARKET_DATA_SYMBOLS_PATH = Path("config/track_b_live_market_data_symbols.yaml")
+REPO_ROOT = Path(__file__).resolve().parents[3]
 REQUIRED_EXECUTION_REFERENCE_PAIRS = {
     "MGC": "GC",
     "MES": "ES",
@@ -113,6 +114,9 @@ class TrackBLiveMarketDataSymbolNamelist:
     def enabled_databento_symbols(self) -> tuple[str, ...]:
         return tuple(symbol.databento_symbol for symbol in self.enabled_symbols())
 
+    def active_phase1_runtime_symbols(self) -> tuple[str, ...]:
+        return tuple(symbol.symbol for symbol in self.enabled_symbols())
+
     def as_dict(self) -> dict[str, Any]:
         return {
             "version": self.version,
@@ -123,11 +127,31 @@ class TrackBLiveMarketDataSymbolNamelist:
 def load_track_b_live_market_data_symbols(
     path: Path | str = DEFAULT_TRACK_B_LIVE_MARKET_DATA_SYMBOLS_PATH,
 ) -> TrackBLiveMarketDataSymbolNamelist:
-    config_path = Path(path)
+    config_path = _resolve_config_path(path)
     payload = _parse_yaml_subset(config_path.read_text(encoding="utf-8"))
     if not isinstance(payload, Mapping):
         raise TrackBLiveMarketDataSymbolConfigError("Track B live market-data config must be a mapping.")
     return parse_track_b_live_market_data_symbols(payload)
+
+
+def active_phase1_runtime_symbols(
+    path: Path | str = DEFAULT_TRACK_B_LIVE_MARKET_DATA_SYMBOLS_PATH,
+) -> tuple[str, ...]:
+    return load_track_b_live_market_data_symbols(path).active_phase1_runtime_symbols()
+
+
+def required_phase1_runtime_symbols(
+    path: Path | str = DEFAULT_TRACK_B_LIVE_MARKET_DATA_SYMBOLS_PATH,
+) -> tuple[str, ...]:
+    return tuple(row.symbol for row in load_track_b_live_market_data_symbols(path).required_for_readiness_symbols())
+
+
+def _resolve_config_path(path: Path | str) -> Path:
+    config_path = Path(path)
+    if config_path.is_absolute() or config_path.exists():
+        return config_path
+    repo_path = REPO_ROOT / config_path
+    return repo_path if repo_path.exists() else config_path
 
 
 def parse_track_b_live_market_data_symbols(payload: Mapping[str, Any]) -> TrackBLiveMarketDataSymbolNamelist:

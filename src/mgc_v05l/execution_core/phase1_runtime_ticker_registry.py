@@ -14,26 +14,9 @@ from mgc_v05l.phase1_futures_scope import (
     phase1_execution_target_for_source,
     supported_phase1_source_instruments,
 )
+from mgc_v05l.execution_core.track_b_live_market_data_symbols import active_phase1_runtime_symbols
 
-PHASE1_RUNTIME_TICKER_ORDER = (
-    "GC",
-    "NQ",
-    "ES",
-    "MGC",
-    "MNQ",
-    "MES",
-    "ZT",
-    "ZF",
-    "ZN",
-    "ZB",
-    "PL",
-    "BTC",
-    "MBT",
-    "ETH",
-    "MET",
-    "SOL",
-    "MSL",
-)
+PHASE1_RUNTIME_TICKER_ORDER = active_phase1_runtime_symbols()
 PHASE1_RUNTIME_TIMEFRAMES = ("1m", "3m", "5m")
 PHASE1_RUNTIME_DERIVED_FEATURES = (
     "close_to_close_pressure",

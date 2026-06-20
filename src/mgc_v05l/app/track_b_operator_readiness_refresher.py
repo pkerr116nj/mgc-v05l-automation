@@ -16,6 +16,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Mapping, Sequence
 
+from mgc_v05l.execution_core.track_b_live_market_data_symbols import active_phase1_runtime_symbols
+
 REPO_ROOT = Path(__file__).resolve().parents[3]
 DEFAULT_STATUS_PATH = (
     REPO_ROOT
@@ -301,6 +303,7 @@ def _refresh_commands(
     canonical_readiness_summary_path: Path | None = None,
 ) -> list[tuple[str, list[str]]]:
     python_bin = str(repo_root / ".venv" / "bin" / "python")
+    phase1_symbols_csv = ",".join(active_phase1_runtime_symbols())
     canonical_path = canonical_readiness_path or (
         repo_root / "outputs" / "operator_dashboard" / "runtime" / "latest_canonical_readiness.json"
     )
@@ -350,7 +353,7 @@ def _refresh_commands(
                 "--account",
                 "DUM882026",
                 "--symbols",
-                "MNQ,MES",
+                phase1_symbols_csv,
             ],
         ),
         (
@@ -397,7 +400,7 @@ def _refresh_commands(
                 "--account",
                 "DUM882026",
                 "--symbols",
-                "MNQ,MES",
+                phase1_symbols_csv,
                 "--no-broker-lease-history",
                 "--json",
             ],

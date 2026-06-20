@@ -60,6 +60,7 @@ from pathlib import Path
 from typing import Any
 
 from mgc_v05l.execution_core.track_b_readiness_authority import build_track_b_readiness_authority
+from mgc_v05l.execution_core.track_b_live_market_data_symbols import active_phase1_runtime_symbols
 
 
 MODE = os.environ["PREFLIGHT_MODE"]
@@ -331,7 +332,7 @@ add(
     hit_count=len(proof_hits),
 )
 
-expected_phase1_symbols = ("GC", "NQ", "ES", "MGC", "MNQ", "MES", "ZT", "ZF", "ZN", "ZB", "PL")
+expected_phase1_symbols = active_phase1_runtime_symbols()
 try:
     from mgc_v05l.app.phase1_ticker_readiness_matrix import (
         Phase1TickerReadinessMatrixConfig,
@@ -363,7 +364,7 @@ try:
     ]
     add(
         "phase1_ticker_readiness_matrix_static",
-        len(matrix_rows) == 11
+        len(matrix_rows) == len(expected_phase1_symbols)
         and matrix_symbols == expected_phase1_symbols
         and matrix_live_money_false
         and not unauthorized_can_submit_rows,
@@ -837,7 +838,7 @@ add(
     "read-only broker verification succeeded" if broker_available else ibkr["stderr"] or ibkr["stdout"],
 )
 
-phase1_broker_symbols = ("GC", "NQ", "ES", "MGC", "MNQ", "MES", "ZT", "ZF", "ZN", "ZB", "PL")
+phase1_broker_symbols = expected_phase1_symbols
 preflight_broker_truth_root = REPO_ROOT / "outputs/reports/track_b_paper_preflight/ibkr_read_only_verification"
 positions_path = preflight_broker_truth_root / "ibkr_positions_snapshot.json"
 positions, positions_err = read_json(positions_path)

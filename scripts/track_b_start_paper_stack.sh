@@ -65,6 +65,36 @@ FORBIDDEN_REVIEW_OVERLAY="${REPO_ROOT}/config/probationary_pattern_engine_paper_
 
 mkdir -p "${RUNTIME_DIR}" "${STACK_DIR}"
 
+phase1_symbols_csv_from_roster() {
+  local roster_path="$1"
+  "${PYTHON_BIN}" - <<'PY' "${roster_path}"
+import json
+import re
+import sys
+from pathlib import Path
+
+from mgc_v05l.execution_core.track_b_live_market_data_symbols import active_phase1_runtime_symbols
+
+roster = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+enabled_ids = tuple(str(item) for item in roster.get("enabled_strategy_ids") or ())
+symbols_in_roster: set[str] = set()
+for strategy_id in enabled_ids:
+    match = re.search(r"PAPER_ACTIVE_EVIDENCE_([A-Z0-9]+)_", strategy_id)
+    if match:
+        symbols_in_roster.add(match.group(1))
+ordered = [symbol for symbol in active_phase1_runtime_symbols() if symbol in symbols_in_roster]
+print(",".join(ordered))
+PY
+}
+
+active_phase1_runtime_symbols_csv() {
+  "${PYTHON_BIN}" - <<'PY'
+from mgc_v05l.execution_core.track_b_live_market_data_symbols import active_phase1_runtime_symbols
+
+print(",".join(active_phase1_runtime_symbols()))
+PY
+}
+
 recovery_service_opted_out() {
   case "${RECOVERY_SERVICE_OPT_OUT}" in
     1|true|TRUE|yes|YES)
@@ -224,7 +254,6 @@ YAML
 JSON
   CANONICAL_CONFIGS+=("${SCOPED_CONFIG_PATH}")
   ROSTER_ENV_PATH="${SCOPED_ROSTER_PATH}"
-  PROOF_REQUIRED_SYMBOLS="MNQ,MES"
 elif [[ "${STACK_PROFILE}" == "mnq_mes_globex_active_evidence" ]]; then
   cat > "${SCOPED_CONFIG_PATH}" <<'YAML'
 probationary_paper_runtime_exclusive_config: true
@@ -249,7 +278,6 @@ YAML
 JSON
   CANONICAL_CONFIGS+=("${SCOPED_CONFIG_PATH}")
   ROSTER_ENV_PATH="${SCOPED_ROSTER_PATH}"
-  PROOF_REQUIRED_SYMBOLS="MNQ,MES"
 elif [[ "${STACK_PROFILE}" == "mnq_mes_session_coverage_active_evidence" ]]; then
   cat > "${SCOPED_CONFIG_PATH}" <<'YAML'
 probationary_paper_runtime_exclusive_config: true
@@ -278,7 +306,6 @@ YAML
 JSON
   CANONICAL_CONFIGS+=("${SCOPED_CONFIG_PATH}")
   ROSTER_ENV_PATH="${SCOPED_ROSTER_PATH}"
-  PROOF_REQUIRED_SYMBOLS="MNQ,MES"
 elif [[ "${STACK_PROFILE}" == "mnq_mes_london_open_active_evidence" ]]; then
   cat > "${SCOPED_CONFIG_PATH}" <<'YAML'
 probationary_paper_runtime_exclusive_config: true
@@ -321,7 +348,6 @@ YAML
 JSON
   CANONICAL_CONFIGS+=("${SCOPED_CONFIG_PATH}")
   ROSTER_ENV_PATH="${SCOPED_ROSTER_PATH}"
-  PROOF_REQUIRED_SYMBOLS="MNQ,MES"
 elif [[ "${STACK_PROFILE}" == "mnq_mes_london_late_mnq_short_active_evidence" ]]; then
   cat > "${SCOPED_CONFIG_PATH}" <<'YAML'
 probationary_paper_runtime_exclusive_config: true
@@ -361,7 +387,6 @@ YAML
 JSON
   CANONICAL_CONFIGS+=("${SCOPED_CONFIG_PATH}")
   ROSTER_ENV_PATH="${SCOPED_ROSTER_PATH}"
-  PROOF_REQUIRED_SYMBOLS="MNQ,MES"
 elif [[ "${STACK_PROFILE}" == "mnq_mes_full_session_active_evidence" ]]; then
   cat > "${SCOPED_ROSTER_PATH}" <<'JSON'
 {
@@ -480,10 +505,15 @@ JSON
   materialize_scoped_lane_config_from_roster "${SCOPED_ROSTER_PATH}" "$(scoped_profile_lane_source_config "${SCOPED_CONFIG_PATH}" "${RUNTIME_DIR}/paper_config_in_force.json")" "${SCOPED_CONFIG_PATH}" "${REPO_ROOT}"
   CANONICAL_CONFIGS+=("${SCOPED_CONFIG_PATH}")
   ROSTER_ENV_PATH="${SCOPED_ROSTER_PATH}"
-  PROOF_REQUIRED_SYMBOLS="GC,MGC,NQ,ES,ZT,ZF,ZN,ZB,MBT,MET,MSL,MNQ,MES"
 elif [[ "${STACK_PROFILE}" != "canonical" ]]; then
   echo "BLOCKED_UNKNOWN_PROFILE: Unknown Track B PAPER stack profile: ${STACK_PROFILE}" >&2
   exit 2
+fi
+
+if [[ -n "${ROSTER_ENV_PATH}" ]]; then
+  PROOF_REQUIRED_SYMBOLS="$(phase1_symbols_csv_from_roster "${ROSTER_ENV_PATH}")"
+else
+  PROOF_REQUIRED_SYMBOLS="$(active_phase1_runtime_symbols_csv)"
 fi
 
 scoped_profile_start_allowed() {
@@ -809,7 +839,7 @@ run_startup_preflight_evidence_refresh() {
   "${PYTHON_BIN}" -m mgc_v05l.execution_core.track_b_paper_broker_reconciliation \
     --repo-root "${REPO_ROOT}" \
     --account DUM882026 \
-    --symbols MNQ,MES \
+    --symbols "${PROOF_REQUIRED_SYMBOLS}" \
     > "${reconciliation_stdout}" 2> "${reconciliation_stderr}"
   reconciliation_rc=$?
   "${PYTHON_BIN}" -m mgc_v05l.app.track_b_open_order_truth \
@@ -830,7 +860,7 @@ run_startup_preflight_evidence_refresh() {
   "${PYTHON_BIN}" -m mgc_v05l.execution_core.track_b_shared_truth_refresh_cli \
     --repo-root "${REPO_ROOT}" \
     --account DUM882026 \
-    --symbols MNQ,MES \
+    --symbols "${PROOF_REQUIRED_SYMBOLS}" \
     --runtime-start-preflight \
     --no-broker-lease-history \
     --json \

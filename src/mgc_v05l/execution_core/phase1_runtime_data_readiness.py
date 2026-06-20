@@ -12,8 +12,11 @@ from typing import Any, Mapping
 from mgc_v05l.execution_core.track_b_atomic_io import write_json_atomic
 from mgc_v05l.execution_core.phase1_runtime_ticker_registry import (
     PHASE1_RUNTIME_DERIVED_FEATURES,
-    PHASE1_RUNTIME_TICKER_ORDER,
     PHASE1_RUNTIME_TIMEFRAMES,
+)
+from mgc_v05l.execution_core.track_b_live_market_data_symbols import (
+    DEFAULT_TRACK_B_LIVE_MARKET_DATA_SYMBOLS_PATH,
+    active_phase1_runtime_symbols,
 )
 from mgc_v05l.market_data.phase1_market_session import (
     MARKET_CLOSED_NO_FRESH_BARS,
@@ -40,6 +43,7 @@ class Phase1RuntimeDataReadinessConfig:
     output_dir: Path = DEFAULT_OUTPUT_DIR
     runtime_candle_root: Path = DEFAULT_RUNTIME_CANDLE_ROOT
     runtime_feature_root: Path = DEFAULT_RUNTIME_FEATURE_ROOT
+    live_market_data_symbols_path: Path = DEFAULT_TRACK_B_LIVE_MARKET_DATA_SYMBOLS_PATH
     now: datetime | None = None
 
 
@@ -54,9 +58,10 @@ def build_phase1_runtime_data_readiness(
     config: Phase1RuntimeDataReadinessConfig,
 ) -> Phase1RuntimeDataReadinessArtifacts:
     now = _coerce_now(config.now)
+    symbols = active_phase1_runtime_symbols(config.live_market_data_symbols_path)
     rows = [
         _ticker_readiness(symbol=symbol, config=config, now=now)
-        for symbol in PHASE1_RUNTIME_TICKER_ORDER
+        for symbol in symbols
     ]
     report = {
         "schema_version": "phase1_runtime_data_readiness_v1",
