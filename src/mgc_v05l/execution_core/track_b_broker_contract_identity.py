@@ -142,6 +142,29 @@ CANONICAL_FUTURES_CONTRACTS: dict[tuple[str, str], dict[str, str]] = {
         "lastTradeDateOrContractMonth": "20260921",
         "multiplier": "1000",
     },
+    ("772435574", "BTCU6"): {
+        "symbol": "BRR",
+        "track_b_symbol": "BTC",
+        "secType": "FUT",
+        "exchange": "CME",
+        "currency": "USD",
+        "localSymbol": "BTCU6",
+        "conId": "772435574",
+        "lastTradeDateOrContractMonth": "20260925",
+        "multiplier": "5",
+        "tradingClass": "BTC",
+    },
+    ("772435596", "MBTU6"): {
+        "symbol": "MBT",
+        "secType": "FUT",
+        "exchange": "CME",
+        "currency": "USD",
+        "localSymbol": "MBTU6",
+        "conId": "772435596",
+        "lastTradeDateOrContractMonth": "20260925",
+        "multiplier": "0.1",
+        "tradingClass": "MBT",
+    },
 }
 
 

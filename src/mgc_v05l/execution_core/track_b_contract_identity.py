@@ -158,6 +158,26 @@ _VALIDATED_TRACK_B_FUTURES: tuple[TrackBContractIdentity, ...] = (
         multiplier="1000",
         min_tick="0.03125",
     ),
+    TrackBContractIdentity(
+        symbol="BTC",
+        local_symbol="BTCU6",
+        con_id=772435574,
+        expiry="20260925",
+        contract_key="BTC-202609",
+        exchange="CME",
+        multiplier="5",
+        min_tick="5",
+    ),
+    TrackBContractIdentity(
+        symbol="MBT",
+        local_symbol="MBTU6",
+        con_id=772435596,
+        expiry="20260925",
+        contract_key="MBT-202609",
+        exchange="CME",
+        multiplier="0.1",
+        min_tick="5",
+    ),
 )
 
 VALIDATED_TRACK_B_FUTURES_BY_SYMBOL: dict[str, TrackBContractIdentity] = {

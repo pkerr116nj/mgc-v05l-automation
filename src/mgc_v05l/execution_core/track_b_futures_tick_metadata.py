@@ -105,6 +105,20 @@ _FUTURES_TICK_METADATA: dict[str, FuturesTickMetadata] = {
         exchange="CBOT",
         fractional_pricing=True,
     ),
+    "BTC": FuturesTickMetadata(
+        symbol="BTC",
+        min_tick=Decimal("5"),
+        multiplier=Decimal("5"),
+        tick_value=Decimal("25"),
+        exchange="CME",
+    ),
+    "MBT": FuturesTickMetadata(
+        symbol="MBT",
+        min_tick=Decimal("5"),
+        multiplier=Decimal("0.1"),
+        tick_value=Decimal("0.5"),
+        exchange="CME",
+    ),
 }
 
 

@@ -35,6 +35,7 @@ class IbkrFuturesContractRule:
     currency: str = "USD"
     multiplier: str | None = None
     trading_class: str | None = None
+    local_symbol_root: str | None = None
     allowed_exchanges: tuple[str, ...] = ()
 
 
@@ -134,6 +135,23 @@ def _default_futures_rules() -> dict[str, IbkrFuturesContractRule]:
             multiplier="1000",
             trading_class="ZB",
             allowed_exchanges=("CBOT", "ECBOT"),
+        ),
+        IbkrFuturesContractRule(
+            internal_symbol="BTC",
+            broker_symbol_root="BRR",
+            exchange="CME",
+            multiplier="5",
+            trading_class="BTC",
+            local_symbol_root="BTC",
+            allowed_exchanges=("CME", "GLOBEX"),
+        ),
+        IbkrFuturesContractRule(
+            internal_symbol="MBT",
+            broker_symbol_root="MBT",
+            exchange="CME",
+            multiplier="0.1",
+            trading_class="MBT",
+            allowed_exchanges=("CME", "GLOBEX"),
         ),
         IbkrFuturesContractRule(
             internal_symbol="CL",
@@ -275,9 +293,10 @@ class IbkrContractResolver:
 
         resolved_expiry = _normalize_expiry(expiry) if expiry else _front_month_expiry(now=now)
         resolved_broker_symbol = _normalize_symbol(broker_symbol) or rule.broker_symbol_root
+        resolved_local_symbol_root = _normalize_symbol(rule.local_symbol_root) or resolved_broker_symbol
         resolved_currency = _normalize_symbol(currency) or rule.currency
         resolved_multiplier = str(multiplier or rule.multiplier or "").strip() or None
-        local_symbol = _local_symbol(resolved_broker_symbol, resolved_expiry)
+        local_symbol = _local_symbol(resolved_local_symbol_root, resolved_expiry)
         metadata = {
             "contract_month": resolved_expiry,
             "month_code": _month_code(resolved_expiry),

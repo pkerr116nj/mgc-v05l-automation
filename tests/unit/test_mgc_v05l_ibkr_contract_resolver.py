@@ -98,6 +98,36 @@ def test_ibkr_contract_resolver_supports_cbot_rates_futures(
     assert qualified.trading_class == symbol
 
 
+def test_ibkr_contract_resolver_supports_full_size_bitcoin_brr_broker_root() -> None:
+    resolver = IbkrContractResolver()
+
+    qualified = resolver.qualify_futures(symbol="BTC", expiry="202609")
+
+    assert qualified.internal_symbol == "BTC"
+    assert qualified.broker_symbol == "BRR"
+    assert qualified.exchange == "CME"
+    assert qualified.currency == "USD"
+    assert qualified.expiry == "202609"
+    assert qualified.local_symbol == "BTCU26"
+    assert qualified.multiplier == "5"
+    assert qualified.trading_class == "BTC"
+
+
+def test_ibkr_contract_resolver_supports_micro_bitcoin_futures() -> None:
+    resolver = IbkrContractResolver()
+
+    qualified = resolver.qualify_futures(symbol="MBT", expiry="202609")
+
+    assert qualified.internal_symbol == "MBT"
+    assert qualified.broker_symbol == "MBT"
+    assert qualified.exchange == "CME"
+    assert qualified.currency == "USD"
+    assert qualified.expiry == "202609"
+    assert qualified.local_symbol == "MBTU26"
+    assert qualified.multiplier == "0.1"
+    assert qualified.trading_class == "MBT"
+
+
 def test_ibkr_contract_resolver_requires_calendar_month_expiry() -> None:
     resolver = IbkrContractResolver()
 

@@ -55,3 +55,25 @@ def test_marketable_rates_prices_round_in_risk_direction() -> None:
         offset_ticks=1,
         min_tick="0.03125",
     ) == Decimal("121.12500")
+
+
+@pytest.mark.parametrize(
+    ("symbol", "multiplier", "tick_value"),
+    (
+        ("BTC", Decimal("5"), Decimal("25")),
+        ("MBT", Decimal("0.1"), Decimal("0.5")),
+    ),
+)
+def test_bitcoin_futures_tick_metadata_uses_ibkr_validated_five_dollar_ticks(
+    symbol: str,
+    multiplier: Decimal,
+    tick_value: Decimal,
+) -> None:
+    metadata = futures_tick_metadata(symbol)
+
+    assert metadata is not None
+    assert metadata.exchange == "CME"
+    assert metadata.min_tick == Decimal("5")
+    assert metadata.multiplier == multiplier
+    assert metadata.tick_value == tick_value
+    assert metadata.fractional_pricing is False

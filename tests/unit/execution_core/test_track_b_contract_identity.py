@@ -22,6 +22,8 @@ from mgc_v05l.execution_core.track_b_contract_identity import normalize_track_b_
         ("ZF", "ZFU6", "20260930", 842590380, "ZF-202609"),
         ("ZN", "ZNU6", "20260921", 840227361, "ZN-202609"),
         ("ZB", "ZBU6", "20260921", 840227357, "ZB-202609"),
+        ("BTC", "BTCU6", "20260925", 772435574, "BTC-202609"),
+        ("MBT", "MBTU6", "20260925", 772435596, "MBT-202609"),
     ),
 )
 def test_validated_track_b_futures_normalize_from_broker_local_symbol(

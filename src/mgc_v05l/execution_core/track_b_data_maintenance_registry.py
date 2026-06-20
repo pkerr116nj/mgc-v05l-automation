@@ -71,6 +71,7 @@ _FUTURES_PLACEHOLDERS = (
     "PL",
     "CL",
     "NG",
+    "BTC",
     "MBT",
     "YM",
 )

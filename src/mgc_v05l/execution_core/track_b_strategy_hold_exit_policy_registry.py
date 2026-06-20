@@ -401,6 +401,8 @@ _BATCH1_ACTIVE_EVIDENCE_SYMBOL_CONFLICT_GROUPS = {
     "ZF": "rates_treasury_active_evidence",
     "ZN": "rates_treasury_active_evidence",
     "ZB": "rates_treasury_active_evidence",
+    "BTC": "crypto_bitcoin_active_evidence",
+    "MBT": "crypto_bitcoin_active_evidence",
 }
 _BATCH1_ACTIVE_EVIDENCE_SESSIONS = (
     (

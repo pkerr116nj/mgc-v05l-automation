@@ -237,6 +237,18 @@
       "exchange": "CME",
       "description": "Micro Bitcoin futures volume-based front continuous"
     },
+    "BTC": {
+      "request_symbol": "BTC.v.0",
+      "dataset": "GLBX.MDP3",
+      "stype_in": "continuous",
+      "stype_out": "instrument_id",
+      "schema_by_timeframe": {
+        "1m": "ohlcv-1m"
+      },
+      "asset_class": "future",
+      "exchange": "CME",
+      "description": "Bitcoin futures volume-based front continuous"
+    },
     "NG": {
       "request_symbol": "NG.v.0",
       "dataset": "GLBX.MDP3",

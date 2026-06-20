@@ -138,6 +138,31 @@ _BATCH1_ACTIVE_EVIDENCE_CONTRACTS: dict[str, dict[str, Any]] = {
         "min_tick": "0.03125",
         "trading_class": "ZB",
     },
+    "BTC": {
+        "symbol": "BTC",
+        "broker_symbol": "BRR",
+        "contract_month": "202609",
+        "expiry": "20260925",
+        "con_id": 772435574,
+        "local_symbol": "BTCU6",
+        "exchange": "CME",
+        "currency": "USD",
+        "multiplier": "5",
+        "min_tick": "5",
+        "trading_class": "BTC",
+    },
+    "MBT": {
+        "symbol": "MBT",
+        "contract_month": "202609",
+        "expiry": "20260925",
+        "con_id": 772435596,
+        "local_symbol": "MBTU6",
+        "exchange": "CME",
+        "currency": "USD",
+        "multiplier": "0.1",
+        "min_tick": "5",
+        "trading_class": "MBT",
+    },
 }
 _GC_PHASE1_SUBMIT_LANE_IDS = (
     *_active_evidence_lane_ids("gc"),
@@ -237,6 +262,8 @@ _ZT_PHASE1_SUBMIT_LANE_IDS = (*_active_evidence_lane_ids("zt"),)
 _ZF_PHASE1_SUBMIT_LANE_IDS = (*_active_evidence_lane_ids("zf"),)
 _ZN_PHASE1_SUBMIT_LANE_IDS = (*_active_evidence_lane_ids("zn"),)
 _ZB_PHASE1_SUBMIT_LANE_IDS = (*_active_evidence_lane_ids("zb"),)
+_BTC_PHASE1_SUBMIT_LANE_IDS = (*_active_evidence_lane_ids("btc"),)
+_MBT_PHASE1_SUBMIT_LANE_IDS = (*_active_evidence_lane_ids("mbt"),)
 _PL_PHASE1_SUBMIT_LANE_IDS = (
     "atp_companion_v1_pl_asia_us",
     "atp_companion_v1_pl_asia_us_5m",
@@ -358,6 +385,8 @@ for symbol, lane_ids in (
     ("ZF", _ZF_PHASE1_SUBMIT_LANE_IDS),
     ("ZN", _ZN_PHASE1_SUBMIT_LANE_IDS),
     ("ZB", _ZB_PHASE1_SUBMIT_LANE_IDS),
+    ("BTC", _BTC_PHASE1_SUBMIT_LANE_IDS),
+    ("MBT", _MBT_PHASE1_SUBMIT_LANE_IDS),
 ):
     _SUBMIT_CAPABLE_LANE_ADAPTERS |= {
         lane_id: {

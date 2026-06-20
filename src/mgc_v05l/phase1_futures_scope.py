@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import date, datetime
 from typing import Any
 
-_SUPPORTED_SOURCE_INSTRUMENTS = {"GC", "MGC", "NQ", "MNQ", "ES", "MES", "ZT", "ZF", "ZN", "ZB", "PL"}
+_SUPPORTED_SOURCE_INSTRUMENTS = {"GC", "MGC", "NQ", "MNQ", "ES", "MES", "ZT", "ZF", "ZN", "ZB", "PL", "BTC", "MBT"}
 _SOURCE_TO_PHASE1_EXECUTION_SYMBOL = {
     "GC": "GC",
     "MGC": "MGC",
@@ -18,6 +18,8 @@ _SOURCE_TO_PHASE1_EXECUTION_SYMBOL = {
     "ZN": "ZN",
     "ZB": "ZB",
     "PL": "PL",
+    "BTC": "BTC",
+    "MBT": "MBT",
 }
 _FIXED_GOLD_CONTRACT_MONTH = "202606"
 _PLATINUM_CONTRACT_MONTHS = (1, 4, 7, 10)
@@ -49,6 +51,26 @@ _RATES_TARGETS = {
         "expiry": "20260921",
         "con_id": 840227357,
         "local_symbol": "ZBU6",
+    },
+}
+_CRYPTO_TARGETS = {
+    "BTC": {
+        "broker_symbol": "BRR",
+        "multiplier": "5",
+        "friendly_name": "Bitcoin",
+        "expiry": "20260925",
+        "con_id": 772435574,
+        "local_symbol": "BTCU6",
+        "trading_class": "BTC",
+    },
+    "MBT": {
+        "broker_symbol": "MBT",
+        "multiplier": "0.1",
+        "friendly_name": "Micro Bitcoin",
+        "expiry": "20260925",
+        "con_id": 772435596,
+        "local_symbol": "MBTU6",
+        "trading_class": "MBT",
     },
 }
 
@@ -220,6 +242,24 @@ def phase1_execution_target_for_symbol(
             "trading_class": "PL",
             "phase1_proxy_mode": "DIRECT",
             "contract_family": "Platinum",
+        }
+    if normalized in _CRYPTO_TARGETS:
+        resolved_month = contract_month or active_rates_contract_month(now=now)
+        metadata = _CRYPTO_TARGETS[normalized]
+        return {
+            "symbol": normalized,
+            "broker_symbol": metadata["broker_symbol"],
+            "contract_month": resolved_month,
+            "expiry": metadata["expiry"] if resolved_month == "202609" else None,
+            "con_id": metadata["con_id"] if resolved_month == "202609" else None,
+            "local_symbol": metadata["local_symbol"] if resolved_month == "202609" else None,
+            "friendly_label": f"{normalized} {resolved_month}",
+            "exchange": "CME",
+            "currency": "USD",
+            "multiplier": metadata["multiplier"],
+            "trading_class": metadata["trading_class"],
+            "phase1_proxy_mode": "DIRECT",
+            "contract_family": str(metadata["friendly_name"]),
         }
     raise KeyError(f"Unsupported phase-1 execution symbol: {symbol}")
 

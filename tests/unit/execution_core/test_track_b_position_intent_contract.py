@@ -169,6 +169,20 @@ def test_batch1_active_evidence_position_intents_use_validated_contracts() -> No
             "20260921",
             "ZB-202609",
         ),
+        "PAPER_ACTIVE_EVIDENCE_BTC_US_PARTICIPATION_LONG_V1": (
+            "BTC",
+            "BTCU6",
+            772435574,
+            "20260925",
+            "BTC-202609",
+        ),
+        "PAPER_ACTIVE_EVIDENCE_MBT_LONDON_OPEN_PARTICIPATION_SHORT_V1": (
+            "MBT",
+            "MBTU6",
+            772435596,
+            "20260925",
+            "MBT-202609",
+        ),
     }
 
     for strategy_id, (symbol, local_symbol, con_id, expiry, contract_key) in expected.items():
