@@ -21,6 +21,7 @@ from mgc_v05l.execution_core.track_b_managed_position_registry import (
     TrackBManagedPositionRegistryConfig,
     build_track_b_managed_position_registry,
     write_track_b_managed_position_registry,
+    _required_close_action,
 )
 
 
@@ -41,6 +42,11 @@ def test_no_positions_reports_no_managed_positions(tmp_path: Path) -> None:
     assert payload["submit_authority"] is False
     assert payload["paper_proof_invoked"] is False
     assert payload["live_money_eligible"] is False
+
+
+def test_required_close_action_prefers_current_broker_quantity_over_stale_side() -> None:
+    assert _required_close_action(side="SHORT", signed_broker_qty=Decimal("1")) == "SELL"
+    assert _required_close_action(side="LONG", signed_broker_qty=Decimal("-1")) == "BUY"
 
 
 def test_historical_review_required_lifecycle_ignored_when_active_truth_clean_flat(tmp_path: Path) -> None:
@@ -1571,6 +1577,9 @@ def test_validated_expanded_futures_project_from_normalized_contract_identity(tm
         ("ZF", "ZFU6", 842590380, "20260930", "ZF-202609"),
         ("ZN", "ZNU6", 840227361, "20260921", "ZN-202609"),
         ("ZB", "ZBU6", 840227357, "20260921", "ZB-202609"),
+        ("MBT", "MBTU6", 772435596, "20260925", "MBT-202609"),
+        ("MET", "METN6", 850790385, "20260731", "MET-202607"),
+        ("MSL", "MSLU6", 772435607, "20260925", "MSL-202609"),
     )
     broker_positions = [
         {

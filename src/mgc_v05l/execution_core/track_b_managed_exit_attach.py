@@ -208,7 +208,7 @@ def build_track_b_managed_exit_attach_plan(
     entry_timestamp = _entry_timestamp(lifecycle_report=lifecycle_report, live_position_status=live_position_status, config=config)
     completed_bars = _completed_bar_timestamps_after_entry(payload=bars_payload, entry_timestamp=entry_timestamp)
     completed_bar_count = len(completed_bars)
-    close_action = close_action_for_position_side(config.side)
+    close_action = _close_action_for_current_broker_position(config=config, position_truth=position_truth)
     exit_execution_class = classify_exit_execution(
         exit_type=exit_profile.exit_strategy_id,
         reason="managed_position_maintenance",
@@ -1539,6 +1539,18 @@ def _synthetic_exit_authority_candidate_for_config(
             "close_action_source": "broker_position_direction",
         },
     }
+
+
+def _close_action_for_current_broker_position(
+    *,
+    config: TrackBManagedExitAttachConfig,
+    position_truth: Mapping[str, Any],
+) -> str:
+    broker_position = _exact_broker_position_for_config(config=config, position_truth=position_truth)
+    signed_qty = _decimal(broker_position.get("quantity") if broker_position else None)
+    if signed_qty is not None and signed_qty != 0:
+        return "SELL" if signed_qty > 0 else "BUY"
+    return close_action_for_position_side(config.side)
 
 
 def _exact_broker_position_for_config(

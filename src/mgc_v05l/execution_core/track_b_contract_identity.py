@@ -190,6 +190,16 @@ _VALIDATED_TRACK_B_FUTURES: tuple[TrackBContractIdentity, ...] = (
     ),
     TrackBContractIdentity(
         symbol="MET",
+        local_symbol="METN6",
+        con_id=850790385,
+        expiry="20260731",
+        contract_key="MET-202607",
+        exchange="CME",
+        multiplier="0.1",
+        min_tick="0.5",
+    ),
+    TrackBContractIdentity(
+        symbol="MET",
         local_symbol="METU6",
         con_id=772435602,
         expiry="20260925",

@@ -16,7 +16,10 @@ from typing import Any, Mapping, Sequence
 
 from mgc_v05l.execution_core.bounded_jsonl import append_bounded_jsonl
 from mgc_v05l.execution_core.track_b_atomic_io import write_json_atomic
-from mgc_v05l.execution_core.track_b_contract_identity import normalize_track_b_contract_row
+from mgc_v05l.execution_core.track_b_contract_identity import (
+    VALIDATED_TRACK_B_FUTURES_BY_SYMBOL,
+    normalize_track_b_contract_row,
+)
 from mgc_v05l.execution_core.track_b_lifecycle_state_transition import (
     is_registry_eligible,
     normalize_lifecycle_state,
@@ -1036,18 +1039,7 @@ def _validated_track_b_futures_position(row: Mapping[str, Any]) -> bool:
         or identity.get("symbol")
         or ""
     ).strip().upper()
-    return identity.get("resolved") is True and symbol in {
-        "MGC",
-        "GC",
-        "ES",
-        "NQ",
-        "MNQ",
-        "MES",
-        "ZT",
-        "ZF",
-        "ZN",
-        "ZB",
-    }
+    return identity.get("resolved") is True and symbol in VALIDATED_TRACK_B_FUTURES_BY_SYMBOL
 
 
 def _registry_lifecycle_candidates_for_broker_positions(
@@ -1314,14 +1306,14 @@ def _position_freshness_state(*, source_stale: Mapping[str, Any]) -> str:
 
 
 def _required_close_action(*, side: Any, signed_broker_qty: Decimal | None) -> str | None:
+    if signed_broker_qty is not None and signed_broker_qty != 0:
+        return "SELL" if signed_broker_qty > 0 else "BUY"
     normalized_side = str(side or "").upper()
     if normalized_side == "LONG":
         return "SELL"
     if normalized_side == "SHORT":
         return "BUY"
-    if signed_broker_qty is None or signed_broker_qty == 0:
-        return None
-    return "SELL" if signed_broker_qty > 0 else "BUY"
+    return None
 
 
 def _overall_classification(
