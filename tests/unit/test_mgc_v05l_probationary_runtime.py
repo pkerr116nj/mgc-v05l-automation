@@ -9115,6 +9115,60 @@ def test_active_profile_route_hold_uses_instrument_scoped_entry_authority(monkey
     assert lane_runtime._startup_route_convergence_source["authority_scope"] == "instrument_scoped_active_profile_paper_bridge"
 
 
+def test_thin_active_profile_route_hold_uses_shared_lane_submit_current_state_authority(monkeypatch) -> None:
+    captured_calls: list[dict[str, object]] = []
+
+    def fake_authority(**kwargs):
+        captured_calls.append(dict(kwargs))
+        return {
+            "classification": "BROKER_MARKET_TRUTH_ENTRY_ALLOWED",
+            "allowed": True,
+            "blockers": [],
+        }
+
+    monkeypatch.setattr(probationary_runtime_module, "build_broker_market_truth_entry_authority_from_repo", fake_authority)
+    for symbol in ("PL", "MBT", "MET", "MSL"):
+        lane_runtime = object.__new__(ProbationaryPaperLaneRuntime)
+        lane_runtime._startup_route_convergence_source = {}
+        lane_runtime._startup_readiness_convergence_snapshot = lambda: {  # type: ignore[method-assign]
+            "clean": False,
+            "blockers": [{"code": "broker_positions_present"}],
+        }
+        lane_runtime.spec = probationary_runtime_module.ProbationaryPaperLaneSpec(
+            lane_id=f"{symbol.lower()}_us_active_participation_short",
+            display_name=f"{symbol.lower()} us active short",
+            symbol=symbol,
+            long_sources=(),
+            short_sources=(f"PAPER_ACTIVE_EVIDENCE_{symbol}_US_PARTICIPATION_SHORT_V1",),
+            session_restriction="US",
+            point_value=Decimal("0.1"),
+            strategy_family="paper_active_evidence",
+            runtime_kind=TRACK_B_RULE_RUNNER_PAPER_RUNTIME_KIND,
+            execution_mode=probationary_runtime_module.PAPER_EXECUTION_MODE_IBKR_BRIDGE,
+            managed_exit_policy_id="US_ACTIVE_EVIDENCE_TIMEBOX_60M_EXIT_V1",
+            paper_only=True,
+        )
+        lane_runtime.execution_engine = ExecutionEngine()
+        bar = _build_bar(datetime(2026, 6, 20, 15, 55, tzinfo=ZoneInfo("America/New_York")), symbol=symbol)
+        intent = OrderIntent(
+            order_intent_id=f"{bar.bar_id}|SELL_TO_OPEN",
+            bar_id=bar.bar_id,
+            symbol=symbol,
+            intent_type=OrderIntentType.SELL_TO_OPEN,
+            quantity=1,
+            created_at=bar.end_ts,
+            reason_code="activeEvidenceShort",
+        )
+
+        assert lane_runtime._startup_route_hold_blocker(bar, object(), intent) is None
+        captured = captured_calls[-1]
+        assert captured["lane_id"] == f"{symbol.lower()}_us_active_participation_short"
+        assert captured["instrument"] == symbol
+        assert dict(captured["contract"])["symbol"] == symbol
+        assert lane_runtime._startup_route_convergence_source["clean"] is True
+        assert lane_runtime._startup_route_convergence_source["authority_scope"] == "instrument_scoped_active_profile_paper_bridge"
+
+
 def test_active_profile_route_hold_blocks_same_instrument_flat_start(monkeypatch) -> None:
     lane_runtime = object.__new__(ProbationaryPaperLaneRuntime)
     lane_runtime._startup_route_convergence_source = {}
@@ -9156,7 +9210,7 @@ def test_active_profile_route_hold_blocks_same_instrument_flat_start(monkeypatch
     )
 
     reason = lane_runtime._startup_route_hold_blocker(bar, object(), intent)
-    assert reason == "PAPER_STARTUP_BROKER_TRUTH_BLOCKED: broker_nonflat_flat_start_violation"
+    assert reason == "PAPER_ENTRY_CURRENT_STATE_BLOCKED: broker_nonflat_flat_start_violation"
     assert lane_runtime._startup_route_convergence_source["clean"] is False
 
 

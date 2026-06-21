@@ -850,9 +850,12 @@ def _source_instrument_from_lane_spec(spec: ProbationaryPaperLaneSpec) -> str:
     source = str(spec.symbol or "").strip().upper()
     if source:
         return source
+    from ..execution.ibkr_phase1_futures_scope import supported_phase1_source_instruments
+
+    supported_instruments = tuple(sorted(supported_phase1_source_instruments(), key=len, reverse=True))
     for value in (*spec.observed_instruments, *spec.long_sources, *spec.short_sources):
         candidate = str(value or "").strip().upper()
-        for instrument in ("MNQ", "MES", "MGC", "GC", "NQ", "ES", "ZT", "ZF", "ZN", "ZB"):
+        for instrument in supported_instruments:
             if instrument in candidate:
                 return instrument
     return source
@@ -860,7 +863,9 @@ def _source_instrument_from_lane_spec(spec: ProbationaryPaperLaneSpec) -> str:
 
 def _active_evidence_bridge_adapter_for_spec(spec: ProbationaryPaperLaneSpec) -> dict[str, Any] | None:
     source_instrument = _source_instrument_from_lane_spec(spec)
-    if source_instrument not in {"MNQ", "MES", "MGC", "GC", "NQ", "ES", "ZT", "ZF", "ZN", "ZB"}:
+    from ..execution.ibkr_phase1_futures_scope import phase1_execution_target_for_source
+
+    if not source_instrument or phase1_execution_target_for_source(source_instrument) is None:
         return None
     lane_tokens = " ".join(
         str(value or "")
@@ -4205,12 +4210,26 @@ class ProbationaryPaperLaneRuntime:
     def _uses_active_profile_bridge_entry_authority(self) -> bool:
         if _effective_probationary_paper_execution_mode(self.spec) != PAPER_EXECUTION_MODE_IBKR_BRIDGE:
             return False
-        return _active_evidence_bridge_adapter_for_spec(self.spec) is not None
+        lane_tokens = " ".join(
+            str(value or "")
+            for value in (
+                self.spec.lane_id,
+                self.spec.strategy_family,
+                self.spec.strategy_identity_root,
+                *self.spec.long_sources,
+                *self.spec.short_sources,
+            )
+        ).upper()
+        if "ACTIVE_EVIDENCE" not in lane_tokens and "_ACTIVE_PARTICIPATION_" not in self.spec.lane_id:
+            return False
+        return _bridge_adapter_for_probationary_lane(self.spec) is not None
 
     def _startup_route_hold_reason_for_intent(self, *, bar: Bar, intent: OrderIntent) -> str | None:
         repo_root = Path(__file__).resolve().parents[3]
         broker = getattr(self.execution_engine, "broker", None)
         bridge_adapter = dict(getattr(broker, "_bridge_adapter", {}) or {}) if isinstance(broker, _IbkrPaperBridgeRuntimeBroker) else {}
+        if not bridge_adapter:
+            bridge_adapter = dict(_bridge_adapter_for_probationary_lane(self.spec) or {})
         bridge_target = dict(bridge_adapter.get("bridge_execution_target") or {})
         route_destination = str(
             getattr(broker, "route_destination", "")
@@ -4255,7 +4274,7 @@ class ProbationaryPaperLaneRuntime:
         ]
         if not blockers:
             blockers = ["broker_market_truth_entry_not_allowed"]
-        return "PAPER_STARTUP_BROKER_TRUTH_BLOCKED: " + ",".join(blockers)
+        return "PAPER_ENTRY_CURRENT_STATE_BLOCKED: " + ",".join(blockers)
 
     def _startup_readiness_convergence_snapshot(self) -> dict[str, Any]:
         repo_root = Path(__file__).resolve().parents[3]
