@@ -805,7 +805,7 @@ def _write_symbol_runtime_artifacts_from_bars(
         symbol=symbol,
         bars=source_one_minute,
     )
-    timeframe_bars = _timeframe_bars(one_minute)
+    timeframe_bars = _timeframe_bars(one_minute, live_symbol=live_symbol)
     written: list[Path] = []
     for timeframe in PHASE1_RUNTIME_TIMEFRAMES:
         payload = _runtime_payload_for_service(
@@ -832,7 +832,7 @@ def _write_symbol_runtime_artifacts_from_bars(
             symbol=symbol,
             timeframe=timeframe,
             generated_at=generated_at,
-            bars=_timeframe_bars(source_one_minute).get(timeframe, []),
+            bars=_timeframe_bars(source_one_minute, live_symbol=live_symbol).get(timeframe, []),
             raw_dbn_path=raw_dbn_path,
         )
         if existing_confirmed:
@@ -885,7 +885,7 @@ def _write_intraday_backfill_artifacts_from_bars(
         bars=[dict(bar) for bar in bars],
         generated_at=generated_at,
     )
-    timeframe_bars = _timeframe_bars(one_minute)
+    timeframe_bars = _timeframe_bars(one_minute, live_symbol=live_symbol)
     written: list[Path] = []
     for timeframe in PHASE1_RUNTIME_TIMEFRAMES:
         payload = _runtime_payload_for_service(
@@ -1142,7 +1142,7 @@ def _row_and_artifacts_for_live_result(
             [],
         )
     candles_1m = _normalize_live_1m_candles(live_event or {})
-    timeframe_bars = _timeframe_bars(candles_1m)
+    timeframe_bars = _timeframe_bars(candles_1m, live_symbol=live_symbol)
     payloads = {
         timeframe: _runtime_payload(
             config=config,
@@ -1174,7 +1174,7 @@ def _row_and_artifacts_for_live_result(
             bars=candles_1m,
             generated_at=_parse_datetime(live_result.report.get("generated_at")) or now,
         )
-        intraday_timeframe_bars = _timeframe_bars(intraday_one_minute)
+        intraday_timeframe_bars = _timeframe_bars(intraday_one_minute, live_symbol=live_symbol)
         for timeframe in PHASE1_RUNTIME_TIMEFRAMES:
             payload = _runtime_payload(
                 config=config,
@@ -1407,6 +1407,13 @@ def _dense_no_trade_1m_candles(
     return dense
 
 
+def _derived_candle_sparse_fill_max_gap_minutes(live_symbol: TrackBLiveMarketDataSymbol | None) -> int:
+    if live_symbol is None or not phase1_symbol_allows_stale_trade_bars(live_symbol.symbol):
+        return 10
+    tolerated_seconds = phase1_latest_bar_freshness_seconds(live_symbol.symbol, 10 * 60)
+    return max(10, int((float(tolerated_seconds) + 59.0) // 60) * 2)
+
+
 def _fallback_legacy_live_event(
     *, config: Phase1DatabentoLiveRuntimeCandlesConfig, symbol: str
 ) -> dict[str, Any] | None:
@@ -1426,10 +1433,17 @@ def _fallback_legacy_live_event(
     return payload
 
 
-def _timeframe_bars(one_minute: list[dict[str, Any]]) -> dict[str, list[dict[str, Any]]]:
+def _timeframe_bars(
+    one_minute: list[dict[str, Any]],
+    *,
+    live_symbol: TrackBLiveMarketDataSymbol | None = None,
+) -> dict[str, list[dict[str, Any]]]:
     if not one_minute:
         return {}
-    dense_one_minute = _dense_no_trade_1m_candles(one_minute)
+    dense_one_minute = _dense_no_trade_1m_candles(
+        one_minute,
+        max_gap_minutes=_derived_candle_sparse_fill_max_gap_minutes(live_symbol),
+    )
     return {
         "1m": one_minute,
         "3m": _aggregate_bars(dense_one_minute, minutes=3),

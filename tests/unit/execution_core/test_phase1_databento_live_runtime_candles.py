@@ -410,6 +410,93 @@ def test_thin_symbol_realtime_confirmation_allows_old_last_trade_when_feed_is_li
     assert payload["latest_bar_freshness_seconds"] == 3600.0
 
 
+def test_thin_symbols_sparse_1m_prints_build_completed_5m_context(tmp_path: Path) -> None:
+    latest_end = NOW.replace(minute=10)
+    for symbol in ("PL", "MBT", "MET", "MSL"):
+        sparse_candles = [
+            {
+                "candle_timestamp": (latest_end - timedelta(minutes=96 - offset)).isoformat(),
+                "open": "73.0",
+                "high": "73.0",
+                "low": "73.0",
+                "close": "73.0",
+                "volume": "1",
+            }
+            for offset in range(7)
+        ]
+        sparse_candles.append(
+            {
+                "candle_timestamp": latest_end.isoformat(),
+                "open": "73.5",
+                "high": "73.5",
+                "low": "73.5",
+                "close": "73.5",
+                "volume": "1",
+            }
+        )
+        runner = RecordingRunner({symbol: sparse_candles})
+
+        result = build_phase1_databento_live_runtime_candles(
+            config=_config(tmp_path / symbol.lower(), symbols=(symbol,)),
+            live_runner=runner,
+        )
+
+        assert result.report["rows"][0]["realtime_feed_confirmed"] is True
+        five_minute = (
+            tmp_path
+            / symbol.lower()
+            / "outputs"
+            / "track_b_execution_core"
+            / "phase1_runtime_market_data"
+            / symbol
+            / "5m"
+            / "latest_runtime_candles.json"
+        )
+        payload = json.loads(five_minute.read_text(encoding="utf-8"))
+        assert payload["bar_count"] >= 1
+        assert payload["last_completed_bar_ts"] == latest_end.isoformat()
+        assert payload["bars"][-1]["bar_end"] == latest_end.isoformat()
+        assert payload["bars"][-1]["source_bar_count"] == 5
+
+
+def test_liquid_symbol_sparse_1m_prints_do_not_overfill_large_gaps(tmp_path: Path) -> None:
+    latest_end = NOW.replace(minute=10)
+    sparse_candles = [
+        {
+            "candle_timestamp": (latest_end - timedelta(minutes=90)).isoformat(),
+            "open": "100.0",
+            "high": "100.0",
+            "low": "100.0",
+            "close": "100.0",
+            "volume": "1",
+        },
+        {
+            "candle_timestamp": latest_end.isoformat(),
+            "open": "101.0",
+            "high": "101.0",
+            "low": "101.0",
+            "close": "101.0",
+            "volume": "1",
+        },
+    ]
+    runner = RecordingRunner({"GC": sparse_candles})
+
+    build_phase1_databento_live_runtime_candles(config=_config(tmp_path, symbols=("GC",)), live_runner=runner)
+
+    five_minute = (
+        tmp_path
+        / "outputs"
+        / "track_b_execution_core"
+        / "phase1_runtime_market_data"
+        / "GC"
+        / "5m"
+        / "latest_runtime_candles.json"
+    )
+    payload = json.loads(five_minute.read_text(encoding="utf-8"))
+    assert payload["bar_count"] == 0
+    assert payload["realtime_feed_confirmed"] is False
+
+
 def test_fresh_merged_legacy_live_artifact_can_satisfy_phase1_contract(tmp_path: Path) -> None:
     legacy = (
         tmp_path
