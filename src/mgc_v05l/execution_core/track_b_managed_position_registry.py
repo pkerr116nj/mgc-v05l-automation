@@ -178,6 +178,7 @@ def build_track_b_managed_position_registry(
         resolved_lifecycle_positions=_registry_lifecycle_candidates_for_broker_positions(
             broker_positions=broker_positions,
             lifecycle_positions=lifecycle_positions,
+            broker_open_orders=broker_open_orders,
             terminal_records=terminal_records,
         ),
     )
@@ -1046,6 +1047,7 @@ def _registry_lifecycle_candidates_for_broker_positions(
     *,
     broker_positions: Sequence[Mapping[str, Any]],
     lifecycle_positions: Sequence[Mapping[str, Any]],
+    broker_open_orders: Sequence[Mapping[str, Any]],
     terminal_records: tuple[Any, ...],
 ) -> list[dict[str, Any]]:
     candidates: list[dict[str, Any]] = []
@@ -1059,6 +1061,7 @@ def _registry_lifecycle_candidates_for_broker_positions(
             continue
         candidate = _registry_lifecycle_candidate_for_broker_position(
             broker_position=broker,
+            broker_open_orders=broker_open_orders,
             terminal_records=terminal_records,
         )
         if candidate:
@@ -1069,15 +1072,29 @@ def _registry_lifecycle_candidates_for_broker_positions(
 def _registry_lifecycle_candidate_for_broker_position(
     *,
     broker_position: Mapping[str, Any],
+    broker_open_orders: Sequence[Mapping[str, Any]],
     terminal_records: tuple[Any, ...],
 ) -> dict[str, Any] | None:
     candidates: list[dict[str, Any]] = []
+    same_contract_open_order = _same_contract_open_order_exists(
+        broker_position=broker_position,
+        broker_open_orders=broker_open_orders,
+    )
     for record in terminal_records:
         state = str(getattr(getattr(record, "current_state", None), "value", getattr(record, "current_state", "")))
         if state == "CLOSED_FLAT":
             continue
         for event in getattr(record, "event_chain", ()) or ():
-            if _event_type_value(getattr(event, "event_type", "")) != "ENTRY_FILL_BROKER_BACKED":
+            event_type = _event_type_value(getattr(event, "event_type", ""))
+            if event_type == "ENTRY_FILL_BROKER_BACKED":
+                source = "TRACK_B_LIVE_TRADE_REGISTRY_ENTRY_FILL"
+            elif (
+                event_type == "ENTRY_ORDER_SUBMITTED"
+                and not same_contract_open_order
+                and _submitted_entry_action_matches_broker_position(event, broker_position=broker_position)
+            ):
+                source = "TRACK_B_LIVE_TRADE_REGISTRY_SUBMITTED_ENTRY_BROKER_EFFECT"
+            else:
                 continue
             if not _event_matches_broker_position(event, broker_position=broker_position):
                 continue
@@ -1108,7 +1125,8 @@ def _registry_lifecycle_candidate_for_broker_position(
                         "entry_order_ids": [str(getattr(event, "order_id", ""))] if getattr(event, "order_id", None) else [],
                         "entry_perm_ids": [str(getattr(event, "perm_id", ""))] if getattr(event, "perm_id", None) else [],
                         "entry_exec_ids": [str(getattr(event, "exec_id", ""))] if getattr(event, "exec_id", None) else [],
-                        "source": "TRACK_B_LIVE_TRADE_REGISTRY_ENTRY_FILL",
+                        "broker_effect_observed_after_submitted_entry": source.endswith("BROKER_EFFECT"),
+                        "source": source,
                     }
                 )
             )
@@ -1158,6 +1176,39 @@ def _event_matches_broker_position(event: Any, *, broker_position: Mapping[str, 
     if not _account_matches(event_row, broker):
         return False
     return _contract_identity_matches(event_row, broker)
+
+
+def _submitted_entry_action_matches_broker_position(event: Any, *, broker_position: Mapping[str, Any]) -> bool:
+    action = str(getattr(event, "action", "") or "").strip().upper()
+    signed_qty = _decimal(broker_position.get("quantity"))
+    if signed_qty is None or signed_qty == 0:
+        return False
+    return (signed_qty > 0 and action == "BUY") or (signed_qty < 0 and action == "SELL")
+
+
+def _same_contract_open_order_exists(
+    *,
+    broker_position: Mapping[str, Any],
+    broker_open_orders: Sequence[Mapping[str, Any]],
+) -> bool:
+    broker = _normalize_contract_row(broker_position)
+    for order in broker_open_orders:
+        if not isinstance(order, Mapping):
+            continue
+        contract = _mapping(order.get("contract"))
+        order_row = _normalize_contract_row(
+            {
+                **contract,
+                "account_id": order.get("account_id") or order.get("account") or contract.get("account_id"),
+                "local_symbol": order.get("local_symbol") or order.get("localSymbol") or contract.get("local_symbol") or contract.get("localSymbol"),
+                "con_id": order.get("con_id") or order.get("conId") or contract.get("con_id") or contract.get("conId"),
+                "expiry": order.get("expiry") or contract.get("expiry") or contract.get("lastTradeDateOrContractMonth"),
+                "symbol": order.get("symbol") or contract.get("symbol"),
+            }
+        )
+        if _account_matches(order_row, broker) and _contract_identity_matches(order_row, broker):
+            return True
+    return False
 
 
 def _reconciliation_lifecycle_positions(reconciliation: Mapping[str, Any]) -> list[dict[str, Any]]:

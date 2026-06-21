@@ -4,6 +4,7 @@ import json
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
+from types import SimpleNamespace
 
 from mgc_v05l.execution_core.track_b_central_trade_registry import TradeEvent, TradeEventType
 import mgc_v05l.execution_core.track_b_managed_position_registry as managed_position_registry_module
@@ -47,6 +48,100 @@ def test_no_positions_reports_no_managed_positions(tmp_path: Path) -> None:
 def test_required_close_action_prefers_current_broker_quantity_over_stale_side() -> None:
     assert _required_close_action(side="SHORT", signed_broker_qty=Decimal("1")) == "SELL"
     assert _required_close_action(side="LONG", signed_broker_qty=Decimal("-1")) == "BUY"
+
+
+def test_submitted_entry_with_broker_effect_projects_adoptable_lifecycle_candidate() -> None:
+    event = SimpleNamespace(
+        event_type="ENTRY_ORDER_SUBMITTED",
+        generated_at=NOW,
+        trade_id="trade_mbt_submitted",
+        lifecycle_id="life_mbt_submitted",
+        lane_id="mbt_globex_active_participation_short",
+        thesis_strategy_id="mbt_globex_active_participation_short",
+        account_id="DUM882026",
+        symbol="MBT",
+        local_symbol="MBTU6",
+        con_id=772435596,
+        expiry="20260925",
+        side="SHORT",
+        action="SELL",
+        qty=Decimal("1"),
+        order_id="1",
+        perm_id="1618435662",
+        exec_id=None,
+        price=Decimal("62220.0"),
+    )
+    record = SimpleNamespace(current_state="WORKING_ENTRY", event_chain=(event,))
+    broker_position = {
+        "account_id": "DUM882026",
+        "security_type": "FUT",
+        "symbol": "MBT",
+        "local_symbol": "MBTU6",
+        "con_id": 772435596,
+        "expiry": "20260925",
+        "quantity": "-1.0",
+    }
+
+    candidate = managed_position_registry_module._registry_lifecycle_candidate_for_broker_position(
+        broker_position=broker_position,
+        broker_open_orders=[],
+        terminal_records=(record,),
+    )
+
+    assert candidate is not None
+    assert candidate["source"] == "TRACK_B_LIVE_TRADE_REGISTRY_SUBMITTED_ENTRY_BROKER_EFFECT"
+    assert candidate["broker_effect_observed_after_submitted_entry"] is True
+    assert candidate["local_symbol"] == "MBTU6"
+    assert candidate["side"] == "SHORT"
+    assert candidate["aggregate_qty"] == "-1"
+    assert candidate["entry_perm_ids"] == ["1618435662"]
+
+
+def test_submitted_entry_broker_effect_waits_when_same_contract_order_still_open() -> None:
+    event = SimpleNamespace(
+        event_type="ENTRY_ORDER_SUBMITTED",
+        generated_at=NOW,
+        trade_id="trade_mbt_submitted",
+        lifecycle_id="life_mbt_submitted",
+        lane_id="mbt_globex_active_participation_short",
+        thesis_strategy_id="mbt_globex_active_participation_short",
+        account_id="DUM882026",
+        symbol="MBT",
+        local_symbol="MBTU6",
+        con_id=772435596,
+        expiry="20260925",
+        side="SHORT",
+        action="SELL",
+        qty=Decimal("1"),
+        order_id="1",
+        perm_id="1618435662",
+        exec_id=None,
+        price=Decimal("62220.0"),
+    )
+    record = SimpleNamespace(current_state="WORKING_ENTRY", event_chain=(event,))
+    broker_position = {
+        "account_id": "DUM882026",
+        "security_type": "FUT",
+        "symbol": "MBT",
+        "local_symbol": "MBTU6",
+        "con_id": 772435596,
+        "expiry": "20260925",
+        "quantity": "-1.0",
+    }
+    open_order = {
+        "account_id": "DUM882026",
+        "symbol": "MBT",
+        "local_symbol": "MBTU6",
+        "con_id": 772435596,
+    }
+
+    candidate = managed_position_registry_module._registry_lifecycle_candidate_for_broker_position(
+        broker_position=broker_position,
+        broker_open_orders=[open_order],
+        terminal_records=(record,),
+    )
+
+    assert candidate is None
 
 
 def test_historical_review_required_lifecycle_ignored_when_active_truth_clean_flat(tmp_path: Path) -> None:
