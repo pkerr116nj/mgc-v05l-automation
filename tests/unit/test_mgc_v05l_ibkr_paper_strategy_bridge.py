@@ -2200,6 +2200,87 @@ def test_futures_contract_resolver_does_not_rewrite_existing_lifecycle_exit_cont
     assert resolver["blocker"] == "CONTRACT_EXIT_OR_MANAGEMENT_ALLOWED"
 
 
+def test_crypto_active_evidence_bridge_preflight_reaches_resolver_allowed(tmp_path: Path) -> None:
+    cases = [
+        ("MBT", "mbt_us_active_participation_long", "BUY", "BUY_TO_OPEN", 772435596, "MBTU6"),
+        ("MET", "met_us_active_participation_short", "SELL", "SELL_TO_OPEN", 772435602, "METU6"),
+    ]
+    for symbol, lane_id, action, intent_type, con_id, local_symbol in cases:
+        config = _config(
+            tmp_path,
+            submit=True,
+            strategy_id=lane_id,
+            symbol=symbol,
+            contract_month="202609",
+            action=action,
+            limit_price_model=(
+                "DELAYED_ASK_PLUS_1T_MARKETABLE_BUY"
+                if action == "BUY"
+                else "DELAYED_BID_MINUS_1T_MARKETABLE_SELL"
+            ),
+            reason=f"PAPER_ACTIVE_EVIDENCE_{symbol}_US_PARTICIPATION_{'LONG' if action == 'BUY' else 'SHORT'}_V1",
+            caller_metadata={
+                **_approved_runtime_metadata(
+                    strategy_id=lane_id,
+                    source_instrument=symbol,
+                    executable_proxy=symbol,
+                    action=action,
+                    intent_type=intent_type,
+                    bridge_proxy_mode=f"{symbol}_SIGNAL_DIRECT_PHASE1",
+                ),
+            },
+        )
+        checks = _build_preflight_checks(
+            config=config,
+            intent=_intent_from_config(config),
+            selected_account_id="DUM882026",
+            open_orders={"open_order_count": 0},
+            current_position_quantity=0.0,
+            quote_context=_quote_context(),
+            exact_contract_report={"exact_contract": {}},
+            qualified_contract_report={
+                "ok": True,
+                "qualified_contract": {
+                    "symbol": symbol,
+                    "broker_symbol": symbol,
+                    "expiry": "20260925",
+                    "con_id": con_id,
+                    "local_symbol": local_symbol,
+                    "exchange": "CMECRYPTO",
+                    "currency": "USD",
+                    "multiplier": "0.1",
+                    "trading_class": symbol,
+                    "min_tick": 5.0 if symbol == "MBT" else 0.5,
+                },
+                "qualified_contract_identifier": con_id,
+                "api_contract_details": [
+                    {
+                        "symbol": symbol,
+                        "expiry": "20260925",
+                        "con_id": con_id,
+                        "local_symbol": local_symbol,
+                        "exchange": "CMECRYPTO",
+                        "currency": "USD",
+                        "multiplier": "0.1",
+                        "trading_class": symbol,
+                        "min_tick": 5.0 if symbol == "MBT" else 0.5,
+                        "updated_at": "2999-01-01T00:00:00+00:00",
+                    }
+                ],
+            },
+            audit_events=[],
+            entry_execution_pricing={
+                "is_entry": True,
+                "execution_price_source": "RUNTIME_DATABENTO_1M_CLOSE",
+                "block_submit": False,
+            },
+        )
+
+        resolver = next(row for row in checks if row["name"] == "futures_contract_resolver")
+        assert resolver["passed"] is True
+        assert resolver["blocker"] == "CONTRACT_ALLOWED"
+
+
 def test_stop_exit_uses_hard_policy_and_runtime_price_source(tmp_path: Path) -> None:
     _write_runtime_1m_candle(
         tmp_path,

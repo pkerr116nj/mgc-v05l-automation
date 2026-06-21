@@ -387,6 +387,74 @@ def test_rates_new_entry_allows_fresh_exact_contract_details() -> None:
     assert result["product_family"] == "RATES"
 
 
+def test_crypto_new_entry_allows_fresh_exact_contract_details() -> None:
+    cases = [
+        ("MBT", "202609", "20260925", 772435596, "MBTU6"),
+        ("MET", "202609", "20260925", 772435602, "METU6"),
+    ]
+    for symbol, contract_month, expiry, con_id, local_symbol in cases:
+        result = evaluate_futures_contract_pre_submit(
+            FuturesContractResolverInput(
+                strategy_id=f"{symbol.lower()}_us_active_participation_long",
+                symbol=symbol,
+                contract_month=contract_month,
+                action="BUY",
+                intent_type="BUY_TO_OPEN",
+                selected_target=_target(
+                    symbol=symbol,
+                    contract_month=contract_month,
+                    expiry=expiry,
+                    con_id=con_id,
+                    local_symbol=local_symbol,
+                ),
+                qualified_contract_report=_report(
+                    symbol=symbol,
+                    expiry=expiry,
+                    con_id=con_id,
+                    local_symbol=local_symbol,
+                    updated_at="2026-05-29T11:59:00+00:00",
+                ),
+                now=NOW,
+            )
+        )
+
+        assert result["classification"] == CONTRACT_ALLOWED
+        assert result["submit_allowed"] is True
+        assert result["selected_contract"]["local_symbol"] == local_symbol
+        assert result["selected_contract"]["con_id"] == con_id
+        assert result["product_family"] == "CRYPTO"
+
+
+def test_unsupported_symbol_still_fails_closed() -> None:
+    result = evaluate_futures_contract_pre_submit(
+        FuturesContractResolverInput(
+            strategy_id="unsupported_us_active_participation_long",
+            symbol="ABC",
+            contract_month="202609",
+            action="BUY",
+            intent_type="BUY_TO_OPEN",
+            selected_target=_target(
+                symbol="ABC",
+                contract_month="202609",
+                expiry="20260925",
+                con_id=123,
+                local_symbol="ABCU6",
+            ),
+            qualified_contract_report=_report(
+                symbol="ABC",
+                expiry="20260925",
+                con_id=123,
+                local_symbol="ABCU6",
+                updated_at="2026-05-29T11:59:00+00:00",
+            ),
+            now=NOW,
+        )
+    )
+
+    assert result["classification"] == CONTRACT_AMBIGUOUS
+    assert result["submit_allowed"] is False
+
+
 def test_new_short_entry_resolves_independently_from_exit_policy() -> None:
     result = evaluate_futures_contract_pre_submit(
         FuturesContractResolverInput(

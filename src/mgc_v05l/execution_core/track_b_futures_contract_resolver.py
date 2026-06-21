@@ -21,6 +21,7 @@ CONTRACT_EXIT_OR_MANAGEMENT_ALLOWED = "CONTRACT_EXIT_OR_MANAGEMENT_ALLOWED"
 _GOLD_SYMBOLS = {"GC", "MGC"}
 _INDEX_SYMBOLS = {"MNQ", "MES", "NQ", "ES"}
 _RATES_SYMBOLS = {"ZT", "ZF", "ZN", "ZB"}
+_CRYPTO_SYMBOLS = {"BTC", "MBT", "ETH", "MET", "SOL", "MSL"}
 _GOLD_ROLL_BLOCK_DAYS = 30
 _INDEX_ROLL_WARN_DAYS = 21
 _INDEX_ROLL_BLOCK_DAYS = 7
@@ -308,6 +309,8 @@ def _product_family(symbol: str) -> str:
         return "INDEX"
     if symbol in _RATES_SYMBOLS:
         return "RATES"
+    if symbol in _CRYPTO_SYMBOLS:
+        return "CRYPTO"
     return "UNKNOWN"
 
 
