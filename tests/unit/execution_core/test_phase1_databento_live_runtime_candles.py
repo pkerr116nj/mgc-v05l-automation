@@ -1027,6 +1027,40 @@ def test_live_listener_defaults_replay_to_current_session_for_london_late_anchor
     assert anchor.source == "RECOVERED_PHASE1_1M"
 
 
+def test_live_listener_clamps_replay_start_to_databento_weekly_provider_floor(tmp_path: Path) -> None:
+    now = datetime(2026, 6, 21, 5, 18, tzinfo=timezone.utc)
+    client = FakeLiveClient(_live_records(12, symbol="MSL", end=now - timedelta(minutes=1)))
+
+    run_phase1_databento_live_listener(
+        config=_listener_config(tmp_path, symbols=("MSL",), now=now, max_bars=90),
+        live_client_factory=lambda _key: client,
+        now_func=lambda: now,
+    )
+
+    assert client.subscribe_kwargs is not None
+    assert client.subscribe_kwargs["start"] == "2026-06-21T00:00:00+00:00"
+
+
+def test_live_listener_clamps_explicit_stale_replay_start_to_provider_floor(tmp_path: Path) -> None:
+    now = datetime(2026, 6, 21, 5, 18, tzinfo=timezone.utc)
+    client = FakeLiveClient(_live_records(12, symbol="MSL", end=now - timedelta(minutes=1)))
+
+    run_phase1_databento_live_listener(
+        config=_listener_config(
+            tmp_path,
+            symbols=("MSL",),
+            now=now,
+            max_bars=90,
+            intraday_replay_start="2026-06-20T22:00:00+00:00",
+        ),
+        live_client_factory=lambda _key: client,
+        now_func=lambda: now,
+    )
+
+    assert client.subscribe_kwargs is not None
+    assert client.subscribe_kwargs["start"] == "2026-06-21T00:00:00+00:00"
+
+
 def test_no_broker_or_paper_proof_terms_in_phase1_live_module() -> None:
     text = Path("src/mgc_v05l/execution_core/phase1_databento_live_runtime_candles.py").read_text(encoding="utf-8")
 

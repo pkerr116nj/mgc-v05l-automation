@@ -322,7 +322,10 @@ def run_phase1_databento_live_listener(
         client = _create_phase1_live_client(api_key=api_key, live_client_factory=live_client_factory)
         client.add_callback(state.on_record, state.on_error)
         client.add_stream(raw_dbn_path, exception_callback=state.on_error)
-        intraday_replay_start = config.intraday_replay_start or _current_futures_session_replay_start(started_at)
+        intraday_replay_start = _phase1_databento_live_replay_start(
+            requested_start=config.intraday_replay_start,
+            started_at=started_at,
+        )
         subscribe_kwargs: dict[str, Any] = {
             "dataset": _single_dataset(selection=selection, fallback=config.dataset),
             "schema": _single_schema(selection=selection, fallback=config.schema),
@@ -773,6 +776,29 @@ def _current_session_anchor_bars(*, bars: Sequence[Mapping[str, Any]], generated
 
 def _current_futures_session_replay_start(value: datetime) -> str:
     return _current_futures_session_start_utc(value).isoformat()
+
+
+def _phase1_databento_live_replay_start(*, requested_start: str | None, started_at: datetime) -> str:
+    requested = _parse_datetime(requested_start) if requested_start else _current_futures_session_start_utc(started_at)
+    if requested is None:
+        requested = _current_futures_session_start_utc(started_at)
+    requested = requested.astimezone(timezone.utc)
+    provider_floor = _databento_live_replay_provider_floor_utc(started_at)
+    return max(requested, provider_floor).isoformat()
+
+
+def _databento_live_replay_provider_floor_utc(value: datetime) -> datetime:
+    """Databento Live replay is bounded by the current weekly replay window.
+
+    The weekly lower bound resets at Sunday 00:00 UTC.  On Sunday morning this
+    can be later than the futures session open from Saturday evening, and the
+    provider rejects older starts before the subscription can warm Phase-1.
+    """
+
+    value_utc = _coerce_now(value).astimezone(timezone.utc)
+    days_since_sunday = (value_utc.weekday() + 1) % 7
+    sunday = value_utc.date() - timedelta(days=days_since_sunday)
+    return datetime.combine(sunday, datetime.min.time(), tzinfo=timezone.utc)
 
 
 def _current_futures_session_start_utc(value: datetime) -> datetime:
