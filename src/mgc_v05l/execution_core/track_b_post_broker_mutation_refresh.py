@@ -12,6 +12,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Callable, Mapping, Sequence
 
+from .phase1_runtime_ticker_registry import PHASE1_RUNTIME_TICKER_ORDER
 from .track_b_atomic_io import write_json_atomic
 
 
@@ -27,7 +28,7 @@ DEFAULT_POST_BROKER_MUTATION_REFRESH_ARTIFACT = (
 )
 
 PAPER_ACCOUNT = "DUM882026"
-DEFAULT_SYMBOLS = ("MES", "MNQ", "MGC")
+DEFAULT_SYMBOLS = PHASE1_RUNTIME_TICKER_ORDER
 
 CommandRunner = Callable[[Sequence[str], Path, float], subprocess.CompletedProcess[str]]
 
@@ -121,7 +122,8 @@ def _refresh_steps(config: PostBrokerMutationRefreshConfig) -> list[dict[str, An
     python = config.python_executable
     repo = str(config.repo_root)
     account = str(config.account_id)
-    symbols = ",".join(config.symbols)
+    canonical_symbols = _normal_symbols(PHASE1_RUNTIME_TICKER_ORDER)
+    symbols = ",".join(canonical_symbols)
     broker_timeout = str(max(1.0, min(float(config.timeout_seconds), 20.0)))
     return [
         {
@@ -230,6 +232,10 @@ def _refresh_steps(config: PostBrokerMutationRefreshConfig) -> list[dict[str, An
     ]
 
 
+def _normal_symbols(symbols: Sequence[str]) -> tuple[str, ...]:
+    return tuple(text for symbol in symbols if (text := str(symbol).strip().upper()))
+
+
 def _base_payload(
     *,
     config: PostBrokerMutationRefreshConfig,
@@ -257,6 +263,11 @@ def _base_payload(
         "global_cancel_allowed": False,
         "broad_flatten_allowed": False,
         "safety_blockers": list(safety_blockers),
+        "requested_symbols": list(_normal_symbols(config.symbols)),
+        "canonical_symbols": list(_normal_symbols(PHASE1_RUNTIME_TICKER_ORDER)),
+        "canonical_refresh_scope": "GLOBAL_COMPLETE",
+        "scoped_symbols_diagnostic_only": tuple(_normal_symbols(config.symbols))
+        != tuple(_normal_symbols(PHASE1_RUNTIME_TICKER_ORDER)),
         "step_count": len(steps),
         "required_failure_count": sum(
             1 for row in steps if row.get("succeeded") is not True and row.get("diagnostic_only") is not True

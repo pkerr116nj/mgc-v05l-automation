@@ -4,6 +4,7 @@ import subprocess
 from datetime import UTC, datetime
 from pathlib import Path
 
+from mgc_v05l.execution_core.phase1_runtime_ticker_registry import PHASE1_RUNTIME_TICKER_ORDER
 from mgc_v05l.execution_core.track_b_post_broker_mutation_refresh import (
     POST_BROKER_MUTATION_REFRESH_DEGRADED,
     POST_BROKER_MUTATION_REFRESH_SKIPPED,
@@ -46,6 +47,43 @@ def test_post_broker_mutation_refresh_runs_ods_after_current_scope_authority(tmp
     assert payload["live_money_eligible"] is False
     assert payload["paper_proof_invoked"] is False
     assert payload["global_cancel_allowed"] is False
+
+
+def test_partial_scope_refresh_uses_global_symbols_for_canonical_truth(tmp_path: Path) -> None:
+    commands: list[list[str]] = []
+
+    def _runner(command, repo_root, timeout):
+        commands.append(list(command))
+        return subprocess.CompletedProcess(list(command), 0, stdout='{"ok": true}', stderr="")
+
+    payload = post_position_order_change_refresh(
+        config=PostBrokerMutationRefreshConfig(
+            repo_root=tmp_path,
+            python_executable="python",
+            symbols=("MES", "MNQ", "MGC"),
+        ),
+        trigger="managed_close_submit_observed",
+        mutation_report={"classification": "MANAGED_EXIT_ACTUATOR_APPLIED", "broker_state_mutated": True},
+        now=NOW,
+        command_runner=_runner,
+        write=False,
+    )
+
+    reconciliation_command = next(
+        command for command in commands if _module_name(command).endswith("track_b_paper_broker_reconciliation")
+    )
+    shared_truth_command = next(
+        command for command in commands if _module_name(command).endswith("track_b_shared_truth_refresh_cli")
+    )
+    canonical_symbols = ",".join(PHASE1_RUNTIME_TICKER_ORDER)
+
+    assert _arg_after(reconciliation_command, "--symbols") == canonical_symbols
+    assert _arg_after(shared_truth_command, "--symbols") == canonical_symbols
+    assert "MET" in _arg_after(shared_truth_command, "--symbols").split(",")
+    assert payload["requested_symbols"] == ["MES", "MNQ", "MGC"]
+    assert payload["canonical_symbols"] == list(PHASE1_RUNTIME_TICKER_ORDER)
+    assert payload["canonical_refresh_scope"] == "GLOBAL_COMPLETE"
+    assert payload["scoped_symbols_diagnostic_only"] is True
 
 
 def test_control_plane_failure_is_diagnostic_when_other_refreshes_succeed(tmp_path: Path) -> None:
@@ -104,3 +142,8 @@ def test_non_paper_or_wrong_account_refresh_is_skipped(tmp_path: Path) -> None:
 def _module_name(command) -> str:
     command = list(command)
     return command[command.index("-m") + 1]
+
+
+def _arg_after(command, flag: str) -> str:
+    command = list(command)
+    return command[command.index(flag) + 1]
