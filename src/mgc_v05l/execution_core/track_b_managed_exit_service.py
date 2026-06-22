@@ -1466,6 +1466,16 @@ def _run_broker_truth_sweeper(
             managed_positions.append(adopted)
             visible_positions.append(adopted)
             changed = True
+            superseded = _demote_stale_same_contract_managed_positions(
+                managed_positions=managed_positions,
+                selected_index=len(managed_positions) - 1,
+                broker_position=broker_position,
+                selected_position=adopted,
+                terminal_records=terminal_records,
+                now=now,
+            )
+            if superseded:
+                diagnostics.extend(superseded)
             diagnostics.append(
                 {
                     "classification": adopted.get("classification"),
@@ -1615,6 +1625,8 @@ def _matching_managed_position(
     for index, row in enumerate(managed_positions):
         if _managed_position_diagnostic_only(row):
             continue
+        if not _managed_position_qty_agrees_with_broker(row, broker_position):
+            continue
         broker_nested = _mapping(row.get("broker_position"))
         row_con_id = _int_or_none(row.get("con_id") or broker_nested.get("con_id"))
         row_symbol = _string_or_none(row.get("local_symbol") or broker_nested.get("local_symbol"))
@@ -1737,6 +1749,30 @@ def _managed_position_matches_broker_position(row: Mapping[str, Any], broker_pos
     if row_con_id and identity["con_id"] and row_con_id == identity["con_id"]:
         return True
     return bool(row_symbol and identity["local_symbol"] and row_symbol == identity["local_symbol"])
+
+
+def _managed_position_qty_agrees_with_broker(row: Mapping[str, Any], broker_position: Mapping[str, Any]) -> bool:
+    broker_qty = _decimal(broker_position.get("quantity") or broker_position.get("signed_qty"))
+    row_qty = _managed_position_signed_qty(row)
+    if broker_qty is None or row_qty is None or broker_qty == 0 or row_qty == 0:
+        return True
+    return (broker_qty > 0) == (row_qty > 0)
+
+
+def _managed_position_signed_qty(row: Mapping[str, Any]) -> Decimal | None:
+    for key in ("signed_lifecycle_qty", "aggregate_qty", "signed_qty"):
+        quantity = _decimal(row.get(key))
+        if quantity is not None and quantity != 0:
+            return quantity
+    quantity = _decimal(row.get("quantity"))
+    if quantity is None or quantity == 0:
+        return None
+    side = str(row.get("side") or "").upper()
+    if side == "SHORT":
+        return -abs(quantity)
+    if side == "LONG":
+        return abs(quantity)
+    return quantity
 
 
 def _demote_broker_flat_managed_positions(

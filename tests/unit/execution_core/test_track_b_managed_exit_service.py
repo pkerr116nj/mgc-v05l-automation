@@ -948,6 +948,90 @@ def test_broker_truth_sweeper_adopts_broker_position_from_lifecycle_report(tmp_p
     assert adopted["managed_exit_policy_id"] == "GLOBEX_ACTIVE_EVIDENCE_TIMEBOX_60M_EXIT_V1"
 
 
+def test_broker_truth_sweeper_selects_fresh_same_contract_owner_over_stale_opposite_side(
+    tmp_path: Path,
+) -> None:
+    _broker_truth(
+        tmp_path,
+        symbol="MGC",
+        local_symbol="MGCQ6",
+        con_id=732156883,
+        expiry="20260827",
+        quantity="1.0",
+    )
+    registry = tmp_path / "outputs/track_b_execution_core/managed_positions/latest_managed_positions.json"
+    _write_json(
+        registry,
+        {
+            "classification": "OPEN_MANAGED_EXIT_DUE",
+            "managed_positions": [
+                {
+                    "classification": "OPEN_MANAGED_EXIT_DUE",
+                    "account_id": "DUM882026",
+                    "symbol": "MGC",
+                    "track_b_root": "MGC",
+                    "local_symbol": "MGCQ6",
+                    "con_id": 732156883,
+                    "quantity": "1",
+                    "aggregate_qty": "-1",
+                    "signed_lifecycle_qty": "-1",
+                    "signed_broker_qty": "1",
+                    "side": "SHORT",
+                    "lane_id": "mgc_globex_active_participation_short",
+                    "strategy_id": "mgc_globex_active_participation_short",
+                    "lifecycle_id": "bridge_fill_MGC|1m|2026-06-18T23:04:00Z|SELL_TO_OPEN",
+                    "trade_id": "trade-old-mgc-short",
+                    "managed_exit_policy_id": "GLOBEX_ACTIVE_EVIDENCE_TIMEBOX_15M_EXIT_V1",
+                    "entry_time": "2026-06-18T23:06:00+00:00",
+                    "exit_due": True,
+                    "exit_due_state": "EXIT_DUE",
+                }
+            ],
+        },
+    )
+    _write_live_entry_fill(
+        tmp_path,
+        trade_id="trade-current-mgc-long",
+        lifecycle_id="bridge_fill_MGC|1m|2026-06-22T06:08:00Z|BUY_TO_OPEN",
+        lane_id="mgc_globex_active_participation_long",
+        generated_at=datetime(2026, 6, 22, 6, 11, 8, tzinfo=UTC),
+        symbol="MGC",
+        local_symbol="MGCQ6",
+        con_id=732156883,
+        side="LONG",
+        action="BUY",
+        price="4213.9",
+    )
+    _write_phase1_5m_bars(
+        tmp_path,
+        "MGC",
+        [
+            "2026-06-22T06:15:00+00:00",
+            "2026-06-22T06:20:00+00:00",
+            "2026-06-22T06:25:00+00:00",
+        ],
+    )
+
+    report = _run_broker_truth_sweeper(
+        config=TrackBManagedExitServiceConfig(repo_root=tmp_path),
+        now=datetime(2026, 6, 22, 6, 26, tzinfo=UTC),
+        write=True,
+    )
+
+    updated = json.loads(registry.read_text(encoding="utf-8"))
+    active = [row for row in updated["managed_positions"] if row.get("diagnostic_only") is not True]
+    diagnostic = [row for row in updated["managed_positions"] if row.get("diagnostic_only") is True]
+    assert report["classification"] == "MANAGED_EXIT_BROKER_TRUTH_SWEEP_ADOPTED"
+    assert len(active) == 1
+    assert active[0]["lifecycle_id"] == "bridge_fill_MGC|1m|2026-06-22T06:08:00Z|BUY_TO_OPEN"
+    assert active[0]["side"] == "LONG"
+    assert active[0]["aggregate_qty"] == "1.0"
+    assert active[0]["required_close_action"] == "SELL"
+    assert active[0]["broker_qty_match"] is True
+    assert diagnostic[0]["lifecycle_id"] == "bridge_fill_MGC|1m|2026-06-18T23:04:00Z|SELL_TO_OPEN"
+    assert diagnostic[0]["classification"] == "STALE_SUPERSEDED_LIFECYCLE_PROJECTION"
+
+
 def test_broker_truth_sweeper_marks_missing_policy_for_review(tmp_path: Path) -> None:
     _broker_truth(tmp_path)
     _write_json(
