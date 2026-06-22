@@ -49,6 +49,7 @@ OPEN_MANAGED_MATCHED = "OPEN_MANAGED_MATCHED"
 OPEN_MANAGED_EXIT_DUE = "OPEN_MANAGED_EXIT_DUE"
 OPEN_MANAGED_CLOSE_WORKING = "OPEN_MANAGED_CLOSE_WORKING"
 BROKER_BACKED_ADOPTION_REQUIRED = "BROKER_BACKED_ADOPTION_REQUIRED"
+MANUAL_OPERATOR_EXPOSURE = "MANUAL_OPERATOR_EXPOSURE"
 MANAGED_POSITION_METADATA_INCOMPLETE = "MANAGED_POSITION_METADATA_INCOMPLETE"
 LIFECYCLE_WITHOUT_BROKER = "LIFECYCLE_WITHOUT_BROKER"
 REVIEW_REQUIRED = "REVIEW_REQUIRED"
@@ -181,6 +182,13 @@ def build_track_b_managed_position_registry(
             broker_open_orders=broker_open_orders,
             terminal_records=terminal_records,
         ),
+    )
+    lifecycle_positions, broker_flat_lifecycle_projections = _demote_broker_flat_lifecycle_residue(
+        lifecycle_positions=lifecycle_positions,
+        broker_positions=broker_positions,
+        broker_open_orders=broker_open_orders,
+        fresh_broker_positions_complete=fresh_broker_positions is not None,
+        fresh_open_orders_complete=fresh_broker_open_orders is not None,
     )
     pre_restart_exposure_resolution = resolve_pre_restart_exposure_reconciliation(
         config=PreRestartExposureResolverConfig(repo_root=config.repo_root),
@@ -325,6 +333,7 @@ def build_track_b_managed_position_registry(
         "superseded_lifecycle_projections": [
             *list(superseded_lifecycle_positions),
             *owner_superseded_lifecycle_positions,
+            *broker_flat_lifecycle_projections,
         ],
         "projection_authority_diagnostics": projection_authority_diagnostics,
         "unresolved_submit_ownership": unresolved_ownership,
@@ -637,6 +646,7 @@ def _managed_positions(
             "attention_required": effective_classification
             in {
                 BROKER_BACKED_ADOPTION_REQUIRED,
+                MANUAL_OPERATOR_EXPOSURE,
                 MANAGED_POSITION_METADATA_INCOMPLETE,
                 LIFECYCLE_WITHOUT_BROKER,
                 REVIEW_REQUIRED,
@@ -1069,6 +1079,43 @@ def _registry_lifecycle_candidates_for_broker_positions(
     return candidates
 
 
+def _demote_broker_flat_lifecycle_residue(
+    *,
+    lifecycle_positions: Sequence[Mapping[str, Any]],
+    broker_positions: Sequence[Mapping[str, Any]],
+    broker_open_orders: Sequence[Mapping[str, Any]],
+    fresh_broker_positions_complete: bool,
+    fresh_open_orders_complete: bool,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    if not fresh_broker_positions_complete or not fresh_open_orders_complete:
+        return [dict(item) for item in lifecycle_positions if isinstance(item, Mapping)], []
+    retained: list[dict[str, Any]] = []
+    demoted: list[dict[str, Any]] = []
+    for lifecycle in lifecycle_positions:
+        if not isinstance(lifecycle, Mapping):
+            continue
+        row = dict(lifecycle)
+        key = _position_key(row)
+        broker = _first_match([dict(item) for item in broker_positions if isinstance(item, Mapping)], key)
+        if broker:
+            retained.append(row)
+            continue
+        if _same_contract_open_order_exists(broker_position=row, broker_open_orders=broker_open_orders):
+            retained.append(row)
+            continue
+        demoted.append(
+            {
+                **row,
+                "classification": "STALE_BROKER_FLAT_LIFECYCLE_DIAGNOSTIC",
+                "superseded_reason": "fresh_complete_broker_truth_flat_for_lifecycle_contract",
+                "current_hot_path_scope": "HISTORICAL_BROKER_FLAT_DIAGNOSTIC_ONLY",
+                "broker_position_present": False,
+                "open_order_present": False,
+            }
+        )
+    return retained, demoted
+
+
 def _registry_lifecycle_candidate_for_broker_position(
     *,
     broker_position: Mapping[str, Any],
@@ -1277,6 +1324,8 @@ def _position_classification(
     close_order_state: Mapping[str, Any] | None,
     source_stale: Mapping[str, Any],
 ) -> str:
+    if broker and not lifecycle and not review:
+        return MANUAL_OPERATOR_EXPOSURE
     if source_stale.get("stale") is True and not _fresh_broker_position_overrides_stale_reconciliation(
         broker=broker,
         source_stale=source_stale,
@@ -1288,8 +1337,6 @@ def _position_classification(
     ) and not _retryable_unmutated_managed_close_review(lifecycle_report)
     if (review and not _retryable_unmutated_managed_close_review(review)) or lifecycle_review:
         return REVIEW_REQUIRED
-    if broker and not lifecycle:
-        return BROKER_BACKED_ADOPTION_REQUIRED
     if lifecycle and not _managed_exit_policy_id(lifecycle, None, lifecycle_report, manifest):
         return MANAGED_POSITION_METADATA_INCOMPLETE
     if lifecycle and not broker:
@@ -1380,6 +1427,7 @@ def _overall_classification(
     priority = [
         PROJECTION_AUTHORITY_DIVERGENCE,
         REVIEW_REQUIRED,
+        MANUAL_OPERATOR_EXPOSURE,
         BROKER_BACKED_ADOPTION_REQUIRED,
         MANAGED_POSITION_METADATA_INCOMPLETE,
         LIFECYCLE_WITHOUT_BROKER,
@@ -1898,6 +1946,9 @@ def _recommended_action(*, classification: str) -> str:
         OPEN_MANAGED_MATCHED: "Observe; position is broker/lifecycle matched.",
         OPEN_MANAGED_EXIT_DUE: "Observe runtime-managed exit path; do not manually interfere unless safety degrades.",
         OPEN_MANAGED_CLOSE_WORKING: "Monitor existing close order; do not submit a duplicate close.",
+        MANUAL_OPERATOR_EXPOSURE: (
+            "Manual/operator-owned broker exposure; keep visible, do not adopt into Track B strategy lifecycle."
+        ),
         BROKER_BACKED_ADOPTION_REQUIRED: "Run scoped broker-backed adoption before any close remediation.",
         MANAGED_POSITION_METADATA_INCOMPLETE: "Repair manifest/lifecycle management metadata before exit handling.",
         LIFECYCLE_WITHOUT_BROKER: "Review lifecycle artifact against broker-flat truth; local cleanup may be needed.",
@@ -1920,7 +1971,7 @@ def _reconciliation_status(
     if broker and lifecycle:
         return OPEN_MANAGED_MATCHED
     if broker and not lifecycle:
-        return BROKER_BACKED_ADOPTION_REQUIRED
+        return MANUAL_OPERATOR_EXPOSURE
     if lifecycle and not broker:
         return LIFECYCLE_WITHOUT_BROKER
     return NO_MANAGED_POSITIONS

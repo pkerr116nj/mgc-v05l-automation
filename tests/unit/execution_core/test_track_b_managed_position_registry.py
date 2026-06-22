@@ -9,8 +9,8 @@ from types import SimpleNamespace
 from mgc_v05l.execution_core.track_b_central_trade_registry import TradeEvent, TradeEventType
 import mgc_v05l.execution_core.track_b_managed_position_registry as managed_position_registry_module
 from mgc_v05l.execution_core.track_b_managed_position_registry import (
-    BROKER_BACKED_ADOPTION_REQUIRED,
     LIFECYCLE_WITHOUT_BROKER,
+    MANUAL_OPERATOR_EXPOSURE,
     MANAGED_POSITION_METADATA_INCOMPLETE,
     NO_MANAGED_POSITIONS,
     OPEN_MANAGED_CLOSE_WORKING,
@@ -1105,9 +1105,9 @@ def test_stale_reconciliation_does_not_hide_fresh_broker_backed_adoption_candida
     )
 
     assert payload["source_freshness"]["stale_sources"] == ["reconciliation"]
-    assert payload["classification"] == BROKER_BACKED_ADOPTION_REQUIRED
+    assert payload["classification"] == MANUAL_OPERATOR_EXPOSURE
     position = payload["managed_positions"][0]
-    assert position["classification"] == BROKER_BACKED_ADOPTION_REQUIRED
+    assert position["classification"] == MANUAL_OPERATOR_EXPOSURE
     assert position["side"] == "SHORT"
     assert position["signed_broker_qty"] == "-1"
 
@@ -1168,7 +1168,7 @@ def test_close_working_comes_from_managed_order_registry(tmp_path: Path) -> None
     assert payload["managed_positions"][0]["managed_order_state"]["broker_order_id"] == "31"
 
 
-def test_broker_backed_position_without_lifecycle_requires_adoption(tmp_path: Path) -> None:
+def test_broker_only_position_without_track_b_owner_is_manual_operator_exposure(tmp_path: Path) -> None:
     _seed_base(tmp_path, broker_positions=[_broker_position()])
 
     payload = build_track_b_managed_position_registry(
@@ -1176,8 +1176,9 @@ def test_broker_backed_position_without_lifecycle_requires_adoption(tmp_path: Pa
         now=NOW,
     )
 
-    assert payload["classification"] == BROKER_BACKED_ADOPTION_REQUIRED
-    assert payload["managed_positions"][0]["recommended_operator_action"].startswith("Run scoped broker-backed adoption")
+    assert payload["classification"] == MANUAL_OPERATOR_EXPOSURE
+    assert payload["managed_positions"][0]["reconciliation_status"] == MANUAL_OPERATOR_EXPOSURE
+    assert "do not adopt" in payload["managed_positions"][0]["recommended_operator_action"]
 
 
 def test_registry_backed_broker_position_repairs_stale_lifecycle_projection(tmp_path: Path) -> None:
@@ -1912,6 +1913,72 @@ def test_lifecycle_without_broker_is_classified(tmp_path: Path) -> None:
     assert payload["managed_positions"][0]["attention_required"] is True
 
 
+def test_fresh_broker_flat_truth_demotes_lifecycle_only_residue(tmp_path: Path) -> None:
+    lifecycle = _lifecycle_position(lifecycle_id="life_broker_flat_residue")
+    _seed_base(tmp_path, lifecycle_positions=[lifecycle])
+    _write_lifecycle_report(tmp_path, lifecycle_id="life_broker_flat_residue")
+    _write_fresh_broker_positions_snapshot(tmp_path, positions=[])
+    _write_fresh_broker_open_orders_snapshot(tmp_path, open_orders=[])
+
+    payload = build_track_b_managed_position_registry(
+        config=TrackBManagedPositionRegistryConfig(repo_root=tmp_path),
+        now=NOW,
+    )
+
+    assert payload["classification"] == NO_MANAGED_POSITIONS
+    assert payload["managed_positions"] == []
+    demoted = payload["superseded_lifecycle_projections"][0]
+    assert demoted["classification"] == "STALE_BROKER_FLAT_LIFECYCLE_DIAGNOSTIC"
+    assert demoted["lifecycle_id"] == "life_broker_flat_residue"
+    assert demoted["current_hot_path_scope"] == "HISTORICAL_BROKER_FLAT_DIAGNOSTIC_ONLY"
+
+
+def test_broker_flat_lifecycle_residue_stays_visible_when_open_order_truth_incomplete(tmp_path: Path) -> None:
+    lifecycle = _lifecycle_position(lifecycle_id="life_open_order_truth_unknown")
+    _seed_base(tmp_path, lifecycle_positions=[lifecycle])
+    _write_lifecycle_report(tmp_path, lifecycle_id="life_open_order_truth_unknown")
+    _write_fresh_broker_positions_snapshot(tmp_path, positions=[])
+
+    payload = build_track_b_managed_position_registry(
+        config=TrackBManagedPositionRegistryConfig(repo_root=tmp_path),
+        now=NOW,
+    )
+
+    assert payload["classification"] == LIFECYCLE_WITHOUT_BROKER
+    assert payload["managed_positions"][0]["lifecycle_id"] == "life_open_order_truth_unknown"
+
+
+def test_broker_flat_lifecycle_residue_stays_visible_with_same_contract_open_order(tmp_path: Path) -> None:
+    lifecycle = _lifecycle_position(lifecycle_id="life_same_contract_order")
+    _seed_base(tmp_path, lifecycle_positions=[lifecycle])
+    _write_lifecycle_report(tmp_path, lifecycle_id="life_same_contract_order")
+    _write_fresh_broker_positions_snapshot(tmp_path, positions=[])
+    _write_fresh_broker_open_orders_snapshot(
+        tmp_path,
+        open_orders=[
+            {
+                "account_id": "DUM882026",
+                "security_type": "FUT",
+                "symbol": "MNQ",
+                "local_symbol": "MNQM6",
+                "con_id": 770561201,
+                "expiry": "20260618",
+                "action": "BUY",
+                "quantity": "1",
+                "status": "Submitted",
+            }
+        ],
+    )
+
+    payload = build_track_b_managed_position_registry(
+        config=TrackBManagedPositionRegistryConfig(repo_root=tmp_path),
+        now=NOW,
+    )
+
+    assert payload["classification"] == LIFECYCLE_WITHOUT_BROKER
+    assert payload["managed_positions"][0]["lifecycle_id"] == "life_same_contract_order"
+
+
 def test_terminal_registry_truth_suppresses_stale_lifecycle_open_projection(tmp_path: Path) -> None:
     lifecycle = _lifecycle_position(lifecycle_id="life_terminal_superseded")
     lifecycle["trade_id"] = "trade_terminal_superseded"
@@ -2054,6 +2121,36 @@ def _seed_base(
             "generated_at": NOW.isoformat(),
             "open_position_count": len(lifecycle_positions),
             "review_required_positions": review_positions,
+        },
+    )
+
+
+def _write_fresh_broker_positions_snapshot(root: Path, *, positions: list[dict]) -> None:
+    _write_json(
+        root / "outputs" / "reports" / "ibkr_read_only_verification" / "ibkr_positions_snapshot.json",
+        {
+            "generated_at": NOW.isoformat(),
+            "source": "IBKR_TWS_API_REQ_POSITIONS",
+            "positions_complete": True,
+            "ok": True,
+            "account": "DUM882026",
+            "selected_account_id": "DUM882026",
+            "positions": positions,
+        },
+    )
+
+
+def _write_fresh_broker_open_orders_snapshot(root: Path, *, open_orders: list[dict]) -> None:
+    _write_json(
+        root / "outputs" / "reports" / "ibkr_read_only_verification" / "ibkr_open_orders_snapshot.json",
+        {
+            "generated_at": NOW.isoformat(),
+            "source": "IBKR_TWS_API_REQ_ALL_OPEN_ORDERS",
+            "open_orders_complete": True,
+            "ok": True,
+            "account": "DUM882026",
+            "selected_account_id": "DUM882026",
+            "open_orders": open_orders,
         },
     )
 
