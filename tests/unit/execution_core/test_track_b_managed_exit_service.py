@@ -724,6 +724,73 @@ def test_broker_truth_sweeper_refreshes_rates_exit_due_from_phase1_bars(tmp_path
     assert position["exit_due_refresh"]["source"] == "phase1_runtime_market_data_5m"
 
 
+def test_broker_truth_sweeper_refreshes_validated_crypto_exit_due_from_phase1_bars(tmp_path: Path) -> None:
+    _broker_truth(
+        tmp_path,
+        symbol="MET",
+        local_symbol="METU6",
+        con_id=772435602,
+        expiry="20260925",
+        quantity="1.0",
+    )
+    registry = tmp_path / "outputs/track_b_execution_core/managed_positions/latest_managed_positions.json"
+    lifecycle_id = "reserved_submit_met_globex_active_participation_long"
+    _write_json(
+        registry,
+        {
+            "classification": "OPEN_MANAGED_MATCHED",
+            "managed_positions": [
+                {
+                    "classification": "OPEN_MANAGED_MATCHED",
+                    "account_id": "DUM882026",
+                    "symbol": "MET",
+                    "track_b_root": "MET",
+                    "local_symbol": "METU6",
+                    "con_id": 772435602,
+                    "quantity": "1",
+                    "aggregate_qty": "1",
+                    "side": "LONG",
+                    "lane_id": "met_globex_active_participation_long",
+                    "strategy_id": "met_globex_active_participation_long",
+                    "lifecycle_id": lifecycle_id,
+                    "trade_id": "trade-met",
+                    "managed_exit_policy_id": "GLOBEX_ACTIVE_EVIDENCE_TIMEBOX_15M_EXIT_V1",
+                    "entry_time": "2026-06-18T10:11:44+00:00",
+                    "bars_since_entry": 1,
+                    "exit_due": False,
+                    "exit_due_state": "NOT_DUE_OR_UNKNOWN",
+                }
+            ],
+        },
+    )
+    _write_phase1_5m_bars(
+        tmp_path,
+        "MET",
+        [
+            "2026-06-18T10:15:00+00:00",
+            "2026-06-18T10:20:00+00:00",
+            "2026-06-18T10:25:00+00:00",
+        ],
+    )
+
+    report = _run_broker_truth_sweeper(
+        config=TrackBManagedExitServiceConfig(repo_root=tmp_path),
+        now=NOW,
+        write=True,
+    )
+
+    updated = json.loads(registry.read_text(encoding="utf-8"))
+    [position] = updated["managed_positions"]
+    assert report["classification"] == "MANAGED_EXIT_BROKER_TRUTH_SWEEP_REPAIRED"
+    assert position["classification"] == "OPEN_MANAGED_EXIT_DUE"
+    assert position["bars_since_entry"] == 3
+    assert position["exit_due"] is True
+    assert position["exit_due_state"] == "EXIT_DUE"
+    assert position["required_close_action"] == "SELL"
+    assert position["required_close_quantity"] == "1"
+    assert position["exit_due_refresh"]["source"] == "phase1_runtime_market_data_5m"
+
+
 def test_broker_truth_sweeper_repairs_zt_policy_from_registry_metadata(tmp_path: Path) -> None:
     _broker_truth(
         tmp_path,

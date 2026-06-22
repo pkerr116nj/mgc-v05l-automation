@@ -21,7 +21,10 @@ from typing import Any, Callable, Mapping, Sequence
 
 from mgc_v05l.execution_core.models import require_aware_datetime, to_jsonable
 from mgc_v05l.execution_core.track_b_atomic_io import write_json_atomic
-from mgc_v05l.execution_core.track_b_contract_identity import normalize_track_b_contract_row
+from mgc_v05l.execution_core.track_b_contract_identity import (
+    VALIDATED_TRACK_B_FUTURES_BY_SYMBOL,
+    normalize_track_b_contract_row,
+)
 from mgc_v05l.execution_core.track_b_managed_exit_pipeline_dry_run import (
     TrackBManagedExitPipelineDryRunConfig,
     build_track_b_managed_exit_pipeline_dry_run_report,
@@ -1562,7 +1565,11 @@ def _is_track_b_futures_broker_position(row: Mapping[str, Any]) -> bool:
     sec_type = str(row.get("security_type") or row.get("secType") or "").strip().upper()
     if sec_type and sec_type != "FUT":
         return False
-    return _instrument_from_position(row) in {"MES", "MNQ", "MGC", "ES", "NQ", "GC", "ZT", "ZF", "ZN", "ZB"}
+    normalized = normalize_track_b_contract_row(row, account_id=_PAPER_ACCOUNT_ID)
+    identity = _mapping(normalized.get("contract_identity"))
+    if identity.get("resolved") is True:
+        return _validated_track_b_symbol(identity.get("symbol"))
+    return _validated_track_b_symbol(identity.get("symbol") or _instrument_from_position(row))
 
 
 def _instrument_from_position(row: Mapping[str, Any]) -> str:
@@ -1773,11 +1780,23 @@ def _demote_broker_flat_managed_positions(
 def _managed_position_track_b_scope(row: Mapping[str, Any]) -> bool:
     if row.get("paper_only") is False:
         return False
-    instrument = _instrument_from_position(row)
-    if instrument in {"MES", "MNQ", "MGC", "ES", "NQ", "GC", "ZT", "ZF", "ZN", "ZB"}:
+    normalized = normalize_track_b_contract_row(row, account_id=_PAPER_ACCOUNT_ID)
+    identity = _mapping(normalized.get("contract_identity"))
+    if identity.get("resolved") is True and _validated_track_b_symbol(identity.get("symbol")):
         return True
-    local_symbol = str(row.get("local_symbol") or _mapping(row.get("broker_position")).get("local_symbol") or "").upper()
-    return any(local_symbol.startswith(root) for root in ("MES", "MNQ", "MGC", "ES", "NQ", "GC", "ZT", "ZF", "ZN", "ZB"))
+    broker_position = _mapping(row.get("broker_position"))
+    if not broker_position:
+        return _validated_track_b_symbol(identity.get("symbol") or _instrument_from_position(row))
+    broker_normalized = normalize_track_b_contract_row(broker_position, account_id=_PAPER_ACCOUNT_ID)
+    broker_identity = _mapping(broker_normalized.get("contract_identity"))
+    return (
+        broker_identity.get("resolved") is True
+        and _validated_track_b_symbol(broker_identity.get("symbol"))
+    )
+
+
+def _validated_track_b_symbol(value: Any) -> bool:
+    return str(value or "").strip().upper() in VALIDATED_TRACK_B_FUTURES_BY_SYMBOL
 
 
 def _repair_managed_position_from_broker(
