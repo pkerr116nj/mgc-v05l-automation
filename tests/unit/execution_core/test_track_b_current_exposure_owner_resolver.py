@@ -328,6 +328,132 @@ def test_current_registry_owner_without_lifecycle_report_carries_fill_identity_a
     assert superseded[0]["owner_lifecycle_id"] == current.ownership_identity.lifecycle_id
 
 
+def test_broker_backed_review_record_supersedes_stale_opposite_side_lifecycle(tmp_path: Path) -> None:
+    stale_short = _registry_record(
+        trade_id="trade_old_mgc_short",
+        lifecycle_id="bridge_fill_MGC|1m|2026-06-18T23:04:00Z|SELL_TO_OPEN",
+        generated_at=NOW - timedelta(days=1),
+        exit_due=True,
+        symbol="MGC",
+        local_symbol="MGCQ6",
+        con_id=732156883,
+        lane_id="mgc_globex_active_participation_short",
+        side="SHORT",
+        action="SELL",
+    )
+    fresh_long = reduce_trade_events(
+        [
+            _event(
+                event_type=TradeEventType.ENTRY_FILL_BROKER_BACKED,
+                trade_id="trade_current_mgc_long",
+                lifecycle_id="bridge_fill_MGC|1m|2026-06-22T06:08:00Z|BUY_TO_OPEN",
+                generated_at=NOW,
+                order_id="1",
+                client_id="10001",
+                perm_id="1762078762",
+                exec_id="0000e1a7.6a4b449d.01.01",
+                symbol="MGC",
+                local_symbol="MGCQ6",
+                con_id=732156883,
+                lane_id="mgc_globex_active_participation_long",
+                managed_exit_policy_id="GLOBEX_ACTIVE_EVIDENCE_TIMEBOX_15M_EXIT_V1",
+                side="LONG",
+                action="BUY",
+            ),
+            _event(
+                event_type=TradeEventType.REVIEW_REQUIRED,
+                trade_id="trade_current_mgc_long",
+                lifecycle_id="bridge_fill_MGC|1m|2026-06-22T06:08:00Z|BUY_TO_OPEN",
+                generated_at=NOW + timedelta(seconds=1),
+                order_id="1",
+                client_id="10001",
+                perm_id="1762078762",
+                exec_id="0000e1a7.6a4b449d.01.01",
+                symbol="MGC",
+                local_symbol="MGCQ6",
+                con_id=732156883,
+                lane_id="mgc_globex_active_participation_long",
+                managed_exit_policy_id="GLOBEX_ACTIVE_EVIDENCE_TIMEBOX_15M_EXIT_V1",
+                side="LONG",
+                action="BUY",
+            ),
+        ]
+    )
+    bridge_alias = reduce_trade_events(
+        [
+            _event(
+                event_type=TradeEventType.LIFECYCLE_OPEN_MANAGED,
+                trade_id="trade_bridge_fill_MGC_1m_2026-06-22T06_08_00Z_BUY_TO_OPEN",
+                lifecycle_id="bridge_fill_MGC|1m|2026-06-22T06:08:00Z|BUY_TO_OPEN",
+                generated_at=NOW + timedelta(seconds=2),
+                order_id="1",
+                client_id="10001",
+                perm_id="1762078762",
+                exec_id="0000e1a7.6a4b449d.01.01",
+                symbol="MGC",
+                local_symbol="MGCQ6",
+                con_id=732156883,
+                lane_id="mgc_globex_active_participation_long",
+                managed_exit_policy_id="GLOBEX_ACTIVE_EVIDENCE_TIMEBOX_15M_EXIT_V1",
+                side="LONG",
+                action="BUY",
+            )
+        ]
+    )
+    broker_position = {
+        "account_id": "DUM882026",
+        "symbol": "MGC",
+        "track_b_root": "MGC",
+        "local_symbol": "MGCQ6",
+        "con_id": 732156883,
+        "expiry": "20260827",
+        "quantity": "1.0",
+    }
+
+    payload = resolve_current_exposure_ownership(
+        config=CurrentExposureOwnerResolverConfig(repo_root=tmp_path),
+        broker_positions=[broker_position],
+        registry_records=[stale_short, fresh_long, bridge_alias],
+        lifecycle_positions=[
+            {
+                "trade_id": stale_short.trade_id,
+                "lifecycle_id": "bridge_fill_MGC|1m|2026-06-18T23:04:00Z|SELL_TO_OPEN",
+                "lane_id": "mgc_globex_active_participation_short",
+                "account_id": "DUM882026",
+                "local_symbol": "MGCQ6",
+                "con_id": 732156883,
+                "aggregate_qty": "-1",
+                "quantity": "1",
+                "side": "SHORT",
+                "managed_exit_policy_id": "GLOBEX_ACTIVE_EVIDENCE_TIMEBOX_15M_EXIT_V1",
+            }
+        ],
+        lifecycle_reports=[
+            _lifecycle_report(
+                trade_id="trade_bridge_fill_MGC_1m_2026-06-22T06_08_00Z_BUY_TO_OPEN",
+                lifecycle_id="bridge_fill_MGC|1m|2026-06-22T06:08:00Z|BUY_TO_OPEN",
+                symbol="MGC",
+                local_symbol="MGCQ6",
+                con_id=732156883,
+                order_id="1",
+                perm_id="1762078762",
+                exec_id="0000e1a7.6a4b449d.01.01",
+                filled_at=NOW,
+                lane_id="mgc_globex_active_participation_long",
+            )
+        ],
+    )
+
+    assert payload["classification"] == OWNED_MANAGED_EXPOSURE
+    exposure = payload["owned_exposures"][0]
+    assert exposure["trade_id"] == "trade_bridge_fill_MGC_1m_2026-06-22T06_08_00Z_BUY_TO_OPEN"
+    assert exposure["lifecycle_id"] == "bridge_fill_MGC|1m|2026-06-22T06:08:00Z|BUY_TO_OPEN"
+    assert exposure["lifecycle_position"]["side"] == "LONG"
+    assert exposure["lifecycle_position"]["aggregate_qty"] == "1"
+    assert exposure["lifecycle_position"]["managed_exit_policy_id"] == "US_ACTIVE_EVIDENCE_TIMEBOX_60M_EXIT_V1"
+    assert "NEWEST_EXACT_BROKER_BACKED_LIFECYCLE_REPORT_SELECTED" in exposure["reason_codes"]
+
+
 def test_fresh_submit_owner_with_exact_lifecycle_fill_beats_stale_same_contract_owner(tmp_path: Path) -> None:
     stale = _registry_record(
         trade_id="trade_submit_owner_mes_globex_short",

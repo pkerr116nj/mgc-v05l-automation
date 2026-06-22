@@ -131,7 +131,7 @@ def resolve_current_exposure_ownership(
     review: list[dict[str, Any]] = []
     stale: list[dict[str, Any]] = list(terminal_superseded_rows)
     resolved_lifecycle_positions: list[dict[str, Any]] = []
-    active_records = [record for record in records if record.current_state in OPEN_REGISTRY_STATES]
+    active_records = _current_owner_candidate_records(records)
 
     for raw_broker_position in broker_rows:
         identity = canonicalize_broker_position_identity(
@@ -538,6 +538,21 @@ def _select_current_registry_owner(
     return None, (), ["MULTIPLE_PLAUSIBLE_CURRENT_REGISTRY_OWNERS"]
 
 
+def _current_owner_candidate_records(records: Sequence[TradeRegistryRecord]) -> list[TradeRegistryRecord]:
+    candidates: list[TradeRegistryRecord] = []
+    for record in records:
+        if record.current_state in OPEN_REGISTRY_STATES:
+            candidates.append(record)
+            continue
+        if (
+            record.broker_backed_entry is True
+            and record.open_qty != 0
+            and record.current_state not in {TradeCurrentState.CLOSED_FLAT, TradeCurrentState.CANCELLED}
+        ):
+            candidates.append(record)
+    return candidates
+
+
 def _select_broker_backed_lifecycle_report_owner(
     *,
     records: Sequence[TradeRegistryRecord],
@@ -715,9 +730,6 @@ def _dedupe_same_fill_lifecycle_report_owner_candidates(
 def _canonical_lifecycle_report_owner_candidate(rows: Sequence[dict[str, Any]]) -> dict[str, Any] | None:
     if not rows:
         return None
-    trade_ids = {str(row["record"].trade_id or "") for row in rows}
-    if len(trade_ids) != 1:
-        return None
     exact_lifecycle_matches = [
         row
         for row in rows
@@ -761,7 +773,6 @@ def _lifecycle_report_owner_fill_identity(candidate: Mapping[str, Any]) -> str:
             order_id,
             perm_id,
             exec_id,
-            str(record.trade_id or ""),
         ]
     )
 
