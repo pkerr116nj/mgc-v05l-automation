@@ -677,6 +677,7 @@ def _apply_managed_exit(
         runtime_safe_state_envelope_path=config.safe_state_path,
         expected_control_plane_snapshot_id=None,
         expected_shared_truth_generation_id=None,
+        managed_close_broker_position_snapshot=_mapping(selected_position.get("broker_position")),
         managed_exit_v1_1_authorized=bool(exit_authority_allows),
     )
     result = maintain_open_track_b_strategy_managed_paper_lifecycle(

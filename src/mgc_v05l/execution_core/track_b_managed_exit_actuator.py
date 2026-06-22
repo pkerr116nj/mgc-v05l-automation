@@ -564,6 +564,7 @@ def _attach_config(*, config: TrackBManagedExitActuatorConfig, position: Mapping
     lifecycle_position = broker_position.get("canonical_managed_position") if isinstance(broker_position.get("canonical_managed_position"), Mapping) else {}
     symbol = str(candidate.get("symbol") or broker_position.get("symbol") or broker_position.get("track_b_root") or "").upper()
     local_symbol = str(candidate.get("local_symbol") or broker_position.get("local_symbol") or "")
+    side = _authoritative_side_for_attach(position=position, candidate=candidate, broker_position=broker_position)
     return TrackBManagedExitAttachConfig(
         repo_root=config.repo_root,
         account_id=str(candidate.get("account_id") or broker_position.get("account_id") or "DUM882026"),
@@ -581,13 +582,44 @@ def _attach_config(*, config: TrackBManagedExitActuatorConfig, position: Mapping
         local_symbol=local_symbol,
         con_id=_int(candidate.get("con_id") or broker_position.get("con_id")),
         expiry=str(broker_position.get("expiry") or lifecycle_position.get("expiry") or ""),
-        side=str(position.get("broker_position_side") or position.get("side") or lifecycle_position.get("side") or _side_from_candidate(candidate)),
+        side=side,
         quantity=_int(candidate.get("quantity")) or 1,
         apply=True,
         operator_authorized_managed_exit=True,
         refresh_control_plane=False,
         auto_select_active_managed_position=True,
     )
+
+
+def _authoritative_side_for_attach(
+    *,
+    position: Mapping[str, Any],
+    candidate: Mapping[str, Any],
+    broker_position: Mapping[str, Any],
+) -> str:
+    broker_side = _side_from_signed_quantity(
+        broker_position.get("quantity")
+        or broker_position.get("signed_broker_qty")
+        or position.get("signed_broker_qty")
+    )
+    if broker_side:
+        return broker_side
+    candidate_side = _side_from_candidate(candidate)
+    if candidate_side:
+        return candidate_side
+    return str(position.get("broker_position_side") or position.get("side") or "").upper()
+
+
+def _side_from_signed_quantity(value: Any) -> str:
+    try:
+        quantity = float(str(value))
+    except (TypeError, ValueError):
+        return ""
+    if quantity > 0:
+        return "LONG"
+    if quantity < 0:
+        return "SHORT"
+    return ""
 
 
 def _side_from_candidate(candidate: Mapping[str, Any]) -> str:

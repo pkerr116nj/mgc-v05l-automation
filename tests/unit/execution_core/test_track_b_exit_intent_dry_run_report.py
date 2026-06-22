@@ -71,6 +71,32 @@ def test_duplicate_excess_required_close_quantity_builds_partial_exit_intent(tmp
     assert candidate["authority_decision"]["decision"] == "ALLOWED"
 
 
+def test_managed_projection_broker_quantity_overrides_stale_side_for_close_action(tmp_path: Path) -> None:
+    inputs = _inputs()
+    inputs["ibkr_positions_snapshot"] = {}
+    position = inputs["managed_positions"]["managed_positions"][0]
+    position["side"] = "SHORT"
+    position["required_close_action"] = "SELL"
+    position["broker_position"] = {
+        "account_id": "DUM882026",
+        "local_symbol": "MESM6",
+        "con_id": 770561194,
+        "quantity": "1.0",
+        "symbol": "MES",
+        "track_b_root": "MES",
+    }
+    inputs["managed_orders"]["managed_orders"][0]["required_close_action"] = "SELL"
+
+    payload = _build(tmp_path, inputs)
+
+    assert payload["classification"] == EXIT_INTENT_DRY_RUN_READY
+    candidate = payload["candidate_exit_intents"][0]
+    assert candidate["position_side"] == "LONG"
+    assert candidate["candidate_close_action"] == "SELL"
+    assert candidate["exit_intent"]["close_action"] == "SELL"
+    assert candidate["authority_decision"]["decision"] == "ALLOWED"
+
+
 def test_unattributed_broker_scoped_risk_exit_is_degraded_allowed(tmp_path: Path) -> None:
     inputs = _inputs()
     inputs["managed_positions"]["managed_positions"] = []

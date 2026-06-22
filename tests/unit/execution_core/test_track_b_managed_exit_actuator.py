@@ -497,6 +497,29 @@ def test_attach_config_prefers_current_broker_contract_key_over_stale_row_key(tm
     assert calls[0].con_id == 649180671
 
 
+def test_attach_config_uses_exit_authority_close_action_over_stale_recovery_side(tmp_path: Path) -> None:
+    inputs = _inputs(runtime_down=True)
+    position = inputs["managed_positions"]["managed_positions"][0]
+    position["side"] = "SHORT"
+    position["lifecycle_position"]["side"] = "SHORT"
+    position["broker_position"]["quantity"] = "1.0"
+    position["signed_broker_qty"] = "1"
+    position["required_close_action"] = "SELL"
+    calls = []
+
+    payload = run_track_b_managed_exit_actuator(
+        config=TrackBManagedExitActuatorConfig(repo_root=tmp_path, apply=True, operator_authorized_managed_exit=True),
+        now=NOW,
+        input_overrides=inputs,
+        attach_runner=lambda config, now: calls.append(config) or _submitted_attach_result(),
+        write=False,
+    )
+
+    assert payload["classification"] == MANAGED_EXIT_ACTUATOR_APPLIED_OR_PENDING
+    assert payload["eligible_positions"][0]["close_candidate"]["action"] == "SELL"
+    assert calls[0].side == "LONG"
+
+
 def _inputs(*, runtime_down: bool) -> dict:
     candidate = _candidate()
     return {

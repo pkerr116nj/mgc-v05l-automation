@@ -209,14 +209,16 @@ def _broker_positions_from_managed_positions(managed_positions: Mapping[str, Any
         broker = _mapping(row.get("broker_position"))
         local_symbol = _text(broker.get("local_symbol") or row.get("local_symbol") or row.get("contract"))
         con_id = _int(broker.get("con_id") or row.get("con_id"))
-        quantity = _decimal(broker.get("quantity") or row.get("quantity"))
+        broker_quantity_raw = broker.get("quantity")
+        quantity = _decimal(broker_quantity_raw if broker_quantity_raw is not None else row.get("quantity"))
         if not local_symbol or con_id <= 0 or abs(quantity) <= Decimal("0"):
             continue
-        side = _text(row.get("side") or broker.get("side")).upper()
-        if side == "SHORT" and quantity > 0:
-            quantity = -quantity
-        elif side == "LONG" and quantity < 0:
-            quantity = abs(quantity)
+        if broker_quantity_raw is None:
+            side = _text(row.get("side") or broker.get("side")).upper()
+            if side == "SHORT" and quantity > 0:
+                quantity = -quantity
+            elif side == "LONG" and quantity < 0:
+                quantity = abs(quantity)
         positions.append(
             {
                 "account_id": broker.get("account_id") or row.get("account_id") or "DUM882026",

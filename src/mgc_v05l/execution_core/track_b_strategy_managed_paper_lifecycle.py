@@ -1066,6 +1066,7 @@ def _default_exit_policy(
     if _discretionary_exits_suppressed(config, policy_id):
         return None
     if policy_id == TrackBManagedExitPolicy.DIAGNOSTIC_TIME_EXIT_IMMEDIATE.value:
+        close_side = _managed_close_position_side(config=config, open_state=open_state)
         return {
             "intent_schema_version": "track_b_strategy_managed_paper_close_intent_v1",
             "lifecycle_id": open_state.get("lifecycle_id"),
@@ -1076,8 +1077,8 @@ def _default_exit_policy(
             "expiry": config.contract_expiry,
             "local_symbol": config.local_symbol,
             "con_id": config.con_id,
-            "side": open_state.get("side"),
-            "order_action": "SELL" if open_state.get("side") == "LONG" else "BUY",
+            "side": close_side,
+            "order_action": _close_order_action(close_side),
             "quantity": config.quantity,
             "close_limit_price": _decimal_text(config.close_limit_price),
             "exit_family": "DIAGNOSTIC_TIME",
@@ -1101,6 +1102,7 @@ def _default_exit_policy(
         )
         if elapsed < required:
             return None
+        close_side = _managed_close_position_side(config=config, open_state=open_state)
         return {
             "intent_schema_version": "track_b_strategy_managed_paper_close_intent_v1",
             "lifecycle_id": open_state.get("lifecycle_id"),
@@ -1111,8 +1113,8 @@ def _default_exit_policy(
             "expiry": config.contract_expiry,
             "local_symbol": config.local_symbol,
             "con_id": config.con_id,
-            "side": open_state.get("side"),
-            "order_action": "SELL" if open_state.get("side") == "LONG" else "BUY",
+            "side": close_side,
+            "order_action": _close_order_action(close_side),
             "quantity": config.quantity,
             "close_limit_price": _decimal_text(config.close_limit_price),
             "exit_family": "DIAGNOSTIC_TIME",
@@ -1142,6 +1144,28 @@ def _discretionary_exits_suppressed(config: TrackBStrategyManagedPaperLifecycleC
     return policy_id in {
         TrackBManagedExitPolicy.DIAGNOSTIC_TIME_EXIT_IMMEDIATE.value,
     }
+
+
+def _managed_close_position_side(
+    *,
+    config: TrackBStrategyManagedPaperLifecycleConfig,
+    open_state: Mapping[str, Any],
+) -> str:
+    broker_position = (
+        config.managed_close_broker_position_snapshot
+        if isinstance(config.managed_close_broker_position_snapshot, Mapping)
+        else {}
+    )
+    signed_quantity = _signed_quantity_from_broker_position(broker_position)
+    if signed_quantity is not None and signed_quantity != 0:
+        return "LONG" if signed_quantity > 0 else "SHORT"
+    if config.managed_exit_v1_1_authorized:
+        return _position_side(config)
+    return _normalized_side(str(open_state.get("side") or config.side or ""))
+
+
+def _close_order_action(side: str | None) -> str:
+    return "SELL" if _normalized_side(side) == "LONG" else "BUY"
 
 
 def _default_close_submitter(

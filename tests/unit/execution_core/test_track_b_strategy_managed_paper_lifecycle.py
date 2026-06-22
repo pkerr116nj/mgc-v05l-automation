@@ -1511,6 +1511,28 @@ def test_discretionary_immediate_exit_policy_remains_suppressed_by_stale_data(tm
     assert result.report["suppressed_due_to_stale_data"] is True
 
 
+def test_default_timebox_close_policy_uses_managed_close_broker_snapshot_over_stale_open_side(
+    tmp_path: Path,
+) -> None:
+    config = base_config(
+        tmp_path,
+        side="LONG",
+        managed_exit_policy_id=TrackBManagedExitPolicy.PAPER_DIAGNOSTIC_TIME_BOXED_3X5M_EXIT_V1.value,
+        completed_5m_bars_since_entry=3,
+        managed_close_broker_position_snapshot={"quantity": "1.0"},
+        managed_exit_v1_1_authorized=True,
+    )
+
+    close_intent = lifecycle_module._default_exit_policy(  # noqa: SLF001 - shared close authority regression.
+        config,
+        {"lifecycle_id": "life-mgc", "trade_id": "trade-mgc", "side": "SHORT"},
+    )
+
+    assert close_intent is not None
+    assert close_intent["side"] == "LONG"
+    assert close_intent["order_action"] == "SELL"
+
+
 def test_forced_session_segment_exit_policy_uses_time_boxed_close(tmp_path: Path) -> None:
     result = run_track_b_strategy_managed_paper_lifecycle(
         config=base_config(
