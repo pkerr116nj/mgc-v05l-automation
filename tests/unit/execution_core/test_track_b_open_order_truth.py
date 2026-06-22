@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import json
+import pytest
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
+from mgc_v05l.execution_core.phase1_runtime_ticker_registry import PHASE1_RUNTIME_TICKER_ORDER
 from mgc_v05l.execution_core.track_b_open_order_truth import (
     BROKER_FLAT_WITH_OPEN_CLOSE_ORDER,
     BROKER_POSITION_WITHOUT_CLOSE_ORDER,
@@ -16,6 +18,7 @@ from mgc_v05l.execution_core.track_b_open_order_truth import (
     SUSPICIOUS_ORDER_STATE,
     TrackBOpenOrderTruthConfig,
     build_track_b_open_order_truth,
+    build_track_b_open_order_truth_from_reconciliation,
     write_track_b_open_order_truth,
 )
 
@@ -321,6 +324,81 @@ def test_authority_event_log_and_dashboard_projection_paths(tmp_path: Path) -> N
     assert projection["authority_owner"] == "execution_core"
 
 
+def test_partial_scope_cannot_publish_canonical_open_order_truth(tmp_path: Path) -> None:
+    config = TrackBOpenOrderTruthConfig(repo_root=tmp_path)
+    _seed_reconciliation(tmp_path)
+    stale_authority = config.resolve(config.output_path)
+    old_generated_at = "2026-05-22T12:00:00+00:00"
+    _write_json(
+        stale_authority,
+        {
+            "schema_version": "track_b_open_order_truth_v1",
+            "generated_at": old_generated_at,
+            "classification": DUPLICATE_CLOSE_ORDER,
+            "broker_open_orders": [{"local_symbol": "METU6", "broker_order_id": 298}],
+        },
+    )
+    partial_payload = build_track_b_open_order_truth_from_reconciliation(
+        config=config,
+        reconciliation={
+            "classification": "TRACK_B_PAPER_BROKER_RECONCILED",
+            "generated_at": NOW.isoformat(),
+            "broker_reconciled": True,
+            "symbols": ["MES", "MNQ", "MGC"],
+            "track_b_broker_positions": [],
+            "track_b_broker_open_orders": [],
+            "unknown_broker_open_orders": [],
+            "known_managed_exit_orders": [],
+            "track_b_lifecycle_positions": [],
+            "unresolved_submit_intent_ownership_records": [],
+            "live_money_eligible": False,
+            "paper_proof_invoked": False,
+        },
+        now=NOW,
+    )
+
+    assert partial_payload["canonical_refresh_scope"] == "PARTIAL_DIAGNOSTIC"
+    assert partial_payload["canonical_scope_blockers"] == ["partial_symbol_scope"]
+    with pytest.raises(ValueError, match="non-global scope"):
+        write_track_b_open_order_truth(config=config, payload=partial_payload, now=NOW)
+
+    assert json.loads(stale_authority.read_text(encoding="utf-8"))["generated_at"] == old_generated_at
+    assert "METU6" in stale_authority.read_text(encoding="utf-8")
+
+
+def test_partial_scope_can_write_scoped_diagnostic_open_order_truth(tmp_path: Path) -> None:
+    diagnostic_config = TrackBOpenOrderTruthConfig(
+        repo_root=tmp_path,
+        output_path=Path("outputs/track_b_execution_core/open_order_truth/scoped_mes_mnq_mgc.json"),
+        dashboard_projection_path=None,
+    )
+    _seed_reconciliation(tmp_path)
+    partial_payload = build_track_b_open_order_truth_from_reconciliation(
+        config=diagnostic_config,
+        reconciliation={
+            "classification": "TRACK_B_PAPER_BROKER_RECONCILED",
+            "generated_at": NOW.isoformat(),
+            "broker_reconciled": True,
+            "symbols": ["MES", "MNQ", "MGC"],
+            "track_b_broker_positions": [],
+            "track_b_broker_open_orders": [],
+            "unknown_broker_open_orders": [],
+            "known_managed_exit_orders": [],
+            "track_b_lifecycle_positions": [],
+            "unresolved_submit_intent_ownership_records": [],
+            "live_money_eligible": False,
+            "paper_proof_invoked": False,
+        },
+        now=NOW,
+    )
+
+    output_path, _ = write_track_b_open_order_truth(config=diagnostic_config, payload=partial_payload, now=NOW)
+
+    written = json.loads(output_path.read_text(encoding="utf-8"))
+    assert written["canonical_refresh_scope"] == "PARTIAL_DIAGNOSTIC"
+    assert written["input_symbols"] == ["MES", "MNQ", "MGC"]
+
+
 def test_critical_paths_do_not_consume_dashboard_projection_as_authority() -> None:
     repo_root = Path(__file__).resolve().parents[3]
     forbidden = "outputs/operator_dashboard/runtime/latest_track_b_open_order_truth.json"
@@ -350,7 +428,7 @@ def _seed_reconciliation(
             "classification": "TRACK_B_PAPER_BROKER_RECONCILED",
             "generated_at": NOW.isoformat(),
             "broker_reconciled": not bool(open_orders),
-            "symbols": ["MGC", "MNQ"],
+            "symbols": list(PHASE1_RUNTIME_TICKER_ORDER),
             "track_b_broker_positions": broker_positions or [],
             "track_b_broker_open_orders": open_orders or [],
             "unknown_broker_open_orders": unknown_open_orders or [],

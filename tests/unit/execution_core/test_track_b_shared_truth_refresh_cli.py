@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import json
+import pytest
 from datetime import UTC, datetime
 from pathlib import Path
 
 from mgc_v05l.execution_core import track_b_shared_truth_refresh_cli as shared_truth_module
+from mgc_v05l.execution_core.phase1_runtime_ticker_registry import PHASE1_RUNTIME_TICKER_ORDER
 from mgc_v05l.execution_core.track_b_shared_truth_refresh_cli import (
     DEFAULT_RECONCILIATION_ARTIFACT,
     TrackBSharedTruthRefreshConfig,
@@ -52,6 +54,8 @@ def test_refresh_clean_flat_stack(tmp_path: Path) -> None:
     assert shared_truth["authority_generation_id"] == result["refresh_generation_id"]
     assert shared_truth["authority_cycle_generated_at"] == result["generated_at"]
     assert shared_truth["refresh_phase"] == "pre_supervisor_refresh"
+    assert shared_truth["canonical_refresh_scope"] == "GLOBAL_COMPLETE"
+    assert shared_truth["canonical_symbols"] == list(PHASE1_RUNTIME_TICKER_ORDER)
     position_truth = _read(tmp_path / "outputs/track_b_execution_core/position_truth/latest_position_truth.json")
     runtime_truth = _read(tmp_path / "outputs/track_b_execution_core/runtime_truth/latest_runtime_environment_truth.json")
     assert position_truth["authority_generation_id"] == result["refresh_generation_id"]
@@ -93,6 +97,29 @@ def test_refresh_replaces_stale_upstream_authority_artifact(tmp_path: Path) -> N
     assert result["exit_code"] == 0
     assert refreshed["classification"] == "NO_OPEN_ORDERS"
     assert refreshed["generated_at"] == NOW.isoformat()
+
+
+def test_partial_reconciliation_scope_cannot_erase_canonical_met_open_orders(tmp_path: Path) -> None:
+    _seed_clean_stack(tmp_path)
+    open_order_path = tmp_path / "outputs/track_b_execution_core/open_order_truth/latest_open_order_truth.json"
+    _write(
+        open_order_path,
+        {
+            "schema_version": "track_b_open_order_truth_v1",
+            "generated_at": OLD,
+            "classification": "DUPLICATE_CLOSE_ORDER",
+            "canonical_refresh_scope": "GLOBAL_COMPLETE",
+            "broker_open_orders": [{"local_symbol": "METU6", "broker_order_id": 298}],
+        },
+    )
+    _write_reconciliation(tmp_path, symbols=["MES", "MNQ", "MGC"])
+
+    with pytest.raises(ValueError, match="non-global scope"):
+        _refresh(tmp_path)
+
+    current = _read(open_order_path)
+    assert current["classification"] == "DUPLICATE_CLOSE_ORDER"
+    assert "METU6" in str(current)
 
 
 def test_refresh_consumes_published_broker_lease_without_overwriting_it(tmp_path: Path) -> None:
@@ -638,6 +665,7 @@ def _write_reconciliation(
     broker_positions: list[dict] | None = None,
     open_orders: list[dict] | None = None,
     lifecycle_positions: list[dict] | None = None,
+    symbols: list[str] | None = None,
 ) -> None:
     positions = broker_positions or []
     orders = open_orders or []
@@ -649,6 +677,7 @@ def _write_reconciliation(
             "classification": classification,
             "broker_reconciled": broker_reconciled,
             "live_money_eligible": False,
+            "symbols": list(symbols or PHASE1_RUNTIME_TICKER_ORDER),
             "track_b_broker_positions": positions,
             "track_b_broker_open_orders": orders,
             "track_b_lifecycle_positions": lifecycle_rows,

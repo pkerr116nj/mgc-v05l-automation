@@ -11,10 +11,11 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any, Mapping, Sequence
 
 from mgc_v05l.execution_core.bounded_jsonl import append_bounded_jsonl
 from mgc_v05l.execution_core.track_b_atomic_io import write_json_atomic
+from mgc_v05l.execution_core.phase1_runtime_ticker_registry import PHASE1_RUNTIME_TICKER_ORDER
 from mgc_v05l.execution_core.track_b_live_trade_registry import load_live_trade_registry_records
 from mgc_v05l.execution_core.track_b_projection_metadata import build_projection_metadata
 from mgc_v05l.execution_core.track_b_terminal_registry_truth import resolve_terminal_registry_truth
@@ -32,6 +33,9 @@ CLOSE_ORDER_MARKETABLE_NOT_FILLED = "CLOSE_ORDER_MARKETABLE_NOT_FILLED"
 BROKER_FLAT_WITH_OPEN_CLOSE_ORDER = "BROKER_FLAT_WITH_OPEN_CLOSE_ORDER"
 BROKER_POSITION_WITHOUT_CLOSE_ORDER = "BROKER_POSITION_WITHOUT_CLOSE_ORDER"
 ORDER_TRUTH_STALE = "ORDER_TRUTH_STALE"
+GLOBAL_COMPLETE_SCOPE = "GLOBAL_COMPLETE"
+PARTIAL_DIAGNOSTIC_SCOPE = "PARTIAL_DIAGNOSTIC"
+CANONICAL_SCOPE_BLOCKED = "CANONICAL_SCOPE_BLOCKED"
 
 DEFAULT_OPEN_ORDER_TRUTH_ARTIFACT = (
     Path("outputs") / "track_b_execution_core" / "open_order_truth" / "latest_open_order_truth.json"
@@ -131,6 +135,7 @@ def build_track_b_open_order_truth_from_reconciliation(
     unresolved_ownership = _list(reconciliation.get("unresolved_submit_intent_ownership_records"))
     source_age = _age_seconds(reconciliation.get("generated_at"), actual_now)
     source_stale = source_age is None or source_age > float(config.artifact_max_age_seconds)
+    scope = _canonical_scope(reconciliation)
 
     order_states = [
         _classify_order(
@@ -177,6 +182,10 @@ def build_track_b_open_order_truth_from_reconciliation(
         "paper_proof_invoked": False,
         "live_money_eligible": reconciliation.get("live_money_eligible") is True,
         "classification": classification,
+        "canonical_refresh_scope": scope["canonical_refresh_scope"],
+        "canonical_scope_blockers": scope["canonical_scope_blockers"],
+        "input_symbols": scope["input_symbols"],
+        "canonical_symbols": scope["canonical_symbols"],
         "source_freshness": {
             "reconciliation_generated_at": reconciliation.get("generated_at"),
             "age_seconds": source_age,
@@ -256,6 +265,7 @@ def write_track_b_open_order_truth(
     output_path = config.resolve(config.output_path)
     event_log_path = config.resolve(config.event_log_path)
     previous = _read_json(output_path)
+    _enforce_canonical_scope(config=config, payload=payload)
     events = build_open_order_truth_events(previous=previous, current=payload, now=now)
     _write_json_atomic(output_path, dict(payload))
     if config.dashboard_projection_path is not None:
@@ -267,6 +277,38 @@ def write_track_b_open_order_truth(
         for event in events:
             append_bounded_jsonl(event_log_path, event)
     return output_path, events
+
+
+def _canonical_scope(reconciliation: Mapping[str, Any]) -> dict[str, Any]:
+    canonical = _normal_symbols(PHASE1_RUNTIME_TICKER_ORDER)
+    raw_symbols = reconciliation.get("symbols")
+    input_symbols = _normal_symbols(raw_symbols if isinstance(raw_symbols, list | tuple) else [])
+    blockers: list[str] = []
+    if not input_symbols:
+        blockers.append("missing_input_symbols")
+    if input_symbols and input_symbols != canonical:
+        blockers.append("partial_symbol_scope")
+    return {
+        "canonical_refresh_scope": GLOBAL_COMPLETE_SCOPE if not blockers else PARTIAL_DIAGNOSTIC_SCOPE,
+        "canonical_scope_blockers": blockers,
+        "input_symbols": list(input_symbols),
+        "canonical_symbols": list(canonical),
+    }
+
+
+def _enforce_canonical_scope(*, config: TrackBOpenOrderTruthConfig, payload: Mapping[str, Any]) -> None:
+    if config.resolve(config.output_path) != config.resolve(DEFAULT_OPEN_ORDER_TRUTH_ARTIFACT):
+        return
+    if payload.get("canonical_refresh_scope") == GLOBAL_COMPLETE_SCOPE:
+        return
+    blockers = _list(payload.get("canonical_scope_blockers")) or ["missing_global_complete_scope"]
+    raise ValueError(
+        "refusing to publish canonical open-order truth from non-global scope: " + ",".join(map(str, blockers))
+    )
+
+
+def _normal_symbols(symbols: Sequence[Any]) -> tuple[str, ...]:
+    return tuple(text for symbol in symbols if (text := str(symbol).strip().upper()))
 
 
 def build_dashboard_open_order_truth_projection(*, authority_payload: Mapping[str, Any], authority_path: Path) -> dict[str, Any]:

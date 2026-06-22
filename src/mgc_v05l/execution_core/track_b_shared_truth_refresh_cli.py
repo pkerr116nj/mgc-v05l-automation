@@ -403,6 +403,10 @@ def refresh_track_b_shared_truth(
             reconciliation=reconciliation,
         ),
         "refresh_phase": "pre_supervisor_refresh",
+        "canonical_refresh_scope": "GLOBAL_COMPLETE",
+        "canonical_scope_blockers": [],
+        "input_symbols": list(PHASE1_RUNTIME_TICKER_ORDER),
+        "canonical_symbols": list(PHASE1_RUNTIME_TICKER_ORDER),
         "mode": "PAPER",
         "read_only": True,
         "submit_authority": False,
@@ -528,7 +532,10 @@ def _clean_flat_fast_path_eligibility(
     reconciliation: Mapping[str, Any],
     registry_diagnostics: Mapping[str, Any],
 ) -> dict[str, Any]:
+    input_symbols = _normal_symbols(reconciliation.get("symbols"))
+    canonical_symbols = _normal_symbols(PHASE1_RUNTIME_TICKER_ORDER)
     checks = {
+        "canonical_symbol_scope_complete": input_symbols == canonical_symbols,
         "broker_positions_empty": len(_list(reconciliation.get("track_b_broker_positions"))) == 0
         and _int(reconciliation.get("track_b_broker_position_count")) == 0,
         "broker_open_orders_empty": len(_list(reconciliation.get("track_b_broker_open_orders"))) == 0
@@ -579,6 +586,10 @@ def _clean_flat_open_order_truth(
         "paper_proof_invoked": False,
         "live_money_eligible": reconciliation.get("live_money_eligible") is True,
         "classification": NO_OPEN_ORDERS,
+        "canonical_refresh_scope": "GLOBAL_COMPLETE",
+        "canonical_scope_blockers": [],
+        "input_symbols": list(PHASE1_RUNTIME_TICKER_ORDER),
+        "canonical_symbols": list(PHASE1_RUNTIME_TICKER_ORDER),
         "source_freshness": {
             "reconciliation_generated_at": reconciliation.get("generated_at"),
             "age_seconds": 0.0,
@@ -1454,6 +1465,12 @@ def _read_json(path: Path) -> dict[str, Any]:
     except (FileNotFoundError, json.JSONDecodeError, OSError):
         return {}
     return payload if isinstance(payload, dict) else {}
+
+
+def _normal_symbols(value: Any) -> tuple[str, ...]:
+    if not isinstance(value, list | tuple):
+        return ()
+    return tuple(text for symbol in value if (text := str(symbol).strip().upper()))
 
 
 def _mapping(value: Any) -> dict[str, Any]:
