@@ -17,6 +17,7 @@ EXIT_CLASS_RISK_REDUCING = "EXIT_CLASS_RISK_REDUCING"
 
 PAPER_AGGRESSIVE_CLOSE_FALLBACK_MIN_TICKS = 400
 PAPER_AGGRESSIVE_CLOSE_FALLBACK_PERCENT = Decimal("0.02")
+PAPER_RISK_REDUCING_CLOSE_MAX_DEVIATION_PERCENT = Decimal("0.005")
 
 _RISK_REDUCING_TOKENS = (
     "TIMEBOX",
@@ -60,12 +61,28 @@ def build_exit_limit_policy(
     reprice_escalation_ticks: int = 0,
 ) -> dict[str, Any]:
     normalized_class = classify_exit_execution(execution_class=execution_class)
+    reference_blocker = _reference_blocker(reference)
+    if reference_blocker:
+        return _pricing_block(
+            blocker=reference_blocker,
+            reference=reference,
+            action=str(close_action or "").strip().upper(),
+            age_seconds=_float_or_none(
+                reference.get("reference_age_seconds")
+                or reference.get("pricing_reference_age_seconds")
+                or reference.get("age_seconds")
+            ),
+            tick_size=tick_size,
+            reprice_attempts=reprice_attempts,
+        )
     if normalized_class == EXIT_CLASS_RISK_REDUCING:
         return _risk_reducing_exit_limit_policy(
             reference=reference,
             close_action=close_action,
             tick_size=tick_size,
             stale_reference_seconds=stale_reference_seconds,
+            base_offset_ticks=base_offset_ticks,
+            max_slippage_ticks=max_slippage_ticks,
             reprice_attempts=reprice_attempts,
         )
     result = managed_close_limit_from_reference(
@@ -102,6 +119,8 @@ def _risk_reducing_exit_limit_policy(
     close_action: str,
     tick_size: str,
     stale_reference_seconds: int,
+    base_offset_ticks: int,
+    max_slippage_ticks: int | None,
     reprice_attempts: int,
 ) -> dict[str, Any]:
     age_seconds = _float_or_none(
@@ -139,6 +158,7 @@ def _risk_reducing_exit_limit_policy(
             reference_kind=preferred_key,
             tick=tick,
             offset_ticks=Decimal("0"),
+            max_deviation_ticks=Decimal(max(int(max_slippage_ticks), 0)) if max_slippage_ticks is not None else Decimal("0"),
             age_seconds=age_seconds,
             reference=reference,
             reprice_attempts=reprice_attempts,
@@ -156,14 +176,16 @@ def _risk_reducing_exit_limit_policy(
             tick_size=tick_size,
             reprice_attempts=reprice_attempts,
         )
-    percent_ticks = (fallback * PAPER_AGGRESSIVE_CLOSE_FALLBACK_PERCENT / tick).copy_abs()
-    offset_ticks = max(Decimal(PAPER_AGGRESSIVE_CLOSE_FALLBACK_MIN_TICKS), percent_ticks.to_integral_value())
+    offset_ticks = Decimal(max(int(base_offset_ticks), 0))
+    if max_slippage_ticks is not None:
+        offset_ticks = min(offset_ticks, Decimal(max(int(max_slippage_ticks), 0)))
     return _priced_risk_reducing_close(
         action=action,
         reference_price=fallback,
         reference_kind="last_price" if last_price is not None else "close",
         tick=tick,
         offset_ticks=offset_ticks,
+        max_deviation_ticks=Decimal(max(int(max_slippage_ticks), 0)) if max_slippage_ticks is not None else offset_ticks,
         age_seconds=age_seconds,
         reference=reference,
         reprice_attempts=reprice_attempts,
@@ -177,6 +199,7 @@ def _priced_risk_reducing_close(
     reference_kind: str,
     tick: Decimal,
     offset_ticks: Decimal,
+    max_deviation_ticks: Decimal,
     age_seconds: float | None,
     reference: Mapping[str, Any],
     reprice_attempts: int,
@@ -184,6 +207,19 @@ def _priced_risk_reducing_close(
     offset = tick * offset_ticks
     raw = reference_price + offset if action == "BUY" else reference_price - offset
     rounded = (raw / tick).to_integral_value() * tick
+    deviation = abs(rounded - reference_price)
+    tick_tolerance = tick * max_deviation_ticks
+    percent_tolerance = abs(reference_price) * PAPER_RISK_REDUCING_CLOSE_MAX_DEVIATION_PERCENT
+    max_deviation = min(tick_tolerance, percent_tolerance) if percent_tolerance > 0 else tick_tolerance
+    if deviation > max_deviation:
+        return _pricing_block(
+            blocker="MANAGED_CLOSE_PRICE_SANITY_DEVIATION",
+            reference=reference,
+            action=action,
+            age_seconds=age_seconds,
+            tick_size=str(tick),
+            reprice_attempts=reprice_attempts,
+        )
     return {
         "classification": "MANAGED_CLOSE_PRICED",
         "execution_class": EXIT_CLASS_RISK_REDUCING,
@@ -201,6 +237,10 @@ def _priced_risk_reducing_close(
         "bar_end": reference.get("bar_end"),
         "generated_at": reference.get("generated_at"),
         "marketable_limit_offset_ticks": float(offset_ticks),
+        "price_deviation_from_reference": format(deviation.normalize(), "f"),
+        "max_price_deviation_from_reference": format(max_deviation.normalize(), "f"),
+        "price_sanity_tolerance_ticks": float(max_deviation_ticks),
+        "price_sanity_tolerance_percent": float(PAPER_RISK_REDUCING_CLOSE_MAX_DEVIATION_PERCENT),
         "aggressive_paper_fallback": reference_kind in {"last_price", "close"},
         "aggressive_paper_fallback_percent": float(PAPER_AGGRESSIVE_CLOSE_FALLBACK_PERCENT),
         "reprice_attempts": max(int(reprice_attempts), 0),
@@ -234,11 +274,24 @@ def _pricing_block(
         "generated_at": reference.get("generated_at"),
         "tick_size": tick_size,
         "marketable_limit_offset_ticks": None,
+        "price_deviation_from_reference": None,
+        "max_price_deviation_from_reference": None,
+        "price_sanity_tolerance_ticks": None,
+        "price_sanity_tolerance_percent": float(PAPER_RISK_REDUCING_CLOSE_MAX_DEVIATION_PERCENT),
         "aggressive_paper_fallback": False,
         "reprice_attempts": max(int(reprice_attempts), 0),
         "stale_reference_blocker": blocker,
         "block_reason": blocker,
     }
+
+
+def _reference_blocker(reference: Mapping[str, Any]) -> str | None:
+    classification = str(reference.get("classification") or "").strip().upper()
+    if classification in {"RUNTIME_MARKET_REFERENCE_WRONG_SYMBOL", "RUNTIME_MARKET_REFERENCE_WRONG_CONTRACT"}:
+        return "MANAGED_CLOSE_REFERENCE_WRONG_SYMBOL"
+    if classification == "RUNTIME_MARKET_REFERENCE_STALE":
+        return "MANAGED_CLOSE_REFERENCE_STALE"
+    return None
 
 
 def _decimal_or_none(value: Any) -> Decimal | None:

@@ -68,7 +68,7 @@ def test_plan_blocks_close_price_when_runtime_market_data_is_stale(tmp_path: Pat
     assert "Current executable close price is unavailable." in payload["blockers"]
 
 
-def test_buy_to_close_without_bid_ask_uses_fresh_close_plus_aggressive_paper_offset(tmp_path: Path) -> None:
+def test_buy_to_close_without_bid_ask_uses_fresh_close_plus_bounded_paper_offset(tmp_path: Path) -> None:
     config = _seed(
         tmp_path,
         completed_bars=3,
@@ -82,12 +82,12 @@ def test_buy_to_close_without_bid_ask_uses_fresh_close_plus_aggressive_paper_off
     assert policy["classification"] == "MANAGED_CLOSE_PRICED"
     assert policy["close_action"] == "BUY"
     assert policy["reference_price_kind"] == "close"
-    assert policy["limit_price"] == "30564.75"
+    assert policy["limit_price"] == "29967.5"
     assert policy["aggressive_paper_fallback"] is True
     assert policy["marketable_execution_required"] is True
     assert policy["passive_execution_allowed"] is False
-    assert policy["marketable_limit_offset_ticks"] == 2397.0
-    assert payload["close_intent_preview"]["close_limit_price"] == "30564.75"
+    assert policy["marketable_limit_offset_ticks"] == 8.0
+    assert payload["close_intent_preview"]["close_limit_price"] == "29967.5"
 
 
 def test_managed_exit_attach_uses_validated_cbot_metadata_for_rates_contracts(tmp_path: Path) -> None:
@@ -146,7 +146,7 @@ def test_managed_exit_attach_keeps_comex_metadata_for_metals(tmp_path: Path) -> 
     assert attach_module._default_exchange("MGC") == "COMEX"
 
 
-def test_sell_to_close_without_bid_ask_uses_fresh_close_minus_aggressive_paper_offset(tmp_path: Path) -> None:
+def test_sell_to_close_without_bid_ask_uses_fresh_close_minus_bounded_paper_offset(tmp_path: Path) -> None:
     config = _seed(tmp_path, completed_bars=3)
 
     payload = build_track_b_managed_exit_attach_plan(config=config, now=NOW)
@@ -155,11 +155,133 @@ def test_sell_to_close_without_bid_ask_uses_fresh_close_minus_aggressive_paper_o
     assert policy["classification"] == "MANAGED_CLOSE_PRICED"
     assert policy["close_action"] == "SELL"
     assert policy["reference_price_kind"] == "close"
-    assert policy["limit_price"] == "29366.25"
+    assert policy["limit_price"] == "29963.5"
     assert policy["aggressive_paper_fallback"] is True
     assert policy["marketable_execution_required"] is True
     assert policy["passive_execution_allowed"] is False
-    assert policy["marketable_limit_offset_ticks"] == 2397.0
+    assert policy["marketable_limit_offset_ticks"] == 8.0
+
+
+def test_met_sell_to_close_uses_current_phase1_reference_near_market(tmp_path: Path) -> None:
+    config = _seed(
+        tmp_path,
+        completed_bars=12,
+        config_overrides={
+            "instrument_family": "MET",
+            "contract_key": "MET-202609",
+            "local_symbol": "METU6",
+            "con_id": 772435602,
+            "expiry": "20260925",
+            "tick_size": "0.5",
+            "managed_exit_policy_id": "US_ACTIVE_EVIDENCE_TIMEBOX_60M_EXIT_V1",
+            "strategy_id": "met_us_active_participation_long",
+            "lane_id": "met_us_active_participation_long",
+        },
+        position_overrides={
+            "instrument_family": "MET",
+            "contract_key": "MET-202609",
+            "local_symbol": "METU6",
+            "con_id": 772435602,
+            "managed_exit_policy_id": "US_ACTIVE_EVIDENCE_TIMEBOX_60M_EXIT_V1",
+            "strategy_id": "met_us_active_participation_long",
+        },
+    )
+    _write_json(
+        tmp_path / "outputs/track_b_execution_core/phase1_runtime_market_data/MET/1m/latest_runtime_candles.json",
+        {
+            "symbol": "MET",
+            "local_symbol": "METU6",
+            "generated_at": NOW.isoformat(),
+            "bars": [{"bar_end": "2026-05-25T07:47:00+00:00", "close": "1660"}],
+        },
+    )
+
+    payload = build_track_b_managed_exit_attach_plan(config=config, now=NOW)
+
+    policy = payload["close_pricing_policy"]
+    assert policy["classification"] == "MANAGED_CLOSE_PRICED"
+    assert policy["reference_price"] == "1660"
+    assert policy["limit_price"] == "1656"
+    assert policy["marketable_limit_offset_ticks"] == 8.0
+    assert payload["close_intent_preview"]["close_limit_price"] == "1656"
+
+
+def test_wrong_symbol_phase1_reference_blocks_managed_exit_pricing(tmp_path: Path) -> None:
+    config = _seed(
+        tmp_path,
+        completed_bars=12,
+        config_overrides={
+            "instrument_family": "MET",
+            "contract_key": "MET-202609",
+            "local_symbol": "METU6",
+            "con_id": 772435602,
+            "expiry": "20260925",
+            "tick_size": "0.5",
+            "managed_exit_policy_id": "US_ACTIVE_EVIDENCE_TIMEBOX_60M_EXIT_V1",
+        },
+        position_overrides={
+            "instrument_family": "MET",
+            "contract_key": "MET-202609",
+            "local_symbol": "METU6",
+            "con_id": 772435602,
+            "managed_exit_policy_id": "US_ACTIVE_EVIDENCE_TIMEBOX_60M_EXIT_V1",
+        },
+    )
+    _write_json(
+        tmp_path / "outputs/track_b_execution_core/phase1_runtime_market_data/MET/1m/latest_runtime_candles.json",
+        {
+            "symbol": "MBT",
+            "local_symbol": "MBTU6",
+            "generated_at": NOW.isoformat(),
+            "bars": [{"bar_end": "2026-05-25T07:47:00+00:00", "close": "1660"}],
+        },
+    )
+
+    payload = build_track_b_managed_exit_attach_plan(config=config, now=NOW)
+
+    assert payload["runtime_pricing_reference"]["classification"] == "RUNTIME_MARKET_REFERENCE_WRONG_SYMBOL"
+    assert payload["close_pricing_policy"]["classification"] == "MANAGED_CLOSE_PRICING_BLOCKED"
+    assert payload["close_pricing_policy"]["stale_reference_blocker"] == "MANAGED_CLOSE_REFERENCE_WRONG_SYMBOL"
+    assert payload["close_intent_preview"]["submit_allowed"] is False
+
+
+def test_stale_met_phase1_reference_blocks_managed_exit_pricing(tmp_path: Path) -> None:
+    config = _seed(
+        tmp_path,
+        completed_bars=12,
+        config_overrides={
+            "instrument_family": "MET",
+            "contract_key": "MET-202609",
+            "local_symbol": "METU6",
+            "con_id": 772435602,
+            "expiry": "20260925",
+            "tick_size": "0.5",
+            "managed_exit_policy_id": "US_ACTIVE_EVIDENCE_TIMEBOX_60M_EXIT_V1",
+        },
+        position_overrides={
+            "instrument_family": "MET",
+            "contract_key": "MET-202609",
+            "local_symbol": "METU6",
+            "con_id": 772435602,
+            "managed_exit_policy_id": "US_ACTIVE_EVIDENCE_TIMEBOX_60M_EXIT_V1",
+        },
+    )
+    _write_json(
+        tmp_path / "outputs/track_b_execution_core/phase1_runtime_market_data/MET/1m/latest_runtime_candles.json",
+        {
+            "symbol": "MET",
+            "local_symbol": "METU6",
+            "generated_at": "2026-05-25T07:40:00+00:00",
+            "bars": [{"bar_end": "2026-05-25T07:40:00+00:00", "close": "1660"}],
+        },
+    )
+
+    payload = build_track_b_managed_exit_attach_plan(config=config, now=NOW)
+
+    assert payload["runtime_pricing_reference"]["expected_symbol"] == "MET"
+    assert payload["close_pricing_policy"]["classification"] == "MANAGED_CLOSE_PRICING_BLOCKED"
+    assert payload["close_pricing_policy"]["stale_reference_blocker"] == "MANAGED_CLOSE_REFERENCE_STALE"
+    assert payload["close_intent_preview"]["submit_allowed"] is False
 
 
 def test_attach_prefers_ask_for_buy_to_close_when_bid_ask_available(tmp_path: Path) -> None:

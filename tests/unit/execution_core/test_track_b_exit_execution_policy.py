@@ -42,7 +42,7 @@ def test_risk_reducing_buy_to_close_prefers_fresh_ask() -> None:
     assert policy["limit_price"] == "30001.25"
 
 
-def test_risk_reducing_sell_to_close_without_bid_uses_fresh_last_minus_aggressive_offset() -> None:
+def test_risk_reducing_sell_to_close_without_bid_uses_fresh_last_minus_bounded_offset() -> None:
     policy = build_exit_limit_policy(
         reference={
             "reference_price": "30000",
@@ -61,8 +61,48 @@ def test_risk_reducing_sell_to_close_without_bid_uses_fresh_last_minus_aggressiv
     assert policy["marketable_execution_required"] is True
     assert policy["reference_price_kind"] == "last_price"
     assert policy["aggressive_paper_fallback"] is True
-    assert policy["marketable_limit_offset_ticks"] == 2400.0
-    assert policy["limit_price"] == "29400"
+    assert policy["marketable_limit_offset_ticks"] == 8.0
+    assert policy["limit_price"] == "29998"
+    assert policy["price_deviation_from_reference"] == "2"
+
+
+def test_risk_reducing_met_close_only_reference_prices_near_current_market() -> None:
+    policy = build_exit_limit_policy(
+        reference={
+            "reference_price": "1660",
+            "close": "1660",
+            "reference_age_seconds": 1.0,
+            "pricing_source": "DATABENTO_RUNTIME",
+        },
+        close_action="SELL",
+        tick_size="0.5",
+        stale_reference_seconds=60,
+        execution_class=EXIT_CLASS_RISK_REDUCING,
+    )
+
+    assert policy["classification"] == "MANAGED_CLOSE_PRICED"
+    assert policy["limit_price"] == "1656"
+    assert policy["marketable_limit_offset_ticks"] == 8.0
+
+
+def test_risk_reducing_far_away_close_limit_fails_sanity() -> None:
+    policy = build_exit_limit_policy(
+        reference={
+            "reference_price": "1660",
+            "close": "1660",
+            "reference_age_seconds": 1.0,
+            "pricing_source": "DATABENTO_RUNTIME",
+        },
+        close_action="SELL",
+        tick_size="0.5",
+        stale_reference_seconds=60,
+        execution_class=EXIT_CLASS_RISK_REDUCING,
+        base_offset_ticks=400,
+        max_slippage_ticks=None,
+    )
+
+    assert policy["classification"] == "MANAGED_CLOSE_PRICING_BLOCKED"
+    assert policy["stale_reference_blocker"] == "MANAGED_CLOSE_PRICE_SANITY_DEVIATION"
 
 
 def test_risk_reducing_exit_blocks_without_fresh_price() -> None:

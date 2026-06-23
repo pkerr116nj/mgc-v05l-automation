@@ -2316,7 +2316,14 @@ def _runtime_pricing_reference(
         source_path=_phase1_path(config=config, timeframe="1m"),
         timeframe="1m",
         now=now,
+        expected_symbol=config.instrument_family,
+        expected_local_symbol=config.local_symbol,
     )
+    if str(one_minute.get("classification") or "") in {
+        "RUNTIME_MARKET_REFERENCE_WRONG_SYMBOL",
+        "RUNTIME_MARKET_REFERENCE_WRONG_CONTRACT",
+    }:
+        return one_minute
     if one_minute.get("reference_price") not in {None, ""}:
         return one_minute
     return _pricing_reference_from_payload(
@@ -2324,6 +2331,8 @@ def _runtime_pricing_reference(
         source_path=_phase1_path(config=config, timeframe="5m"),
         timeframe="5m",
         now=now,
+        expected_symbol=config.instrument_family,
+        expected_local_symbol=config.local_symbol,
     )
 
 
@@ -2333,6 +2342,8 @@ def _pricing_reference_from_payload(
     source_path: Path,
     timeframe: str,
     now: datetime,
+    expected_symbol: str,
+    expected_local_symbol: str,
 ) -> dict[str, Any]:
     bars = _payload_bars(payload)
     if not bars:
@@ -2346,6 +2357,34 @@ def _pricing_reference_from_payload(
             "reference_age_seconds": None,
         }
     last = _mapping(bars[-1])
+    source_symbol = _string_or_none(payload.get("symbol") or payload.get("instrument_family") or last.get("symbol"))
+    source_local_symbol = _string_or_none(payload.get("local_symbol") or payload.get("localSymbol") or last.get("local_symbol") or last.get("localSymbol"))
+    expected_root = str(expected_symbol or "").strip().upper()
+    expected_contract = str(expected_local_symbol or "").strip().upper()
+    if source_symbol and source_symbol.upper() != expected_root:
+        return {
+            "classification": "RUNTIME_MARKET_REFERENCE_WRONG_SYMBOL",
+            "reference_price": None,
+            "reference_source": str(source_path),
+            "reference_source_type": "phase1_runtime_market_data",
+            "pricing_source": "DATABENTO_RUNTIME",
+            "timeframe": timeframe,
+            "reference_age_seconds": None,
+            "source_symbol": source_symbol,
+            "expected_symbol": expected_root,
+        }
+    if source_local_symbol and source_local_symbol.upper() != expected_contract:
+        return {
+            "classification": "RUNTIME_MARKET_REFERENCE_WRONG_CONTRACT",
+            "reference_price": None,
+            "reference_source": str(source_path),
+            "reference_source_type": "phase1_runtime_market_data",
+            "pricing_source": "DATABENTO_RUNTIME",
+            "timeframe": timeframe,
+            "reference_age_seconds": None,
+            "source_local_symbol": source_local_symbol,
+            "expected_local_symbol": expected_contract,
+        }
     generated_at = _parse_time(payload.get("generated_at"))
     bar_end_raw = last.get("bar_end") or last.get("candle_timestamp") or last.get("timestamp")
     bar_end = _parse_time(bar_end_raw)
@@ -2363,6 +2402,10 @@ def _pricing_reference_from_payload(
         "reference_source_type": "phase1_runtime_market_data",
         "pricing_source": "DATABENTO_RUNTIME",
         "timeframe": timeframe,
+        "source_symbol": source_symbol,
+        "expected_symbol": expected_root,
+        "source_local_symbol": source_local_symbol,
+        "expected_local_symbol": expected_contract,
         "reference_age_seconds": age_seconds,
         "bar_end": bar_end_raw,
         "generated_at": payload.get("generated_at"),
@@ -2401,6 +2444,11 @@ def _read_json(path: Path) -> dict[str, Any]:
 
 def _mapping(value: object) -> dict[str, Any]:
     return dict(value) if isinstance(value, Mapping) else {}
+
+
+def _string_or_none(value: object) -> str | None:
+    text = str(value or "").strip()
+    return text or None
 
 
 def _parse_time(value: object) -> datetime | None:
