@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import signal
 import subprocess
 import sys
 import time
@@ -344,15 +345,42 @@ def _run_command(command: Sequence[str], repo_root: Path, timeout_seconds: float
     env = dict(os.environ)
     existing_pythonpath = env.get("PYTHONPATH", "")
     env["PYTHONPATH"] = f"{repo_root / 'src'}{':' + existing_pythonpath if existing_pythonpath else ''}"
-    return subprocess.run(
+    process = subprocess.Popen(
         list(command),
         cwd=repo_root,
         env=env,
         text=True,
-        capture_output=True,
-        timeout=timeout_seconds,
-        check=False,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        start_new_session=True,
     )
+    try:
+        stdout, stderr = process.communicate(timeout=timeout_seconds)
+    except subprocess.TimeoutExpired as exc:
+        stdout = exc.stdout if isinstance(exc.stdout, str) else str(exc.stdout or "")
+        stderr = exc.stderr if isinstance(exc.stderr, str) else str(exc.stderr or "")
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        except OSError:
+            try:
+                process.kill()
+            except OSError:
+                pass
+        try:
+            cleanup_stdout, cleanup_stderr = process.communicate(timeout=2)
+            stdout = cleanup_stdout if cleanup_stdout is not None else stdout
+            stderr = cleanup_stderr if cleanup_stderr is not None else stderr
+        except subprocess.TimeoutExpired:
+            pass
+        return subprocess.CompletedProcess(
+            list(command),
+            124,
+            stdout=stdout or "",
+            stderr=f"refresh command timed out after {timeout_seconds}s: {stderr or ''}".strip(),
+        )
+    return subprocess.CompletedProcess(list(command), process.returncode, stdout=stdout or "", stderr=stderr or "")
 
 
 def _tail(value: str | bytes | None, *, limit: int = 1600) -> str:

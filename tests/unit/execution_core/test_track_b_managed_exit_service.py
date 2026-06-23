@@ -1409,6 +1409,46 @@ def test_managed_close_fill_triggers_post_broker_mutation_refresh(tmp_path: Path
     assert refresh_calls[0]["mutation_report"]["broker_state_mutated"] is True
 
 
+def test_managed_close_fill_publishes_refresh_running_status_before_post_refresh(tmp_path: Path) -> None:
+    status_path = tmp_path / "status.json"
+    heartbeat_path = tmp_path / "heartbeat.json"
+
+    def _post_refresh(**kwargs):
+        status = read_track_b_managed_exit_service_status(repo_root=tmp_path, status_path=status_path)
+        assert status["classification"] == "TRACK_B_MANAGED_EXIT_SERVICE_POST_BROKER_MUTATION_REFRESH_RUNNING"
+        assert status["trigger"] == "managed_exit_service_actuator"
+        assert heartbeat_path.exists()
+        return {
+            "classification": "POST_BROKER_MUTATION_REFRESH_DEGRADED",
+            "trigger": kwargs["trigger"],
+            "steps": [{"name": "shared_truth", "returncode": 124, "succeeded": False}],
+        }
+
+    payload = run_track_b_managed_exit_service_once(
+        config=TrackBManagedExitServiceConfig(
+            repo_root=tmp_path,
+            status_path=status_path,
+            heartbeat_path=heartbeat_path,
+            apply=True,
+            max_cycles_per_tick=1,
+        ),
+        now=NOW,
+        actuator_runner=lambda config, now, timeout: _actuator_report(
+            MANAGED_EXIT_ACTUATOR_APPLIED_OR_PENDING,
+            eligible=1,
+            submitted=1,
+            local_symbol="MESM6",
+        ),
+        authority_refresher=_refresh_ok,
+        pipeline_builder=lambda config, now: _pipeline_report(decisions=("ALLOWED",)),
+        post_mutation_refresher=_post_refresh,
+    )
+
+    assert payload["classification"] == MANAGED_EXIT_SERVICE_APPLY_SUCCEEDED
+    assert payload["post_broker_mutation_refresh"]["classification"] == "POST_BROKER_MUTATION_REFRESH_DEGRADED"
+    assert payload["post_broker_mutation_refresh"]["duration_seconds"] >= 0
+
+
 def test_v1_allowed_close_with_real_broker_risk_blocker_stops_before_actuator(tmp_path: Path) -> None:
     calls = []
 

@@ -596,6 +596,43 @@ def _attach_post_broker_mutation_refresh(
     if write is not True or enriched.get("broker_state_mutated") is not True:
         return enriched
     refresh_config = PostBrokerMutationRefreshConfig(repo_root=config.repo_root)
+    refresh_started = datetime.now(UTC)
+    write_track_b_managed_exit_service_status(
+        config=config,
+        payload={
+            "schema_version": "track_b_managed_exit_service_status_v1",
+            "generated_at": refresh_started.isoformat(),
+            "classification": "TRACK_B_MANAGED_EXIT_SERVICE_POST_BROKER_MUTATION_REFRESH_RUNNING",
+            "trigger": trigger,
+            "pid": os.getpid(),
+            "service_label": _service_label(config),
+            "repo_root": str(config.repo_root),
+            "cadence_seconds": config.cadence_seconds,
+            "close_only": True,
+            "entry_allowed": False,
+            "apply_requested": config.apply is True,
+            "apply_mode": "GUARDED_CLOSE_ONLY_APPLY" if config.apply is True else "DRY_RUN_ONLY",
+            "operator_authorized_managed_exit": config.operator_authorized_managed_exit is True,
+            "post_broker_mutation_refresh_timeout_seconds": refresh_config.timeout_seconds,
+            "broker_state_mutated": True,
+            "live_money_eligible": False,
+            "paper_proof_invoked": False,
+            "global_flatten_allowed": False,
+            "broad_flatten_allowed": False,
+        },
+    )
+    _write_heartbeat(
+        config=config,
+        payload={
+            "classification": "TRACK_B_MANAGED_EXIT_SERVICE_POST_BROKER_MUTATION_REFRESH_RUNNING",
+            "trigger": trigger,
+            "repo_root": str(config.repo_root),
+            "cadence_seconds": config.cadence_seconds,
+            "close_only": True,
+            "entry_allowed": False,
+        },
+        service_running=True,
+    )
     try:
         refresh = dict(
             post_mutation_refresher(
@@ -614,6 +651,10 @@ def _attach_post_broker_mutation_refresh(
             "global_cancel_allowed": False,
             "broad_flatten_allowed": False,
         }
+    refresh.setdefault(
+        "duration_seconds",
+        round(max((datetime.now(UTC) - refresh_started).total_seconds(), 0.0), 3),
+    )
     enriched["post_broker_mutation_refresh"] = refresh
     return enriched
 
@@ -1338,13 +1379,21 @@ def _run_command(command: Sequence[str], repo_root: Path, timeout_seconds: float
     try:
         stdout, stderr = process.communicate(timeout=timeout_seconds)
     except subprocess.TimeoutExpired:
+        stdout = ""
+        stderr = ""
         try:
             os.killpg(process.pid, signal.SIGKILL)
         except ProcessLookupError:
             pass
         except OSError:
-            process.kill()
-        stdout, stderr = process.communicate(timeout=10)
+            try:
+                process.kill()
+            except OSError:
+                pass
+        try:
+            stdout, stderr = process.communicate(timeout=2)
+        except subprocess.TimeoutExpired:
+            pass
         return subprocess.CompletedProcess(list(command), 124, stdout=stdout or "", stderr=stderr or "")
     return subprocess.CompletedProcess(list(command), process.returncode, stdout=stdout or "", stderr=stderr or "")
 

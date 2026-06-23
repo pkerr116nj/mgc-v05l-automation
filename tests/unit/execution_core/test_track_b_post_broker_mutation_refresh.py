@@ -5,6 +5,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from mgc_v05l.execution_core.phase1_runtime_ticker_registry import PHASE1_RUNTIME_TICKER_ORDER
+from mgc_v05l.execution_core import track_b_post_broker_mutation_refresh as refresh_module
 from mgc_v05l.execution_core.track_b_post_broker_mutation_refresh import (
     POST_BROKER_MUTATION_REFRESH_DEGRADED,
     POST_BROKER_MUTATION_REFRESH_SKIPPED,
@@ -123,6 +124,33 @@ def test_required_refresh_timeout_is_degraded_but_does_not_raise(tmp_path: Path)
     assert payload["required_failure_count"] == 1
     assert payload["first_failing_step"]["name"] == "shared_truth"
     assert payload["first_failing_step"]["returncode"] == 124
+
+
+def test_refresh_subprocess_timeout_kills_process_group_without_blocking(tmp_path: Path, monkeypatch) -> None:
+    killed: list[tuple[int, int]] = []
+
+    class HangingProcess:
+        pid = 4321
+        returncode = None
+
+        def __init__(self, *args, **kwargs) -> None:
+            self.communicate_calls = 0
+
+        def communicate(self, timeout=None):
+            self.communicate_calls += 1
+            raise subprocess.TimeoutExpired(["python", "-m", "hung"], timeout, output="partial", stderr="hung")
+
+        def kill(self) -> None:
+            killed.append((self.pid, -1))
+
+    monkeypatch.setattr(refresh_module.subprocess, "Popen", HangingProcess)
+    monkeypatch.setattr(refresh_module.os, "killpg", lambda pid, sig: killed.append((pid, sig)))
+
+    completed = refresh_module._run_command(["python", "-m", "hung"], tmp_path, 0.01)
+
+    assert completed.returncode == 124
+    assert "timed out" in completed.stderr
+    assert killed == [(4321, refresh_module.signal.SIGKILL)]
 
 
 def test_non_paper_or_wrong_account_refresh_is_skipped(tmp_path: Path) -> None:
