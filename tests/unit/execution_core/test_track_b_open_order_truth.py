@@ -14,6 +14,7 @@ from mgc_v05l.execution_core.track_b_open_order_truth import (
     NO_OPEN_ORDERS,
     OPEN_CLOSE_ORDER_WORKING,
     OPEN_ENTRY_ORDER_WORKING,
+    ORDER_TRUTH_STALE,
     PAPER_TEST_ORDER_PENDING_CANCEL_QUARANTINED,
     SUSPICIOUS_ORDER_STATE,
     TrackBOpenOrderTruthConfig,
@@ -302,6 +303,64 @@ def test_marketable_sell_limit_unfilled_is_classified(tmp_path: Path) -> None:
     assert "marketable_unfilled_beyond_threshold" in payload["order_states"][0]["condition_flags"]
 
 
+def test_fresh_complete_broker_snapshot_refreshes_persistent_working_order(tmp_path: Path) -> None:
+    stale_order = _order(
+        symbol="MET",
+        local_symbol="METU6",
+        action="SELL",
+        order_id=328,
+        perm_id=770010846,
+        limit_price="2000.0",
+        updated_at=(NOW - timedelta(minutes=35)).isoformat(),
+    )
+    _seed_reconciliation(
+        tmp_path,
+        broker_positions=[_position("MET", "METU6", "1")],
+        open_orders=[stale_order],
+        generated_at=(NOW - timedelta(minutes=35)).isoformat(),
+    )
+    _seed_raw_broker_snapshots(
+        tmp_path,
+        broker_positions=[_position("MET", "METU6", "1")],
+        open_orders=[stale_order],
+        generated_at=NOW.isoformat(),
+    )
+
+    payload = build_track_b_open_order_truth(config=TrackBOpenOrderTruthConfig(repo_root=tmp_path), now=NOW)
+
+    assert payload["classification"] == OPEN_CLOSE_ORDER_WORKING
+    assert payload["canonical_refresh_scope"] == "GLOBAL_COMPLETE"
+    assert payload["source_freshness"]["authority_source"] == "FRESH_COMPLETE_IBKR_BROKER_SNAPSHOT"
+    assert payload["source_freshness"]["fresh_broker_snapshot_overlay"] is True
+    assert payload["broker_open_orders"][0]["observed_at"] == NOW.isoformat()
+    assert payload["order_states"][0]["observed_age_seconds"] == 0.0
+    assert payload["order_states"][0]["age_seconds"] == 2100.0
+    assert "close_order_stale" not in payload["order_states"][0]["condition_flags"]
+
+
+def test_stale_reconciliation_still_blocks_when_raw_snapshot_is_missing(tmp_path: Path) -> None:
+    _seed_reconciliation(
+        tmp_path,
+        broker_positions=[_position("MET", "METU6", "1")],
+        open_orders=[
+            _order(
+                symbol="MET",
+                local_symbol="METU6",
+                action="SELL",
+                order_id=328,
+                limit_price="2000.0",
+                updated_at=(NOW - timedelta(minutes=35)).isoformat(),
+            )
+        ],
+        generated_at=(NOW - timedelta(minutes=35)).isoformat(),
+    )
+
+    payload = build_track_b_open_order_truth(config=TrackBOpenOrderTruthConfig(repo_root=tmp_path), now=NOW)
+
+    assert payload["classification"] == ORDER_TRUTH_STALE
+    assert payload["source_freshness"]["authority_source"] == "BROKER_RECONCILIATION_ARTIFACT"
+
+
 def test_authority_event_log_and_dashboard_projection_paths(tmp_path: Path) -> None:
     config = TrackBOpenOrderTruthConfig(repo_root=tmp_path)
     _seed_reconciliation(tmp_path)
@@ -421,12 +480,13 @@ def _seed_reconciliation(
     broker_positions: list[dict] | None = None,
     open_orders: list[dict] | None = None,
     unknown_open_orders: list[dict] | None = None,
+    generated_at: str | None = None,
 ) -> None:
     _write_json(
         _reconciliation_path(root),
         {
             "classification": "TRACK_B_PAPER_BROKER_RECONCILED",
-            "generated_at": NOW.isoformat(),
+            "generated_at": generated_at or NOW.isoformat(),
             "broker_reconciled": not bool(open_orders),
             "symbols": list(PHASE1_RUNTIME_TICKER_ORDER),
             "track_b_broker_positions": broker_positions or [],
@@ -450,6 +510,38 @@ def _seed_reconciliation(
     _write_json(
         root / "outputs" / "track_b_execution_core" / "paper_trade_ledger" / "latest_track_b_live_position_status.json",
         {"open_position_count": len(broker_positions or []), "review_required_positions": [], "generated_at": NOW.isoformat()},
+    )
+
+
+def _seed_raw_broker_snapshots(
+    root: Path,
+    *,
+    broker_positions: list[dict] | None = None,
+    open_orders: list[dict] | None = None,
+    generated_at: str | None = None,
+    open_orders_complete: bool = True,
+    positions_complete: bool = True,
+) -> None:
+    snapshot_root = root / "outputs" / "reports" / "ibkr_read_only_verification"
+    _write_json(
+        snapshot_root / "ibkr_positions_snapshot.json",
+        {
+            "generated_at": generated_at or NOW.isoformat(),
+            "positions": broker_positions or [],
+            "position_count": len(broker_positions or []),
+            "positions_complete": positions_complete,
+            "read_only": True,
+        },
+    )
+    _write_json(
+        snapshot_root / "ibkr_open_orders_snapshot.json",
+        {
+            "generated_at": generated_at or NOW.isoformat(),
+            "open_orders": open_orders or [],
+            "open_order_count": len(open_orders or []),
+            "open_orders_complete": open_orders_complete,
+            "read_only": True,
+        },
     )
 
 

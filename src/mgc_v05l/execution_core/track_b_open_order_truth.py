@@ -65,6 +65,12 @@ DEFAULT_MARKET_DATA_ROOT = Path("outputs") / "track_b_execution_core" / "phase1_
 DEFAULT_LIFECYCLE_ROOT = (
     Path("outputs") / "track_b_execution_core" / "track_b_strategy_managed_paper_lifecycle"
 )
+DEFAULT_BROKER_POSITIONS_SNAPSHOT = (
+    Path("outputs") / "reports" / "ibkr_read_only_verification" / "ibkr_positions_snapshot.json"
+)
+DEFAULT_BROKER_OPEN_ORDERS_SNAPSHOT = (
+    Path("outputs") / "reports" / "ibkr_read_only_verification" / "ibkr_open_orders_snapshot.json"
+)
 
 _SENTINEL_FILLED_QUANTITY = Decimal("1e100")
 _TOLERABLE_IBKR_STATUS_GAPS = {"sentinel_filled_quantity", "missing_remaining_quantity"}
@@ -92,6 +98,8 @@ class TrackBOpenOrderTruthConfig:
     live_position_status_path: Path = DEFAULT_LIVE_POSITION_STATUS_ARTIFACT
     market_data_root: Path = DEFAULT_MARKET_DATA_ROOT
     lifecycle_root: Path = DEFAULT_LIFECYCLE_ROOT
+    broker_positions_snapshot_path: Path = DEFAULT_BROKER_POSITIONS_SNAPSHOT
+    broker_open_orders_snapshot_path: Path = DEFAULT_BROKER_OPEN_ORDERS_SNAPSHOT
     artifact_max_age_seconds: float = 180.0
     close_order_stale_seconds: float = 900.0
     marketable_unfilled_seconds: float = 60.0
@@ -126,15 +134,29 @@ def build_track_b_open_order_truth_from_reconciliation(
     market_refs = _market_refs(config=config)
     lifecycle_reports = _load_lifecycle_reports(config.resolve(config.lifecycle_root))
     terminal_records = load_live_trade_registry_records(repo_root=config.repo_root)
+    broker_snapshot = _fresh_complete_broker_snapshot_source(config=config, now=actual_now)
 
-    open_orders = _list(reconciliation.get("track_b_broker_open_orders"))
-    broker_positions = _list(reconciliation.get("track_b_broker_positions"))
+    if broker_snapshot:
+        open_orders = _track_b_open_orders_from_broker_snapshot(
+            broker_snapshot["open_orders"],
+            observed_at=broker_snapshot["open_orders_generated_at"],
+        )
+        broker_positions = _track_b_positions_from_broker_snapshot(broker_snapshot["positions"])
+        source_age = broker_snapshot["source_age_seconds"]
+        source_stale = False
+        authority_source = "FRESH_COMPLETE_IBKR_BROKER_SNAPSHOT"
+        source_generated_at = broker_snapshot["source_generated_at"]
+    else:
+        open_orders = _list(reconciliation.get("track_b_broker_open_orders"))
+        broker_positions = _list(reconciliation.get("track_b_broker_positions"))
+        source_age = _age_seconds(reconciliation.get("generated_at"), actual_now)
+        source_stale = source_age is None or source_age > float(config.artifact_max_age_seconds)
+        authority_source = "BROKER_RECONCILIATION_ARTIFACT"
+        source_generated_at = reconciliation.get("generated_at")
     lifecycle_positions = _list(reconciliation.get("track_b_lifecycle_positions"))
     unknown_orders = _list(reconciliation.get("unknown_broker_open_orders"))
     known_managed_exit_orders = _list(reconciliation.get("known_managed_exit_orders"))
     unresolved_ownership = _list(reconciliation.get("unresolved_submit_intent_ownership_records"))
-    source_age = _age_seconds(reconciliation.get("generated_at"), actual_now)
-    source_stale = source_age is None or source_age > float(config.artifact_max_age_seconds)
     scope = _canonical_scope(reconciliation)
 
     order_states = [
@@ -188,6 +210,9 @@ def build_track_b_open_order_truth_from_reconciliation(
         "canonical_symbols": scope["canonical_symbols"],
         "source_freshness": {
             "reconciliation_generated_at": reconciliation.get("generated_at"),
+            "authority_source": authority_source,
+            "authority_source_generated_at": source_generated_at,
+            "fresh_broker_snapshot_overlay": bool(broker_snapshot),
             "age_seconds": source_age,
             "ttl_seconds": float(config.artifact_max_age_seconds),
             "stale": bool(source_stale),
@@ -251,6 +276,8 @@ def build_track_b_open_order_truth_from_reconciliation(
             "position_truth": str(config.resolve(config.position_truth_path)),
             "live_position_status": str(config.resolve(config.live_position_status_path)),
             "lifecycle_root": str(config.resolve(config.lifecycle_root)),
+            "broker_positions_snapshot": str(config.resolve(config.broker_positions_snapshot_path)),
+            "broker_open_orders_snapshot": str(config.resolve(config.broker_open_orders_snapshot_path)),
         },
     }
     return payload
@@ -394,8 +421,12 @@ def _classify_order(
     close_attempt_age = _age_seconds(close_attempt.get("submitted_at"), now)
     if close_attempt_age is not None:
         age_seconds = max(age_seconds or 0.0, close_attempt_age)
+    observed_age_seconds = _order_observed_age_seconds(order, now)
     marketable = _is_marketable(order=order, market_ref=market_ref)
-    stale = bool(is_close_order and age_seconds is not None and age_seconds >= float(close_order_stale_seconds))
+    stale = bool(
+        is_close_order
+        and (observed_age_seconds is None or observed_age_seconds >= float(close_order_stale_seconds))
+    )
     flat_with_close = bool(is_close_order and not _matching_broker_positions(order, broker_positions))
     condition_flags = []
     if marketable and age_seconds is not None and age_seconds >= float(marketable_unfilled_seconds):
@@ -430,6 +461,8 @@ def _classify_order(
         "status": order.get("status"),
         "limit_price": order.get("limit_price") or order.get("order_limit_price"),
         "age_seconds": age_seconds,
+        "observed_age_seconds": observed_age_seconds,
+        "observed_at": order.get("observed_at") or order.get("last_observed_at"),
         "market_reference": dict(market_ref),
         "marketable": bool(marketable),
         "working": _order_working(order),
@@ -478,6 +511,64 @@ def _overall_classification(
     if any(state.get("is_entry_order") is True for state in order_states):
         return OPEN_ENTRY_ORDER_WORKING
     return NO_OPEN_ORDERS
+
+
+def _fresh_complete_broker_snapshot_source(
+    *,
+    config: TrackBOpenOrderTruthConfig,
+    now: datetime,
+) -> dict[str, Any] | None:
+    positions = _read_json(config.resolve(config.broker_positions_snapshot_path))
+    open_orders = _read_json(config.resolve(config.broker_open_orders_snapshot_path))
+    if positions.get("positions_complete") is not True or open_orders.get("open_orders_complete") is not True:
+        return None
+    if positions.get("read_only") is False or open_orders.get("read_only") is False:
+        return None
+    position_age = _age_seconds(positions.get("generated_at"), now)
+    open_order_age = _age_seconds(open_orders.get("generated_at"), now)
+    if position_age is None or open_order_age is None:
+        return None
+    max_age = float(config.artifact_max_age_seconds)
+    if position_age > max_age or open_order_age > max_age:
+        return None
+    return {
+        "positions": positions,
+        "open_orders": open_orders,
+        "positions_generated_at": positions.get("generated_at"),
+        "open_orders_generated_at": open_orders.get("generated_at"),
+        "source_generated_at": min(str(positions.get("generated_at")), str(open_orders.get("generated_at"))),
+        "source_age_seconds": max(position_age, open_order_age),
+    }
+
+
+def _track_b_open_orders_from_broker_snapshot(
+    snapshot: Mapping[str, Any],
+    *,
+    observed_at: Any,
+) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    for order in _list(snapshot.get("open_orders") or snapshot.get("orders")):
+        if _row_symbol(order) not in PHASE1_RUNTIME_TICKER_ORDER:
+            continue
+        row = dict(order)
+        previous_updated_at = row.get("updated_at")
+        row.setdefault("first_observed_at", previous_updated_at)
+        row["observed_at"] = observed_at
+        row["last_observed_at"] = observed_at
+        row["broker_snapshot_generated_at"] = observed_at
+        rows.append(row)
+    return rows
+
+
+def _track_b_positions_from_broker_snapshot(snapshot: Mapping[str, Any]) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    for position in _list(snapshot.get("positions")):
+        if _row_symbol(position) not in PHASE1_RUNTIME_TICKER_ORDER:
+            continue
+        if _quantity(position) == Decimal("0"):
+            continue
+        rows.append(dict(position))
+    return rows
 
 
 def _suspicious_reasons(*, order: Mapping[str, Any], lifecycle_report: Mapping[str, Any]) -> list[str]:
@@ -812,6 +903,20 @@ def _order_age_seconds(order: Mapping[str, Any], now: datetime) -> float | None:
         or order.get("updated_at")
         or order.get("last_update_at")
         or order.get("order_time")
+    )
+    if timestamp is None:
+        return None
+    return round(max((now - timestamp).total_seconds(), 0.0), 3)
+
+
+def _order_observed_age_seconds(order: Mapping[str, Any], now: datetime) -> float | None:
+    timestamp = _parse_time(
+        order.get("observed_at")
+        or order.get("last_observed_at")
+        or order.get("source_generated_at")
+        or order.get("broker_snapshot_generated_at")
+        or order.get("updated_at")
+        or order.get("last_update_at")
     )
     if timestamp is None:
         return None
