@@ -7,6 +7,9 @@ from mgc_v05l.execution_core.track_b_current_state_authority import (
     CURRENT_STATE_AUTHORITY_BLOCKED,
     CurrentStateAuthorityInput,
     evaluate_current_state_authority,
+    open_order_truth_duplicate_close_group_count,
+    open_order_truth_is_global_no_open_orders,
+    open_order_truth_open_order_count,
 )
 
 
@@ -182,6 +185,27 @@ def test_unknown_orders_block() -> None:
 
     assert classification == CURRENT_STATE_AUTHORITY_BLOCKED
     assert "unknown_open_orders" in reasons
+
+
+def test_global_no_open_order_truth_helper_requires_clean_complete_scope() -> None:
+    clean = {
+        "classification": "NO_OPEN_ORDERS",
+        "canonical_refresh_scope": "GLOBAL_COMPLETE",
+        "broker_open_orders": [],
+        "unknown_open_orders": [],
+        "duplicate_close_order_groups": [],
+    }
+
+    assert open_order_truth_is_global_no_open_orders(clean) is True
+    assert open_order_truth_open_order_count(clean) == 0
+    assert open_order_truth_duplicate_close_group_count(clean) == 0
+    assert open_order_truth_is_global_no_open_orders({**clean, "canonical_refresh_scope": "PARTIAL_DIAGNOSTIC"}) is False
+    assert open_order_truth_is_global_no_open_orders(
+        {**clean, "broker_open_orders": [{"local_symbol": "METU6", "order_id": 328}]}
+    ) is False
+    assert open_order_truth_is_global_no_open_orders(
+        {**clean, "duplicate_close_order_groups": [{"local_symbol": "METU6", "order_ids": [1, 2]}]}
+    ) is False
 
 
 def test_unresolved_identity_and_stale_price_block() -> None:

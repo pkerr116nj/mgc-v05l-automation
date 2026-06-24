@@ -33,6 +33,9 @@ DEFAULT_LIFECYCLE_SUMMARY = (
 DEFAULT_ORDER_STATE = (
     Path("outputs") / "track_b_execution_core" / "paper_trade_ledger" / "latest_track_b_paper_trade_summary.json"
 )
+DEFAULT_OPEN_ORDER_TRUTH = (
+    Path("outputs") / "track_b_execution_core" / "open_order_truth" / "latest_open_order_truth.json"
+)
 DEFAULT_CANONICAL_READINESS = Path("outputs") / "operator_dashboard" / "runtime" / "latest_canonical_readiness.json"
 DEFAULT_MAINTENANCE_SUPERVISOR = (
     Path("outputs") / "operator_dashboard" / "runtime" / "latest_maintenance_supervisor_decision.json"
@@ -58,6 +61,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--reconciliation-path", default=None)
     parser.add_argument("--lifecycle-path", default=None)
     parser.add_argument("--order-state-path", default=None)
+    parser.add_argument("--open-order-truth-path", default=None)
     parser.add_argument("--canonical-readiness-path", default=None)
     parser.add_argument("--maintenance-supervisor-path", default=None)
     parser.add_argument("--output-path", default=None)
@@ -130,6 +134,7 @@ def gather_lease_inputs(
     reconciliation = _read_json(paths["reconciliation"])
     lifecycle = _read_json(paths["lifecycle"])
     order_state = _read_json(paths["order_state"])
+    open_order_truth = _read_json(paths["open_order_truth"])
     canonical = _read_json(paths["canonical_readiness"])
     maintenance = _read_json(paths["maintenance_supervisor"])
 
@@ -143,6 +148,7 @@ def gather_lease_inputs(
         "reconciliation": reconciliation,
         "lifecycle": _lifecycle_summary(lifecycle),
         "order_state": _order_state_summary(order_state, reconciliation),
+        "open_order_truth": open_order_truth,
         "canonical_readiness": canonical,
         "maintenance_supervisor": maintenance,
         "source_artifact_paths": {key: str(path) for key, path in paths.items()},
@@ -154,6 +160,7 @@ def gather_lease_inputs(
                 "reconciliation": _artifact_timestamp(paths["reconciliation"], reconciliation),
                 "lifecycle": _artifact_timestamp(paths["lifecycle"], lifecycle),
                 "order_state": _artifact_timestamp(paths["order_state"], order_state),
+                "open_order_truth": _artifact_timestamp(paths["open_order_truth"], open_order_truth),
                 "canonical_readiness": _artifact_timestamp(paths["canonical_readiness"], canonical),
                 "maintenance_supervisor": _artifact_timestamp(paths["maintenance_supervisor"], maintenance),
             }.items()
@@ -236,6 +243,7 @@ def _resolve_paths(*, repo_root: Path, args: argparse.Namespace) -> dict[str, Pa
         "reconciliation": _resolve_path(repo_root, args.reconciliation_path, DEFAULT_RECONCILIATION),
         "lifecycle": _resolve_path(repo_root, args.lifecycle_path, DEFAULT_LIFECYCLE_SUMMARY),
         "order_state": _resolve_path(repo_root, args.order_state_path, DEFAULT_ORDER_STATE),
+        "open_order_truth": _resolve_path(repo_root, args.open_order_truth_path, DEFAULT_OPEN_ORDER_TRUTH),
         "canonical_readiness": _resolve_path(repo_root, args.canonical_readiness_path, DEFAULT_CANONICAL_READINESS),
         "maintenance_supervisor": _resolve_path(repo_root, args.maintenance_supervisor_path, DEFAULT_MAINTENANCE_SUPERVISOR),
         "output": _resolve_path(repo_root, args.output_path, DEFAULT_LEASE_ARTIFACT),

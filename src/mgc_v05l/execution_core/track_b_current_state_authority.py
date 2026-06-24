@@ -261,6 +261,59 @@ def open_order_truth_unknown_count(open_order_truth: Mapping[str, Any]) -> int:
     return 0
 
 
+def open_order_truth_open_order_count(open_order_truth: Mapping[str, Any]) -> int:
+    for key in (
+        "open_order_count",
+        "broker_open_order_count",
+        "track_b_broker_open_order_count",
+    ):
+        value = int_or_none(open_order_truth.get(key))
+        if value is not None:
+            return value
+    rows = open_order_truth.get("broker_open_orders") or open_order_truth.get("open_orders") or open_order_truth.get("orders") or []
+    if isinstance(rows, list):
+        return len(rows)
+    return 0
+
+
+def open_order_truth_duplicate_close_group_count(open_order_truth: Mapping[str, Any]) -> int:
+    for key in (
+        "duplicate_close_group_count",
+        "duplicate_close_order_group_count",
+        "duplicate_group_count",
+    ):
+        value = int_or_none(open_order_truth.get(key))
+        if value is not None:
+            return value
+    rows = open_order_truth.get("duplicate_close_order_groups") or open_order_truth.get("duplicate_close_groups") or []
+    if isinstance(rows, list):
+        return len(rows)
+    return 0
+
+
+def open_order_truth_is_global_complete(open_order_truth: Mapping[str, Any]) -> bool:
+    scope = str(
+        open_order_truth.get("canonical_refresh_scope")
+        or open_order_truth.get("refresh_scope")
+        or open_order_truth.get("scope")
+        or ""
+    ).strip().upper()
+    return scope == "GLOBAL_COMPLETE"
+
+
+def open_order_truth_is_global_no_open_orders(open_order_truth: Mapping[str, Any]) -> bool:
+    if not open_order_truth_is_global_complete(open_order_truth):
+        return False
+    classification = str(open_order_truth.get("classification") or open_order_truth.get("state") or "").strip().upper()
+    if classification not in {"NO_OPEN_ORDERS", "OPEN_ORDER_TRUTH_CLEAN_FLAT"}:
+        return False
+    return (
+        open_order_truth_open_order_count(open_order_truth) == 0
+        and open_order_truth_unknown_count(open_order_truth) == 0
+        and open_order_truth_duplicate_close_group_count(open_order_truth) == 0
+    )
+
+
 def normalize_current_broker_position(
     row: Mapping[str, Any],
     *,

@@ -992,6 +992,53 @@ def test_unknown_open_orders_invalidate_immediately() -> None:
     assert result["operator_action_required"] is True
 
 
+def test_global_no_open_order_truth_clears_stale_unknown_order_counts() -> None:
+    inputs = base_inputs()
+    inputs["reconciliation"] = {
+        **dict(inputs["reconciliation"]),
+        "track_b_broker_open_order_count": 1,
+        "unknown_broker_open_order_count": 1,
+    }
+    inputs["order_state"] = {
+        **dict(inputs["order_state"]),
+        "unknown_open_order_count": 1,
+    }
+    inputs["open_order_truth"] = {
+        "classification": "NO_OPEN_ORDERS",
+        "canonical_refresh_scope": "GLOBAL_COMPLETE",
+        "broker_open_orders": [],
+        "unknown_open_orders": [],
+        "duplicate_close_order_groups": [],
+    }
+
+    result = classify_broker_truth_lease(inputs)
+
+    assert result["lease_state"] == "ACTIVE"
+    assert result["track_b_broker_open_order_count"] == 0
+    assert result["unknown_broker_open_order_count"] == 0
+    assert result["connection_health"]["flat_no_order_submit_capable_context"]["unknown_open_orders_zero"] is True
+    assert result["degraded_exact_risk_reducing_close_context"]["unknown_open_order_count"] == 0
+
+
+def test_partial_open_order_truth_does_not_clear_unknown_order_counts() -> None:
+    inputs = base_inputs()
+    inputs["reconciliation"] = {
+        **dict(inputs["reconciliation"]),
+        "unknown_broker_open_order_count": 1,
+    }
+    inputs["open_order_truth"] = {
+        "classification": "NO_OPEN_ORDERS",
+        "canonical_refresh_scope": "PARTIAL_DIAGNOSTIC",
+        "broker_open_orders": [],
+        "unknown_open_orders": [],
+    }
+
+    result = classify_broker_truth_lease(inputs)
+
+    assert result["lease_state"] == "INVALIDATED_UNKNOWN_OPEN_ORDERS"
+    assert result["unknown_broker_open_order_count"] == 1
+
+
 def test_known_managed_exit_order_reconciliation_preserves_active_lease() -> None:
     inputs = base_inputs()
     inputs["last_successful_broker_truth"] = {

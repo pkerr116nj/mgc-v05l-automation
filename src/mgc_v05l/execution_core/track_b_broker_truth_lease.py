@@ -15,6 +15,11 @@ from typing import Any, Mapping, Sequence
 
 from mgc_v05l.execution_core.bounded_jsonl import append_bounded_jsonl
 from mgc_v05l.execution_core.track_b_atomic_io import write_json_atomic
+from mgc_v05l.execution_core.track_b_current_state_authority import (
+    open_order_truth_open_order_count,
+    open_order_truth_is_global_no_open_orders,
+    open_order_truth_unknown_count,
+)
 
 LEASE_STATES = {
     "ACTIVE",
@@ -68,6 +73,7 @@ def classify_broker_truth_lease(inputs: Mapping[str, Any]) -> dict[str, Any]:
     reconciliation = _mapping(inputs.get("reconciliation") or inputs.get("phase1_reconciliation"))
     lifecycle = _mapping(inputs.get("lifecycle") or inputs.get("lifecycle_state"))
     order_state = _mapping(inputs.get("order_state") or inputs.get("order_intent_state") or inputs.get("open_order_state"))
+    open_order_truth = _mapping(inputs.get("open_order_truth") or inputs.get("canonical_open_order_truth"))
     source_paths = _mapping(inputs.get("source_artifact_paths") or inputs.get("source_artifacts"))
     source_timestamps = dict(_mapping(inputs.get("source_artifact_timestamps") or {}))
 
@@ -96,6 +102,7 @@ def classify_broker_truth_lease(inputs: Mapping[str, Any]) -> dict[str, Any]:
         reconciliation=reconciliation,
         lifecycle=lifecycle,
         order_state=order_state,
+        open_order_truth=open_order_truth,
         allowed_instruments=allowed_instruments,
         broker_session_owner=broker_session_owner,
         current_time=current_time,
@@ -159,6 +166,7 @@ def classify_broker_truth_lease(inputs: Mapping[str, Any]) -> dict[str, Any]:
         latest_attempt=latest_attempt,
         reconciliation=reconciliation,
         order_state=order_state,
+        open_order_truth=open_order_truth,
         allowed_instruments=allowed_instruments,
     ):
         builder.invalidate(
@@ -181,6 +189,8 @@ def classify_broker_truth_lease(inputs: Mapping[str, Any]) -> dict[str, Any]:
             allowed_instruments=allowed_instruments,
             lifecycle=lifecycle,
             order_state=order_state,
+            broker_truth=broker_truth,
+            open_order_truth=open_order_truth,
         )
         broker_position_contradiction = _broker_position_contradiction(
             broker_truth=broker_truth,
@@ -353,6 +363,7 @@ def classify_broker_truth_lease(inputs: Mapping[str, Any]) -> dict[str, Any]:
         reconciliation=reconciliation,
         lifecycle=lifecycle,
         order_state=order_state,
+        open_order_truth=open_order_truth,
         allowed_instruments=allowed_instruments,
         connection_mode=connection_mode,
         broker_position_lease=broker_position_lease,
@@ -455,11 +466,20 @@ def classify_broker_truth_lease(inputs: Mapping[str, Any]) -> dict[str, Any]:
         "positions": _scoped_positions(broker_truth, allowed_instruments),
         "open_orders": _scoped_open_orders(broker_truth, allowed_instruments),
         "track_b_broker_position_count": int(reconciliation.get("track_b_broker_position_count") or 0),
-        "track_b_broker_open_order_count": int(reconciliation.get("track_b_broker_open_order_count") or 0),
-        "unknown_broker_open_order_count": int(
-            reconciliation.get("unknown_broker_open_order_count")
-            or order_state.get("unknown_open_order_count")
-            or 0
+        "track_b_broker_open_order_count": _derived_broker_open_order_count(
+            broker_truth=broker_truth,
+            latest_attempt=latest_attempt,
+            reconciliation=reconciliation,
+            open_order_truth=open_order_truth,
+            allowed_instruments=allowed_instruments,
+        ),
+        "unknown_broker_open_order_count": _derived_unknown_open_order_count(
+            broker_truth=broker_truth,
+            latest_attempt=latest_attempt,
+            reconciliation=reconciliation,
+            order_state=order_state,
+            open_order_truth=open_order_truth,
+            allowed_instruments=allowed_instruments,
         ),
         "lifecycle_open_position_count": int(
             reconciliation.get("lifecycle_open_position_count")
@@ -684,9 +704,19 @@ def _unknown_open_orders(
     latest_attempt: Mapping[str, Any],
     reconciliation: Mapping[str, Any],
     order_state: Mapping[str, Any],
+    open_order_truth: Mapping[str, Any],
     allowed_instruments: set[str],
 ) -> bool:
     if not _bool(broker_truth.get("open_orders_complete")):
+        return True
+    if _canonical_global_no_open_order_truth(
+        broker_truth=broker_truth,
+        latest_attempt=latest_attempt,
+        open_order_truth=open_order_truth,
+        allowed_instruments=allowed_instruments,
+    ):
+        return False
+    if open_order_truth_unknown_count(open_order_truth) > 0:
         return True
     if int(reconciliation.get("unknown_broker_open_order_count") or order_state.get("unknown_open_order_count") or 0) > 0:
         return True
@@ -699,6 +729,72 @@ def _unknown_open_orders(
         if not _bool(row.get("known") if "known" in row else row.get("owned", True)):
             return True
     return False
+
+
+def _derived_unknown_open_order_count(
+    *,
+    broker_truth: Mapping[str, Any],
+    latest_attempt: Mapping[str, Any],
+    reconciliation: Mapping[str, Any],
+    order_state: Mapping[str, Any],
+    open_order_truth: Mapping[str, Any],
+    allowed_instruments: set[str],
+) -> int:
+    if _canonical_global_no_open_order_truth(
+        broker_truth=broker_truth,
+        latest_attempt=latest_attempt,
+        open_order_truth=open_order_truth,
+        allowed_instruments=allowed_instruments,
+    ):
+        return 0
+    current_unknown = open_order_truth_unknown_count(open_order_truth)
+    if current_unknown > 0:
+        return current_unknown
+    return int(
+        reconciliation.get("unknown_broker_open_order_count")
+        or order_state.get("unknown_open_order_count")
+        or latest_attempt.get("unknown_broker_open_order_count")
+        or 0
+    )
+
+
+def _derived_broker_open_order_count(
+    *,
+    broker_truth: Mapping[str, Any],
+    latest_attempt: Mapping[str, Any],
+    reconciliation: Mapping[str, Any],
+    open_order_truth: Mapping[str, Any],
+    allowed_instruments: set[str],
+) -> int:
+    if _canonical_global_no_open_order_truth(
+        broker_truth=broker_truth,
+        latest_attempt=latest_attempt,
+        open_order_truth=open_order_truth,
+        allowed_instruments=allowed_instruments,
+    ):
+        return 0
+    current_open_orders = open_order_truth_open_order_count(open_order_truth)
+    if current_open_orders > 0:
+        return current_open_orders
+    broker_count = len(_scoped_open_orders(broker_truth, allowed_instruments))
+    latest_count = len(_scoped_open_orders(latest_attempt, allowed_instruments))
+    return int(reconciliation.get("track_b_broker_open_order_count") or broker_count or latest_count or 0)
+
+
+def _canonical_global_no_open_order_truth(
+    *,
+    broker_truth: Mapping[str, Any],
+    latest_attempt: Mapping[str, Any],
+    open_order_truth: Mapping[str, Any],
+    allowed_instruments: set[str],
+) -> bool:
+    if not open_order_truth:
+        return False
+    if not _bool(broker_truth.get("open_orders_complete")):
+        return False
+    if _scoped_open_orders(broker_truth, allowed_instruments):
+        return False
+    return open_order_truth_is_global_no_open_orders(open_order_truth)
 
 
 def _manual_broker_action_detected(
@@ -743,13 +839,23 @@ def _latest_success_contradiction(
     allowed_instruments: set[str],
     lifecycle: Mapping[str, Any],
     order_state: Mapping[str, Any],
+    broker_truth: Mapping[str, Any],
+    open_order_truth: Mapping[str, Any],
 ) -> dict[str, str] | None:
     if not _latest_attempt_success(latest_attempt):
         return None
     latest_account = str(latest_attempt.get("account") or latest_attempt.get("account_id") or "").strip()
     if account_id and latest_account and latest_account != account_id:
         return {"code": "wrong_account", "detail": "Latest successful broker truth uses a different account."}
-    if int(latest_attempt.get("unknown_broker_open_order_count") or order_state.get("unknown_open_order_count") or 0) > 0:
+    if (
+        int(latest_attempt.get("unknown_broker_open_order_count") or order_state.get("unknown_open_order_count") or 0) > 0
+        and not _canonical_global_no_open_order_truth(
+            broker_truth=broker_truth,
+            latest_attempt=latest_attempt,
+            open_order_truth=open_order_truth,
+            allowed_instruments=allowed_instruments,
+        )
+    ):
         return {"code": "unknown_open_orders", "detail": "Latest successful broker truth reports unknown open orders."}
     positions = [row for row in _scoped_positions(latest_attempt, allowed_instruments) if abs(_quantity(row)) > 1e-9]
     if positions and not _lifecycle_positions_match(positions=positions, lifecycle=lifecycle):
@@ -970,6 +1076,7 @@ def _connection_health(
     reconciliation: Mapping[str, Any],
     lifecycle: Mapping[str, Any],
     order_state: Mapping[str, Any],
+    open_order_truth: Mapping[str, Any],
     allowed_instruments: set[str],
     broker_session_owner: Mapping[str, Any],
     current_time: datetime,
@@ -998,6 +1105,7 @@ def _connection_health(
         reconciliation=reconciliation,
         lifecycle=lifecycle,
         order_state=order_state,
+        open_order_truth=open_order_truth,
         allowed_instruments=allowed_instruments,
         broker_session_owner=broker_session_owner,
         current_time=current_time,
@@ -1323,6 +1431,7 @@ def _flat_no_order_submit_capable_context(
     reconciliation: Mapping[str, Any],
     lifecycle: Mapping[str, Any],
     order_state: Mapping[str, Any],
+    open_order_truth: Mapping[str, Any],
     allowed_instruments: set[str],
     broker_session_owner: Mapping[str, Any],
     current_time: datetime,
@@ -1346,8 +1455,13 @@ def _flat_no_order_submit_capable_context(
         current_time=current_time,
         max_age_seconds=max_age_seconds,
     )
-    unknown_open_orders_zero = int(
-        reconciliation.get("unknown_broker_open_order_count") or order_state.get("unknown_open_order_count") or 0
+    unknown_open_orders_zero = _derived_unknown_open_order_count(
+        broker_truth=broker_truth,
+        latest_attempt=latest_attempt,
+        reconciliation=reconciliation,
+        order_state=order_state,
+        open_order_truth=open_order_truth,
+        allowed_instruments=allowed_instruments,
     ) == 0
     live_money_or_proof = _bool(inputs.get("live_money_eligible")) or _bool(inputs.get("paper_proof_invoked"))
     checks = {
@@ -1382,7 +1496,13 @@ def _flat_no_order_submit_capable_context(
             lifecycle=lifecycle,
         ),
         "registry_current_scope_clean": _current_scope_review_required_count(reconciliation) == 0,
-        "order_state_clean": _flat_no_order_state_clean(order_state),
+        "order_state_clean": _flat_no_order_state_clean(
+            broker_truth=broker_truth,
+            latest_attempt=latest_attempt,
+            order_state=order_state,
+            open_order_truth=open_order_truth,
+            allowed_instruments=allowed_instruments,
+        ),
         "submit_session_liveness_proven": submit_liveness["proven"],
         "no_live_money_or_paper_proof": not live_money_or_proof,
     }
@@ -1422,6 +1542,7 @@ def _degraded_exact_risk_reducing_close_context(
     reconciliation: Mapping[str, Any],
     lifecycle: Mapping[str, Any],
     order_state: Mapping[str, Any],
+    open_order_truth: Mapping[str, Any],
     allowed_instruments: set[str],
     connection_mode: str,
     broker_position_lease: Mapping[str, Any],
@@ -1447,11 +1568,13 @@ def _degraded_exact_risk_reducing_close_context(
         for row in _scoped_open_orders(latest_attempt, allowed_instruments)
         if isinstance(row, Mapping)
     ]
-    unknown_open_orders = int(
-        reconciliation.get("unknown_broker_open_order_count")
-        or order_state.get("unknown_open_order_count")
-        or latest_attempt.get("unknown_broker_open_order_count")
-        or 0
+    unknown_open_orders = _derived_unknown_open_order_count(
+        broker_truth=broker_truth,
+        latest_attempt=latest_attempt,
+        reconciliation=reconciliation,
+        order_state=order_state,
+        open_order_truth=open_order_truth,
+        allowed_instruments=allowed_instruments,
     )
     lifecycle_count = int(
         reconciliation.get("current_scope_lifecycle_position_count")
@@ -1664,7 +1787,21 @@ def _owner_resolution_no_open_exposure(
     return classification == "NO_OPEN_EXPOSURE" and int(owner.get("owned_exposure_count") or 0) == 0
 
 
-def _flat_no_order_state_clean(order_state: Mapping[str, Any]) -> bool:
+def _flat_no_order_state_clean(
+    *,
+    broker_truth: Mapping[str, Any],
+    latest_attempt: Mapping[str, Any],
+    order_state: Mapping[str, Any],
+    open_order_truth: Mapping[str, Any],
+    allowed_instruments: set[str],
+) -> bool:
+    if _canonical_global_no_open_order_truth(
+        broker_truth=broker_truth,
+        latest_attempt=latest_attempt,
+        open_order_truth=open_order_truth,
+        allowed_instruments=allowed_instruments,
+    ):
+        return int(order_state.get("unresolved_intent_count") or 0) == 0
     status = str(order_state.get("classification") or "").upper()
     explicit_no_order = status in {"", "NO_OPEN_ORDERS", "NO_OPEN_ORDER_TRUTH", "OPEN_ORDER_TRUTH_CLEAN_FLAT"}
     if not explicit_no_order and any(

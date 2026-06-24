@@ -22,6 +22,11 @@ from mgc_v05l.execution_core.track_b_atomic_io import write_json_atomic
 from mgc_v05l.execution_core.track_b_broker_position_guardian import DEFAULT_BROKER_POSITION_GUARDIAN_ARTIFACT
 from mgc_v05l.execution_core.track_b_broker_session_authority import DEFAULT_BROKER_SESSION_AUTHORITY_ARTIFACT
 from mgc_v05l.execution_core.track_b_broker_truth_lease import DEFAULT_LEASE_ARTIFACT
+from mgc_v05l.execution_core.track_b_current_state_authority import (
+    open_order_truth_open_order_count,
+    open_order_truth_is_global_no_open_orders,
+    open_order_truth_unknown_count,
+)
 from mgc_v05l.execution_core.track_b_managed_order_registry import DEFAULT_MANAGED_ORDER_REGISTRY_ARTIFACT
 from mgc_v05l.execution_core.track_b_managed_position_registry import DEFAULT_MANAGED_POSITION_REGISTRY_ARTIFACT
 from mgc_v05l.execution_core.track_b_open_order_truth import DEFAULT_OPEN_ORDER_TRUTH_ARTIFACT
@@ -220,9 +225,9 @@ def _classify_position(
         blockers.append("DUPLICATE_OR_COMPETING_EXPOSURE")
     if not _top_level_broker_lifecycle_reconciled(inputs["reconciliation"]):
         blockers.append("BROKER_LIFECYCLE_RECONCILIATION_NOT_CLEAN")
-    if int(inputs["reconciliation"].get("track_b_broker_open_order_count") or 0) != 0:
+    if _current_track_b_broker_open_order_count(inputs) != 0:
         blockers.append("RECONCILIATION_BROKER_OPEN_ORDERS_PRESENT")
-    if int(inputs["reconciliation"].get("unknown_broker_open_order_count") or 0) != 0:
+    if _current_unknown_open_order_count(inputs) != 0:
         blockers.append("RECONCILIATION_UNKNOWN_OPEN_ORDERS_PRESENT")
 
     if _matching_position_count(positions=positions, account_id=account_id, local_symbol=local_symbol, con_id=con_id) != 1:
@@ -240,6 +245,7 @@ def _classify_position(
     if not registry_record:
         registry_record = _current_scope_lifecycle_registry_owner_record(
             reconciliation=inputs["reconciliation"],
+            open_order_truth=inputs["open_order_truth"],
             trade_id=trade_id,
             lifecycle_id=lifecycle_id,
             account_id=account_id,
@@ -576,6 +582,7 @@ def _matching_registry_record(
 def _current_scope_lifecycle_registry_owner_record(
     *,
     reconciliation: Mapping[str, Any],
+    open_order_truth: Mapping[str, Any],
     trade_id: str,
     lifecycle_id: str,
     account_id: str,
@@ -586,9 +593,15 @@ def _current_scope_lifecycle_registry_owner_record(
         return {}
     if not _top_level_broker_lifecycle_reconciled(reconciliation):
         return {}
-    if int(reconciliation.get("track_b_broker_open_order_count") or 0) != 0:
+    if _current_track_b_broker_open_order_count_from_artifacts(
+        reconciliation=reconciliation,
+        open_order_truth=open_order_truth,
+    ) != 0:
         return {}
-    if int(reconciliation.get("unknown_broker_open_order_count") or 0) != 0:
+    if _current_unknown_open_order_count_from_artifacts(
+        reconciliation=reconciliation,
+        open_order_truth=open_order_truth,
+    ) != 0:
         return {}
     current_scope_rows = [
         row
@@ -639,6 +652,46 @@ def _top_level_broker_lifecycle_reconciled(reconciliation: Mapping[str, Any]) ->
         }
         and reconciliation.get("broker_reconciled") is True
     )
+
+
+def _current_track_b_broker_open_order_count(inputs: Mapping[str, Mapping[str, Any]]) -> int:
+    return _current_track_b_broker_open_order_count_from_artifacts(
+        reconciliation=inputs["reconciliation"],
+        open_order_truth=inputs["open_order_truth"],
+    )
+
+
+def _current_unknown_open_order_count(inputs: Mapping[str, Mapping[str, Any]]) -> int:
+    return _current_unknown_open_order_count_from_artifacts(
+        reconciliation=inputs["reconciliation"],
+        open_order_truth=inputs["open_order_truth"],
+    )
+
+
+def _current_track_b_broker_open_order_count_from_artifacts(
+    *,
+    reconciliation: Mapping[str, Any],
+    open_order_truth: Mapping[str, Any],
+) -> int:
+    if open_order_truth_is_global_no_open_orders(open_order_truth):
+        return 0
+    current = open_order_truth_open_order_count(open_order_truth)
+    if current > 0:
+        return current
+    return int(reconciliation.get("track_b_broker_open_order_count") or 0)
+
+
+def _current_unknown_open_order_count_from_artifacts(
+    *,
+    reconciliation: Mapping[str, Any],
+    open_order_truth: Mapping[str, Any],
+) -> int:
+    if open_order_truth_is_global_no_open_orders(open_order_truth):
+        return 0
+    current = open_order_truth_unknown_count(open_order_truth)
+    if current > 0:
+        return current
+    return int(reconciliation.get("unknown_broker_open_order_count") or 0)
 
 
 def _current_scope_lifecycle_rows(reconciliation: Mapping[str, Any]) -> list[dict[str, Any]]:

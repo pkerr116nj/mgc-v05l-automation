@@ -99,6 +99,17 @@ def seed_clean_artifacts(repo_root: Path) -> None:
         },
     )
     write_json(
+        open_order_truth_path(repo_root),
+        {
+            "generated_at": RECON_TIME,
+            "classification": "NO_OPEN_ORDERS",
+            "canonical_refresh_scope": "GLOBAL_COMPLETE",
+            "broker_open_orders": [],
+            "unknown_open_orders": [],
+            "duplicate_close_order_groups": [],
+        },
+    )
+    write_json(
         repo_root / "outputs" / "operator_dashboard" / "runtime" / "latest_canonical_readiness.json",
         {"generated_at": RECON_TIME, "canonical_readiness": "READY_OBSERVATION_ONLY", "live_money_eligible": False},
     )
@@ -149,6 +160,10 @@ def lifecycle_path(repo_root: Path) -> Path:
 
 def order_state_path(repo_root: Path) -> Path:
     return repo_root / "outputs" / "track_b_execution_core" / "paper_trade_ledger" / "latest_track_b_paper_trade_summary.json"
+
+
+def open_order_truth_path(repo_root: Path) -> Path:
+    return repo_root / "outputs" / "track_b_execution_core" / "open_order_truth" / "latest_open_order_truth.json"
 
 
 def connection_report_path(repo_root: Path) -> Path:
@@ -324,17 +339,38 @@ def test_invalidated_contradiction_exits_2(tmp_path: Path) -> None:
     assert _codes(lease["contradiction_details"]) >= {"unexpected_broker_position"}
 
 
-def test_unknown_open_orders_invalidate_and_exit_2(tmp_path: Path) -> None:
+def test_current_unknown_open_orders_invalidate_and_exit_2(tmp_path: Path) -> None:
     seed_clean_artifacts(tmp_path)
-    reconciliation = json.loads(reconciliation_path(tmp_path).read_text(encoding="utf-8"))
-    reconciliation["unknown_broker_open_order_count"] = 1
-    write_json(reconciliation_path(tmp_path), reconciliation)
+    open_order_truth = json.loads(open_order_truth_path(tmp_path).read_text(encoding="utf-8"))
+    open_order_truth["classification"] = "UNKNOWN_OPEN_ORDERS_PRESENT"
+    open_order_truth["unknown_open_order_count"] = 1
+    open_order_truth["unknown_open_orders"] = [{"local_symbol": "METU6", "order_id": 328}]
+    write_json(open_order_truth_path(tmp_path), open_order_truth)
 
     exit_code = cli.main(base_args(tmp_path))
 
     lease = json.loads(lease_path(tmp_path).read_text(encoding="utf-8"))
     assert exit_code == 2
     assert lease["lease_state"] == "INVALIDATED_UNKNOWN_OPEN_ORDERS"
+
+
+def test_global_no_open_order_truth_clears_stale_reconciliation_unknown_counts(tmp_path: Path) -> None:
+    seed_clean_artifacts(tmp_path)
+    reconciliation = json.loads(reconciliation_path(tmp_path).read_text(encoding="utf-8"))
+    reconciliation["track_b_broker_open_order_count"] = 1
+    reconciliation["unknown_broker_open_order_count"] = 1
+    write_json(reconciliation_path(tmp_path), reconciliation)
+    order_state = json.loads(order_state_path(tmp_path).read_text(encoding="utf-8"))
+    order_state["unknown_open_order_count"] = 1
+    write_json(order_state_path(tmp_path), order_state)
+
+    exit_code = cli.main(base_args(tmp_path))
+
+    lease = json.loads(lease_path(tmp_path).read_text(encoding="utf-8"))
+    assert exit_code == 0
+    assert lease["lease_state"] == "ACTIVE"
+    assert lease["track_b_broker_open_order_count"] == 0
+    assert lease["unknown_broker_open_order_count"] == 0
 
 
 def test_manual_broker_action_invalidation_exits_2(tmp_path: Path) -> None:

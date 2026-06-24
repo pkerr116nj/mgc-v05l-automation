@@ -137,6 +137,43 @@ def test_broker_open_order_conflict_blocks() -> None:
     assert payload["blocked_positions"][0]["diagnostic_close_candidate_ready"] is False
 
 
+def test_global_no_open_order_truth_clears_stale_reconciliation_order_blockers() -> None:
+    inputs = _inputs()
+    inputs["reconciliation"]["track_b_broker_open_order_count"] = 1
+    inputs["reconciliation"]["unknown_broker_open_order_count"] = 1
+    inputs["open_order_truth"] = {
+        "classification": "NO_OPEN_ORDERS",
+        "canonical_refresh_scope": "GLOBAL_COMPLETE",
+        "broker_open_orders": [],
+        "unknown_open_orders": [],
+        "duplicate_close_order_groups": [],
+    }
+
+    payload = _build(inputs)
+
+    assert payload["classification"] == EXIT_DUE_CLOSE_READY
+    assert payload["eligible_count"] == 1
+    blockers = payload["eligible_positions"][0]["blockers"]
+    assert "RECONCILIATION_BROKER_OPEN_ORDERS_PRESENT" not in blockers
+    assert "RECONCILIATION_UNKNOWN_OPEN_ORDERS_PRESENT" not in blockers
+
+
+def test_current_unknown_open_order_truth_blocks_recovery() -> None:
+    inputs = _inputs()
+    inputs["open_order_truth"] = {
+        "classification": "UNKNOWN_OPEN_ORDERS_PRESENT",
+        "canonical_refresh_scope": "GLOBAL_COMPLETE",
+        "broker_open_orders": [],
+        "unknown_open_order_count": 1,
+        "unknown_open_orders": [{"account_id": "DUM882026", "local_symbol": "MNQM6"}],
+    }
+
+    payload = _build(inputs)
+
+    assert payload["classification"] == EXIT_DUE_CLOSE_BLOCKED
+    assert "RECONCILIATION_UNKNOWN_OPEN_ORDERS_PRESENT" in payload["blocked_positions"][0]["blockers"]
+
+
 def test_ambiguous_owner_blocks() -> None:
     inputs = _inputs()
     duplicate = dict(inputs["managed_positions"]["managed_positions"][0])
