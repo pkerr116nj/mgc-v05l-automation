@@ -224,6 +224,74 @@ def test_mnq_position_blocks_mnq_but_allows_mes_flat_start() -> None:
     assert mes_result["broker_truth"]["instrument_nonflat_position_count"] == 0
 
 
+def test_mbt_working_close_blocks_mbt_but_not_unrelated_symbol_entry() -> None:
+    mbt_working_close = _orders(
+        rows=[
+            {
+                "account_id": "DUM882026",
+                "security_type": "FUT",
+                "symbol": "MBT",
+                "local_symbol": "MBTU6",
+                "order_id": "389",
+                "action": "BUY",
+                "quantity": "1",
+                "status": "Submitted",
+            }
+        ]
+    )
+    crypto_lanes = (
+        "mbt_us_active_participation_short",
+        "met_us_active_participation_long",
+    )
+
+    mbt_result = evaluate_broker_market_truth_entry_authority(
+        _input(
+            lane_id="mbt_us_active_participation_short",
+            instrument="MBT",
+            action="SELL_TO_OPEN",
+            active_profile_lane_ids=crypto_lanes,
+            broker_open_orders_snapshot=mbt_working_close,
+            runtime_price={
+                "price": 61000.0,
+                "timestamp": "2026-06-11T14:00:00+00:00",
+            },
+            contract={
+                "symbol": "MBT",
+                "contract_month": "202609",
+                "expiry": "20260925",
+                "local_symbol": "MBTU6",
+                "con_id": 772435596,
+            },
+        )
+    )
+    met_result = evaluate_broker_market_truth_entry_authority(
+        _input(
+            lane_id="met_us_active_participation_long",
+            instrument="MET",
+            action="BUY_TO_OPEN",
+            active_profile_lane_ids=crypto_lanes,
+            broker_open_orders_snapshot=mbt_working_close,
+            runtime_price={
+                "price": 160.0,
+                "timestamp": "2026-06-11T14:00:00+00:00",
+            },
+            contract={
+                "symbol": "MET",
+                "contract_month": "202609",
+                "expiry": "20260925",
+                "local_symbol": "METU6",
+                "con_id": 772435602,
+            },
+        )
+    )
+
+    assert mbt_result["classification"] == BROKER_MARKET_TRUTH_ENTRY_BLOCKED
+    assert "duplicate_or_conflicting_working_order" in mbt_result["block_reasons"]
+    assert met_result["classification"] == BROKER_MARKET_TRUTH_ENTRY_ALLOWED
+    assert met_result["broker_truth"]["track_b_open_order_count"] == 1
+    assert met_result["broker_truth"]["instrument_open_order_count"] == 0
+
+
 def test_rates_position_blocks_same_rate_but_allows_other_rates_flat_start() -> None:
     rates_lanes = (
         "zf_globex_active_participation_long",

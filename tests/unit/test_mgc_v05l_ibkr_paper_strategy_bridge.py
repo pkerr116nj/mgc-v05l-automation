@@ -7458,6 +7458,152 @@ def test_mnq_short_entry_lane_reaches_guarded_submit_boundary_when_fresh(tmp_pat
     assert next(row for row in checks if row["name"] == "paper_strategy_exposure_gate")["passed"] is True
 
 
+def test_active_profile_entry_uses_scoped_current_order_truth_not_profile_wide_stale_reconciliation(
+    tmp_path: Path,
+) -> None:
+    lane_id = "met_us_active_participation_long"
+    stale_governance = {
+        "classification": "PAPER_STRATEGY_GOVERNANCE_PARTIAL",
+        "submit_allowed": False,
+        "block_reasons": ["phase1_broker_reconciliation_not_clear", "backend_or_source_not_live_ready"],
+        "detail": "Paper strategy governance blocked submit: phase1_broker_reconciliation_not_clear, backend_or_source_not_live_ready",
+        "selected_strategy": {
+            "strategy_id": lane_id,
+            "bridge_strategy_id": lane_id,
+            "strategy_status": "PROBATION_ACTIVE",
+            "submit_allowed": False,
+            "submit_block_reasons": ["phase1_broker_reconciliation_not_clear", "backend_or_source_not_live_ready"],
+        },
+        "strategies": [],
+    }
+    _write_runtime_files(tmp_path, governance_status=stale_governance)
+    _write_active_profile_roster(
+        tmp_path,
+        [
+            _active_profile_lane("mbt_us_active_participation_short", symbol="MBT"),
+            _active_profile_lane(lane_id, symbol="MET"),
+        ],
+    )
+    _write_phase1_reconciliation(
+        tmp_path,
+        classification="TRACK_B_PAPER_BROKER_RECONCILIATION_BLOCKED",
+        broker_reconciled=False,
+        review_required_count=1,
+        block_reasons=["phase1_broker_reconciliation_not_clear"],
+        generated_at="2000-01-01T00:00:00+00:00",
+    )
+    _write_json(
+        tmp_path / "outputs/reports/ibkr_read_only_verification/ibkr_positions_snapshot.json",
+        {
+            "ok": True,
+            "positions_complete": True,
+            "generated_at": "2999-01-01T00:00:00+00:00",
+            "selected_account_id": "DUM882026",
+            "positions": [],
+        },
+    )
+    _write_json(
+        tmp_path / "outputs/reports/ibkr_read_only_verification/ibkr_open_orders_snapshot.json",
+        {
+            "ok": True,
+            "open_orders_complete": True,
+            "generated_at": "2999-01-01T00:00:00+00:00",
+            "selected_account_id": "DUM882026",
+            "open_orders": [
+                {
+                    "account_id": "DUM882026",
+                    "security_type": "FUT",
+                    "symbol": "MBT",
+                    "local_symbol": "MBTU6",
+                    "order_id": "389",
+                    "action": "BUY",
+                    "quantity": "1",
+                    "status": "Submitted",
+                }
+            ],
+        },
+    )
+    _write_json(
+        tmp_path / "outputs/track_b_execution_core/open_order_truth/latest_open_order_truth.json",
+        {
+            "classification": "OPEN_CLOSE_ORDER_WORKING",
+            "canonical_refresh_scope": "GLOBAL_COMPLETE",
+            "broker_open_orders": [
+                {
+                    "account_id": "DUM882026",
+                    "security_type": "FUT",
+                    "symbol": "MBT",
+                    "local_symbol": "MBTU6",
+                    "order_id": "389",
+                    "action": "BUY",
+                    "quantity": "1",
+                    "status": "Submitted",
+                }
+            ],
+            "unknown_open_order_count": 0,
+            "duplicate_close_order_groups": [],
+            "review_required_count": 0,
+        },
+    )
+    _write_json(
+        tmp_path / "outputs/track_b_execution_core/phase1_runtime_market_data/MET/1m/latest_runtime_candles.json",
+        {"bars": [{"bar_end": "2999-01-01T00:00:00+00:00", "close": 160.0}]},
+    )
+    config = _config(
+        tmp_path,
+        submit=True,
+        strategy_id=lane_id,
+        symbol="MET",
+        contract_month="202609",
+        action="BUY",
+        limit_price_model="DELAYED_ASK_PLUS_1T_MARKETABLE_BUY",
+        caller_path="probationary_paper_runtime_lane",
+        caller_metadata=_approved_runtime_metadata(
+            strategy_id=lane_id,
+            source_instrument="MET",
+            executable_proxy="MET",
+            action="BUY",
+            intent_type="BUY_TO_OPEN",
+            bridge_proxy_mode="MET_SIGNAL_DIRECT_PHASE1",
+        ),
+        manual_frozen_preview_path=None,
+        approval_digest=None,
+        approval_phrase=None,
+    )
+    intent = IbkrPaperStrategyOrderIntent(
+        strategy_id=config.strategy_id,
+        symbol=config.symbol,
+        contract_month=config.contract_month,
+        action=config.action,
+        quantity=config.quantity,
+        order_type=config.order_type,
+        limit_price_model=config.limit_price_model,
+        time_in_force=config.time_in_force,
+        reason=config.reason,
+        timestamp="2999-01-01T00:00:00+00:00",
+        risk_tags=config.risk_tags,
+        paper_only=config.paper_only,
+    )
+
+    checks = _build_static_preflight_checks(
+        config=config,
+        intent=intent,
+        environment_lock=evaluate_paper_preview_environment_lock(mode=config.mode, host=config.host, port=config.port),
+        caller_gate={"passed": True, "detail": "approved runtime caller"},
+        monitor_status=load_paper_strategy_monitor_status(repo_root=tmp_path),
+        governance_status=stale_governance,
+        exposure_status=_diagnostic_registry_exposure(),
+    )
+
+    by_name = {str(row["name"]): row for row in checks}
+    assert by_name["broker_market_truth_entry_authority"]["passed"] is True
+    assert by_name["phase1_broker_reconciliation_submit_gate"]["passed"] is True
+    assert by_name["phase1_broker_reconciliation_submit_gate"]["diagnostic_only"] is True
+    assert by_name["paper_strategy_governance_submit_gate"]["passed"] is True
+    assert by_name["paper_strategy_exposure_gate"]["passed"] is True
+    assert by_name["broker_market_truth_entry_authority"]["authority"]["broker_truth"]["instrument_open_order_count"] == 0
+
+
 def test_submit_preflight_blocks_deprecated_documents_repo_root(tmp_path: Path) -> None:
     deprecated_root = Path("/Users/patrick/Documents/MGC-v05l-automation")
     config = _config(

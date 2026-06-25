@@ -109,12 +109,13 @@ def evaluate_current_state_authority(authority_input: CurrentStateAuthorityInput
     if not open_orders_known:
         block(BROKER_TRUTH_CRITICAL, "broker_open_orders_unavailable", "Broker open orders are unavailable or incomplete.")
     track_b_open_orders = [row for row in open_orders if is_track_b_order(row)]
-    if track_b_open_orders:
+    instrument_open_orders = [row for row in track_b_open_orders if order_matches_instrument(row, instrument)]
+    if instrument_open_orders:
         block(
             BROKER_TRUTH_CRITICAL,
             "duplicate_or_conflicting_working_order",
-            "PAPER mutation is blocked by actual Track B broker working orders.",
-            broker_open_orders=track_b_open_orders,
+            "PAPER mutation is blocked by actual same-instrument Track B broker working orders.",
+            broker_open_orders=instrument_open_orders,
         )
 
     unknown_order_count = open_order_truth_unknown_count(authority_input.open_order_truth)
@@ -124,6 +125,22 @@ def evaluate_current_state_authority(authority_input: CurrentStateAuthorityInput
             "unknown_open_orders",
             f"PAPER mutation is blocked by {unknown_order_count} unknown broker open order(s).",
             unknown_order_count=unknown_order_count,
+        )
+    duplicate_close_group_count = open_order_truth_duplicate_close_group_count(authority_input.open_order_truth)
+    if duplicate_close_group_count > 0:
+        block(
+            BROKER_TRUTH_CRITICAL,
+            "duplicate_close_groups",
+            f"PAPER mutation is blocked by {duplicate_close_group_count} duplicate close order group(s).",
+            duplicate_close_group_count=duplicate_close_group_count,
+        )
+    review_required_count = open_order_truth_review_required_count(authority_input.open_order_truth)
+    if review_required_count > 0:
+        block(
+            BROKER_TRUTH_CRITICAL,
+            "review_required",
+            f"PAPER mutation is blocked by {review_required_count} current review-required exposure(s).",
+            review_required_count=review_required_count,
         )
 
     price_status = runtime_price_status(
@@ -165,7 +182,10 @@ def evaluate_current_state_authority(authority_input: CurrentStateAuthorityInput
             "instrument_nonflat_position_count": len(instrument_nonflat_positions),
             "open_orders_known": open_orders_known,
             "track_b_open_order_count": len(track_b_open_orders),
+            "instrument_open_order_count": len(instrument_open_orders),
             "unknown_order_count": unknown_order_count,
+            "duplicate_close_group_count": duplicate_close_group_count,
+            "review_required_count": review_required_count,
         },
         "market_truth": {
             "instrument": instrument,
@@ -223,6 +243,23 @@ def position_matches_instrument(row: Mapping[str, Any], instrument: str) -> bool
     if symbol == expected:
         return True
     local_symbol = str(row.get("local_symbol") or row.get("localSymbol") or "").strip().upper()
+    return bool(local_symbol) and local_symbol.startswith(expected)
+
+
+def order_matches_instrument(row: Mapping[str, Any], instrument: str) -> bool:
+    expected = str(instrument or "").strip().upper()
+    if not expected:
+        return False
+    symbol = str(
+        row.get("symbol")
+        or row.get("track_b_root")
+        or row.get("instrument")
+        or row.get("instrument_family")
+        or ""
+    ).strip().upper()
+    if symbol == expected:
+        return True
+    local_symbol = str(row.get("local_symbol") or row.get("localSymbol") or row.get("contract") or "").strip().upper()
     return bool(local_symbol) and local_symbol.startswith(expected)
 
 
@@ -286,6 +323,31 @@ def open_order_truth_duplicate_close_group_count(open_order_truth: Mapping[str, 
         if value is not None:
             return value
     rows = open_order_truth.get("duplicate_close_order_groups") or open_order_truth.get("duplicate_close_groups") or []
+    if isinstance(rows, list):
+        return len(rows)
+    return 0
+
+
+def open_order_truth_review_required_count(open_order_truth: Mapping[str, Any]) -> int:
+    for key in (
+        "review_required_count",
+        "current_scope_review_required_count",
+        "review_required_exposure_count",
+    ):
+        value = int_or_none(open_order_truth.get(key))
+        if value is not None:
+            return max(0, value)
+    summary = open_order_truth.get("summary")
+    if isinstance(summary, Mapping):
+        for key in (
+            "review_required_count",
+            "current_scope_review_required_count",
+            "review_required_exposure_count",
+        ):
+            value = int_or_none(summary.get(key))
+            if value is not None:
+                return max(0, value)
+    rows = open_order_truth.get("review_required_positions") or open_order_truth.get("review_required_exposures") or []
     if isinstance(rows, list):
         return len(rows)
     return 0

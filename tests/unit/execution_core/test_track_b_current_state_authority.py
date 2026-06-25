@@ -153,6 +153,36 @@ def test_real_track_b_open_order_blocks() -> None:
     assert "duplicate_or_conflicting_working_order" in reasons
 
 
+def test_other_instrument_working_order_does_not_profile_wide_block() -> None:
+    classification, reasons = _classification(
+        instrument="GC",
+        runtime_price={"price": 3400.5, "timestamp": "2026-06-18T13:59:00+00:00"},
+        contract={
+            "symbol": "GC",
+            "contract_month": "202608",
+            "expiry": "20260827",
+            "local_symbol": "GCQ6",
+            "con_id": 223456789,
+        },
+        broker_open_orders_snapshot=_orders(
+            rows=[
+                {
+                    "account_id": "DUM882026",
+                    "security_type": "FUT",
+                    "symbol": "MBT",
+                    "local_symbol": "MBTU6",
+                    "order_id": "389",
+                    "action": "BUY",
+                    "quantity": "1",
+                }
+            ]
+        ),
+    )
+
+    assert classification == CURRENT_STATE_AUTHORITY_ALLOWED
+    assert "duplicate_or_conflicting_working_order" not in reasons
+
+
 def test_rates_open_order_with_only_local_symbol_is_track_b_scoped() -> None:
     classification, reasons = _classification(
         instrument="ZT",
@@ -185,6 +215,22 @@ def test_unknown_orders_block() -> None:
 
     assert classification == CURRENT_STATE_AUTHORITY_BLOCKED
     assert "unknown_open_orders" in reasons
+
+
+def test_duplicate_close_groups_and_review_required_remain_hard_blocks() -> None:
+    classification, reasons = _classification(
+        open_order_truth={
+            "classification": "OPEN_CLOSE_ORDER_WORKING",
+            "canonical_refresh_scope": "GLOBAL_COMPLETE",
+            "unknown_open_order_count": 0,
+            "duplicate_close_order_groups": [{"local_symbol": "METU6", "order_ids": [1, 2]}],
+            "review_required_count": 1,
+        }
+    )
+
+    assert classification == CURRENT_STATE_AUTHORITY_BLOCKED
+    assert "duplicate_close_groups" in reasons
+    assert "review_required" in reasons
 
 
 def test_global_no_open_order_truth_helper_requires_clean_complete_scope() -> None:
