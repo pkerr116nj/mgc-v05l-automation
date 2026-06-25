@@ -53,12 +53,12 @@ def test_clean_working_close_away_from_market_is_modify_in_place_eligible(tmp_pa
     assert plan["identity_complete_for_modify"] is True
     assert plan["mutation_planned"] is False
     assert plan["managed_close_reprice_policy"]["classification"] == "MANAGED_CLOSE_PRICED"
-    assert plan["managed_close_reprice_policy"]["limit_price"] == "28958.75"
+    assert plan["managed_close_reprice_policy"]["limit_price"] == "29547.75"
     assert plan["managed_close_reprice_policy"]["reference_price_kind"] == "close"
     assert plan["managed_close_reprice_policy"]["aggressive_paper_fallback"] is True
     assert plan["managed_close_reprice_policy"]["marketable_execution_required"] is True
     assert plan["managed_close_reprice_policy"]["passive_execution_allowed"] is False
-    assert plan["managed_close_reprice_policy"]["marketable_limit_offset_ticks"] == 2364.0
+    assert plan["managed_close_reprice_policy"]["marketable_limit_offset_ticks"] == 8.0
 
 
 def test_non_marketable_working_close_requires_operator_review(tmp_path: Path) -> None:
@@ -82,6 +82,123 @@ def test_non_marketable_working_close_requires_operator_review(tmp_path: Path) -
     assert plan["mutation_planned"] is False
 
 
+def test_non_marketable_mbt_close_is_supervised_modify_eligible(tmp_path: Path) -> None:
+    order = {
+        **_managed_order(classification="CLOSE_ORDER_NOT_MARKETABLE", marketable=False),
+        "symbol": "MBT",
+        "contract": "MBTU6",
+        "local_symbol": "MBTU6",
+        "con_id": 772435596,
+        "action": "BUY",
+        "quantity": "1",
+        "broker_order_id": "389",
+        "perm_id": "264461229",
+        "limit_price": "61610",
+        "source_order": {
+            "account_id": "DUM882026",
+            "local_symbol": "MBTU6",
+            "con_id": 772435596,
+            "broker_order_id": "389",
+            "perm_id": "264461229",
+            "action": "BUY",
+            "quantity": "1",
+            "filled_quantity": "0",
+            "remaining_quantity": "1",
+            "status": "Submitted",
+        },
+    }
+    _seed_base(
+        tmp_path,
+        managed_orders=[order],
+        broker_positions=[
+            {
+                "account_id": "DUM882026",
+                "symbol": "MBT",
+                "track_b_root": "MBT",
+                "local_symbol": "MBTU6",
+                "con_id": 772435596,
+                "quantity": "-1",
+            }
+        ],
+    )
+    _write_json(
+        tmp_path / "outputs/track_b_execution_core/open_order_truth/latest_open_order_truth.json",
+        {
+            "schema_version": "track_b_open_order_truth_v1",
+            "generated_at": NOW.isoformat(),
+            "classification": "OPEN_CLOSE_ORDER_WORKING",
+            "canonical_refresh_scope": "GLOBAL_COMPLETE",
+            "unknown_open_order_count": 0,
+            "duplicate_close_order_groups": [],
+            "summary": {"duplicate_close_order_group_count": 0, "unknown_open_order_count": 0},
+        },
+    )
+    _write_json(
+        tmp_path / "outputs/track_b_execution_core/phase1_runtime_market_data/MBT/1m/latest_runtime_candles.json",
+        {
+            "symbol": "MBT",
+            "generated_at": NOW.isoformat(),
+            "candles": [{"bar_end": NOW.isoformat(), "close": "61620"}],
+        },
+    )
+
+    payload = _build(tmp_path)
+
+    assert payload["classification"] == MODIFY_IN_PLACE_ELIGIBLE
+    plan = payload["plans"][0]
+    assert plan["classification"] == MODIFY_IN_PLACE_ELIGIBLE
+    assert plan["managed_close_reprice_policy"]["limit_price"] == "61660"
+    assert plan["managed_close_reprice_policy"]["marketable_limit_offset_ticks"] == 8.0
+    assert plan["supervised_modify_boundary"]["canonical_open_order_truth_global_complete"] is True
+    assert plan["supervised_modify_boundary"]["risk_reducing"] is True
+
+
+def test_non_marketable_close_duplicate_group_fails_closed(tmp_path: Path) -> None:
+    _seed_base(
+        tmp_path,
+        managed_orders=[_managed_order(classification="CLOSE_ORDER_NOT_MARKETABLE", marketable=False)],
+        broker_positions=[_broker_position()],
+    )
+    _write_json(
+        tmp_path / "outputs/track_b_execution_core/open_order_truth/latest_open_order_truth.json",
+        {
+            "classification": "OPEN_CLOSE_ORDER_WORKING",
+            "canonical_refresh_scope": "GLOBAL_COMPLETE",
+            "unknown_open_order_count": 0,
+            "duplicate_close_order_groups": [{"duplicate_key": "dup"}],
+        },
+    )
+
+    payload = _build(tmp_path)
+
+    assert payload["classification"] == REVIEW_REQUIRED_SUSPICIOUS_STATE
+    assert "duplicate_close_group_present" in payload["plans"][0]["rationale"]
+
+
+def test_non_marketable_close_wrong_qty_fails_closed(tmp_path: Path) -> None:
+    order = {**_managed_order(classification="CLOSE_ORDER_NOT_MARKETABLE", marketable=False), "quantity": "2"}
+    order["source_order"] = {**order["source_order"], "quantity": "2"}
+    _seed_base(
+        tmp_path,
+        managed_orders=[order],
+        broker_positions=[_broker_position()],
+    )
+    _write_json(
+        tmp_path / "outputs/track_b_execution_core/open_order_truth/latest_open_order_truth.json",
+        {
+            "classification": "OPEN_CLOSE_ORDER_WORKING",
+            "canonical_refresh_scope": "GLOBAL_COMPLETE",
+            "unknown_open_order_count": 0,
+            "duplicate_close_order_groups": [],
+        },
+    )
+
+    payload = _build(tmp_path)
+
+    assert payload["classification"] == REVIEW_REQUIRED_SUSPICIOUS_STATE
+    assert "close_order_not_risk_reducing" in payload["plans"][0]["rationale"]
+
+
 def test_unfilled_working_close_reprice_escalates_but_caps_slippage(tmp_path: Path) -> None:
     _seed_base(
         tmp_path,
@@ -102,8 +219,8 @@ def test_unfilled_working_close_reprice_escalates_but_caps_slippage(tmp_path: Pa
 
     policy = payload["plans"][0]["managed_close_reprice_policy"]
     assert policy["classification"] == "MANAGED_CLOSE_PRICED"
-    assert policy["limit_price"] == "28958.75"
-    assert policy["marketable_limit_offset_ticks"] == 2364.0
+    assert policy["limit_price"] == "29547.75"
+    assert policy["marketable_limit_offset_ticks"] == 8.0
 
 
 def test_stale_working_close_reference_blocks_reprice_policy(tmp_path: Path) -> None:
@@ -156,7 +273,7 @@ def test_reprice_uses_fresh_runtime_market_data_before_legacy_market_reference(t
     assert plan["market_reference"]["pricing_source"] == "DATABENTO_RUNTIME_1M"
     assert plan["market_reference"]["reference_age_seconds"] == 0.0
     assert plan["legacy_market_reference_diagnostic"]["reference_price"] == "1"
-    assert plan["managed_close_reprice_policy"]["limit_price"] == "28958.75"
+    assert plan["managed_close_reprice_policy"]["limit_price"] == "29547.75"
 
 
 def test_reprice_buy_to_close_uses_fresh_last_plus_aggressive_paper_offset(tmp_path: Path) -> None:
@@ -179,12 +296,12 @@ def test_reprice_buy_to_close_uses_fresh_last_plus_aggressive_paper_offset(tmp_p
 
     policy = payload["plans"][0]["managed_close_reprice_policy"]
     assert policy["classification"] == "MANAGED_CLOSE_PRICED"
-    assert policy["limit_price"] == "30140.75"
+    assert policy["limit_price"] == "29551.75"
     assert policy["reference_price_kind"] == "close"
     assert policy["aggressive_paper_fallback"] is True
     assert policy["marketable_execution_required"] is True
     assert policy["passive_execution_allowed"] is False
-    assert policy["marketable_limit_offset_ticks"] == 2364.0
+    assert policy["marketable_limit_offset_ticks"] == 8.0
 
 
 def test_reprice_prefers_bid_ask_over_aggressive_fallback(tmp_path: Path) -> None:

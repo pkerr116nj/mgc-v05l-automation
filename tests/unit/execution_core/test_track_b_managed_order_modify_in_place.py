@@ -129,6 +129,37 @@ def test_stale_known_close_can_use_modify_in_place_boundary(tmp_path: Path) -> N
     assert report["new_order_created"] is False
 
 
+def test_non_marketable_close_can_use_supervised_modify_boundary(tmp_path: Path) -> None:
+    _seed_authorities(
+        tmp_path,
+        open_order_classification="OPEN_CLOSE_ORDER_WORKING",
+        managed_order_classification="CLOSE_ORDER_NOT_MARKETABLE",
+        planner_classification="MODIFY_IN_PLACE_ELIGIBLE",
+    )
+    open_order_path = tmp_path / "outputs/track_b_execution_core/open_order_truth/latest_open_order_truth.json"
+    open_order_truth = json.loads(open_order_path.read_text(encoding="utf-8"))
+    open_order_truth.update(
+        {
+            "canonical_refresh_scope": "GLOBAL_COMPLETE",
+            "unknown_open_order_count": 0,
+            "duplicate_close_order_groups": [],
+            "summary": {"unknown_open_order_count": 0, "duplicate_close_order_group_count": 0},
+        }
+    )
+    _write_json(open_order_path, open_order_truth)
+    _write_json(
+        tmp_path / "outputs/operator_dashboard/runtime/latest_broker_truth_lease.json",
+        {"generated_at": NOW.isoformat(), "classification": "INVALIDATED_CONTRADICTION"},
+    )
+
+    report = _run(tmp_path)
+
+    assert report["classification"] == MODIFY_IN_PLACE_DRY_RUN_READY
+    assert report["new_order_created"] is False
+    assert report["shared_truth_evidence"]["exact_current_state_clean_for_modify"] is True
+    assert any("Broker Truth Lease is diagnostic" in item for item in report["shared_truth_evidence"]["diagnostic_only_blockers"])
+
+
 def test_duplicate_close_risk_blocks_modify(tmp_path: Path) -> None:
     _seed_authorities(
         tmp_path,

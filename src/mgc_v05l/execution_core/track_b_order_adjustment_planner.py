@@ -22,6 +22,7 @@ from .track_b_exit_execution_policy import (
     EXIT_CLASS_RISK_REDUCING,
     build_exit_limit_policy,
     classify_exit_execution,
+    validate_final_marketable_close_limit,
 )
 from .track_b_exit_strategy_roster import (
     ACTIVE_EVIDENCE_MANAGED_CLOSE_MAX_SLIPPAGE_TICKS,
@@ -29,6 +30,7 @@ from .track_b_exit_strategy_roster import (
     ACTIVE_EVIDENCE_MANAGED_CLOSE_REPRICE_ESCALATION_TICKS,
     ACTIVE_EVIDENCE_MANAGED_CLOSE_STALE_AFTER_SECONDS,
 )
+from .track_b_futures_tick_metadata import futures_tick_metadata
 from .track_b_managed_order_registry import (
     BROKER_FLAT_WITH_WORKING_CLOSE,
     CLOSE_ORDER_CANCEL_REPLACE_REQUIRED,
@@ -95,6 +97,7 @@ def build_track_b_order_adjustment_plan(
     plans = [
         _plan_for_managed_order(
             order=order,
+            open_order_truth=open_order_truth,
             position_truth=position_truth,
             config=config,
             now=actual_now,
@@ -192,6 +195,7 @@ def main(argv: Sequence[str] | None = None) -> int:
 def _plan_for_managed_order(
     *,
     order: Mapping[str, Any],
+    open_order_truth: Mapping[str, Any],
     position_truth: Mapping[str, Any],
     config: TrackBOrderAdjustmentPlannerConfig,
     now: datetime,
@@ -253,9 +257,22 @@ def _plan_for_managed_order(
         recommended_action = "REVIEW_REQUIRED" if position_open else "WAIT"
         rationale = "Broker position exists without a current managed close order."
     elif source_classification == CLOSE_ORDER_NOT_MARKETABLE:
-        classification = REVIEW_REQUIRED_SUSPICIOUS_STATE
-        recommended_action = "OPERATOR_REVIEW"
-        rationale = "Working close order is not marketable against current runtime market context."
+        supervised_ready, supervised_reason = _supervised_non_marketable_modify_ready(
+            order=order,
+            open_order_truth=open_order_truth,
+            position_truth=position_truth,
+            identity=identity,
+            close_reprice_policy=close_reprice_policy,
+            reference=reference,
+        )
+        if supervised_ready:
+            classification = MODIFY_IN_PLACE_ELIGIBLE
+            recommended_action = "MODIFY_IN_PLACE_CANDIDATE"
+            rationale = "Non-marketable close order is exact, risk-reducing, and eligible for supervised modify-in-place."
+        else:
+            classification = REVIEW_REQUIRED_SUSPICIOUS_STATE
+            recommended_action = "OPERATOR_REVIEW"
+            rationale = f"Non-marketable close order requires review: {supervised_reason}."
     elif source_classification in {CLOSE_ORDER_MODIFIABLE, CLOSE_ORDER_CANCEL_REPLACE_REQUIRED, CLOSE_ORDER_SUSPICIOUS} or (
         source_classification == WORKING_CLOSE_ORDER and marketability.get("marketable") is not True
     ):
@@ -308,6 +325,17 @@ def _plan_for_managed_order(
         "tolerated_ibkr_status_gaps": tolerated_status_gaps,
         "source_managed_order_classification": source_classification,
         "source_recommended_next_action": order.get("recommended_next_action"),
+        "supervised_modify_boundary": (
+            _supervised_modify_boundary_evidence(
+                open_order_truth=open_order_truth,
+                position_truth=position_truth,
+                close_reprice_policy=close_reprice_policy,
+                reference=reference,
+                identity=identity,
+            )
+            if source_classification == CLOSE_ORDER_NOT_MARKETABLE
+            else {}
+        ),
         "lifecycle_id": order.get("lifecycle_id"),
         "manifest_id": order.get("manifest_id"),
         "ownership_id": order.get("ownership_id"),
@@ -350,6 +378,133 @@ def _position_open(*, order: Mapping[str, Any], position_truth: Mapping[str, Any
             return True
     summary = _mapping(position_truth.get("summary"))
     return summary.get("broker_exposure_present") is True and bool(symbol)
+
+
+def _supervised_non_marketable_modify_ready(
+    *,
+    order: Mapping[str, Any],
+    open_order_truth: Mapping[str, Any],
+    position_truth: Mapping[str, Any],
+    identity: Mapping[str, Any],
+    close_reprice_policy: Mapping[str, Any],
+    reference: Mapping[str, Any],
+) -> tuple[bool, str]:
+    if not _identity_complete(identity):
+        return False, "identity_incomplete"
+    if open_order_truth.get("canonical_refresh_scope") != "GLOBAL_COMPLETE":
+        return False, "open_order_truth_not_global_complete"
+    if _unknown_order_count(open_order_truth) != 0:
+        return False, "unknown_orders_present"
+    if _duplicate_close_group_count(open_order_truth) != 0:
+        return False, "duplicate_close_group_present"
+    broker_position = _matching_broker_position(identity=identity, order=order, position_truth=position_truth)
+    if not broker_position:
+        return False, "current_broker_position_missing"
+    if not _risk_reducing_against_position(identity=identity, broker_position=broker_position):
+        return False, "close_order_not_risk_reducing"
+    if close_reprice_policy.get("classification") != "MANAGED_CLOSE_PRICED":
+        return False, str(close_reprice_policy.get("stale_reference_blocker") or "reprice_policy_not_priced")
+    final_check = validate_final_marketable_close_limit(
+        limit_price=close_reprice_policy.get("limit_price"),
+        reference=reference,
+        close_action=str(identity.get("action") or ""),
+        tick_size=str(close_reprice_policy.get("tick_size") or _tick_size_for_symbol(str(order.get("symbol") or ""))),
+        stale_reference_seconds=ACTIVE_EVIDENCE_MANAGED_CLOSE_STALE_AFTER_SECONDS,
+    )
+    if final_check.get("classification") != "MANAGED_CLOSE_FINAL_MARKETABILITY_READY":
+        return False, str(final_check.get("block_reason") or "final_marketability_failed")
+    return True, "supervised_modify_ready"
+
+
+def _supervised_modify_boundary_evidence(
+    *,
+    open_order_truth: Mapping[str, Any],
+    position_truth: Mapping[str, Any],
+    close_reprice_policy: Mapping[str, Any],
+    reference: Mapping[str, Any],
+    identity: Mapping[str, Any],
+) -> dict[str, Any]:
+    return {
+        "canonical_open_order_truth_global_complete": open_order_truth.get("canonical_refresh_scope") == "GLOBAL_COMPLETE",
+        "unknown_order_count": _unknown_order_count(open_order_truth),
+        "duplicate_close_group_count": _duplicate_close_group_count(open_order_truth),
+        "broker_position_open": bool(_matching_broker_position(identity=identity, order={}, position_truth=position_truth)),
+        "risk_reducing": _risk_reducing_against_position(
+            identity=identity,
+            broker_position=_matching_broker_position(identity=identity, order={}, position_truth=position_truth) or {},
+        ),
+        "new_limit": close_reprice_policy.get("limit_price"),
+        "reprice_policy_classification": close_reprice_policy.get("classification"),
+        "reference_price": reference.get("reference_price"),
+        "reference_age_seconds": reference.get("reference_age_seconds"),
+        "reference_source": reference.get("reference_source"),
+    }
+
+
+def _matching_broker_position(
+    *,
+    identity: Mapping[str, Any],
+    order: Mapping[str, Any],
+    position_truth: Mapping[str, Any],
+) -> dict[str, Any]:
+    symbol = str(order.get("symbol") or "").strip().upper()
+    contract = str(identity.get("contract") or "").strip().upper()
+    con_id = str(identity.get("con_id") or "").strip()
+    account = str(identity.get("account_id") or "").strip()
+    for row in _list(position_truth.get("broker_positions")):
+        if account and str(row.get("account_id") or row.get("account") or "").strip() not in {"", account}:
+            continue
+        row_symbol = str(row.get("symbol") or row.get("track_b_root") or "").strip().upper()
+        if symbol and row_symbol and row_symbol != symbol:
+            continue
+        row_contract = str(row.get("local_symbol") or row.get("localSymbol") or row.get("contract") or "").strip().upper()
+        if contract and row_contract and row_contract != contract:
+            continue
+        row_con_id = str(row.get("con_id") or row.get("conId") or "").strip()
+        if con_id and row_con_id and row_con_id != con_id:
+            continue
+        if _quantity(row) != Decimal("0"):
+            return dict(row)
+    return {}
+
+
+def _risk_reducing_against_position(*, identity: Mapping[str, Any], broker_position: Mapping[str, Any]) -> bool:
+    action = str(identity.get("action") or "").strip().upper()
+    order_qty = _decimal_or_none(identity.get("quantity"))
+    broker_qty = _quantity(broker_position)
+    if order_qty is None or order_qty <= 0 or broker_qty == 0:
+        return False
+    if action == "BUY":
+        return broker_qty < 0 and order_qty <= abs(broker_qty)
+    if action == "SELL":
+        return broker_qty > 0 and order_qty <= abs(broker_qty)
+    return False
+
+
+def _unknown_order_count(open_order_truth: Mapping[str, Any]) -> int:
+    summary = _mapping(open_order_truth.get("summary"))
+    for value in (
+        open_order_truth.get("unknown_open_order_count"),
+        open_order_truth.get("unknown_order_count"),
+        summary.get("unknown_open_order_count"),
+        summary.get("unknown_order_count"),
+    ):
+        parsed = _int_or_none(value)
+        if parsed is not None:
+            return parsed
+    return len(_list(open_order_truth.get("unknown_open_orders")))
+
+
+def _duplicate_close_group_count(open_order_truth: Mapping[str, Any]) -> int:
+    summary = _mapping(open_order_truth.get("summary"))
+    for value in (
+        open_order_truth.get("duplicate_close_order_group_count"),
+        summary.get("duplicate_close_order_group_count"),
+    ):
+        parsed = _int_or_none(value)
+        if parsed is not None:
+            return parsed
+    return len(_list(open_order_truth.get("duplicate_close_order_groups")))
 
 
 def _identity(*, order: Mapping[str, Any], source_order: Mapping[str, Any]) -> dict[str, Any]:
@@ -411,6 +566,19 @@ def _phase1_market_reference(*, config: TrackBOrderAdjustmentPlannerConfig, symb
     if not bars:
         return {}
     last = _mapping(bars[-1])
+    source_symbol = str(payload.get("symbol") or payload.get("instrument_family") or last.get("symbol") or "").strip().upper()
+    expected_symbol = str(symbol or "").strip().upper()
+    if source_symbol and expected_symbol and source_symbol != expected_symbol:
+        return {
+            "classification": "RUNTIME_MARKET_REFERENCE_WRONG_SYMBOL",
+            "reference_price": None,
+            "source_symbol": source_symbol,
+            "expected_symbol": expected_symbol,
+            "reference_source": str(path),
+            "reference_source_type": "phase1_runtime_market_data",
+            "pricing_source": "DATABENTO_RUNTIME_1M",
+            "reference_age_seconds": None,
+        }
     generated_at = _parse_datetime(payload.get("generated_at"))
     bar_end = _parse_datetime(last.get("bar_end") or last.get("timestamp") or last.get("candle_timestamp"))
     freshness_anchor = generated_at or bar_end
@@ -432,7 +600,7 @@ def _phase1_market_reference(*, config: TrackBOrderAdjustmentPlannerConfig, symb
 
 def _managed_close_reprice_policy(*, order: Mapping[str, Any], reference: Mapping[str, Any]) -> dict[str, Any]:
     symbol = str(order.get("symbol") or "").upper()
-    tick_size = "0.25" if symbol in {"MNQ", "MES", "NQ", "ES"} else "0.1"
+    tick_size = _tick_size_for_symbol(symbol)
     execution_class = classify_exit_execution(
         execution_class=order.get("exit_execution_class") or order.get("execution_class"),
         exit_type=order.get("exit_type") or order.get("strategy_type"),
@@ -457,6 +625,13 @@ def _managed_close_reprice_policy(*, order: Mapping[str, Any], reference: Mappin
         reprice_attempts=_int_or_default(order.get("reprice_attempt_count") or order.get("modify_attempt_count"), 0),
         execution_class=execution_class,
     )
+
+
+def _tick_size_for_symbol(symbol: str) -> str:
+    metadata = futures_tick_metadata(str(symbol or "").upper())
+    if metadata is not None:
+        return str(metadata.min_tick)
+    return "0.25" if str(symbol or "").upper() in {"MNQ", "MES", "NQ", "ES"} else "0.1"
 
 
 def _paper_marketable_close_policy(
@@ -544,6 +719,13 @@ def _int_or_default(value: Any, default: int) -> int:
         return int(value)
     except (TypeError, ValueError):
         return default
+
+
+def _int_or_none(value: Any) -> int | None:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
 
 
 def _read_json(path: Path) -> dict[str, Any]:

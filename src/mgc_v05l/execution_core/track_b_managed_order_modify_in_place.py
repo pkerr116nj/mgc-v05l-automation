@@ -507,6 +507,7 @@ def _classify_readiness(
         "WORKING_CLOSE_ORDER",
         "CLOSE_ORDER_MODIFIABLE",
         "CLOSE_ORDER_CANCEL_REPLACE_REQUIRED",
+        "CLOSE_ORDER_NOT_MARKETABLE",
         "CLOSE_ORDER_SUSPICIOUS",
     }:
         return _blocked(MODIFY_IN_PLACE_BLOCKED_NOT_WORKING_ORDER, f"Managed order is not a working close order: {managed_class}.")
@@ -541,6 +542,7 @@ def _shared_truth_evidence(*, config: ManagedOrderModifyInPlaceConfig, now: date
     reconciliation = _read_json(config.resolve(config.reconciliation_path))
     classifications = {name: _classification(payload) for name, payload in payloads.items()}
     classifications["reconciliation"] = str(reconciliation.get("classification") or "")
+    exact_current_state_clean = _exact_modify_current_state_clean(config=config, payloads=payloads)
     freshness = {
         name: _freshness(payload=payload, now=now, max_age_seconds=config.shared_truth_max_age_seconds)
         for name, payload in payloads.items()
@@ -622,7 +624,12 @@ def _shared_truth_evidence(*, config: ManagedOrderModifyInPlaceConfig, now: date
         "INVALIDATED_MANUAL_BROKER_ACTION",
         "OPERATOR_REQUIRED",
     }:
-        blockers.append(f"Broker Truth Lease is unsafe for modify-in-place: {classifications['broker_lease']}.")
+        if exact_current_state_clean:
+            diagnostic_only_blockers.append(
+                f"Broker Truth Lease is diagnostic for exact modify-in-place: {classifications['broker_lease']}."
+            )
+        else:
+            blockers.append(f"Broker Truth Lease is unsafe for modify-in-place: {classifications['broker_lease']}.")
     if classifications["reconciliation"] in {
         "BROKER_TRUTH_SETTLEMENT_CONTRADICTORY_STATE",
         "TRACK_B_PAPER_BROKER_RECONCILIATION_BLOCKED_UNKNOWN_OPEN_ORDERS",
@@ -645,7 +652,38 @@ def _shared_truth_evidence(*, config: ManagedOrderModifyInPlaceConfig, now: date
         "freshness": freshness,
         "blockers": blockers,
         "diagnostic_only_blockers": diagnostic_only_blockers,
+        "exact_current_state_clean_for_modify": exact_current_state_clean,
     }
+
+
+def _exact_modify_current_state_clean(
+    *,
+    config: ManagedOrderModifyInPlaceConfig,
+    payloads: Mapping[str, Mapping[str, Any]],
+) -> bool:
+    open_order_truth = _mapping(payloads.get("open_order_truth"))
+    if open_order_truth.get("canonical_refresh_scope") != "GLOBAL_COMPLETE":
+        return False
+    if _unknown_order_count(open_order_truth) != 0:
+        return False
+    if _duplicate_close_group_count(open_order_truth) != 0:
+        return False
+    exact_orders = [row for row in _authority_order_rows(open_order_truth) if _order_identity_matches(config=config, row=row)]
+    if len(exact_orders) != 1:
+        return False
+    managed_orders = _mapping(payloads.get("managed_order_registry"))
+    managed_match = _find_order(config=config, rows=_list(managed_orders.get("managed_orders")))
+    if not managed_match:
+        return False
+    if str(managed_match.get("classification") or "") not in {
+        "WORKING_CLOSE_ORDER",
+        "CLOSE_ORDER_MODIFIABLE",
+        "CLOSE_ORDER_CANCEL_REPLACE_REQUIRED",
+        "CLOSE_ORDER_NOT_MARKETABLE",
+        "CLOSE_ORDER_SUSPICIOUS",
+    }:
+        return False
+    return managed_match.get("live_money_eligible") is not True and managed_match.get("paper_proof_invoked") is not True
 
 
 def _target_evidence(*, config: ManagedOrderModifyInPlaceConfig, shared: Mapping[str, Any]) -> dict[str, Any]:
@@ -789,6 +827,32 @@ def _authority_order_rows(payload: Mapping[str, Any]) -> list[dict[str, Any]]:
             if isinstance(row, Mapping):
                 rows.append(dict(row))
     return rows
+
+
+def _unknown_order_count(payload: Mapping[str, Any]) -> int:
+    summary = _mapping(payload.get("summary"))
+    for value in (
+        payload.get("unknown_open_order_count"),
+        payload.get("unknown_order_count"),
+        summary.get("unknown_open_order_count"),
+        summary.get("unknown_order_count"),
+    ):
+        parsed = _int_or_none(value)
+        if parsed is not None:
+            return parsed
+    return len(_list(payload.get("unknown_open_orders")))
+
+
+def _duplicate_close_group_count(payload: Mapping[str, Any]) -> int:
+    summary = _mapping(payload.get("summary"))
+    for value in (
+        payload.get("duplicate_close_order_group_count"),
+        summary.get("duplicate_close_order_group_count"),
+    ):
+        parsed = _int_or_none(value)
+        if parsed is not None:
+            return parsed
+    return len(_list(payload.get("duplicate_close_order_groups")))
 
 
 def _attach_pre_action_summary(report: dict[str, Any], validation: Mapping[str, Any]) -> None:
@@ -951,6 +1015,7 @@ def _redacted_shared(shared: Mapping[str, Any]) -> dict[str, Any]:
         "freshness": shared.get("freshness"),
         "blockers": shared.get("blockers"),
         "diagnostic_only_blockers": shared.get("diagnostic_only_blockers"),
+        "exact_current_state_clean_for_modify": shared.get("exact_current_state_clean_for_modify"),
     }
 
 

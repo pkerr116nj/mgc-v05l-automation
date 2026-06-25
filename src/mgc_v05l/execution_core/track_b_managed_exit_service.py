@@ -1122,7 +1122,6 @@ def _classify_working_close_order_maintenance_authority(config: TrackBManagedExi
     _require(blockers, order.get("paper_proof_invoked") is not True, "paper_proof_invoked")
     _require(blockers, str(order.get("broker_order_id") or ""), "broker_order_id_missing")
     _require(blockers, str(order.get("perm_id") or ""), "perm_id_missing")
-    _require(blockers, str(order.get("classification") or "") != "CLOSE_ORDER_NOT_MARKETABLE", "close_order_not_marketable")
     _require(blockers, str(order.get("action") or "").upper() in {"BUY", "SELL"}, "close_order_action_invalid")
     quantity = _decimal(order.get("quantity"))
     _require(blockers, quantity is not None and quantity > 0, "close_order_quantity_missing_or_zero")
