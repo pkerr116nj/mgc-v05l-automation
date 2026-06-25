@@ -10,6 +10,7 @@ from mgc_v05l.execution_core.track_b_managed_order_registry import (
     ACTIVE_HOLD_MANAGED_TIMED_EXIT_PENDING,
     BROKER_FLAT_WITH_WORKING_CLOSE,
     CLOSE_ORDER_MODIFIABLE,
+    CLOSE_ORDER_NOT_MARKETABLE,
     CLOSE_ORDER_SUSPICIOUS,
     DUPLICATE_CLOSE_ORDER_BLOCKED,
     MODIFY_IN_PLACE_CANDIDATE,
@@ -715,6 +716,33 @@ def test_marketable_close_order_is_modify_in_place_candidate(tmp_path: Path) -> 
 
     assert payload["classification"] == CLOSE_ORDER_MODIFIABLE
     assert payload["managed_orders"][0]["recommended_next_action"] == MODIFY_IN_PLACE_CANDIDATE
+
+
+def test_non_marketable_close_order_requires_operator_review(tmp_path: Path) -> None:
+    _seed_base(
+        tmp_path,
+        order_states=[
+            _order_state(
+                classification="OPEN_CLOSE_ORDER_WORKING",
+                marketable=False,
+            )
+            | {
+                "market_reference": {
+                    "reference_price": "29560",
+                    "reference_age_seconds": 1.0,
+                    "pricing_source": "DATABENTO_RUNTIME_1M",
+                }
+            }
+        ],
+    )
+
+    payload = build_track_b_managed_order_registry(
+        config=TrackBManagedOrderRegistryConfig(repo_root=tmp_path),
+        now=NOW,
+    )
+
+    assert payload["classification"] == CLOSE_ORDER_NOT_MARKETABLE
+    assert payload["managed_orders"][0]["recommended_next_action"] == TARGETED_CANCEL_REPLACE_CANDIDATE
 
 
 def test_stale_close_order_is_cancel_replace_candidate(tmp_path: Path) -> None:

@@ -31,6 +31,7 @@ from mgc_v05l.execution_core.track_b_exit_execution_policy import (
     EXIT_CLASS_RISK_REDUCING,
     build_exit_limit_policy,
     classify_exit_execution,
+    validate_final_marketable_close_limit,
 )
 from mgc_v05l.execution_core.track_b_exit_strategy_roster import (
     ACTIVE_EVIDENCE_MANAGED_CLOSE_STALE_AFTER_SECONDS,
@@ -227,6 +228,25 @@ def build_track_b_managed_exit_attach_plan(
         stale_reference_seconds=exit_profile.stale_reference_seconds or ACTIVE_EVIDENCE_MANAGED_CLOSE_STALE_AFTER_SECONDS,
         execution_class=exit_execution_class,
     )
+    final_runtime_pricing_reference = runtime_pricing_reference
+    final_marketability_check = _final_marketable_close_check(
+        config=config,
+        bars_payload=bars_payload,
+        close_action=close_action,
+        tick_size=exit_profile.tick_size,
+        stale_reference_seconds=exit_profile.stale_reference_seconds or ACTIVE_EVIDENCE_MANAGED_CLOSE_STALE_AFTER_SECONDS,
+        execution_class=exit_execution_class,
+        initial_close_pricing_policy=close_pricing_policy,
+        explicit_close_limit_price=config.close_limit_price,
+        now=actual_now if now is not None else datetime.now(UTC),
+    )
+    if final_marketability_check.get("runtime_pricing_reference"):
+        final_runtime_pricing_reference = _mapping(final_marketability_check.get("runtime_pricing_reference"))
+    if (
+        not config.close_limit_price
+        and _mapping(final_marketability_check.get("close_pricing_policy")).get("classification") == "MANAGED_CLOSE_PRICED"
+    ):
+        close_pricing_policy = _mapping(final_marketability_check.get("close_pricing_policy"))
     close_limit_price = config.close_limit_price or (
         str(close_pricing_policy.get("limit_price"))
         if close_pricing_policy.get("classification") == "MANAGED_CLOSE_PRICED"
@@ -312,6 +332,9 @@ def build_track_b_managed_exit_attach_plan(
         classification = _classification_for_exit_authority_blockers(exit_authority_block_reasons)
     elif not exit_authority_candidate:
         blockers.append("ExitAuthorityDecision V1.1 did not find a matching broker-scoped close intent.")
+        classification = MANAGED_EXIT_BLOCKED_POSITION_MISMATCH
+    elif final_marketability_check.get("classification") == "MANAGED_CLOSE_FINAL_MARKETABILITY_BLOCKED":
+        blockers.append(str(final_marketability_check.get("block_reason") or "CLOSE_ORDER_NOT_MARKETABLE"))
         classification = MANAGED_EXIT_BLOCKED_POSITION_MISMATCH
     elif not close_limit_price:
         blockers.append("Current executable close price is unavailable.")
@@ -459,7 +482,9 @@ def build_track_b_managed_exit_attach_plan(
         "entry_timestamp": entry_timestamp,
         "latest_price_evidence": runtime_pricing_reference.get("reference_price"),
         "runtime_pricing_reference": runtime_pricing_reference,
+        "final_runtime_pricing_reference": final_runtime_pricing_reference,
         "close_pricing_policy": close_pricing_policy,
+        "final_marketability_check": final_marketability_check,
         "close_intent_preview": close_intent,
         "expected_post_action_evidence": {
             "same_account": config.account_id,
@@ -2432,6 +2457,61 @@ def _paper_marketable_close_policy(
         stale_reference_seconds=stale_reference_seconds,
         execution_class=execution_class,
     )
+
+
+def _final_marketable_close_check(
+    *,
+    config: TrackBManagedExitAttachConfig,
+    bars_payload: Mapping[str, Any],
+    close_action: str,
+    tick_size: str,
+    stale_reference_seconds: int,
+    execution_class: str,
+    initial_close_pricing_policy: Mapping[str, Any],
+    explicit_close_limit_price: str | None,
+    now: datetime,
+) -> dict[str, Any]:
+    one_minute_payload = _read_json(_phase1_path(config=config, timeframe="1m"))
+    final_reference = _runtime_pricing_reference(
+        config=config,
+        one_minute_payload=one_minute_payload,
+        bars_payload=bars_payload,
+        now=now,
+    )
+    close_pricing_policy = (
+        dict(initial_close_pricing_policy)
+        if explicit_close_limit_price
+        else _paper_marketable_close_policy(
+            reference=final_reference,
+            close_action=close_action,
+            tick_size=tick_size,
+            stale_reference_seconds=stale_reference_seconds,
+            execution_class=execution_class,
+        )
+    )
+    limit_price = explicit_close_limit_price or close_pricing_policy.get("limit_price")
+    if close_pricing_policy.get("classification") != "MANAGED_CLOSE_PRICED":
+        return {
+            "classification": "MANAGED_CLOSE_FINAL_MARKETABILITY_BLOCKED",
+            "block_reason": close_pricing_policy.get("stale_reference_blocker")
+            or close_pricing_policy.get("block_reason")
+            or "MANAGED_CLOSE_PRICING_BLOCKED",
+            "operator_review_required": True,
+            "runtime_pricing_reference": final_reference,
+            "close_pricing_policy": close_pricing_policy,
+        }
+    check = validate_final_marketable_close_limit(
+        limit_price=limit_price,
+        reference=final_reference,
+        close_action=close_action,
+        tick_size=tick_size,
+        stale_reference_seconds=stale_reference_seconds,
+    )
+    return {
+        **check,
+        "runtime_pricing_reference": final_reference,
+        "close_pricing_policy": close_pricing_policy,
+    }
 
 
 def _read_json(path: Path) -> dict[str, Any]:

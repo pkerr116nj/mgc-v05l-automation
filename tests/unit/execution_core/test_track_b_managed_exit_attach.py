@@ -65,7 +65,7 @@ def test_plan_blocks_close_price_when_runtime_market_data_is_stale(tmp_path: Pat
     assert payload["close_pricing_policy"]["classification"] == "MANAGED_CLOSE_PRICING_BLOCKED"
     assert payload["close_pricing_policy"]["stale_reference_blocker"] == "MANAGED_CLOSE_REFERENCE_STALE"
     assert payload["close_intent_preview"]["submit_allowed"] is False
-    assert "Current executable close price is unavailable." in payload["blockers"]
+    assert "MANAGED_CLOSE_REFERENCE_STALE" in payload["blockers"]
 
 
 def test_buy_to_close_without_bid_ask_uses_fresh_close_plus_bounded_paper_offset(tmp_path: Path) -> None:
@@ -204,6 +204,100 @@ def test_met_sell_to_close_uses_current_phase1_reference_near_market(tmp_path: P
     assert policy["limit_price"] == "1656"
     assert policy["marketable_limit_offset_ticks"] == 8.0
     assert payload["close_intent_preview"]["close_limit_price"] == "1656"
+
+
+def test_mbt_buy_to_close_reprices_from_final_phase1_reference(tmp_path: Path) -> None:
+    config = _seed(
+        tmp_path,
+        completed_bars=12,
+        config_overrides={
+            "instrument_family": "MBT",
+            "contract_key": "MBT-202609",
+            "local_symbol": "MBTU6",
+            "con_id": 772435608,
+            "expiry": "20260925",
+            "tick_size": "5",
+            "managed_exit_policy_id": "US_ACTIVE_EVIDENCE_TIMEBOX_60M_EXIT_V1",
+            "strategy_id": "mbt_us_active_participation_short",
+            "lane_id": "mbt_us_active_participation_short",
+            "side": "SHORT",
+        },
+        position_overrides={
+            "instrument_family": "MBT",
+            "contract_key": "MBT-202609",
+            "local_symbol": "MBTU6",
+            "con_id": 772435608,
+            "quantity": "-1",
+            "side": "SHORT",
+            "managed_exit_policy_id": "US_ACTIVE_EVIDENCE_TIMEBOX_60M_EXIT_V1",
+            "strategy_id": "mbt_us_active_participation_short",
+        },
+    )
+    _write_json(
+        tmp_path / "outputs/track_b_execution_core/phase1_runtime_market_data/MBT/1m/latest_runtime_candles.json",
+        {
+            "symbol": "MBT",
+            "local_symbol": "MBTU6",
+            "generated_at": NOW.isoformat(),
+            "bars": [{"bar_end": "2026-05-25T07:47:00+00:00", "close": "61635"}],
+        },
+    )
+
+    payload = build_track_b_managed_exit_attach_plan(config=config, now=NOW)
+
+    assert payload["close_pricing_policy"]["classification"] == "MANAGED_CLOSE_PRICED"
+    assert payload["close_pricing_policy"]["close_action"] == "BUY"
+    assert payload["close_pricing_policy"]["limit_price"] == "61675"
+    assert payload["final_marketability_check"]["classification"] == "MANAGED_CLOSE_FINAL_MARKETABILITY_READY"
+    assert payload["close_intent_preview"]["close_limit_price"] == "61675"
+
+
+def test_explicit_mbt_buy_close_limit_below_final_reference_blocks(tmp_path: Path) -> None:
+    config = _seed(
+        tmp_path,
+        completed_bars=12,
+        config_overrides={
+            "instrument_family": "MBT",
+            "contract_key": "MBT-202609",
+            "local_symbol": "MBTU6",
+            "con_id": 772435608,
+            "expiry": "20260925",
+            "tick_size": "5",
+            "managed_exit_policy_id": "US_ACTIVE_EVIDENCE_TIMEBOX_60M_EXIT_V1",
+            "strategy_id": "mbt_us_active_participation_short",
+            "lane_id": "mbt_us_active_participation_short",
+            "side": "SHORT",
+            "close_limit_price": "61610",
+        },
+        position_overrides={
+            "instrument_family": "MBT",
+            "contract_key": "MBT-202609",
+            "local_symbol": "MBTU6",
+            "con_id": 772435608,
+            "quantity": "-1",
+            "side": "SHORT",
+            "managed_exit_policy_id": "US_ACTIVE_EVIDENCE_TIMEBOX_60M_EXIT_V1",
+            "strategy_id": "mbt_us_active_participation_short",
+        },
+    )
+    _write_json(
+        tmp_path / "outputs/track_b_execution_core/phase1_runtime_market_data/MBT/1m/latest_runtime_candles.json",
+        {
+            "symbol": "MBT",
+            "local_symbol": "MBTU6",
+            "generated_at": NOW.isoformat(),
+            "bars": [{"bar_end": "2026-05-25T07:47:00+00:00", "close": "61635"}],
+        },
+    )
+
+    payload = build_track_b_managed_exit_attach_plan(config=config, now=NOW)
+
+    assert payload["final_marketability_check"]["classification"] == "MANAGED_CLOSE_FINAL_MARKETABILITY_BLOCKED"
+    assert payload["final_marketability_check"]["block_reason"] == "CLOSE_ORDER_NOT_MARKETABLE"
+    assert payload["final_marketability_check"]["required_marketable_limit_price"] == "61675"
+    assert payload["close_intent_preview"]["close_limit_price"] == "61610"
+    assert payload["close_intent_preview"]["submit_allowed"] is False
+    assert "CLOSE_ORDER_NOT_MARKETABLE" in payload["blockers"]
 
 
 def test_wrong_symbol_phase1_reference_blocks_managed_exit_pricing(tmp_path: Path) -> None:

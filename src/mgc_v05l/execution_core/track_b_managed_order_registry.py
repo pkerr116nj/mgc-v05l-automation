@@ -31,6 +31,7 @@ WORKING_ENTRY_ORDER = "WORKING_ENTRY_ORDER"
 WORKING_CLOSE_ORDER = "WORKING_CLOSE_ORDER"
 CLOSE_ORDER_MODIFIABLE = "CLOSE_ORDER_MODIFIABLE"
 CLOSE_ORDER_CANCEL_REPLACE_REQUIRED = "CLOSE_ORDER_CANCEL_REPLACE_REQUIRED"
+CLOSE_ORDER_NOT_MARKETABLE = "CLOSE_ORDER_NOT_MARKETABLE"
 CLOSE_ORDER_SUSPICIOUS = "CLOSE_ORDER_SUSPICIOUS"
 DUPLICATE_CLOSE_ORDER_BLOCKED = "DUPLICATE_CLOSE_ORDER_BLOCKED"
 ORDER_TERMINAL_FILLED = "ORDER_TERMINAL_FILLED"
@@ -396,6 +397,9 @@ def _classify_managed_order_state(
     if state.get("suspicious") is True or state.get("classification") == "SUSPICIOUS_ORDER_STATE":
         return CLOSE_ORDER_SUSPICIOUS
     flags = set(str(flag) for flag in (state.get("condition_flags") or []))
+    market_reference = _mapping(state.get("market_reference"))
+    if state.get("is_close_order") is True and state.get("marketable") is False and market_reference:
+        return CLOSE_ORDER_NOT_MARKETABLE
     if "close_order_stale" in flags:
         return CLOSE_ORDER_CANCEL_REPLACE_REQUIRED
     if "marketable_unfilled_beyond_threshold" in flags and state.get("is_close_order") is True:
@@ -741,6 +745,7 @@ def _overall_classification(*, source_stale: Mapping[str, Any], managed_orders: 
         return NO_MANAGED_ORDERS
     priority = [
         DUPLICATE_CLOSE_ORDER_BLOCKED,
+        CLOSE_ORDER_NOT_MARKETABLE,
         CLOSE_ORDER_SUSPICIOUS,
         BROKER_FLAT_WITH_WORKING_CLOSE,
         ORDER_STATE_UNKNOWN_REVIEW_REQUIRED,
@@ -792,7 +797,7 @@ def _managed_position_stale_dependency_sources(position: Mapping[str, Any]) -> l
 def _recommended_next_action(*, classification: str, state: Mapping[str, Any]) -> str:
     if classification == DUPLICATE_CLOSE_ORDER_BLOCKED:
         return DO_NOT_REPLACE_DUPLICATE_RISK
-    if classification in {CLOSE_ORDER_SUSPICIOUS, CLOSE_ORDER_CANCEL_REPLACE_REQUIRED}:
+    if classification in {CLOSE_ORDER_SUSPICIOUS, CLOSE_ORDER_CANCEL_REPLACE_REQUIRED, CLOSE_ORDER_NOT_MARKETABLE}:
         return TARGETED_CANCEL_REPLACE_CANDIDATE
     if classification == CLOSE_ORDER_MODIFIABLE:
         return MODIFY_IN_PLACE_CANDIDATE
@@ -1294,6 +1299,7 @@ __all__ = [
     "BROKER_FLAT_WITH_WORKING_CLOSE",
     "CLOSE_ORDER_CANCEL_REPLACE_REQUIRED",
     "CLOSE_ORDER_MODIFIABLE",
+    "CLOSE_ORDER_NOT_MARKETABLE",
     "CLOSE_ORDER_SUSPICIOUS",
     "DUPLICATE_CLOSE_ORDER_BLOCKED",
     "NO_MANAGED_ORDERS",

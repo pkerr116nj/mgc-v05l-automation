@@ -61,6 +61,27 @@ def test_clean_working_close_away_from_market_is_modify_in_place_eligible(tmp_pa
     assert plan["managed_close_reprice_policy"]["marketable_limit_offset_ticks"] == 2364.0
 
 
+def test_non_marketable_working_close_requires_operator_review(tmp_path: Path) -> None:
+    _seed_base(
+        tmp_path,
+        managed_orders=[
+            _managed_order(
+                classification="CLOSE_ORDER_NOT_MARKETABLE",
+                marketable=False,
+            )
+        ],
+        broker_positions=[_broker_position()],
+    )
+
+    payload = _build(tmp_path)
+
+    assert payload["classification"] == REVIEW_REQUIRED_SUSPICIOUS_STATE
+    plan = payload["plans"][0]
+    assert plan["classification"] == REVIEW_REQUIRED_SUSPICIOUS_STATE
+    assert plan["recommended_operator_action"] == "OPERATOR_REVIEW"
+    assert plan["mutation_planned"] is False
+
+
 def test_unfilled_working_close_reprice_escalates_but_caps_slippage(tmp_path: Path) -> None:
     _seed_base(
         tmp_path,

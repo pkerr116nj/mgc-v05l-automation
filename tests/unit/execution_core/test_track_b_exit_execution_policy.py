@@ -5,6 +5,7 @@ from mgc_v05l.execution_core.track_b_exit_execution_policy import (
     EXIT_CLASS_RISK_REDUCING,
     build_exit_limit_policy,
     classify_exit_execution,
+    validate_final_marketable_close_limit,
 )
 
 
@@ -118,6 +119,53 @@ def test_risk_reducing_exit_blocks_without_fresh_price() -> None:
     assert policy["marketable_execution_required"] is True
     assert policy["passive_execution_allowed"] is False
     assert policy["stale_reference_blocker"] == "MANAGED_CLOSE_REFERENCE_STALE"
+
+
+def test_final_marketability_blocks_buy_close_below_current_reference_buffer() -> None:
+    check = validate_final_marketable_close_limit(
+        limit_price="61610",
+        reference={"close": "61635", "reference_price": "61635", "reference_age_seconds": 1.0},
+        close_action="BUY",
+        tick_size="5",
+        stale_reference_seconds=60,
+    )
+
+    assert check["classification"] == "MANAGED_CLOSE_FINAL_MARKETABILITY_BLOCKED"
+    assert check["block_reason"] == "CLOSE_ORDER_NOT_MARKETABLE"
+    assert check["required_marketable_limit_price"] == "61675"
+
+
+def test_final_marketability_accepts_current_buffered_buy_and_sell_closes() -> None:
+    buy_check = validate_final_marketable_close_limit(
+        limit_price="61675",
+        reference={"close": "61635", "reference_price": "61635", "reference_age_seconds": 1.0},
+        close_action="BUY",
+        tick_size="5",
+        stale_reference_seconds=60,
+    )
+    sell_check = validate_final_marketable_close_limit(
+        limit_price="1656",
+        reference={"close": "1660", "reference_price": "1660", "reference_age_seconds": 1.0},
+        close_action="SELL",
+        tick_size="0.5",
+        stale_reference_seconds=60,
+    )
+
+    assert buy_check["classification"] == "MANAGED_CLOSE_FINAL_MARKETABILITY_READY"
+    assert sell_check["classification"] == "MANAGED_CLOSE_FINAL_MARKETABILITY_READY"
+
+
+def test_final_marketability_blocks_stale_reference() -> None:
+    check = validate_final_marketable_close_limit(
+        limit_price="1656",
+        reference={"close": "1660", "reference_price": "1660", "reference_age_seconds": 120.0},
+        close_action="SELL",
+        tick_size="0.5",
+        stale_reference_seconds=60,
+    )
+
+    assert check["classification"] == "MANAGED_CLOSE_FINAL_MARKETABILITY_BLOCKED"
+    assert check["block_reason"] == "MANAGED_CLOSE_REFERENCE_STALE"
 
 
 def test_alpha_seeking_exit_remains_passive() -> None:

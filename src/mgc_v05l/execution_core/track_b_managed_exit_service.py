@@ -811,6 +811,7 @@ def _run_managed_order_maintenance(
             "WORKING_CLOSE_ORDER",
             "CLOSE_ORDER_MODIFIABLE",
             "CLOSE_ORDER_CANCEL_REPLACE_REQUIRED",
+            "CLOSE_ORDER_NOT_MARKETABLE",
         }:
             continue
         if order.get("is_close_order") is not True:
@@ -916,6 +917,7 @@ def _working_close_order_maintenance_needed(config: TrackBManagedExitServiceConf
             "WORKING_CLOSE_ORDER",
             "CLOSE_ORDER_MODIFIABLE",
             "CLOSE_ORDER_CANCEL_REPLACE_REQUIRED",
+            "CLOSE_ORDER_NOT_MARKETABLE",
         }:
             return True
     return False
@@ -1012,7 +1014,16 @@ def _classify_managed_paper_risk_reducing_exit_authority(
         else:
             blockers.append(f"managed_position_not_current:{managed_positions}")
     managed_orders = str(source_classifications.get("managed_orders") or source_classifications.get("Managed Order Registry") or "")
-    if managed_orders and managed_orders not in {
+    if managed_orders == "CLOSE_ORDER_NOT_MARKETABLE":
+        blockers.append("managed_close_order_not_marketable")
+        diagnostics.append(
+            {
+                "kind": "managed_order_operator_review",
+                "classification": managed_orders,
+                "detail": "A working managed close order is not marketable against current runtime market context.",
+            }
+        )
+    elif managed_orders and managed_orders not in {
         "POSITION_WITHOUT_CLOSE_ORDER",
         "ACTIVE_HOLD_MANAGED_TIMED_EXIT_PENDING",
         "WORKING_CLOSE_ORDER",
@@ -1096,6 +1107,7 @@ def _classify_working_close_order_maintenance_authority(config: TrackBManagedExi
             "WORKING_CLOSE_ORDER",
             "CLOSE_ORDER_MODIFIABLE",
             "CLOSE_ORDER_CANCEL_REPLACE_REQUIRED",
+            "CLOSE_ORDER_NOT_MARKETABLE",
         }:
             continue
         candidates.append(order)
@@ -1110,6 +1122,7 @@ def _classify_working_close_order_maintenance_authority(config: TrackBManagedExi
     _require(blockers, order.get("paper_proof_invoked") is not True, "paper_proof_invoked")
     _require(blockers, str(order.get("broker_order_id") or ""), "broker_order_id_missing")
     _require(blockers, str(order.get("perm_id") or ""), "perm_id_missing")
+    _require(blockers, str(order.get("classification") or "") != "CLOSE_ORDER_NOT_MARKETABLE", "close_order_not_marketable")
     _require(blockers, str(order.get("action") or "").upper() in {"BUY", "SELL"}, "close_order_action_invalid")
     quantity = _decimal(order.get("quantity"))
     _require(blockers, quantity is not None and quantity > 0, "close_order_quantity_missing_or_zero")

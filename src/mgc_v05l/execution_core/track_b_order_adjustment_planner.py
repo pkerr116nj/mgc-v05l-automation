@@ -33,6 +33,7 @@ from .track_b_managed_order_registry import (
     BROKER_FLAT_WITH_WORKING_CLOSE,
     CLOSE_ORDER_CANCEL_REPLACE_REQUIRED,
     CLOSE_ORDER_MODIFIABLE,
+    CLOSE_ORDER_NOT_MARKETABLE,
     CLOSE_ORDER_SUSPICIOUS,
     DUPLICATE_CLOSE_ORDER_BLOCKED,
     NO_MANAGED_ORDERS,
@@ -251,6 +252,10 @@ def _plan_for_managed_order(
         classification = ORDER_NOT_FOUND if position_open else NO_ACTION_NEEDED
         recommended_action = "REVIEW_REQUIRED" if position_open else "WAIT"
         rationale = "Broker position exists without a current managed close order."
+    elif source_classification == CLOSE_ORDER_NOT_MARKETABLE:
+        classification = REVIEW_REQUIRED_SUSPICIOUS_STATE
+        recommended_action = "OPERATOR_REVIEW"
+        rationale = "Working close order is not marketable against current runtime market context."
     elif source_classification in {CLOSE_ORDER_MODIFIABLE, CLOSE_ORDER_CANCEL_REPLACE_REQUIRED, CLOSE_ORDER_SUSPICIOUS} or (
         source_classification == WORKING_CLOSE_ORDER and marketability.get("marketable") is not True
     ):
