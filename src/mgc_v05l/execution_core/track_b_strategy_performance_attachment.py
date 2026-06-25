@@ -223,16 +223,33 @@ def build_canonical_trade_records(
         )
         records.append(record)
 
-    unpaired_exits = [
-        _unpaired_exit_record(row, index=index, now=now)
-        for index, row in enumerate(sorted_exits)
-        if index not in used_exit_indexes
-    ]
+    unpaired_exits: list[dict[str, Any]] = []
+    ignored_unmatched_exits: list[dict[str, Any]] = []
+    for index, row in enumerate(sorted_exits):
+        if index in used_exit_indexes:
+            continue
+        if _is_backfilled_managed_exit_fill(row):
+            ignored_unmatched_exits.append(
+                {
+                    "event_type": row.get("event_type"),
+                    "trade_id": row.get("trade_id"),
+                    "lifecycle_id": row.get("lifecycle_id"),
+                    "lane_id": row.get("lane_id"),
+                    "symbol": row.get("symbol"),
+                    "order_id": row.get("order_id"),
+                    "perm_id": row.get("perm_id"),
+                    "exec_id": row.get("exec_id"),
+                    "reason": "backfilled_managed_exit_without_entry_artifact",
+                }
+            )
+            continue
+        unpaired_exits.append(_unpaired_exit_record(row, index=index, now=now))
     records.extend(unpaired_exits)
     pairing_summary = _pairing_summary(
         canonical_records=records,
         total_entries=len(sorted_entries),
         total_exits=len(sorted_exits),
+        ignored_unmatched_exits=ignored_unmatched_exits,
     )
     return records, pairing_summary
 
@@ -402,6 +419,7 @@ def _pairing_summary(
     canonical_records: Sequence[Mapping[str, Any]],
     total_entries: int,
     total_exits: int,
+    ignored_unmatched_exits: Sequence[Mapping[str, Any]] = (),
 ) -> dict[str, Any]:
     paired = [row for row in canonical_records if row.get("pairing_status") == "PAIRED"]
     unpaired_entries = [row for row in canonical_records if row.get("pairing_status") == "UNPAIRED_ENTRY"]
@@ -419,6 +437,10 @@ def _pairing_summary(
         "unpaired_exit_count": len(unpaired_exits),
         "unpaired_entry_reasons": dict(Counter(str(row.get("pairing_reason") or "UNKNOWN") for row in unpaired_entries)),
         "unpaired_exit_reasons": dict(Counter(str(row.get("pairing_reason") or "UNKNOWN") for row in unpaired_exits)),
+        "ignored_unmatched_exit_count": len(ignored_unmatched_exits),
+        "ignored_unmatched_exit_reasons": dict(
+            Counter(str(row.get("reason") or "UNKNOWN") for row in ignored_unmatched_exits)
+        ),
     }
 
 
@@ -862,6 +884,11 @@ def _is_entry_fill(row: Mapping[str, Any]) -> bool:
 
 def _is_exit_fill(row: Mapping[str, Any]) -> bool:
     return str(row.get("event_type") or "") in EXIT_EVENT_TYPES or "EXIT_FILL" in str(row.get("event_type") or "")
+
+
+def _is_backfilled_managed_exit_fill(row: Mapping[str, Any]) -> bool:
+    metadata = _mapping(row.get("metadata"))
+    return metadata.get("source") == "track_b_managed_exit_fill_registry_backfill"
 
 
 def _trade_id_from_entry(entry: Mapping[str, Any]) -> str | None:

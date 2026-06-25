@@ -285,6 +285,45 @@ def test_pairing_summary_reports_unpaired_entry_and_exit(tmp_path: Path) -> None
     assert pairing["unpaired_exit_reasons"] == {"no_matching_entry_for_exit_fill": 1}
 
 
+def test_backfilled_managed_exit_without_entry_is_ignored_for_canonical_performance(tmp_path: Path) -> None:
+    _write_profile(tmp_path, ["gc_globex_active_participation_short"])
+    _write_jsonl(tmp_path / "fills.jsonl", [])
+    exit_row = _exit(
+        lane_id="gc_globex_active_participation_short",
+        symbol="GC",
+        action="BUY",
+        price="197",
+        generated_at="2026-06-24T00:05:00Z",
+    )
+    exit_row["metadata"] = {
+        "source": "track_b_managed_exit_fill_registry_backfill",
+        "managed_exit_policy_id": "GLOBEX_ACTIVE_EVIDENCE_TIMEBOX_15M_EXIT_V1",
+    }
+    _write_jsonl(tmp_path / "trade_events.jsonl", [exit_row])
+    _write_jsonl(tmp_path / "funnel.jsonl", [])
+    _write_candles(tmp_path, "GC", highs=[201], lows=[195])
+
+    result = perf.build_strategy_performance_attachment(
+        repo_root=tmp_path,
+        config_path=Path("config.json"),
+        roster_path=Path("roster.json"),
+        filled_bridge_results_path=Path("fills.jsonl"),
+        trade_registry_events_path=Path("trade_events.jsonl"),
+        funnel_events_path=Path("funnel.jsonl"),
+        phase1_root=Path("phase1"),
+        output_dir=Path("out"),
+    )
+
+    pairing = json.loads(result.pairing_summary_path.read_text())
+    assert pairing["total_exits"] == 1
+    assert pairing["unpaired_exit_count"] == 0
+    assert pairing["ignored_unmatched_exit_count"] == 1
+    assert pairing["ignored_unmatched_exit_reasons"] == {
+        "backfilled_managed_exit_without_entry_artifact": 1
+    }
+    assert not result.canonical_trades_path.read_text().strip()
+
+
 def test_pilot_lane_filtering_includes_crypto_active_lanes(tmp_path: Path) -> None:
     _write_profile(
         tmp_path,
