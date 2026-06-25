@@ -171,11 +171,20 @@ materialize_scoped_lane_config_from_roster() {
 import json
 import sys
 from pathlib import Path
+from typing import Any
 
 roster_path = Path(sys.argv[1])
 source_config_path = Path(sys.argv[2])
 output_config_path = Path(sys.argv[3])
 repo_root = Path(sys.argv[4])
+
+sys.path.insert(0, str(repo_root / "src"))
+
+from mgc_v05l.execution_core.track_b_contract_identity import VALIDATED_TRACK_B_FUTURES_BY_SYMBOL
+
+
+ACTIVE_EVIDENCE_US_EXIT_POLICY = "US_ACTIVE_EVIDENCE_TIMEBOX_60M_EXIT_V1"
+ACTIVE_EVIDENCE_GLOBEX_EXIT_POLICY = "GLOBEX_ACTIVE_EVIDENCE_TIMEBOX_15M_EXIT_V1"
 
 
 def _load_source_lanes(path: Path) -> list[dict]:
@@ -195,14 +204,116 @@ def _load_source_lanes(path: Path) -> list[dict]:
     return [dict(row) for row in payload.get("lanes") or [] if isinstance(row, dict)]
 
 
-def _normalize_lane(row: dict) -> dict:
+def _text(value: Any) -> str:
+    return str(value or "").strip()
+
+
+def _first_source(row: dict) -> str:
+    for value in [*list(row.get("long_sources") or []), *list(row.get("short_sources") or [])]:
+        text = _text(value)
+        if text:
+            return text
+    return ""
+
+
+def _lane_symbol(row: dict) -> str:
+    explicit = _text(row.get("symbol") or row.get("instrument_family")).upper()
+    if explicit:
+        return explicit
+    haystack = f"{_text(row.get('lane_id'))} {_first_source(row)}".upper()
+    for symbol in sorted(VALIDATED_TRACK_B_FUTURES_BY_SYMBOL, key=len, reverse=True):
+        if f"_{symbol}_" in haystack or haystack.startswith(f"{symbol}_") or f" {symbol}_" in haystack:
+            return symbol
+    return ""
+
+
+def _lane_session(row: dict) -> str:
+    explicit = _text(row.get("session_restriction")).upper()
+    if explicit:
+        if "LONDON_LATE" in explicit:
+            return "LONDON_LATE"
+        if "LONDON_OPEN" in explicit:
+            return "LONDON_OPEN"
+        if "GLOBEX" in explicit:
+            return "GLOBEX"
+        if explicit == "US" or explicit.startswith("US/"):
+            return "US"
+        return explicit
+    haystack = f"{_text(row.get('lane_id'))} {_first_source(row)}".upper()
+    if "LONDON_LATE" in haystack:
+        return "LONDON_LATE"
+    if "LONDON_OPEN" in haystack:
+        return "LONDON_OPEN"
+    if "GLOBEX" in haystack:
+        return "GLOBEX"
+    if "_US_" in haystack or "_US_ACTIVE_PARTICIPATION_" in haystack:
+        return "US"
+    return ""
+
+
+def _is_active_participation_lane(row: dict) -> bool:
+    haystack = f"{_text(row.get('lane_id'))} {_first_source(row)} {_text(row.get('lane_mode'))}".upper()
+    return "ACTIVE_PARTICIPATION" in haystack or "ACTIVE_EVIDENCE" in haystack
+
+
+def _managed_exit_policy_for_lane(row: dict) -> str:
+    if not _is_active_participation_lane(row):
+        return ""
+    session = _lane_session(row)
+    if session == "US":
+        return ACTIVE_EVIDENCE_US_EXIT_POLICY
+    if session in {"GLOBEX", "LONDON_OPEN", "LONDON_LATE"}:
+        return ACTIVE_EVIDENCE_GLOBEX_EXIT_POLICY
+    return ""
+
+
+def _enrich_active_participation_lane(row: dict) -> dict:
     lane = dict(row)
+    if not _is_active_participation_lane(lane):
+        return lane
+
+    symbol = _lane_symbol(lane)
+    if symbol and not _text(lane.get("symbol")):
+        lane["symbol"] = symbol
+    session = _lane_session(lane)
+    if session and not _text(lane.get("session_restriction")):
+        lane["session_restriction"] = session
+
+    policy_id = _text(lane.get("managed_exit_policy_id")) or _managed_exit_policy_for_lane(lane)
+    if policy_id:
+        lane["managed_exit_policy_id"] = policy_id
+
+    contract = VALIDATED_TRACK_B_FUTURES_BY_SYMBOL.get(symbol)
+    if contract is not None:
+        if not _text(lane.get("local_symbol")):
+            lane["local_symbol"] = contract.local_symbol
+        if not lane.get("con_id"):
+            lane["con_id"] = contract.con_id
+        if not _text(lane.get("contract_key")):
+            lane["contract_key"] = contract.contract_key
+        if not _text(lane.get("exchange")):
+            lane["exchange"] = contract.exchange
+        if not _text(lane.get("expiry")):
+            lane["expiry"] = contract.expiry
+        if not _text(lane.get("tick_size")):
+            lane["tick_size"] = contract.min_tick
+        if not _text(lane.get("point_value")):
+            lane["point_value"] = contract.multiplier
+        if not lane.get("max_position_quantity"):
+            lane["max_position_quantity"] = 1
+    return lane
+
+
+def _normalize_lane(row: dict) -> dict:
+    lane = _enrich_active_participation_lane(row)
     lane["execution_mode"] = "IBKR_PAPER_BRIDGE"
     lane["current_order_destination"] = "ibkr_paper_bridge_submit_capable"
     lane["bridge_adapter_required"] = True
     runtime_overlay = dict(lane.get("runtime_overlay_params") or {})
     runtime_overlay["execution_mode"] = "IBKR_PAPER_BRIDGE"
     runtime_overlay["current_order_destination"] = "ibkr_paper_bridge_submit_capable"
+    if lane.get("managed_exit_policy_id"):
+        runtime_overlay["managed_exit_policy_id"] = lane["managed_exit_policy_id"]
     lane["runtime_overlay_params"] = runtime_overlay
     return lane
 
@@ -221,7 +332,6 @@ for row in _load_source_lanes(source_config_path):
 
 missing = [source_id for source_id in enabled if source_id not in seen_sources]
 if missing:
-    sys.path.insert(0, str(repo_root / "src"))
     from mgc_v05l.execution_core.track_b_shadow_promotion_contract import promoted_probationary_paper_lane_rows
 
     for row in promoted_probationary_paper_lane_rows({"enabled_strategy_ids": missing}):

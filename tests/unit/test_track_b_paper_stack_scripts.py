@@ -1904,6 +1904,18 @@ def test_paper_stack_full_session_materializes_ninety_two_lane_specs(tmp_path: P
     assert {lane["execution_mode"] for lane in lanes} == {"IBKR_PAPER_BRIDGE"}
     assert {lane["current_order_destination"] for lane in lanes} == {"ibkr_paper_bridge_submit_capable"}
     assert {lane["runtime_overlay_params"]["execution_mode"] for lane in lanes} == {"IBKR_PAPER_BRIDGE"}
+    entry_capable_lanes = [
+        lane
+        for lane in lanes
+        if "ACTIVE_EVIDENCE" in [*lane.get("long_sources", []), *lane.get("short_sources", [])][0]
+    ]
+    assert len(entry_capable_lanes) == 91
+    assert not [lane["lane_id"] for lane in entry_capable_lanes if not lane.get("managed_exit_policy_id")]
+    assert not [
+        lane["lane_id"]
+        for lane in entry_capable_lanes
+        if lane["runtime_overlay_params"].get("managed_exit_policy_id") != lane["managed_exit_policy_id"]
+    ]
 
 
 def test_paper_stack_full_session_materializer_fills_missing_lane_specs_from_contract(tmp_path: Path) -> None:
@@ -1970,6 +1982,24 @@ def test_paper_stack_full_session_materializer_fills_missing_lane_specs_from_con
     assert mes_late["session_restriction"] == "LONDON_LATE"
     assert mes_late["execution_mode"] == "IBKR_PAPER_BRIDGE"
     assert mes_late["runtime_overlay_params"]["current_order_destination"] == "ibkr_paper_bridge_submit_capable"
+    mnq_us = by_source["PAPER_ACTIVE_EVIDENCE_MNQ_US_PARTICIPATION_LONG_V1"]
+    assert mnq_us["lane_id"] == "lane_0"
+    assert mnq_us["symbol"] == "MNQ"
+    assert mnq_us["local_symbol"] == "MNQU6"
+    assert mnq_us["con_id"] == 793356225
+    assert mnq_us["session_restriction"] == "US"
+    assert mnq_us["managed_exit_policy_id"] == "US_ACTIVE_EVIDENCE_TIMEBOX_60M_EXIT_V1"
+    assert mnq_us["runtime_overlay_params"]["managed_exit_policy_id"] == "US_ACTIVE_EVIDENCE_TIMEBOX_60M_EXIT_V1"
+    mes_globex = by_source["PAPER_ACTIVE_EVIDENCE_MES_GLOBEX_PARTICIPATION_SHORT_V1"]
+    assert mes_globex["symbol"] == "MES"
+    assert mes_globex["local_symbol"] == "MESU6"
+    assert mes_globex["con_id"] == 793356217
+    assert mes_globex["session_restriction"] == "GLOBEX"
+    assert mes_globex["managed_exit_policy_id"] == "GLOBEX_ACTIVE_EVIDENCE_TIMEBOX_15M_EXIT_V1"
+    assert (
+        mes_globex["runtime_overlay_params"]["managed_exit_policy_id"]
+        == "GLOBEX_ACTIVE_EVIDENCE_TIMEBOX_15M_EXIT_V1"
+    )
     assert mgc_us["lane_id"] == "mgc_us_active_participation_long"
     assert mgc_us["symbol"] == "MGC"
     assert mgc_us["local_symbol"] == "MGCQ6"
