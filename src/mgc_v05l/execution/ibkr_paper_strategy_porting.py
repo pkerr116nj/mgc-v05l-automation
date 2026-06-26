@@ -315,8 +315,6 @@ _BTC_PHASE1_SUBMIT_LANE_IDS = (*_active_evidence_lane_ids("btc"),)
 _MBT_PHASE1_SUBMIT_LANE_IDS = (*_active_evidence_lane_ids("mbt"),)
 _ETH_PHASE1_SUBMIT_LANE_IDS = (*_active_evidence_lane_ids("eth"),)
 _MET_PHASE1_SUBMIT_LANE_IDS = (*_active_evidence_lane_ids("met"),)
-_SOL_PHASE1_SUBMIT_LANE_IDS = (*_active_evidence_lane_ids("sol"),)
-_MSL_PHASE1_SUBMIT_LANE_IDS = (*_active_evidence_lane_ids("msl"),)
 _PL_PHASE1_SUBMIT_LANE_IDS = (
     "atp_companion_v1_pl_asia_us",
     "atp_companion_v1_pl_asia_us_5m",
@@ -442,8 +440,6 @@ for symbol, lane_ids in (
     ("MBT", _MBT_PHASE1_SUBMIT_LANE_IDS),
     ("ETH", _ETH_PHASE1_SUBMIT_LANE_IDS),
     ("MET", _MET_PHASE1_SUBMIT_LANE_IDS),
-    ("SOL", _SOL_PHASE1_SUBMIT_LANE_IDS),
-    ("MSL", _MSL_PHASE1_SUBMIT_LANE_IDS),
 ):
     _SUBMIT_CAPABLE_LANE_ADAPTERS |= {
         lane_id: {

@@ -329,7 +329,6 @@ _BATCH1_ACTIVE_EVIDENCE_SYMBOLS = (
     "ZB",
     "MBT",
     "MET",
-    "MSL",
 )
 
 

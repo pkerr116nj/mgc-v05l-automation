@@ -68,7 +68,7 @@ def test_batch1_active_evidence_specs_are_registered() -> None:
 def test_crypto_active_evidence_specs_are_registered() -> None:
     expected = [
         f"PAPER_ACTIVE_EVIDENCE_{symbol}_{session}_PARTICIPATION_{side}_V1"
-        for symbol in ("MBT", "MET", "MSL")
+        for symbol in ("MBT", "MET")
         for session, side in (
             ("US", "LONG"),
             ("US", "SHORT"),
@@ -83,10 +83,8 @@ def test_crypto_active_evidence_specs_are_registered() -> None:
     assert set(expected).issubset(PAPER_ACTIVE_EVIDENCE_SPECS)
     assert PAPER_ACTIVE_EVIDENCE_SPECS["PAPER_ACTIVE_EVIDENCE_MBT_US_PARTICIPATION_LONG_V1"].direction == "LONG"
     assert PAPER_ACTIVE_EVIDENCE_SPECS["PAPER_ACTIVE_EVIDENCE_MET_US_PARTICIPATION_SHORT_V1"].direction == "SHORT"
-    assert (
-        PAPER_ACTIVE_EVIDENCE_SPECS["PAPER_ACTIVE_EVIDENCE_MSL_LONDON_LATE_PARTICIPATION_SHORT_V1"].overlay_label
-        == "PAPER_ONLY_LONDON_LATE_ACTIVE_EVIDENCE_LANE"
-    )
+    assert "PAPER_ACTIVE_EVIDENCE_MSL_LONDON_LATE_PARTICIPATION_SHORT_V1" not in PAPER_ACTIVE_EVIDENCE_SPECS
+    assert "PAPER_ACTIVE_EVIDENCE_SOL_US_PARTICIPATION_LONG_V1" not in PAPER_ACTIVE_EVIDENCE_SPECS
 
 
 def test_rule_runner_paper_engine_requires_timestamp_coherent_input() -> None:

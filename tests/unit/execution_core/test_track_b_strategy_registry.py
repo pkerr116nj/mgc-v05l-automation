@@ -474,3 +474,17 @@ def test_batch1_active_evidence_registry_metadata_is_valid() -> None:
             assert entry.live_money_eligible is False
             assert entry.managed_exit_policy_id == policy_id
             assert entry.exit_not_available is False
+
+
+def test_solana_active_evidence_registry_entries_are_not_submit_capable() -> None:
+    for strategy_id in (
+        "PAPER_ACTIVE_EVIDENCE_SOL_US_PARTICIPATION_LONG_V1",
+        "PAPER_ACTIVE_EVIDENCE_MSL_LONDON_OPEN_PARTICIPATION_SHORT_V1",
+    ):
+        entry = resolve_track_b_strategy_registry_entry(
+            rule_mode=strategy_id,
+            rule_id=strategy_id,
+            strategy_id=strategy_id,
+        )
+
+        assert entry is None

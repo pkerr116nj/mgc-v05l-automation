@@ -287,8 +287,6 @@ def test_batch1_active_evidence_lanes_use_validated_contract_bridge_targets() ->
         "mbt_london_open_active_participation_short": ("MBT", "MBTU6", 772435596, "20260925", "0.1", "5"),
         "eth_us_active_participation_long": ("ETH", "ETHU6", 772435593, "20260925", "50", "0.5"),
         "met_london_open_active_participation_short": ("MET", "METU6", 772435602, "20260925", "0.1", "0.5"),
-        "sol_us_active_participation_long": ("SOL", "SOLU6", 772435608, "20260925", "500", "0.05"),
-        "msl_london_open_active_participation_short": ("MSL", "MSLU6", 772435607, "20260925", "25", "0.05"),
     }
 
     for lane_id, (symbol, local_symbol, con_id, expiry, multiplier, min_tick) in expected_targets.items():
@@ -307,6 +305,9 @@ def test_batch1_active_evidence_lanes_use_validated_contract_bridge_targets() ->
         assert target["expiry"] == expiry
         assert target["multiplier"] == multiplier
         assert target["min_tick"] == min_tick
+
+    assert lane_submit_bridge_adapter(lane_id="sol_us_active_participation_long") is None
+    assert lane_submit_bridge_adapter(lane_id="msl_london_open_active_participation_short") is None
 
 
 def test_dormant_paper_config_lanes_are_wired_for_ibkr_paper_submit() -> None:

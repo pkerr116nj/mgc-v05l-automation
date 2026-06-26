@@ -620,13 +620,6 @@ elif [[ "${STACK_PROFILE}" == "mnq_mes_full_session_active_evidence" ]]; then
     "PAPER_ACTIVE_EVIDENCE_MET_LONDON_OPEN_PARTICIPATION_LONG_V1",
     "PAPER_ACTIVE_EVIDENCE_MET_LONDON_OPEN_PARTICIPATION_SHORT_V1",
     "PAPER_ACTIVE_EVIDENCE_MET_LONDON_LATE_PARTICIPATION_SHORT_V1",
-    "PAPER_ACTIVE_EVIDENCE_MSL_US_PARTICIPATION_LONG_V1",
-    "PAPER_ACTIVE_EVIDENCE_MSL_US_PARTICIPATION_SHORT_V1",
-    "PAPER_ACTIVE_EVIDENCE_MSL_GLOBEX_PARTICIPATION_LONG_V1",
-    "PAPER_ACTIVE_EVIDENCE_MSL_GLOBEX_PARTICIPATION_SHORT_V1",
-    "PAPER_ACTIVE_EVIDENCE_MSL_LONDON_OPEN_PARTICIPATION_LONG_V1",
-    "PAPER_ACTIVE_EVIDENCE_MSL_LONDON_OPEN_PARTICIPATION_SHORT_V1",
-    "PAPER_ACTIVE_EVIDENCE_MSL_LONDON_LATE_PARTICIPATION_SHORT_V1",
     "MNQ_US_DERIVATIVE_BEAR_TURN_V1"
   ],
   "shadow_only_strategy_ids": [
@@ -2418,7 +2411,7 @@ if str(truth.get("heartbeat_state") or "").strip().upper() not in {"", "HEALTHY"
 lanes = [row for row in config.get("lanes") or [] if isinstance(row, dict)]
 active_lane_ids = [str(value) for value in config.get("active_lane_ids") or [] if str(value)]
 if expected_profile == "mnq_mes_full_session_active_evidence":
-    expected_lane_count = 92
+    expected_lane_count = 85
 else:
     expected_lane_count = len(active_lane_ids) or len(lanes)
 if len(lanes) != expected_lane_count:
