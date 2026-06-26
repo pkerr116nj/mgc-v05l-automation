@@ -54,6 +54,7 @@ from mgc_v05l.execution_core.track_b_post_broker_mutation_refresh import (
     PostBrokerMutationRefreshConfig,
     post_position_order_change_refresh,
 )
+from mgc_v05l.execution_core.track_b_post_trade_analytics_refresh import run_post_trade_analytics_refresh
 from mgc_v05l.execution_core.track_b_strategy_attrition_funnel import (
     events_from_managed_exit_service_status,
     try_record_strategy_funnel_events,
@@ -126,6 +127,7 @@ class TrackBManagedExitServiceConfig:
     authority_refresh_after_attempt: bool = True
     authority_refresh_timeout_seconds: float = 120.0
     actuator_timeout_seconds: float = 90.0
+    post_trade_analytics_timeout_seconds: float = 90.0
     service_label: str | None = None
 
     def resolve(self, path: Path) -> Path:
@@ -138,6 +140,7 @@ CommandRunner = Callable[[Sequence[str], Path, float], subprocess.CompletedProce
 PipelineBuilder = Callable[[TrackBManagedExitServiceConfig, datetime], Mapping[str, Any]]
 OrderMaintenanceRunner = Callable[[TrackBManagedExitServiceConfig, datetime, float], Mapping[str, Any]]
 PostMutationRefresher = Callable[..., Mapping[str, Any]]
+PostTradeAnalyticsRefresher = Callable[..., Mapping[str, Any]]
 SleepFunc = Callable[[float], None]
 
 
@@ -151,6 +154,7 @@ def run_track_b_managed_exit_service_once(
     pipeline_builder: PipelineBuilder | None = None,
     order_maintenance_runner: OrderMaintenanceRunner | None = None,
     post_mutation_refresher: PostMutationRefresher | None = None,
+    post_trade_analytics_refresher: PostTradeAnalyticsRefresher | None = None,
     write: bool = True,
 ) -> dict[str, Any]:
     actual_now = now or datetime.now(UTC)
@@ -167,6 +171,7 @@ def run_track_b_managed_exit_service_once(
     pipeline_builder = pipeline_builder or _run_pipeline_dry_run
     order_maintenance_runner = order_maintenance_runner or _run_managed_order_maintenance
     post_mutation_refresher = post_mutation_refresher or post_position_order_change_refresh
+    post_trade_analytics_refresher = post_trade_analytics_refresher or _run_post_trade_analytics_refresh
     authority_refreshes: list[dict[str, Any]] = []
     actuator_reports: list[dict[str, Any]] = []
     order_maintenance_reports: list[dict[str, Any]] = []
@@ -389,6 +394,12 @@ def run_track_b_managed_exit_service_once(
         trigger="managed_exit_service_actuator",
         post_mutation_refresher=post_mutation_refresher,
         write=write,
+    )
+    payload = _attach_post_trade_analytics_refresh(
+        config=config,
+        payload=payload,
+        trigger="managed_exit_service_actuator",
+        post_trade_analytics_refresher=post_trade_analytics_refresher,
     )
     if write:
         write_track_b_managed_exit_service_status(config=config, payload=payload)
@@ -657,6 +668,65 @@ def _attach_post_broker_mutation_refresh(
     )
     enriched["post_broker_mutation_refresh"] = refresh
     return enriched
+
+
+def _attach_post_trade_analytics_refresh(
+    *,
+    config: TrackBManagedExitServiceConfig,
+    payload: Mapping[str, Any],
+    trigger: str,
+    post_trade_analytics_refresher: PostTradeAnalyticsRefresher,
+) -> dict[str, Any]:
+    enriched = dict(payload)
+    if enriched.get("broker_state_mutated") is not True:
+        return enriched
+    try:
+        refresh = dict(
+            post_trade_analytics_refresher(
+                repo_root=config.repo_root,
+                trigger=trigger,
+                mutation_report=enriched,
+                timeout_seconds=config.post_trade_analytics_timeout_seconds,
+            )
+        )
+    except Exception as exc:  # defensive: analytics refresh must never unwind close handling.
+        refresh = {
+            "classification": "POST_TRADE_ANALYTICS_REFRESH_EXCEPTION_DIAGNOSTIC_ONLY",
+            "trigger": trigger,
+            "error": str(exc),
+            "analytics_only": True,
+            "broker_mutation_allowed": False,
+            "runtime_authority": False,
+            "managed_exit_authority": False,
+            "strategy_behavior_changed": False,
+            "trading_blocking": False,
+        }
+    refresh.setdefault("trigger", trigger)
+    refresh.setdefault("analytics_only", True)
+    refresh.setdefault("broker_mutation_allowed", False)
+    refresh.setdefault("runtime_authority", False)
+    refresh.setdefault("managed_exit_authority", False)
+    refresh.setdefault("strategy_behavior_changed", False)
+    refresh.setdefault("trading_blocking", False)
+    enriched["post_trade_analytics_refresh"] = refresh
+    return enriched
+
+
+def _run_post_trade_analytics_refresh(
+    *,
+    repo_root: Path,
+    trigger: str,
+    mutation_report: Mapping[str, Any],
+    timeout_seconds: float,
+) -> Mapping[str, Any]:
+    result = run_post_trade_analytics_refresh(
+        repo_root=repo_root,
+        max_stage_seconds=max(float(timeout_seconds or 0), 1.0),
+    )
+    summary = dict(result.summary)
+    summary["trigger"] = trigger
+    summary["source_mutation_classification"] = mutation_report.get("classification")
+    return summary
 
 
 def _cycle_started_payload(*, config: TrackBManagedExitServiceConfig, now: datetime) -> dict[str, Any]:
@@ -2744,6 +2814,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--no-authority-refresh-after-attempt", action="store_true")
     parser.add_argument("--authority-refresh-timeout-seconds", type=float, default=120.0)
     parser.add_argument("--actuator-timeout-seconds", type=float, default=90.0)
+    parser.add_argument("--post-trade-analytics-timeout-seconds", type=float, default=90.0)
     parser.add_argument("--service-label")
     parser.add_argument("--service", action="store_true")
     parser.add_argument("--once", action="store_true")
@@ -2765,6 +2836,7 @@ def _config_from_args(args: argparse.Namespace) -> TrackBManagedExitServiceConfi
         authority_refresh_after_attempt=not bool(args.no_authority_refresh_after_attempt),
         authority_refresh_timeout_seconds=args.authority_refresh_timeout_seconds,
         actuator_timeout_seconds=args.actuator_timeout_seconds,
+        post_trade_analytics_timeout_seconds=args.post_trade_analytics_timeout_seconds,
         service_label=args.service_label,
     )
 

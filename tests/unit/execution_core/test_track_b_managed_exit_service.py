@@ -1386,6 +1386,7 @@ def test_refresh_failure_is_diagnostic_for_v1_allowed_paper_risk_reducing_close(
 
 def test_managed_close_fill_triggers_post_broker_mutation_refresh(tmp_path: Path) -> None:
     refresh_calls = []
+    analytics_calls = []
 
     payload = run_track_b_managed_exit_service_once(
         config=TrackBManagedExitServiceConfig(repo_root=tmp_path, apply=True, max_cycles_per_tick=1),
@@ -1400,6 +1401,13 @@ def test_managed_close_fill_triggers_post_broker_mutation_refresh(tmp_path: Path
         pipeline_builder=lambda config, now: _pipeline_report(decisions=("ALLOWED",)),
         post_mutation_refresher=lambda **kwargs: refresh_calls.append(kwargs)
         or {"classification": "POST_BROKER_MUTATION_REFRESH_SUCCEEDED", "trigger": kwargs["trigger"]},
+        post_trade_analytics_refresher=lambda **kwargs: analytics_calls.append(kwargs)
+        or {
+            "classification": "POST_TRADE_ANALYTICS_REFRESH_READY",
+            "trigger": kwargs["trigger"],
+            "analytics_only": True,
+            "trading_blocking": False,
+        },
     )
 
     assert payload["classification"] == MANAGED_EXIT_SERVICE_APPLY_SUCCEEDED
@@ -1407,6 +1415,39 @@ def test_managed_close_fill_triggers_post_broker_mutation_refresh(tmp_path: Path
     assert payload["post_broker_mutation_refresh"]["classification"] == "POST_BROKER_MUTATION_REFRESH_SUCCEEDED"
     assert payload["post_broker_mutation_refresh"]["trigger"] == "managed_exit_service_actuator"
     assert refresh_calls[0]["mutation_report"]["broker_state_mutated"] is True
+    assert analytics_calls[0]["mutation_report"]["post_broker_mutation_refresh"]["classification"] == "POST_BROKER_MUTATION_REFRESH_SUCCEEDED"
+    assert analytics_calls[0]["timeout_seconds"] == 90.0
+    assert payload["post_trade_analytics_refresh"]["classification"] == "POST_TRADE_ANALYTICS_REFRESH_READY"
+    assert payload["post_trade_analytics_refresh"]["trading_blocking"] is False
+
+
+def test_managed_close_analytics_refresh_failure_is_diagnostic_only(tmp_path: Path) -> None:
+    def _analytics_failure(**kwargs):
+        raise RuntimeError("analytics refresh unavailable")
+
+    payload = run_track_b_managed_exit_service_once(
+        config=TrackBManagedExitServiceConfig(repo_root=tmp_path, apply=True, max_cycles_per_tick=1),
+        now=NOW,
+        actuator_runner=lambda config, now, timeout: _actuator_report(
+            MANAGED_EXIT_ACTUATOR_APPLIED_OR_PENDING,
+            eligible=1,
+            submitted=1,
+            local_symbol="MESM6",
+        ),
+        authority_refresher=_refresh_ok,
+        pipeline_builder=lambda config, now: _pipeline_report(decisions=("ALLOWED",)),
+        post_mutation_refresher=lambda **kwargs: {
+            "classification": "POST_BROKER_MUTATION_REFRESH_SUCCEEDED",
+            "trigger": kwargs["trigger"],
+        },
+        post_trade_analytics_refresher=_analytics_failure,
+    )
+
+    assert payload["classification"] == MANAGED_EXIT_SERVICE_APPLY_SUCCEEDED
+    assert payload["post_trade_analytics_refresh"]["classification"] == "POST_TRADE_ANALYTICS_REFRESH_EXCEPTION_DIAGNOSTIC_ONLY"
+    assert payload["post_trade_analytics_refresh"]["analytics_only"] is True
+    assert payload["post_trade_analytics_refresh"]["managed_exit_authority"] is False
+    assert payload["post_trade_analytics_refresh"]["trading_blocking"] is False
 
 
 def test_managed_close_fill_publishes_refresh_running_status_before_post_refresh(tmp_path: Path) -> None:
