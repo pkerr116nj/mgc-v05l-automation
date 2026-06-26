@@ -86,6 +86,7 @@ def build_side_session_attribution_replay(
     forward_capture_path = output / "forward_path_capture.jsonl"
     if write_artifacts:
         output.mkdir(parents=True, exist_ok=True)
+        forward_capture = _merge_forward_capture(_read_jsonl(forward_capture_path), forward_capture)
         summary_path.write_text(json.dumps(summary, indent=2, sort_keys=True) + "\n", encoding="utf-8")
         report_path.write_text(_markdown_report(summary), encoding="utf-8")
         write_bounded_jsonl(trade_replay_path, replay_rows, config=PATH_CAPTURE_JSONL_CONFIG)
@@ -391,6 +392,42 @@ def _build_forward_capture(
                 }
             )
     return rows
+
+
+def _merge_forward_capture(
+    existing_rows: Sequence[Mapping[str, Any]],
+    new_rows: Sequence[Mapping[str, Any]],
+) -> list[dict[str, Any]]:
+    merged: dict[tuple[str, str, str | None, str | None, str | None], dict[str, Any]] = {}
+    for row in [*existing_rows, *new_rows]:
+        if row.get("event_type") != "FORWARD_PATH_CANDLE_CAPTURE":
+            continue
+        key = (
+            str(row.get("symbol") or "").upper(),
+            str(row.get("timeframe") or ""),
+            _nullable_str(row.get("first_bar_end")),
+            _nullable_str(row.get("latest_bar_end")),
+            _nullable_str(row.get("generated_at")),
+        )
+        if not key[0] or not key[1]:
+            continue
+        merged[key] = dict(row)
+    return sorted(
+        merged.values(),
+        key=lambda row: (
+            str(row.get("generated_at") or ""),
+            str(row.get("symbol") or ""),
+            str(row.get("timeframe") or ""),
+            str(row.get("latest_bar_end") or ""),
+        ),
+    )
+
+
+def _nullable_str(value: Any) -> str | None:
+    if value is None:
+        return None
+    text = str(value).strip()
+    return text or None
 
 
 def _markdown_report(summary: Mapping[str, Any]) -> str:

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import inspect
 import json
+from datetime import UTC, datetime
 from pathlib import Path
 
 from mgc_v05l.execution_core import track_b_side_session_attribution_replay as replay
@@ -138,6 +139,55 @@ def test_forward_capture_retains_sixty_minute_path_window(tmp_path: Path) -> Non
 
     assert row["bar_count"] == 60
     assert len(row["bars"]) == 60
+
+
+def test_forward_capture_carries_forward_prior_snapshots(tmp_path: Path) -> None:
+    _write_canonical(
+        tmp_path,
+        [
+            _trade(
+                lane_id="mbt_globex_active_participation_long",
+                symbol="MBT",
+                side="LONG",
+                session_label="GLOBEX",
+                entry_price="100",
+                exit_price="101",
+                entry_time="2026-06-24T00:00:00Z",
+                exit_time="2026-06-24T00:05:00Z",
+            )
+        ],
+    )
+    _write_1m_candles(tmp_path, "MBT", [("2026-06-24T00:05:00Z", "101", "99", "101")])
+
+    prior_path = (
+        tmp_path
+        / "outputs"
+        / "track_b_execution_core"
+        / "strategy_performance"
+        / "side_session_attribution"
+        / "forward_path_capture.jsonl"
+    )
+    prior_path.parent.mkdir(parents=True)
+    prior_row = {
+        "schema_version": replay.SCHEMA_VERSION,
+        "event_type": "FORWARD_PATH_CANDLE_CAPTURE",
+        "generated_at": "2026-06-24T00:01:00+00:00",
+        "symbol": "GC",
+        "timeframe": "1m",
+        "first_bar_end": "2026-06-24T00:00:00Z",
+        "latest_bar_end": "2026-06-24T00:01:00Z",
+        "bars": [{"bar_end": "2026-06-24T00:01:00Z", "close": "2500"}],
+    }
+    prior_path.write_text(json.dumps(prior_row) + "\n", encoding="utf-8")
+
+    now = datetime(2026, 6, 24, 0, 6, tzinfo=UTC)
+    replay.build_side_session_attribution_replay(repo_root=tmp_path, now=now)
+    replay.build_side_session_attribution_replay(repo_root=tmp_path, now=now)
+    captures = _read_jsonl(prior_path)
+
+    assert any(row["symbol"] == "GC" for row in captures)
+    assert any(row["symbol"] == "MBT" for row in captures)
+    assert sum(1 for row in captures if row["symbol"] == "MBT" and row["timeframe"] == "1m") == 1
 
 
 def test_module_has_no_broker_runtime_or_strategy_mutation_imports() -> None:
