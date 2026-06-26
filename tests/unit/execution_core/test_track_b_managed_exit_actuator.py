@@ -10,6 +10,7 @@ from mgc_v05l.execution_core.track_b_managed_exit_actuator import (
     MANAGED_EXIT_ACTUATOR_ATTACH_TIMEOUT,
     MANAGED_EXIT_ACTUATOR_BLOCKED,
     MANAGED_EXIT_ACTUATOR_DRY_RUN_READY,
+    MANAGED_EXIT_ACTUATOR_PARTIAL,
     MANAGED_EXIT_ACTUATOR_PHASE_RUNNING,
     TrackBManagedExitActuatorConfig,
     run_track_b_managed_exit_actuator,
@@ -273,6 +274,56 @@ def test_multiple_positions_are_processed_one_at_a_time_with_refresh_between(tmp
     assert payload["submitted_count"] == 2
 
 
+def test_position_local_attach_block_does_not_stall_unrelated_due_close(tmp_path: Path) -> None:
+    inputs = _inputs(runtime_down=True)
+    inputs["managed_positions"]["managed_positions"].append(
+        _position(symbol="MES", local_symbol="MESM6", con_id=770561194, lifecycle_id="life-mes", trade_id="trade-mes")
+    )
+    inputs["managed_orders"]["managed_orders"].append(
+        _managed_order(local_symbol="MESM6", con_id=770561194, lifecycle_id="life-mes", trade_id="trade-mes")
+    )
+    inputs["reconciliation"]["registry_reconciliation"]["mapped_records"].append(
+        _registry_record(symbol="MES", local_symbol="MESM6", con_id=770561194, lifecycle_id="life-mes", trade_id="trade-mes")
+    )
+    inputs["guardian"]["managed_close_authority"]["candidates"].append(
+        _candidate(symbol="MES", local_symbol="MESM6", con_id=770561194, lifecycle_id="life-mes", trade_id="trade-mes")
+    )
+    inputs["safe_state"]["close_authority"]["guardian_close_candidates"].append(
+        _candidate(symbol="MES", local_symbol="MESM6", con_id=770561194, lifecycle_id="life-mes", trade_id="trade-mes")
+    )
+    attach_symbols = []
+
+    def _attach(config, now):
+        attach_symbols.append(config.local_symbol)
+        if config.local_symbol == "MNQM6":
+            return {
+                "classification": "MANAGED_EXIT_BLOCKED_POSITION_MISMATCH",
+                "submit_attempted": False,
+                "broker_state_mutated": False,
+            }
+        return _submitted_attach_result("92")
+
+    payload = run_track_b_managed_exit_actuator(
+        config=TrackBManagedExitActuatorConfig(
+            repo_root=tmp_path,
+            apply=True,
+            operator_authorized_managed_exit=True,
+            max_closes_per_run=2,
+        ),
+        now=NOW,
+        input_overrides=inputs,
+        attach_runner=_attach,
+        write=False,
+    )
+
+    assert payload["classification"] == MANAGED_EXIT_ACTUATOR_PARTIAL
+    assert attach_symbols == ["MNQM6", "MESM6"]
+    assert payload["attempted_closes"][0]["classification"] == "MANAGED_EXIT_BLOCKED_POSITION_MISMATCH"
+    assert payload["attempted_closes"][0]["submit_attempted"] is False
+    assert payload["attempted_closes"][1]["order_id"] == "92"
+    assert payload["submitted_count"] == 1
+
+
 def test_duplicate_close_blocks_before_attach(tmp_path: Path) -> None:
     inputs = _inputs(runtime_down=True)
     inputs["managed_orders"]["classification"] = "WORKING_CLOSE_ORDER"
@@ -326,7 +377,7 @@ def test_unknown_open_orders_block_before_attach(tmp_path: Path) -> None:
 
     assert payload["classification"] == MANAGED_EXIT_ACTUATOR_BLOCKED
     assert payload["submit_attempted"] is False
-    assert "same_contract_unknown_order_over_close_risk" in payload["blocked_positions"][0]["blockers"]
+    assert "RECONCILIATION_UNKNOWN_OPEN_ORDERS_PRESENT" in payload["blocked_positions"][0]["blockers"]
 
 
 def test_dirty_reconciliation_is_legacy_diagnostic_when_v11_allows(tmp_path: Path) -> None:

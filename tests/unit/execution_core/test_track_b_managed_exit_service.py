@@ -1263,7 +1263,7 @@ def test_apply_service_processes_one_v1_executable_intent_then_refreshes_broker_
     assert payload["operator_authorized_managed_exit"] is False
     assert [call.apply for call in actuator_calls] == [True]
     assert [call.operator_authorized_managed_exit for call in actuator_calls] == [True]
-    assert [call.max_closes_per_run for call in actuator_calls] == [1]
+    assert [call.max_closes_per_run for call in actuator_calls] == [3]
     assert refresh_phases == ["after_actuator_attempt"]
 
 
@@ -1575,7 +1575,7 @@ def test_service_writes_cycle_started_status_before_actuator_call(tmp_path: Path
         assert status["pid"] > 0
         assert status["service_label"] == "unit-test-service"
         assert status["apply_mode"] == "GUARDED_CLOSE_ONLY_APPLY"
-        assert status["max_closes_per_run"] == 1
+        assert status["max_closes_per_run"] == 4
         assert status["detected_candidates_count"] is None
         assert status["candidate_detection"] == "deferred_to_v1_pipeline_execution_plan"
         return _actuator_report(MANAGED_EXIT_ACTUATOR_NOOP, eligible=0)

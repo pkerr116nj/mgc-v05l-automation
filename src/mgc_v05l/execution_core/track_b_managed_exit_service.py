@@ -322,7 +322,7 @@ def run_track_b_managed_exit_service_once(
             repo_root=config.repo_root,
             apply=config.apply is True,
             operator_authorized_managed_exit=config.operator_authorized_managed_exit is True or config.apply is True,
-            max_closes_per_run=1,
+            max_closes_per_run=_max_closes_per_run(config),
         )
         try:
             actuator_report = dict(actuator_runner(actuator_config, actual_now, config.actuator_timeout_seconds))
@@ -518,7 +518,7 @@ def _service_payload(
         "apply_requested": config.apply is True,
         "apply_mode": "GUARDED_CLOSE_ONLY_APPLY" if config.apply is True else "DRY_RUN_ONLY",
         "operator_authorized_managed_exit": config.operator_authorized_managed_exit is True,
-        "max_closes_per_run": 1,
+        "max_closes_per_run": _max_closes_per_run(config),
         "max_cycles_per_tick": config.max_cycles_per_tick,
         "actuator_timeout_seconds": config.actuator_timeout_seconds,
         "broad_flatten_allowed": False,
@@ -674,7 +674,7 @@ def _cycle_started_payload(*, config: TrackBManagedExitServiceConfig, now: datet
         "apply_requested": config.apply is True,
         "apply_mode": "GUARDED_CLOSE_ONLY_APPLY" if config.apply is True else "DRY_RUN_ONLY",
         "operator_authorized_managed_exit": config.operator_authorized_managed_exit is True,
-        "max_closes_per_run": 1,
+        "max_closes_per_run": _max_closes_per_run(config),
         "max_cycles_per_tick": config.max_cycles_per_tick,
         "actuator_timeout_seconds": config.actuator_timeout_seconds,
         "detected_candidates_count": None,
@@ -765,6 +765,16 @@ def _actuator_broker_effect_observed(report: Mapping[str, Any]) -> bool:
         if close_submit.get("classification") == BROKER_EFFECT_OBSERVED:
             return True
     return False
+
+
+def _max_closes_per_run(config: TrackBManagedExitServiceConfig) -> int:
+    if config.apply is not True:
+        return 1
+    try:
+        value = int(config.max_cycles_per_tick or 1)
+    except (TypeError, ValueError):
+        value = 1
+    return max(value, 1)
 
 
 def _next_action(classification: str) -> str:

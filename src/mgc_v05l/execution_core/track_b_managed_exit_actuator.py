@@ -187,7 +187,7 @@ def run_track_b_managed_exit_actuator(
             )
             recovery = latest_recovery
             exit_authority = latest_exit_authority
-            break
+            continue
         attach_config = _attach_config(config=config, position=latest)
         if write:
             _write_phase_status(config=config, now=actual_now, phase="guarded_attach", phase_timings=phase_timings)
@@ -816,7 +816,29 @@ def _tail(value: str | None, limit: int = 4000) -> str:
 
 
 def _unsafe_after_attempt(row: Mapping[str, Any]) -> bool:
-    return row.get("submit_attempted") is not True or row.get("broker_effect_observed") is True
+    if _position_local_no_mutation_block(row):
+        return False
+    if row.get("submit_attempted") is True or row.get("broker_state_mutated") is True:
+        return False
+    if row.get("broker_effect_observed") is True:
+        return False
+    return True
+
+
+def _position_local_no_mutation_block(row: Mapping[str, Any]) -> bool:
+    """A local attach veto for one position must not stall unrelated closes."""
+
+    classification = str(row.get("classification") or "")
+    if classification not in {"MANAGED_EXIT_BLOCKED_POSITION_MISMATCH", "MANAGED_EXIT_ACTUATOR_RECHECK_BLOCKED"}:
+        return False
+    if row.get("submit_attempted") is True or row.get("broker_state_mutated") is True:
+        return False
+    if row.get("broker_effect_observed") is True:
+        return False
+    close_candidate = row.get("close_candidate") if isinstance(row.get("close_candidate"), Mapping) else {}
+    if classification == "MANAGED_EXIT_ACTUATOR_RECHECK_BLOCKED":
+        return True
+    return str(close_candidate.get("classification") or "") == "EXIT_AUTHORITY_V1_1_CLOSE_ALLOWED"
 
 
 def _nested(payload: Mapping[str, Any], *keys: str) -> Any:
