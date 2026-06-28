@@ -147,6 +147,7 @@ def build_track_b_order_adjustment_plan(
             "market_data_root": str(config.resolve(config.market_data_root)),
         },
     }
+    payload["dmc_metadata"] = _build_dmc_metadata(config=config, payload=payload, generated_at=actual_now)
     return payload
 
 
@@ -158,6 +159,85 @@ def write_track_b_order_adjustment_plan(
     output_path = config.resolve(config.output_path)
     _write_json_atomic(output_path, dict(payload))
     return output_path
+
+
+def _build_dmc_metadata(
+    *,
+    config: TrackBOrderAdjustmentPlannerConfig,
+    payload: Mapping[str, Any],
+    generated_at: datetime,
+) -> dict[str, Any]:
+    artifact_paths = _mapping(payload.get("artifact_paths"))
+    managed_order_registry = _mapping(payload.get("managed_order_registry"))
+    open_order_truth = _mapping(payload.get("open_order_truth"))
+    position_truth = _mapping(payload.get("position_truth"))
+    shared_truth_refresh = _mapping(payload.get("shared_truth_refresh"))
+    source_artifacts = [
+        _dmc_source_artifact(
+            artifact_family="managed_order_registry",
+            path=artifact_paths.get("managed_order_registry") or str(config.resolve(config.managed_order_registry_path)),
+            observed_at=managed_order_registry.get("generated_at"),
+        ),
+        _dmc_source_artifact(
+            artifact_family="open_order_truth",
+            path=artifact_paths.get("open_order_truth") or str(config.resolve(config.open_order_truth_path)),
+            observed_at=open_order_truth.get("generated_at"),
+        ),
+        _dmc_source_artifact(
+            artifact_family="position_truth",
+            path=artifact_paths.get("position_truth") or str(config.resolve(config.position_truth_path)),
+            observed_at=position_truth.get("generated_at"),
+        ),
+    ]
+    if shared_truth_refresh:
+        source_artifacts.append(
+            _dmc_source_artifact(
+                artifact_family="shared_truth_refresh",
+                path="",
+                observed_at=shared_truth_refresh.get("generated_at"),
+            )
+        )
+    source_observed_at = _latest_observed_at(source_artifacts)
+    return {
+        "schema_version": "track_b_dmc_metadata_envelope_v1",
+        "artifact_family": "latest_order_adjustment_plan",
+        "authority_tier": "Tier 1 – Canonical",
+        "publisher_id": "track_b_order_adjustment_planner.py",
+        "owner_id": "Managed Order Registry",
+        "generated_at": generated_at.isoformat(),
+        "source_observed_at": source_observed_at,
+        "source_artifacts": source_artifacts,
+        "refresh_scope": {
+            "scope_type": "GLOBAL_COMPLETE",
+            "account_scope": "Track B PAPER",
+            "symbols": "ALL_TRACK_B_FUTURES_FROM_MANAGED_ORDERS",
+            "partial": False,
+        },
+        "retention_model": "rolling latest snapshot",
+        "append_only": False,
+        "diagnostic_only": False,
+        "analytics_only": False,
+        "can_influence_runtime": True,
+        "can_influence_managed_exit": True,
+    }
+
+
+def _dmc_source_artifact(*, artifact_family: str, path: Any, observed_at: Any) -> dict[str, Any]:
+    return {
+        "artifact_family": artifact_family,
+        "path": str(path or ""),
+        "observed_at": observed_at,
+    }
+
+
+def _latest_observed_at(source_artifacts: list[dict[str, Any]]) -> str | None:
+    latest: datetime | None = None
+    for artifact in source_artifacts:
+        parsed = _parse_datetime(artifact.get("observed_at"))
+        if parsed is None:
+            continue
+        latest = parsed if latest is None or parsed > latest else latest
+    return None if latest is None else latest.isoformat()
 
 
 def build_parser() -> argparse.ArgumentParser:

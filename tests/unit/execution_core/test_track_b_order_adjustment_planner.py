@@ -33,6 +33,44 @@ def test_no_open_order_has_no_action_needed_plan(tmp_path: Path) -> None:
     assert payload["mutation_authority"] is False
 
 
+def test_order_adjustment_plan_includes_backward_compatible_dmc_metadata(tmp_path: Path) -> None:
+    _seed_base(tmp_path)
+
+    payload = _build(tmp_path)
+
+    assert payload["schema_version"] == "track_b_order_adjustment_plan_v1"
+    assert payload["generated_at"] == NOW.isoformat()
+    assert payload["classification"] == NO_ACTION_NEEDED
+    assert payload["summary"]["plan_count"] == 0
+
+    metadata = payload["dmc_metadata"]
+    assert metadata["schema_version"] == "track_b_dmc_metadata_envelope_v1"
+    assert metadata["artifact_family"] == "latest_order_adjustment_plan"
+    assert metadata["authority_tier"] == "Tier 1 – Canonical"
+    assert metadata["publisher_id"] == "track_b_order_adjustment_planner.py"
+    assert metadata["owner_id"] == "Managed Order Registry"
+    assert metadata["generated_at"] == NOW.isoformat()
+    assert metadata["source_observed_at"] == NOW.isoformat()
+    assert metadata["refresh_scope"] == {
+        "scope_type": "GLOBAL_COMPLETE",
+        "account_scope": "Track B PAPER",
+        "symbols": "ALL_TRACK_B_FUTURES_FROM_MANAGED_ORDERS",
+        "partial": False,
+    }
+    assert metadata["retention_model"] == "rolling latest snapshot"
+    assert metadata["append_only"] is False
+    assert metadata["diagnostic_only"] is False
+    assert metadata["analytics_only"] is False
+    assert metadata["can_influence_runtime"] is True
+    assert metadata["can_influence_managed_exit"] is True
+    assert {source["artifact_family"] for source in metadata["source_artifacts"]} == {
+        "managed_order_registry",
+        "open_order_truth",
+        "position_truth",
+        "shared_truth_refresh",
+    }
+
+
 def test_clean_working_close_away_from_market_is_modify_in_place_eligible(tmp_path: Path) -> None:
     _seed_base(
         tmp_path,
@@ -477,6 +515,22 @@ def test_write_authority_artifact(tmp_path: Path) -> None:
 
     assert path == tmp_path / "outputs/track_b_execution_core/managed_orders/latest_order_adjustment_plan.json"
     assert json.loads(path.read_text(encoding="utf-8"))["classification"] == NO_ACTION_NEEDED
+
+
+def test_written_order_adjustment_plan_preserves_existing_consumer_fields_with_dmc_metadata(tmp_path: Path) -> None:
+    _seed_base(tmp_path)
+    config = TrackBOrderAdjustmentPlannerConfig(repo_root=tmp_path)
+    payload = build_track_b_order_adjustment_plan(config=config, now=NOW)
+
+    path = write_track_b_order_adjustment_plan(config=config, payload=payload)
+
+    written = json.loads(path.read_text(encoding="utf-8"))
+    assert written["schema_version"] == "track_b_order_adjustment_plan_v1"
+    assert written["classification"] == NO_ACTION_NEEDED
+    assert written["summary"]["plan_count"] == 0
+    assert written["plans"] == []
+    assert written["dmc_metadata"]["artifact_family"] == "latest_order_adjustment_plan"
+    assert written["dmc_metadata"]["publisher_id"] == "track_b_order_adjustment_planner.py"
 
 
 def test_cli_uses_shared_truth_refresh_precondition(tmp_path: Path, capsys) -> None:
