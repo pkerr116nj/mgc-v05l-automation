@@ -157,7 +157,7 @@ def build_track_b_open_order_truth_from_reconciliation(
     unknown_orders = _list(reconciliation.get("unknown_broker_open_orders"))
     known_managed_exit_orders = _list(reconciliation.get("known_managed_exit_orders"))
     unresolved_ownership = _list(reconciliation.get("unresolved_submit_intent_ownership_records"))
-    scope = _canonical_scope(reconciliation)
+    scope = _canonical_scope_from_fresh_broker_snapshot() if broker_snapshot else _canonical_scope(reconciliation)
 
     order_states = [
         _classify_order(
@@ -319,6 +319,16 @@ def _canonical_scope(reconciliation: Mapping[str, Any]) -> dict[str, Any]:
         "canonical_refresh_scope": GLOBAL_COMPLETE_SCOPE if not blockers else PARTIAL_DIAGNOSTIC_SCOPE,
         "canonical_scope_blockers": blockers,
         "input_symbols": list(input_symbols),
+        "canonical_symbols": list(canonical),
+    }
+
+
+def _canonical_scope_from_fresh_broker_snapshot() -> dict[str, Any]:
+    canonical = _normal_symbols(PHASE1_RUNTIME_TICKER_ORDER)
+    return {
+        "canonical_refresh_scope": GLOBAL_COMPLETE_SCOPE,
+        "canonical_scope_blockers": [],
+        "input_symbols": list(canonical),
         "canonical_symbols": list(canonical),
     }
 

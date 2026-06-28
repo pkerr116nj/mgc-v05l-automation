@@ -122,6 +122,76 @@ def test_partial_reconciliation_scope_cannot_erase_canonical_met_open_orders(tmp
     assert "METU6" in str(current)
 
 
+def test_refresh_publishes_global_open_order_truth_from_complete_broker_snapshot_without_reconciliation_symbols(
+    tmp_path: Path,
+) -> None:
+    _seed_clean_stack(tmp_path)
+    msl_position = {
+        "account_id": "DUM882026",
+        "symbol": "MSL",
+        "track_b_root": "MSL",
+        "local_symbol": "MSLU6",
+        "con_id": 772435607,
+        "quantity": "-1.0",
+    }
+    msl_order = {
+        "account_id": "DUM882026",
+        "symbol": "MSL",
+        "local_symbol": "MSLU6",
+        "perm_id": 865990651,
+        "client_id": 0,
+        "action": "BUY",
+        "quantity": "1.0",
+        "status": "PreSubmitted",
+        "limit_price": "0.0",
+    }
+    _write_reconciliation(
+        tmp_path,
+        now=NOW,
+        broker_reconciled=False,
+        broker_positions=[msl_position],
+        open_orders=[msl_order],
+        symbols=[],
+    )
+    reconciliation_path = tmp_path / DEFAULT_RECONCILIATION_ARTIFACT
+    reconciliation = _read(reconciliation_path)
+    reconciliation.pop("symbols")
+    _write(reconciliation_path, reconciliation)
+    broker_root = tmp_path / "outputs/reports/ibkr_read_only_verification"
+    _write(
+        broker_root / "ibkr_positions_snapshot.json",
+        {
+            "generated_at": NOW.isoformat(),
+            "positions": [msl_position],
+            "position_count": 1,
+            "positions_complete": True,
+            "read_only": True,
+        },
+    )
+    _write(
+        broker_root / "ibkr_open_orders_snapshot.json",
+        {
+            "generated_at": NOW.isoformat(),
+            "open_orders": [msl_order],
+            "open_order_count": 1,
+            "open_orders_complete": True,
+            "read_only": True,
+        },
+    )
+
+    result = _refresh(tmp_path)
+
+    open_order_truth = _read(tmp_path / "outputs/track_b_execution_core/open_order_truth/latest_open_order_truth.json")
+    assert result["artifact_paths"]["Open Order Truth"].endswith("latest_open_order_truth.json")
+    assert open_order_truth["canonical_refresh_scope"] == "GLOBAL_COMPLETE"
+    assert open_order_truth["canonical_scope_blockers"] == []
+    assert open_order_truth["input_symbols"] == list(PHASE1_RUNTIME_TICKER_ORDER)
+    assert open_order_truth["canonical_symbols"] == list(PHASE1_RUNTIME_TICKER_ORDER)
+    assert open_order_truth["source_freshness"]["authority_source"] == "FRESH_COMPLETE_IBKR_BROKER_SNAPSHOT"
+    assert open_order_truth["broker_open_orders"][0]["symbol"] == "MSL"
+    assert open_order_truth["summary"]["duplicate_close_order_group_count"] == 0
+
+
 def test_refresh_consumes_published_broker_lease_without_overwriting_it(tmp_path: Path) -> None:
     _seed_clean_stack(tmp_path)
     lease_path = tmp_path / "outputs/operator_dashboard/runtime/latest_broker_truth_lease.json"

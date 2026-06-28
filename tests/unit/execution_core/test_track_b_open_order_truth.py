@@ -338,6 +338,48 @@ def test_fresh_complete_broker_snapshot_refreshes_persistent_working_order(tmp_p
     assert "close_order_stale" not in payload["order_states"][0]["condition_flags"]
 
 
+def test_complete_global_broker_snapshot_can_publish_canonical_without_reconciliation_symbols(tmp_path: Path) -> None:
+    stale_order = _order(
+        symbol="MSL",
+        local_symbol="MSLU6",
+        action="BUY",
+        order_id=0,
+        perm_id=865990651,
+        limit_price="0.0",
+        status="PreSubmitted",
+        updated_at=(NOW - timedelta(minutes=35)).isoformat(),
+    )
+    _seed_reconciliation(
+        tmp_path,
+        broker_positions=[_position("MSL", "MSLU6", "-1")],
+        open_orders=[stale_order],
+        generated_at=(NOW - timedelta(minutes=35)).isoformat(),
+    )
+    reconciliation_path = _reconciliation_path(tmp_path)
+    reconciliation = json.loads(reconciliation_path.read_text(encoding="utf-8"))
+    reconciliation.pop("symbols")
+    _write_json(reconciliation_path, reconciliation)
+    _seed_raw_broker_snapshots(
+        tmp_path,
+        broker_positions=[_position("MSL", "MSLU6", "-1")],
+        open_orders=[stale_order],
+        generated_at=NOW.isoformat(),
+    )
+    config = TrackBOpenOrderTruthConfig(repo_root=tmp_path)
+
+    payload = build_track_b_open_order_truth(config=config, now=NOW)
+    output_path, _ = write_track_b_open_order_truth(config=config, payload=payload, now=NOW)
+    written = json.loads(output_path.read_text(encoding="utf-8"))
+
+    assert written["canonical_refresh_scope"] == "GLOBAL_COMPLETE"
+    assert written["canonical_scope_blockers"] == []
+    assert written["input_symbols"] == list(PHASE1_RUNTIME_TICKER_ORDER)
+    assert written["canonical_symbols"] == list(PHASE1_RUNTIME_TICKER_ORDER)
+    assert written["source_freshness"]["authority_source"] == "FRESH_COMPLETE_IBKR_BROKER_SNAPSHOT"
+    assert written["broker_open_orders"][0]["symbol"] == "MSL"
+    assert written["summary"]["duplicate_close_order_group_count"] == 0
+
+
 def test_stale_reconciliation_still_blocks_when_raw_snapshot_is_missing(tmp_path: Path) -> None:
     _seed_reconciliation(
         tmp_path,
