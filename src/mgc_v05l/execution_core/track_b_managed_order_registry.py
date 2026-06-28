@@ -245,6 +245,7 @@ def build_track_b_managed_order_registry(
             "submit_ownership_jsonl": str(config.resolve(config.submit_ownership_jsonl_path)),
         },
     }
+    payload["dmc_metadata"] = _build_dmc_metadata(config=config, payload=payload, generated_at=actual_now)
     return payload
 
 
@@ -276,6 +277,83 @@ def build_dashboard_managed_order_projection(*, authority_payload: Mapping[str, 
         "schema_version": "track_b_managed_order_dashboard_projection_v1",
         **build_projection_metadata(source_authority_path=authority_path),
     }
+
+
+def _build_dmc_metadata(
+    *,
+    config: TrackBManagedOrderRegistryConfig,
+    payload: Mapping[str, Any],
+    generated_at: datetime,
+) -> dict[str, Any]:
+    artifact_paths = _mapping(payload.get("artifact_paths"))
+    open_order_truth = _mapping(payload.get("open_order_truth"))
+    position_truth = _mapping(payload.get("position_truth"))
+    managed_position_registry = _mapping(payload.get("managed_position_registry"))
+    reconciliation = _mapping(payload.get("reconciliation"))
+    source_artifacts = [
+        _dmc_source_artifact(
+            artifact_family="open_order_truth",
+            path=artifact_paths.get("open_order_truth") or str(config.resolve(config.open_order_truth_path)),
+            observed_at=open_order_truth.get("generated_at"),
+        ),
+        _dmc_source_artifact(
+            artifact_family="position_truth",
+            path=artifact_paths.get("position_truth") or str(config.resolve(config.position_truth_path)),
+            observed_at=position_truth.get("generated_at"),
+        ),
+        _dmc_source_artifact(
+            artifact_family="managed_position_registry",
+            path=artifact_paths.get("managed_position_registry")
+            or str(config.resolve(config.managed_position_registry_path)),
+            observed_at=managed_position_registry.get("generated_at"),
+        ),
+        _dmc_source_artifact(
+            artifact_family="track_b_paper_broker_reconciliation",
+            path=artifact_paths.get("reconciliation") or str(config.resolve(config.reconciliation_path)),
+            observed_at=reconciliation.get("generated_at"),
+        ),
+    ]
+    source_observed_at = _latest_observed_at(source_artifacts)
+    return {
+        "schema_version": "track_b_dmc_metadata_envelope_v1",
+        "artifact_family": "latest_managed_orders",
+        "authority_tier": "Tier 1 – Canonical",
+        "publisher_id": "track_b_managed_order_registry.py",
+        "owner_id": "Managed Order Registry",
+        "generated_at": generated_at.isoformat(),
+        "source_observed_at": source_observed_at,
+        "source_artifacts": source_artifacts,
+        "refresh_scope": {
+            "scope_type": "GLOBAL_COMPLETE",
+            "account_scope": "Track B PAPER",
+            "symbols": "ALL_TRACK_B_FUTURES_FROM_OPEN_ORDER_TRUTH",
+            "partial": False,
+        },
+        "retention_model": "rolling latest snapshot with append-only managed order event companion",
+        "append_only": False,
+        "diagnostic_only": False,
+        "analytics_only": False,
+        "can_influence_runtime": True,
+        "can_influence_managed_exit": True,
+    }
+
+
+def _dmc_source_artifact(*, artifact_family: str, path: Any, observed_at: Any) -> dict[str, Any]:
+    return {
+        "artifact_family": artifact_family,
+        "path": str(path or ""),
+        "observed_at": observed_at,
+    }
+
+
+def _latest_observed_at(source_artifacts: list[dict[str, Any]]) -> str | None:
+    latest: datetime | None = None
+    for artifact in source_artifacts:
+        parsed = _parse_time(artifact.get("observed_at"))
+        if parsed is None:
+            continue
+        latest = parsed if latest is None or parsed > latest else latest
+    return None if latest is None else latest.isoformat()
 
 
 def build_managed_order_events(

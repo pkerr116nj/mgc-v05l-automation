@@ -44,6 +44,47 @@ def test_no_orders_reports_no_managed_orders(tmp_path: Path) -> None:
     assert payload["live_money_eligible"] is False
 
 
+def test_managed_order_registry_includes_backward_compatible_dmc_metadata(tmp_path: Path) -> None:
+    _seed_base(tmp_path)
+
+    payload = build_track_b_managed_order_registry(
+        config=TrackBManagedOrderRegistryConfig(repo_root=tmp_path),
+        now=NOW,
+    )
+
+    assert payload["schema_version"] == "track_b_managed_order_registry_v1"
+    assert payload["generated_at"] == NOW.isoformat()
+    assert payload["classification"] == NO_MANAGED_ORDERS
+    assert payload["summary"]["managed_order_count"] == 0
+
+    metadata = payload["dmc_metadata"]
+    assert metadata["schema_version"] == "track_b_dmc_metadata_envelope_v1"
+    assert metadata["artifact_family"] == "latest_managed_orders"
+    assert metadata["authority_tier"] == "Tier 1 – Canonical"
+    assert metadata["publisher_id"] == "track_b_managed_order_registry.py"
+    assert metadata["owner_id"] == "Managed Order Registry"
+    assert metadata["generated_at"] == NOW.isoformat()
+    assert metadata["source_observed_at"] == NOW.isoformat()
+    assert metadata["refresh_scope"] == {
+        "scope_type": "GLOBAL_COMPLETE",
+        "account_scope": "Track B PAPER",
+        "symbols": "ALL_TRACK_B_FUTURES_FROM_OPEN_ORDER_TRUTH",
+        "partial": False,
+    }
+    assert metadata["retention_model"] == "rolling latest snapshot with append-only managed order event companion"
+    assert metadata["append_only"] is False
+    assert metadata["diagnostic_only"] is False
+    assert metadata["analytics_only"] is False
+    assert metadata["can_influence_runtime"] is True
+    assert metadata["can_influence_managed_exit"] is True
+    assert {source["artifact_family"] for source in metadata["source_artifacts"]} == {
+        "open_order_truth",
+        "position_truth",
+        "managed_position_registry",
+        "track_b_paper_broker_reconciliation",
+    }
+
+
 def test_one_working_close_order_is_tracked(tmp_path: Path) -> None:
     _seed_base(tmp_path, order_states=[_order_state()])
 
@@ -785,6 +826,22 @@ def test_dashboard_projection_is_not_authority(tmp_path: Path) -> None:
     assert projection["not_routing_authority"] is True
     assert projection["source_authority_path"] == str(authority_path)
     assert projection["authority_owner"] == "execution_core"
+
+
+def test_written_managed_order_registry_preserves_existing_consumer_fields_with_dmc_metadata(tmp_path: Path) -> None:
+    _seed_base(tmp_path)
+    config = TrackBManagedOrderRegistryConfig(repo_root=tmp_path)
+    payload = build_track_b_managed_order_registry(config=config, now=NOW)
+
+    authority_path, _ = write_track_b_managed_order_registry(config=config, payload=payload, now=NOW)
+
+    written = json.loads(authority_path.read_text(encoding="utf-8"))
+    assert written["schema_version"] == "track_b_managed_order_registry_v1"
+    assert written["classification"] == NO_MANAGED_ORDERS
+    assert written["summary"]["managed_order_count"] == 0
+    assert written["managed_orders"] == []
+    assert written["dmc_metadata"]["artifact_family"] == "latest_managed_orders"
+    assert written["dmc_metadata"]["publisher_id"] == "track_b_managed_order_registry.py"
 
 
 def test_critical_paths_do_not_consume_dashboard_projection_as_authority() -> None:
