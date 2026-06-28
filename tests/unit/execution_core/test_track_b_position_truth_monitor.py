@@ -36,6 +36,60 @@ def test_position_truth_reports_clean_flat(tmp_path: Path) -> None:
     assert {row["classification"] for row in payload["position_states"]} == {FLAT_CLEAN}
 
 
+def test_position_truth_includes_backward_compatible_dmc_metadata(tmp_path: Path) -> None:
+    _seed_clean(tmp_path)
+    config = TrackBPositionTruthMonitorConfig(repo_root=tmp_path)
+
+    payload = build_track_b_position_truth(config=config, now=NOW)
+
+    assert payload["schema_version"] == "track_b_position_truth_v1"
+    assert payload["generated_at"] == NOW.isoformat()
+    assert payload["summary"]["overall_classification"] == "CLEAN_FLAT_READY"
+
+    metadata = payload["dmc_metadata"]
+    assert metadata["schema_version"] == "track_b_dmc_metadata_envelope_v1"
+    assert metadata["artifact_family"] == "latest_position_truth"
+    assert metadata["authority_tier"] == "Tier 1 – Canonical"
+    assert metadata["publisher_id"] == "track_b_position_truth.py"
+    assert metadata["owner_id"] == "Position Truth"
+    assert metadata["generated_at"] == NOW.isoformat()
+    assert metadata["source_observed_at"] == NOW.isoformat()
+    assert metadata["refresh_scope"] == {
+        "scope_type": "GLOBAL_COMPLETE",
+        "account_scope": "Track B PAPER",
+        "symbols": "ALL_TRACK_B_FUTURES_FROM_RECONCILIATION",
+        "partial": False,
+    }
+    assert metadata["retention_model"] == "rolling latest snapshot with append-only trade outcome event companion"
+    assert metadata["append_only"] is False
+    assert metadata["diagnostic_only"] is False
+    assert metadata["analytics_only"] is False
+    assert metadata["can_influence_runtime"] is True
+    assert metadata["can_influence_managed_exit"] is True
+    assert {source["artifact_family"] for source in metadata["source_artifacts"]} == {
+        "track_b_paper_broker_reconciliation",
+        "open_order_truth",
+        "managed_order_registry",
+        "runtime_truth",
+    }
+
+
+def test_written_position_truth_sample_preserves_existing_consumer_fields_with_dmc_metadata(tmp_path: Path) -> None:
+    _seed_clean(tmp_path)
+    config = TrackBPositionTruthMonitorConfig(repo_root=tmp_path)
+    payload = build_track_b_position_truth(config=config, now=NOW)
+
+    authority_path, _ = write_track_b_position_truth(config=config, payload=payload, now=NOW)
+
+    written = json.loads(authority_path.read_text(encoding="utf-8"))
+    assert written["schema_version"] == "track_b_position_truth_v1"
+    assert written["summary"]["overall_classification"] == "CLEAN_FLAT_READY"
+    assert written["broker_positions"] == []
+    assert written["open_broker_orders"] == []
+    assert written["dmc_metadata"]["artifact_family"] == "latest_position_truth"
+    assert written["dmc_metadata"]["publisher_id"] == "track_b_position_truth.py"
+
+
 def test_position_truth_surfaces_suspicious_managed_order_evidence(tmp_path: Path) -> None:
     _seed_clean(tmp_path)
     _write_json(
