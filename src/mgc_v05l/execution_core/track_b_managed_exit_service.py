@@ -44,6 +44,7 @@ from mgc_v05l.execution_core.track_b_managed_order_modify_in_place import (
 from mgc_v05l.execution_core.track_b_managed_order_registry import (
     DEFAULT_MANAGED_ORDER_REGISTRY_ARTIFACT,
 )
+from mgc_v05l.execution_core.track_b_open_order_truth import DEFAULT_OPEN_ORDER_TRUTH_ARTIFACT
 from mgc_v05l.execution_core.track_b_order_adjustment_planner import (
     MODIFY_IN_PLACE_ELIGIBLE,
     TrackBOrderAdjustmentPlannerConfig,
@@ -112,6 +113,7 @@ MANAGED_PAPER_RISK_REDUCING_EXIT_AUTHORITY_BLOCKED = "MANAGED_PAPER_RISK_REDUCIN
 
 _PAPER_ACCOUNT_ID = "DUM882026"
 _PAPER_EXECUTION_DOMAIN = "TRACK_B_PAPER"
+_RETIRED_THIN_LOCAL_RESIDUAL_SYMBOLS = frozenset({"MSL", "SOL"})
 
 
 @dataclass(frozen=True)
@@ -299,6 +301,7 @@ def run_track_b_managed_exit_service_once(
     for cycle_index in range(max_cycles):
         executable_intent = _mapping(executable_intents[cycle_index])
         mutation_authority = _classify_managed_paper_risk_reducing_exit_authority(
+            config=config,
             executable_intent=executable_intent,
             execution_plan=execution_plan,
         )
@@ -1026,6 +1029,7 @@ def _legacy_refresh_diagnostic_skipped(phase: str, authority: Mapping[str, Any])
 
 def _classify_managed_paper_risk_reducing_exit_authority(
     *,
+    config: TrackBManagedExitServiceConfig,
     executable_intent: Mapping[str, Any],
     execution_plan: Mapping[str, Any],
 ) -> dict[str, Any]:
@@ -1095,14 +1099,33 @@ def _classify_managed_paper_risk_reducing_exit_authority(
             blockers.append(f"managed_position_not_current:{managed_positions}")
     managed_orders = str(source_classifications.get("managed_orders") or source_classifications.get("Managed Order Registry") or "")
     if managed_orders == "CLOSE_ORDER_NOT_MARKETABLE":
-        blockers.append("managed_close_order_not_marketable")
-        diagnostics.append(
-            {
-                "kind": "managed_order_operator_review",
-                "classification": managed_orders,
-                "detail": "A working managed close order is not marketable against current runtime market context.",
-            }
-        )
+        quarantine = _retired_thin_local_residual_quarantine(config=config, executable_intent=executable_intent)
+        if (
+            quarantine.get("applies") is True
+            and _exit_authority_checks_clear_order_risk(decision)
+            and _exit_authority_checks_prove_current_managed_exposure(decision, executable_intent)
+        ):
+            diagnostics.append(
+                {
+                    "kind": "diagnostic_retired_thin_local_residual",
+                    "classification": managed_orders,
+                    "detail": (
+                        "The only current managed-order blocker is a known retired/thin-symbol working close; "
+                        "it remains local operator-review and does not block this unrelated exact close."
+                    ),
+                    "retired_thin_residual": quarantine,
+                }
+            )
+        else:
+            blockers.append("managed_close_order_not_marketable")
+            diagnostics.append(
+                {
+                    "kind": "managed_order_operator_review",
+                    "classification": managed_orders,
+                    "detail": "A working managed close order is not marketable against current runtime market context.",
+                    "retired_thin_residual": quarantine,
+                }
+            )
     elif managed_orders and managed_orders not in {
         "POSITION_WITHOUT_CLOSE_ORDER",
         "ACTIVE_HOLD_MANAGED_TIMED_EXIT_PENDING",
@@ -1172,6 +1195,119 @@ def _exit_authority_checks_prove_current_managed_exposure(
     if attribution and attribution.get("blocks_authority") is True:
         return False
     return bool(_managed_lifecycle_identity(executable_intent))
+
+
+def _retired_thin_local_residual_quarantine(
+    *,
+    config: TrackBManagedExitServiceConfig,
+    executable_intent: Mapping[str, Any],
+) -> dict[str, Any]:
+    intent_symbol = _intent_root_symbol(executable_intent)
+    if not intent_symbol:
+        return {"applies": False, "reason": "intent_symbol_unresolved"}
+    if intent_symbol in _RETIRED_THIN_LOCAL_RESIDUAL_SYMBOLS:
+        return {
+            "applies": False,
+            "reason": "same_retired_thin_symbol_remains_local_blocked",
+            "intent_symbol": intent_symbol,
+        }
+
+    open_order_truth = _read_json(config.resolve(DEFAULT_OPEN_ORDER_TRUTH_ARTIFACT))
+    open_order_summary = _mapping(open_order_truth.get("summary"))
+    if str(open_order_truth.get("canonical_refresh_scope") or "") != "GLOBAL_COMPLETE":
+        return {"applies": False, "reason": "open_order_truth_not_global_complete", "intent_symbol": intent_symbol}
+    if _list(open_order_truth.get("canonical_scope_blockers")):
+        return {"applies": False, "reason": "canonical_scope_blockers_present", "intent_symbol": intent_symbol}
+    if _int_value(open_order_summary.get("unknown_order_count") or open_order_truth.get("unknown_order_count")):
+        return {"applies": False, "reason": "unknown_orders_present", "intent_symbol": intent_symbol}
+    if _int_value(open_order_summary.get("duplicate_close_order_group_count")):
+        return {"applies": False, "reason": "duplicate_close_groups_present", "intent_symbol": intent_symbol}
+    if _list(open_order_truth.get("duplicate_close_order_groups")):
+        return {"applies": False, "reason": "duplicate_close_groups_present", "intent_symbol": intent_symbol}
+
+    managed_positions = _read_json(config.resolve(DEFAULT_MANAGED_POSITION_REGISTRY_ARTIFACT))
+    managed_position_summary = _mapping(managed_positions.get("summary"))
+    if _int_value(managed_position_summary.get("review_required_count") or managed_positions.get("review_required_count")):
+        return {"applies": False, "reason": "review_required_present", "intent_symbol": intent_symbol}
+
+    managed_orders = _read_json(config.resolve(DEFAULT_MANAGED_ORDER_REGISTRY_ARTIFACT))
+    residual_orders = [
+        _mapping(order)
+        for order in _list(managed_orders.get("managed_orders"))
+        if _mapping(order).get("is_close_order") is True
+        and str(_mapping(order).get("classification") or "") == "CLOSE_ORDER_NOT_MARKETABLE"
+    ]
+    if not residual_orders:
+        return {"applies": False, "reason": "no_non_marketable_close_order_rows", "intent_symbol": intent_symbol}
+
+    residual_symbols = {_order_root_symbol(order) for order in residual_orders}
+    residual_symbols.discard("")
+    if not residual_symbols or not residual_symbols.issubset(_RETIRED_THIN_LOCAL_RESIDUAL_SYMBOLS):
+        return {
+            "applies": False,
+            "reason": "non_retired_thin_non_marketable_close_present",
+            "intent_symbol": intent_symbol,
+            "residual_symbols": sorted(residual_symbols),
+        }
+
+    open_order_rows = [
+        *_list(open_order_truth.get("order_states")),
+        *_list(open_order_truth.get("broker_open_orders")),
+    ]
+    open_order_symbols = {_order_root_symbol(_mapping(order)) for order in open_order_rows}
+    open_order_symbols.discard("")
+    if not open_order_symbols or not open_order_symbols.issubset(_RETIRED_THIN_LOCAL_RESIDUAL_SYMBOLS):
+        return {
+            "applies": False,
+            "reason": "non_retired_thin_open_order_present",
+            "intent_symbol": intent_symbol,
+            "open_order_symbols": sorted(open_order_symbols),
+        }
+
+    return {
+        "applies": True,
+        "reason": "retired_thin_working_close_local_residual_only",
+        "intent_symbol": intent_symbol,
+        "residual_symbols": sorted(residual_symbols),
+        "open_order_symbols": sorted(open_order_symbols),
+        "open_order_truth_classification": open_order_truth.get("classification"),
+        "managed_order_registry_classification": managed_orders.get("classification"),
+    }
+
+
+def _intent_root_symbol(intent: Mapping[str, Any]) -> str:
+    for key in ("symbol", "instrument"):
+        text = str(intent.get(key) or "").strip().upper()
+        if text:
+            return text
+    local_symbol = str(intent.get("localSymbol") or intent.get("local_symbol") or "").strip().upper()
+    return _root_symbol_from_local_symbol(local_symbol)
+
+
+def _order_root_symbol(order: Mapping[str, Any]) -> str:
+    for key in ("symbol", "instrument"):
+        text = str(order.get(key) or "").strip().upper()
+        if text:
+            return text
+    local_symbol = str(order.get("local_symbol") or order.get("localSymbol") or order.get("contract") or "").strip().upper()
+    return _root_symbol_from_local_symbol(local_symbol)
+
+
+def _root_symbol_from_local_symbol(local_symbol: str) -> str:
+    text = str(local_symbol or "").strip().upper()
+    if not text:
+        return ""
+    for symbol in sorted(VALIDATED_TRACK_B_FUTURES_BY_SYMBOL, key=len, reverse=True):
+        if text.startswith(symbol):
+            return symbol
+    return ""
+
+
+def _int_value(value: Any) -> int:
+    try:
+        return int(value or 0)
+    except (TypeError, ValueError):
+        return 0
 
 
 def _classify_working_close_order_maintenance_authority(config: TrackBManagedExitServiceConfig) -> dict[str, Any]:

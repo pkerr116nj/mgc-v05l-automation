@@ -1577,6 +1577,150 @@ def test_legacy_bsa_false_is_diagnostic_when_v1_allows_broker_scoped_exit(tmp_pa
     assert "close_authority_snapshots" not in payload
 
 
+def test_retired_thin_residual_does_not_block_unrelated_managed_exit(tmp_path: Path) -> None:
+    calls = []
+    _seed_retired_thin_residual(tmp_path)
+
+    payload = run_track_b_managed_exit_service_once(
+        config=TrackBManagedExitServiceConfig(repo_root=tmp_path, apply=True),
+        now=NOW,
+        actuator_runner=lambda config, now, timeout: calls.append(config)
+        or _actuator_report(MANAGED_EXIT_ACTUATOR_DRY_RUN_READY, eligible=1),
+        authority_refresher=_refresh_ok,
+        pipeline_builder=lambda config, now: _pipeline_report(
+            decisions=("ALLOWED",),
+            source_classifications={
+                "open_order_truth": "OPEN_CLOSE_ORDER_WORKING",
+                "managed_positions": "OPEN_MANAGED_EXIT_DUE",
+                "managed_orders": "CLOSE_ORDER_NOT_MARKETABLE",
+                "broker_truth_lease": "INVALIDATED_CONTRADICTION",
+                "broker_position_guardian": "BROKER_POSITION_GUARDIAN_HARD_HOLD",
+            },
+        ),
+        write=False,
+    )
+
+    assert calls
+    assert payload["classification"] == MANAGED_EXIT_SERVICE_DRY_RUN_READY
+    diagnostics = payload["service_diagnostics"][0]["managed_paper_risk_reducing_exit_authority"]["diagnostics"]
+    retired = [row for row in diagnostics if row["kind"] == "diagnostic_retired_thin_local_residual"]
+    assert retired
+    assert retired[0]["retired_thin_residual"]["residual_symbols"] == ["MSL"]
+
+
+def test_retired_thin_residual_same_contract_remains_blocked(tmp_path: Path) -> None:
+    calls = []
+    _seed_retired_thin_residual(tmp_path)
+
+    payload = run_track_b_managed_exit_service_once(
+        config=TrackBManagedExitServiceConfig(repo_root=tmp_path, apply=True),
+        now=NOW,
+        actuator_runner=lambda config, now, timeout: calls.append(config) or {},
+        authority_refresher=_refresh_ok,
+        pipeline_builder=lambda config, now: _pipeline_report(
+            decisions=("ALLOWED",),
+            intents=[{"exit_intent_id": "exit-msl", "symbol": "MSL", "localSymbol": "MSLU6"}],
+            failed_hard_checks=("same_contract_working_close_does_not_over_close",),
+            source_classifications={
+                "open_order_truth": "OPEN_CLOSE_ORDER_WORKING",
+                "managed_positions": "OPEN_MANAGED_EXIT_DUE",
+                "managed_orders": "CLOSE_ORDER_NOT_MARKETABLE",
+            },
+        ),
+        write=False,
+    )
+
+    assert calls == []
+    assert payload["classification"] == MANAGED_EXIT_SERVICE_APPLY_BLOCKED
+    blockers = payload["service_diagnostics"][0]["blockers"]
+    assert "same_contract_working_close_over_close_risk" in blockers
+
+
+def test_retired_thin_residual_does_not_demote_unknown_order_or_duplicate_or_review_required(tmp_path: Path) -> None:
+    for kwargs, expected_reason in (
+        ({"unknown_orders": 1}, "unknown_orders_present"),
+        ({"duplicate_groups": 1}, "duplicate_close_groups_present"),
+        ({"review_required": 1}, "review_required_present"),
+    ):
+        calls = []
+        _seed_retired_thin_residual(tmp_path, **kwargs)
+
+        payload = run_track_b_managed_exit_service_once(
+            config=TrackBManagedExitServiceConfig(repo_root=tmp_path, apply=True),
+            now=NOW,
+            actuator_runner=lambda config, now, timeout: calls.append(config) or {},
+            authority_refresher=_refresh_ok,
+            pipeline_builder=lambda config, now: _pipeline_report(
+                decisions=("ALLOWED",),
+                source_classifications={
+                    "open_order_truth": "OPEN_CLOSE_ORDER_WORKING",
+                    "managed_positions": "OPEN_MANAGED_EXIT_DUE",
+                    "managed_orders": "CLOSE_ORDER_NOT_MARKETABLE",
+                },
+            ),
+            write=False,
+        )
+
+        assert calls == []
+        assert payload["classification"] == MANAGED_EXIT_SERVICE_APPLY_BLOCKED
+        diagnostics = payload["service_diagnostics"][0]["diagnostics"]
+        operator_review = [row for row in diagnostics if row["kind"] == "managed_order_operator_review"][0]
+        assert operator_review["retired_thin_residual"]["reason"] == expected_reason
+
+
+def test_retired_thin_residual_does_not_demote_non_risk_reducing_close(tmp_path: Path) -> None:
+    calls = []
+    _seed_retired_thin_residual(tmp_path)
+
+    payload = run_track_b_managed_exit_service_once(
+        config=TrackBManagedExitServiceConfig(repo_root=tmp_path, apply=True),
+        now=NOW,
+        actuator_runner=lambda config, now, timeout: calls.append(config) or {},
+        authority_refresher=_refresh_ok,
+        pipeline_builder=lambda config, now: _pipeline_report(
+            decisions=("ALLOWED",),
+            failed_hard_checks=("risk_reducing_action",),
+            source_classifications={
+                "open_order_truth": "OPEN_CLOSE_ORDER_WORKING",
+                "managed_positions": "OPEN_MANAGED_EXIT_DUE",
+                "managed_orders": "CLOSE_ORDER_NOT_MARKETABLE",
+            },
+        ),
+        write=False,
+    )
+
+    assert calls == []
+    assert payload["classification"] == MANAGED_EXIT_SERVICE_APPLY_BLOCKED
+    assert "not_risk_reducing" in payload["service_diagnostics"][0]["blockers"]
+
+
+def test_non_retired_non_marketable_order_still_blocks_unrelated_exit(tmp_path: Path) -> None:
+    calls = []
+    _seed_retired_thin_residual(tmp_path, residual_symbol="MBT", residual_local_symbol="MBTU6")
+
+    payload = run_track_b_managed_exit_service_once(
+        config=TrackBManagedExitServiceConfig(repo_root=tmp_path, apply=True),
+        now=NOW,
+        actuator_runner=lambda config, now, timeout: calls.append(config) or {},
+        authority_refresher=_refresh_ok,
+        pipeline_builder=lambda config, now: _pipeline_report(
+            decisions=("ALLOWED",),
+            source_classifications={
+                "open_order_truth": "OPEN_CLOSE_ORDER_WORKING",
+                "managed_positions": "OPEN_MANAGED_EXIT_DUE",
+                "managed_orders": "CLOSE_ORDER_NOT_MARKETABLE",
+            },
+        ),
+        write=False,
+    )
+
+    assert calls == []
+    assert payload["classification"] == MANAGED_EXIT_SERVICE_APPLY_BLOCKED
+    diagnostics = payload["service_diagnostics"][0]["diagnostics"]
+    operator_review = [row for row in diagnostics if row["kind"] == "managed_order_operator_review"][0]
+    assert operator_review["retired_thin_residual"]["reason"] == "non_retired_thin_non_marketable_close_present"
+
+
 def test_service_loop_writes_status_and_heartbeat_without_starting_entries(tmp_path: Path) -> None:
     status_path = tmp_path / "latest_service_status.json"
     heartbeat_path = tmp_path / "heartbeat.json"
@@ -1952,6 +2096,88 @@ def _write_managed_close_order_registry(repo_root: Path) -> None:
             }
         ),
         encoding="utf-8",
+    )
+
+
+def _seed_retired_thin_residual(
+    repo_root: Path,
+    *,
+    residual_symbol: str = "MSL",
+    residual_local_symbol: str = "MSLU6",
+    unknown_orders: int = 0,
+    duplicate_groups: int = 0,
+    review_required: int = 0,
+) -> None:
+    order_state = {
+        "classification": "OPEN_CLOSE_ORDER_WORKING",
+        "symbol": residual_symbol,
+        "local_symbol": residual_local_symbol,
+        "contract": residual_local_symbol,
+        "account_id": "DUM882026",
+        "is_close_order": True,
+        "action": "BUY",
+        "quantity": "1",
+        "broker_order_id": "389",
+        "perm_id": "865990651",
+        "status": "PreSubmitted",
+        "marketable": False,
+    }
+    _write_json(
+        repo_root / "outputs/track_b_execution_core/open_order_truth/latest_open_order_truth.json",
+        {
+            "classification": "OPEN_CLOSE_ORDER_WORKING",
+            "canonical_refresh_scope": "GLOBAL_COMPLETE",
+            "canonical_scope_blockers": [],
+            "summary": {
+                "open_order_count": 1,
+                "working_close_order_count": 1,
+                "unknown_order_count": unknown_orders,
+                "duplicate_close_order_group_count": duplicate_groups,
+                "suspicious_order_count": 0,
+            },
+            "order_states": [order_state],
+            "broker_open_orders": [order_state],
+            "duplicate_close_order_groups": ([{"symbol": residual_symbol}] if duplicate_groups else []),
+        },
+    )
+    _write_json(
+        repo_root / "outputs/track_b_execution_core/managed_positions/latest_managed_positions.json",
+        {
+            "classification": "OPEN_MANAGED_EXIT_DUE",
+            "summary": {"review_required_count": review_required},
+            "managed_positions": [],
+        },
+    )
+    _write_json(
+        repo_root / DEFAULT_MANAGED_ORDER_REGISTRY_ARTIFACT,
+        {
+            "classification": "CLOSE_ORDER_NOT_MARKETABLE",
+            "summary": {
+                "managed_order_count": 1,
+                "close_order_not_marketable_count": 1,
+                "duplicate_close_order_group_count": duplicate_groups,
+            },
+            "managed_orders": [
+                {
+                    **order_state,
+                    "classification": "CLOSE_ORDER_NOT_MARKETABLE",
+                    "recommended_next_action": "OPERATOR_REVIEW",
+                    "canonical_managed_position": {
+                        "lifecycle_id": f"life-{residual_symbol.lower()}",
+                        "broker_position": {
+                            "quantity": "-1",
+                            "local_symbol": residual_local_symbol,
+                            "symbol": residual_symbol,
+                        },
+                    },
+                    "broker_position": {
+                        "quantity": "-1",
+                        "local_symbol": residual_local_symbol,
+                        "symbol": residual_symbol,
+                    },
+                }
+            ],
+        },
     )
 
 
