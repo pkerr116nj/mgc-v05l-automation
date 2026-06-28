@@ -25,6 +25,7 @@ from mgc_v05l.execution_core.track_b_canonical_truth_snapshot import (
     TRUTH_SNAPSHOT_OK,
     TrackBTruthSnapshotConfig,
     build_track_b_truth_snapshot,
+    write_track_b_truth_snapshot,
 )
 from mgc_v05l.execution_core.track_b_central_trade_registry import TradeEvent, TradeEventType
 
@@ -345,6 +346,63 @@ def test_all_source_paths_and_freshness_are_included(tmp_path: Path) -> None:
     assert payload["runtime"]["source"]["fresh"] is True
     assert payload["broker_truth"]["source"]["freshness_seconds"] == 0.0
     assert payload["diagnostic_sources"][0]["diagnostic_only"] is True
+
+
+def test_canonical_truth_snapshot_includes_backward_compatible_dmc_metadata(tmp_path: Path) -> None:
+    config = _seed_clean(tmp_path)
+
+    snapshot = build_track_b_truth_snapshot(config=config, now=NOW)
+    payload = snapshot.to_dict()
+
+    assert payload["schema_version"] == "track_b_truth_snapshot_v1"
+    assert payload["classification"] == TRUTH_SNAPSHOT_OK
+    metadata = payload["dmc_metadata"]
+    assert metadata["schema_version"] == "track_b_dmc_metadata_envelope_v1"
+    assert metadata["artifact_family"] == "latest_track_b_canonical_truth_snapshot"
+    assert metadata["authority_tier"] == "Tier 1 – Canonical"
+    assert metadata["publisher_id"] == "track_b_canonical_truth_snapshot.py"
+    assert metadata["owner_id"] == "Current State Authority"
+    assert metadata["generated_at"] == NOW.isoformat()
+    assert metadata["source_observed_at"] == NOW.isoformat()
+    assert metadata["refresh_scope"] == {
+        "scope_type": "GLOBAL_COMPLETE",
+        "account_scope": "Track B PAPER",
+        "symbols": "ALL_TRACK_B_CURRENT_STATE_AUTHORITY_INPUTS",
+        "partial": False,
+    }
+    assert metadata["append_only"] is False
+    assert metadata["diagnostic_only"] is False
+    assert metadata["analytics_only"] is False
+    assert metadata["can_influence_runtime"] is True
+    assert metadata["can_influence_managed_exit"] is True
+    assert {source["artifact_family"] for source in metadata["source_artifacts"]} >= {
+        "runtime_truth",
+        "broker_truth",
+        "broker_positions",
+        "broker_open_orders",
+        "lifecycle_positions",
+        "managed_order_registry",
+        "reconciliation",
+        "safe_state",
+        "control_plane",
+    }
+
+
+def test_written_canonical_truth_snapshot_preserves_existing_consumer_fields_with_dmc_metadata(
+    tmp_path: Path,
+) -> None:
+    config = _seed_clean(tmp_path)
+    snapshot = build_track_b_truth_snapshot(config=config, now=NOW)
+
+    output_path = write_track_b_truth_snapshot(config=config, snapshot=snapshot)
+    written = json.loads(output_path.read_text(encoding="utf-8"))
+
+    assert written["classification"] == TRUTH_SNAPSHOT_OK
+    assert written["runtime"]["submit_capable"] is True
+    assert written["broker_truth"]["broker_position_count"] == 0
+    assert written["source_paths"]["runtime_truth"].endswith("latest_runtime_environment_truth.json")
+    assert written["dmc_metadata"]["artifact_family"] == "latest_track_b_canonical_truth_snapshot"
+    assert written["dmc_metadata"]["publisher_id"] == "track_b_canonical_truth_snapshot.py"
 
 
 def test_stale_control_plane_is_not_submit_authority(tmp_path: Path) -> None:

@@ -301,6 +301,7 @@ class TrackBTruthSnapshot:
     def to_dict(self) -> dict[str, Any]:
         payload = _jsonable(asdict(self))
         payload["classification"] = self.classification
+        payload["dmc_metadata"] = _build_dmc_metadata(payload=payload, generated_at=self.generated_at)
         return payload
 
 
@@ -615,6 +616,133 @@ def write_track_b_truth_snapshot(
     output_path = config.resolve(config.output_path)
     write_json_atomic(output_path, snapshot.to_dict())
     return output_path
+
+
+def _build_dmc_metadata(*, payload: Mapping[str, Any], generated_at: datetime) -> dict[str, Any]:
+    source_paths = _mapping(payload.get("source_paths"))
+    source_artifacts = [
+        _dmc_source_artifact(
+            artifact_family="runtime_truth",
+            path=source_paths.get("runtime_truth"),
+            observed_at=_source_generated_at(payload, "runtime"),
+        ),
+        _dmc_source_artifact(
+            artifact_family="recovery_status",
+            path=source_paths.get("recovery_status"),
+            observed_at=_source_generated_at(payload, "recovery"),
+        ),
+        _dmc_source_artifact(
+            artifact_family="broker_truth",
+            path=source_paths.get("broker_truth"),
+            observed_at=_source_generated_at(payload, "broker_truth"),
+        ),
+        _dmc_source_artifact(
+            artifact_family="broker_positions",
+            path=source_paths.get("broker_positions"),
+            observed_at=None,
+        ),
+        _dmc_source_artifact(
+            artifact_family="broker_open_orders",
+            path=source_paths.get("broker_open_orders"),
+            observed_at=None,
+        ),
+        _dmc_source_artifact(
+            artifact_family="lifecycle_positions",
+            path=source_paths.get("lifecycle_positions"),
+            observed_at=_source_generated_at(payload, "lifecycle"),
+        ),
+        _dmc_source_artifact(
+            artifact_family="managed_position_registry",
+            path=source_paths.get("managed_position_registry"),
+            observed_at=None,
+        ),
+        _dmc_source_artifact(
+            artifact_family="managed_order_registry",
+            path=source_paths.get("managed_order_registry"),
+            observed_at=None,
+        ),
+        _dmc_source_artifact(
+            artifact_family="reconciliation",
+            path=source_paths.get("reconciliation"),
+            observed_at=_source_generated_at(payload, "reconciliation"),
+        ),
+        _dmc_source_artifact(
+            artifact_family="safe_state",
+            path=source_paths.get("safe_state"),
+            observed_at=_source_generated_at(payload, "safe_state"),
+        ),
+        _dmc_source_artifact(
+            artifact_family="control_plane",
+            path=source_paths.get("control_plane"),
+            observed_at=_source_generated_at(payload, "control_plane"),
+        ),
+        _dmc_source_artifact(
+            artifact_family="planner",
+            path=source_paths.get("planner"),
+            observed_at=_source_generated_at(payload, "planner_supervisor", "planner_source"),
+        ),
+        _dmc_source_artifact(
+            artifact_family="supervisor",
+            path=source_paths.get("supervisor"),
+            observed_at=_source_generated_at(payload, "planner_supervisor", "supervisor_source"),
+        ),
+        _dmc_source_artifact(
+            artifact_family="contract_status",
+            path=source_paths.get("contract_status"),
+            observed_at=_source_generated_at(payload, "contract_status"),
+        ),
+        _dmc_source_artifact(
+            artifact_family="broker_backed_evidence",
+            path=source_paths.get("broker_backed_evidence"),
+            observed_at=_source_generated_at(payload, "broker_backed_evidence"),
+        ),
+    ]
+    return {
+        "schema_version": "track_b_dmc_metadata_envelope_v1",
+        "artifact_family": "latest_track_b_canonical_truth_snapshot",
+        "authority_tier": "Tier 1 – Canonical",
+        "publisher_id": "track_b_canonical_truth_snapshot.py",
+        "owner_id": "Current State Authority",
+        "generated_at": generated_at.isoformat(),
+        "source_observed_at": _latest_observed_at(source_artifacts),
+        "source_artifacts": source_artifacts,
+        "refresh_scope": {
+            "scope_type": "GLOBAL_COMPLETE",
+            "account_scope": "Track B PAPER",
+            "symbols": "ALL_TRACK_B_CURRENT_STATE_AUTHORITY_INPUTS",
+            "partial": False,
+        },
+        "retention_model": "rolling latest snapshot",
+        "append_only": False,
+        "diagnostic_only": False,
+        "analytics_only": False,
+        "can_influence_runtime": True,
+        "can_influence_managed_exit": True,
+    }
+
+
+def _source_generated_at(payload: Mapping[str, Any], section: str, source_key: str = "source") -> str | None:
+    section_payload = _mapping(payload.get(section))
+    source_payload = _mapping(section_payload.get(source_key))
+    return _str_or_none(source_payload.get("generated_at"))
+
+
+def _dmc_source_artifact(*, artifact_family: str, path: Any, observed_at: Any) -> dict[str, Any]:
+    return {
+        "artifact_family": artifact_family,
+        "path": str(path or ""),
+        "observed_at": observed_at,
+    }
+
+
+def _latest_observed_at(source_artifacts: Sequence[Mapping[str, Any]]) -> str | None:
+    latest: datetime | None = None
+    for artifact in source_artifacts:
+        parsed = _parse_datetime(artifact.get("observed_at"))
+        if parsed is None:
+            continue
+        latest = parsed if latest is None or parsed > latest else latest
+    return None if latest is None else latest.isoformat()
 
 
 def build_parser() -> argparse.ArgumentParser:
