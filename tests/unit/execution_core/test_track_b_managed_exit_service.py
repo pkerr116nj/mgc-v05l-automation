@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import json
+import signal
 import subprocess
+import sys
 from datetime import UTC, datetime
 from decimal import Decimal
 from pathlib import Path
@@ -29,7 +31,9 @@ from mgc_v05l.execution_core.track_b_managed_exit_service import (
     TrackBManagedExitServiceConfig,
     _build_pipeline_execution_plan,
     _modify_config_from_order_plan,
+    _refresh_operator_authority,
     _run_broker_truth_sweeper,
+    _run_command,
     read_track_b_managed_exit_service_status,
     run_track_b_managed_exit_service,
     run_track_b_managed_exit_service_once,
@@ -1267,6 +1271,56 @@ def test_apply_service_processes_one_v1_executable_intent_then_refreshes_broker_
     assert refresh_phases == ["after_actuator_attempt"]
 
 
+def test_default_post_actuator_refresh_does_not_invoke_broad_operator_readiness(tmp_path: Path) -> None:
+    payload = _refresh_operator_authority(
+        TrackBManagedExitServiceConfig(repo_root=tmp_path),
+        "after_actuator_attempt",
+    )
+
+    assert payload["succeeded"] is True
+    assert payload["classification"] == "TRACK_B_MANAGED_EXIT_POST_ACTUATOR_CURRENT_STATE_REFRESH_DEFERRED"
+    assert payload["broad_operator_readiness_refresh_invoked"] is False
+    assert "command" not in payload
+
+
+def test_post_actuator_refresh_publishes_running_status_before_authority_refresh(tmp_path: Path) -> None:
+    status_path = tmp_path / "status.json"
+    heartbeat_path = tmp_path / "heartbeat.json"
+
+    def _refresh(config, phase):
+        status = read_track_b_managed_exit_service_status(repo_root=tmp_path, status_path=status_path)
+        assert status["classification"] == "TRACK_B_MANAGED_EXIT_SERVICE_POST_CLOSE_REFRESH_RUNNING"
+        assert status["phase"] == "after_actuator_attempt"
+        heartbeat = json.loads(heartbeat_path.read_text(encoding="utf-8"))
+        assert heartbeat["classification"] == "TRACK_B_MANAGED_EXIT_SERVICE_POST_CLOSE_REFRESH_RUNNING"
+        return _refresh_ok(config, phase)
+
+    payload = run_track_b_managed_exit_service_once(
+        config=TrackBManagedExitServiceConfig(
+            repo_root=tmp_path,
+            status_path=status_path,
+            heartbeat_path=heartbeat_path,
+            apply=True,
+            max_cycles_per_tick=1,
+        ),
+        now=NOW,
+        actuator_runner=lambda config, now, timeout: _actuator_report(
+            MANAGED_EXIT_ACTUATOR_APPLIED_OR_PENDING,
+            eligible=1,
+            submitted=1,
+            local_symbol="MESM6",
+        ),
+        authority_refresher=_refresh,
+        pipeline_builder=lambda config, now: _pipeline_report(decisions=("ALLOWED",)),
+        post_mutation_refresher=lambda **kwargs: {
+            "classification": "POST_BROKER_MUTATION_REFRESH_SUCCEEDED",
+            "trigger": kwargs["trigger"],
+        },
+    )
+
+    assert payload["classification"] == MANAGED_EXIT_SERVICE_APPLY_SUCCEEDED
+
+
 def test_apply_service_treats_stale_publication_as_diagnostic_when_v11_broker_risk_is_clear(tmp_path: Path) -> None:
     actuator_calls = []
 
@@ -1814,6 +1868,53 @@ def test_actuator_timeout_produces_terminal_status_without_further_apply(tmp_pat
     assert len(calls) == 1
     assert "--apply" in calls[0]
     assert "--operator-authorized-managed-exit" in calls[0]
+
+
+def test_run_command_timeout_kills_child_process_group(tmp_path: Path) -> None:
+    completed = _run_command(
+        [
+            sys.executable,
+            "-c",
+            "import time; time.sleep(10)",
+        ],
+        tmp_path,
+        0.01,
+    )
+
+    assert completed.returncode == 124
+
+
+def test_run_command_interrupt_kills_child_process_group(tmp_path: Path, monkeypatch) -> None:
+    killed: list[int] = []
+
+    class _FakeProcess:
+        pid = 12345
+        returncode = None
+
+        def communicate(self, timeout=None):
+            raise SystemExit(0)
+
+        def poll(self):
+            return None
+
+        def kill(self):
+            killed.append(self.pid)
+
+    monkeypatch.setattr(
+        "mgc_v05l.execution_core.track_b_managed_exit_service.subprocess.Popen",
+        lambda *args, **kwargs: _FakeProcess(),
+    )
+    monkeypatch.setattr(
+        "mgc_v05l.execution_core.track_b_managed_exit_service.os.killpg",
+        lambda pid, sig: killed.append((pid, sig)),
+    )
+
+    try:
+        _run_command(["fake"], tmp_path, 1.0)
+    except SystemExit:
+        pass
+
+    assert killed == [(12345, signal.SIGKILL)]
 
 
 def test_no_candidates_produces_no_eligible_exits(tmp_path: Path) -> None:

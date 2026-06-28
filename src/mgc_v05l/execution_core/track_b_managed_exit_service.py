@@ -114,6 +114,7 @@ MANAGED_PAPER_RISK_REDUCING_EXIT_AUTHORITY_BLOCKED = "MANAGED_PAPER_RISK_REDUCIN
 _PAPER_ACCOUNT_ID = "DUM882026"
 _PAPER_EXECUTION_DOMAIN = "TRACK_B_PAPER"
 _RETIRED_THIN_LOCAL_RESIDUAL_SYMBOLS = frozenset({"MSL", "SOL"})
+_ACTIVE_SUBPROCESSES: set[subprocess.Popen[str]] = set()
 
 
 @dataclass(frozen=True)
@@ -357,6 +358,12 @@ def run_track_b_managed_exit_service_once(
         )
         if should_refresh_after:
             phase_started = time.monotonic()
+            if write:
+                _write_post_close_refresh_running_status(
+                    config=config,
+                    phase="after_actuator_attempt",
+                    trigger="managed_exit_service_actuator",
+                )
             authority_refreshes.append(_run_authority_refresh(authority_refresher, config, "after_actuator_attempt"))
             phase_timings.append(_phase_timing("post_refresh", phase_started))
             phase_started = time.monotonic()
@@ -423,6 +430,7 @@ def run_track_b_managed_exit_service(
     def _handle_stop(signum: int, _frame: Any) -> None:
         nonlocal stopping
         stopping = True
+        _terminate_active_subprocesses()
         payload = {
             "schema_version": "track_b_managed_exit_service_status_v1",
             "generated_at": datetime.now(UTC).isoformat(),
@@ -439,6 +447,7 @@ def run_track_b_managed_exit_service(
         }
         write_track_b_managed_exit_service_status(config=config, payload=payload)
         _write_heartbeat(config=config, payload=payload, service_running=False)
+        raise SystemExit(0)
 
     signal.signal(signal.SIGTERM, _handle_stop)
     signal.signal(signal.SIGINT, _handle_stop)
@@ -671,6 +680,38 @@ def _attach_post_broker_mutation_refresh(
     )
     enriched["post_broker_mutation_refresh"] = refresh
     return enriched
+
+
+def _write_post_close_refresh_running_status(
+    *,
+    config: TrackBManagedExitServiceConfig,
+    phase: str,
+    trigger: str,
+) -> None:
+    payload = {
+        "schema_version": "track_b_managed_exit_service_status_v1",
+        "generated_at": datetime.now(UTC).isoformat(),
+        "classification": "TRACK_B_MANAGED_EXIT_SERVICE_POST_CLOSE_REFRESH_RUNNING",
+        "phase": phase,
+        "trigger": trigger,
+        "pid": os.getpid(),
+        "service_label": _service_label(config),
+        "repo_root": str(config.repo_root),
+        "cadence_seconds": config.cadence_seconds,
+        "close_only": True,
+        "entry_allowed": False,
+        "apply_requested": config.apply is True,
+        "apply_mode": "GUARDED_CLOSE_ONLY_APPLY" if config.apply is True else "DRY_RUN_ONLY",
+        "operator_authorized_managed_exit": config.operator_authorized_managed_exit is True,
+        "broker_state_mutated": True,
+        "live_money_eligible": False,
+        "paper_proof_invoked": False,
+        "global_flatten_allowed": False,
+        "broad_flatten_allowed": False,
+        "diagnostic_only": True,
+    }
+    write_track_b_managed_exit_service_status(config=config, payload=payload)
+    _write_heartbeat(config=config, payload=payload, service_running=True)
 
 
 def _attach_post_trade_analytics_refresh(
@@ -1604,26 +1645,43 @@ def _run_command(command: Sequence[str], repo_root: Path, timeout_seconds: float
         stderr=subprocess.PIPE,
         start_new_session=True,
     )
+    _ACTIVE_SUBPROCESSES.add(process)
     try:
         stdout, stderr = process.communicate(timeout=timeout_seconds)
     except subprocess.TimeoutExpired:
         stdout = ""
         stderr = ""
-        try:
-            os.killpg(process.pid, signal.SIGKILL)
-        except ProcessLookupError:
-            pass
-        except OSError:
-            try:
-                process.kill()
-            except OSError:
-                pass
+        _terminate_process_group(process)
         try:
             stdout, stderr = process.communicate(timeout=2)
         except subprocess.TimeoutExpired:
             pass
         return subprocess.CompletedProcess(list(command), 124, stdout=stdout or "", stderr=stderr or "")
+    except BaseException:
+        _terminate_process_group(process)
+        raise
+    finally:
+        _ACTIVE_SUBPROCESSES.discard(process)
     return subprocess.CompletedProcess(list(command), process.returncode, stdout=stdout or "", stderr=stderr or "")
+
+
+def _terminate_process_group(process: subprocess.Popen[str]) -> None:
+    if process.poll() is not None:
+        return
+    try:
+        os.killpg(process.pid, signal.SIGKILL)
+    except ProcessLookupError:
+        return
+    except OSError:
+        try:
+            process.kill()
+        except OSError:
+            return
+
+
+def _terminate_active_subprocesses() -> None:
+    for process in list(_ACTIVE_SUBPROCESSES):
+        _terminate_process_group(process)
 
 
 def _phase_timing(phase: str, started_monotonic: float) -> dict[str, Any]:
@@ -2832,6 +2890,17 @@ def _int_or_none(value: object) -> int | None:
 
 
 def _refresh_operator_authority(config: TrackBManagedExitServiceConfig, phase: str) -> Mapping[str, Any]:
+    if phase == "after_actuator_attempt":
+        return {
+            "phase": phase,
+            "succeeded": True,
+            "classification": "TRACK_B_MANAGED_EXIT_POST_ACTUATOR_CURRENT_STATE_REFRESH_DEFERRED",
+            "generated_at": datetime.now(UTC).isoformat(),
+            "dependency_refresh_failures": [],
+            "diagnostic_only": True,
+            "broad_operator_readiness_refresh_invoked": False,
+            "post_broker_mutation_refresh_expected": True,
+        }
     command = [
         sys.executable,
         "-m",
