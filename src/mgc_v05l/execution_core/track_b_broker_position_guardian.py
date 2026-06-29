@@ -90,7 +90,12 @@ def build_track_b_broker_position_guardian(
     )
     findings.extend(_open_order_registry_findings(inputs=inputs, open_orders=open_orders, managed_orders=managed_orders))
 
-    hard_classifications = _dedupe([str(row.get("classification") or "") for row in findings if row.get("hard_hold")])
+    active_findings, current_truth_invalidation = _apply_current_truth_invalidation(
+        inputs=inputs,
+        findings=findings,
+        broker_positions=broker_positions,
+    )
+    hard_classifications = _dedupe([str(row.get("classification") or "") for row in active_findings if row.get("hard_hold")])
     classification = BROKER_POSITION_GUARDIAN_HARD_HOLD if hard_classifications else BROKER_POSITION_GUARDIAN_READY
     close_authority = _registry_verified_managed_close_authority(
         inputs=inputs,
@@ -98,7 +103,7 @@ def build_track_b_broker_position_guardian(
         open_orders=open_orders,
         managed_orders=managed_orders,
     )
-    remediation_plan = _scoped_remediation_plan(findings=findings, broker_positions=broker_positions)
+    remediation_plan = _scoped_remediation_plan(findings=active_findings, broker_positions=broker_positions)
     close_submit_allowed = classification == BROKER_POSITION_GUARDIAN_READY or close_authority.get("allowed") is True
     return {
         "schema_version": "track_b_broker_position_guardian_v1",
@@ -116,7 +121,10 @@ def build_track_b_broker_position_guardian(
         "dashboard_projection_consumed": False,
         "classification": classification,
         "hard_classifications": hard_classifications,
-        "findings": findings,
+        "findings": active_findings,
+        "current_truth_invalidation": current_truth_invalidation,
+        "source_freshness": _source_freshness(inputs),
+        "dmc_metadata": _dmc_metadata(actual_now=actual_now, inputs=inputs),
         "managed_close_authority": close_authority,
         "broker_positions": broker_positions,
         "open_orders": open_orders,
@@ -200,6 +208,173 @@ def _inputs(
         "reconciliation": config.reconciliation_path,
     }
     return {name: overrides.get(name) or _read_json(config.resolve(path)) for name, path in paths.items()}
+
+
+
+def _apply_current_truth_invalidation(
+    *,
+    inputs: Mapping[str, Mapping[str, Any]],
+    findings: Sequence[Mapping[str, Any]],
+    broker_positions: Sequence[Mapping[str, Any]],
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    position_truth_fresh_complete = _position_truth_fresh_complete(inputs["position_truth"])
+    open_order_truth_global_complete = _open_order_truth_global_complete(inputs["open_order_truth"])
+    active_findings: list[dict[str, Any]] = []
+    invalidated_findings: list[dict[str, Any]] = []
+
+    for finding in findings:
+        row = dict(finding)
+        if _finding_invalidated_by_current_truth(
+            finding=row,
+            inputs=inputs,
+            broker_positions=broker_positions,
+            position_truth_fresh_complete=position_truth_fresh_complete,
+            open_order_truth_global_complete=open_order_truth_global_complete,
+        ):
+            invalidated_findings.append(_historical_finding(row, inputs=inputs))
+            continue
+        active_findings.append(row)
+
+    return active_findings, {
+        "enabled": True,
+        "position_truth_fresh_complete": position_truth_fresh_complete,
+        "open_order_truth_global_complete": open_order_truth_global_complete,
+        "invalidated_finding_count": len(invalidated_findings),
+        "invalidated_findings": invalidated_findings,
+        "source": "broker_position_guardian_current_truth_invalidation_v1",
+    }
+
+
+def _finding_invalidated_by_current_truth(
+    *,
+    finding: Mapping[str, Any],
+    inputs: Mapping[str, Mapping[str, Any]],
+    broker_positions: Sequence[Mapping[str, Any]],
+    position_truth_fresh_complete: bool,
+    open_order_truth_global_complete: bool,
+) -> bool:
+    classification = str(finding.get("classification") or "")
+    detail = str(finding.get("detail") or "").lower()
+    if classification == DUPLICATE_CLOSE_ORDER_BLOCKED:
+        return open_order_truth_global_complete and _open_order_truth_current_no_orders(inputs["open_order_truth"])
+    if classification == OPEN_ORDER_MANAGED_REGISTRY_MISMATCH:
+        return open_order_truth_global_complete and _open_order_truth_current_no_orders(inputs["open_order_truth"])
+    if classification == CLOSE_FILLED_LIFECYCLE_NOT_UPDATED:
+        return position_truth_fresh_complete and not _current_nonzero_broker_positions(broker_positions)
+    if classification != BROKER_LIFECYCLE_POSITION_MISMATCH:
+        return False
+    if not position_truth_fresh_complete:
+        return False
+    if "lifecycle owner is open but broker position is missing" in detail:
+        lifecycle_position = _mapping(finding.get("lifecycle_position"))
+        return lifecycle_position and _matching_broker_position(
+            lifecycle_position=lifecycle_position,
+            broker_positions=_current_nonzero_broker_positions(broker_positions),
+        ) is None
+    return False
+
+
+def _historical_finding(finding: Mapping[str, Any], *, inputs: Mapping[str, Mapping[str, Any]]) -> dict[str, Any]:
+    row = dict(finding)
+    row.update(
+        {
+            "historical_only": True,
+            "diagnostic_only": True,
+            "current_scope_active": False,
+            "invalidated_by_current_truth": True,
+            "invalidated_at": _first_text(
+                inputs["position_truth"].get("generated_at"),
+                inputs["open_order_truth"].get("generated_at"),
+            ),
+            "source_refs": {
+                "position_truth_generated_at": inputs["position_truth"].get("generated_at"),
+                "open_order_truth_generated_at": inputs["open_order_truth"].get("generated_at"),
+                "open_order_truth_classification": inputs["open_order_truth"].get("classification"),
+                "open_order_truth_scope": inputs["open_order_truth"].get("canonical_refresh_scope"),
+            },
+        }
+    )
+    row["hard_hold"] = False
+    return row
+
+
+def _position_truth_fresh_complete(position_truth: Mapping[str, Any]) -> bool:
+    metadata = _mapping(position_truth.get("dmc_metadata"))
+    refresh_scope = _mapping(metadata.get("refresh_scope"))
+    if str(refresh_scope.get("scope_type") or "").upper() == "GLOBAL_COMPLETE" and refresh_scope.get("partial") is False:
+        return True
+    source_freshness = _mapping(position_truth.get("source_freshness"))
+    return (
+        str(position_truth.get("canonical_refresh_scope") or "").upper() == "GLOBAL_COMPLETE"
+        and source_freshness.get("stale") is False
+    )
+
+
+def _open_order_truth_global_complete(open_order_truth: Mapping[str, Any]) -> bool:
+    return str(open_order_truth.get("canonical_refresh_scope") or "").upper() == "GLOBAL_COMPLETE"
+
+
+def _open_order_truth_current_no_orders(open_order_truth: Mapping[str, Any]) -> bool:
+    classification = str(open_order_truth.get("classification") or "").upper()
+    open_order_count = _decimal(open_order_truth.get("open_order_count") or _mapping(open_order_truth.get("summary")).get("open_order_count"))
+    rows = _open_orders_from_open_order_truth(open_order_truth)
+    duplicate_groups = _list(open_order_truth.get("duplicate_close_order_groups")) + _list(open_order_truth.get("duplicates"))
+    return classification == "NO_OPEN_ORDERS" and open_order_count == Decimal("0") and not rows and not duplicate_groups
+
+
+def _open_orders_from_open_order_truth(open_order_truth: Mapping[str, Any]) -> list[dict[str, Any]]:
+    rows = (
+        _list(open_order_truth.get("open_orders"))
+        or _list(open_order_truth.get("order_states"))
+        or _list(open_order_truth.get("rows"))
+    )
+    return [dict(row) for row in rows if isinstance(row, Mapping)]
+
+
+def _current_nonzero_broker_positions(broker_positions: Sequence[Mapping[str, Any]]) -> list[Mapping[str, Any]]:
+    return [row for row in broker_positions if _decimal(row.get("quantity")) != Decimal("0")]
+
+
+def _source_freshness(inputs: Mapping[str, Mapping[str, Any]]) -> dict[str, Any]:
+    return {
+        "position_truth_fresh_complete": _position_truth_fresh_complete(inputs["position_truth"]),
+        "open_order_truth_global_complete": _open_order_truth_global_complete(inputs["open_order_truth"]),
+        "position_truth_generated_at": inputs["position_truth"].get("generated_at"),
+        "open_order_truth_generated_at": inputs["open_order_truth"].get("generated_at"),
+        "managed_order_registry_generated_at": inputs["managed_order_registry"].get("generated_at"),
+        "managed_position_registry_generated_at": inputs["managed_position_registry"].get("generated_at"),
+        "reconciliation_generated_at": inputs["reconciliation"].get("generated_at"),
+    }
+
+
+def _dmc_metadata(*, actual_now: datetime, inputs: Mapping[str, Mapping[str, Any]]) -> dict[str, Any]:
+    return {
+        "schema_version": "track_b_dmc_metadata_envelope_v1",
+        "artifact_family": "latest_broker_position_guardian",
+        "authority_tier": "Tier 2 – Derived",
+        "publisher_id": "track_b_broker_position_guardian.py",
+        "owner_id": "Broker Position Guardian",
+        "generated_at": actual_now.isoformat(),
+        "source_observed_at": _first_text(inputs["position_truth"].get("generated_at"), inputs["open_order_truth"].get("generated_at")),
+        "source_artifacts": [
+            {"artifact_family": "latest_position_truth", "observed_at": inputs["position_truth"].get("generated_at")},
+            {"artifact_family": "latest_open_order_truth", "observed_at": inputs["open_order_truth"].get("generated_at")},
+            {"artifact_family": "latest_managed_orders", "observed_at": inputs["managed_order_registry"].get("generated_at")},
+            {"artifact_family": "latest_managed_positions", "observed_at": inputs["managed_position_registry"].get("generated_at")},
+            {"artifact_family": "track_b_paper_broker_reconciliation", "observed_at": inputs["reconciliation"].get("generated_at")},
+        ],
+        "refresh_scope": {
+            "scope_type": "GLOBAL_COMPLETE" if _open_order_truth_global_complete(inputs["open_order_truth"]) else "UNKNOWN_OR_LEGACY",
+            "partial": not _open_order_truth_global_complete(inputs["open_order_truth"]),
+            "account_scope": "Track B PAPER",
+        },
+        "retention_model": "rolling latest snapshot",
+        "append_only": False,
+        "diagnostic_only": False,
+        "analytics_only": False,
+        "can_influence_runtime": True,
+        "can_influence_managed_exit": True,
+    }
 
 
 def _duplicate_close_findings(

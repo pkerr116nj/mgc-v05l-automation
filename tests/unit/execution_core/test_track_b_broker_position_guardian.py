@@ -8,6 +8,7 @@ from mgc_v05l.execution_core.track_b_broker_position_guardian import (
     BROKER_POSITION_GUARDIAN_HARD_HOLD,
     BROKER_POSITION_GUARDIAN_READY,
     DUPLICATE_CLOSE_ORDER_BLOCKED,
+    OPEN_ORDER_MANAGED_REGISTRY_MISMATCH,
     UNAUTHORIZED_REVERSE_EXPOSURE,
     TrackBBrokerPositionGuardianConfig,
     build_track_b_broker_position_guardian,
@@ -407,6 +408,119 @@ def test_collapsed_registry_quantity_against_broker_hard_holds() -> None:
     assert BROKER_LIFECYCLE_POSITION_MISMATCH in payload["hard_classifications"]
 
 
+def test_fresh_broker_flat_invalidates_stale_lifecycle_owner() -> None:
+    stale_lifecycle = {
+        "account_id": "DUM882026",
+        "symbol": "MNQ",
+        "local_symbol": "MNQM6",
+        "con_id": 770561201,
+        "quantity": "1",
+        "side": "LONG",
+        "lifecycle_id": "stale-lifecycle",
+    }
+    payload = build_track_b_broker_position_guardian(
+        config=TrackBBrokerPositionGuardianConfig(),
+        now=NOW,
+        input_overrides=_inputs(
+            position_truth=_fresh_position_truth([]),
+            managed_position_registry={
+                "classification": "OPEN_MANAGED_MATCHED",
+                "managed_positions": [],
+                "lifecycle_open_positions": [stale_lifecycle],
+            },
+        ),
+    )
+
+    assert payload["classification"] == BROKER_POSITION_GUARDIAN_READY
+    assert payload["hard_classifications"] == []
+    invalidation = payload["current_truth_invalidation"]
+    assert invalidation["invalidated_finding_count"] == 1
+    invalidated = invalidation["invalidated_findings"][0]
+    assert invalidated["classification"] == BROKER_LIFECYCLE_POSITION_MISMATCH
+    assert invalidated["historical_only"] is True
+    assert invalidated["diagnostic_only"] is True
+    assert invalidated["current_scope_active"] is False
+    assert invalidated["invalidated_by_current_truth"] is True
+
+
+def test_fresh_no_open_orders_invalidates_stale_managed_order_mismatch() -> None:
+    payload = build_track_b_broker_position_guardian(
+        config=TrackBBrokerPositionGuardianConfig(),
+        now=NOW,
+        input_overrides=_inputs(
+            position_truth=_fresh_position_truth([]),
+            open_order_truth=_global_no_open_orders(),
+            managed_order_registry={
+                "classification": "CLOSE_ORDER_MODIFIABLE",
+                "managed_orders": [
+                    {
+                        "local_symbol": "MNQM6",
+                        "action": "SELL",
+                        "quantity": "1",
+                        "broker_order_id": "stale-37",
+                        "working": True,
+                    }
+                ],
+            },
+        ),
+    )
+
+    assert payload["classification"] == BROKER_POSITION_GUARDIAN_READY
+    assert OPEN_ORDER_MANAGED_REGISTRY_MISMATCH not in payload["hard_classifications"]
+    invalidated = payload["current_truth_invalidation"]["invalidated_findings"]
+    assert [row["classification"] for row in invalidated] == [OPEN_ORDER_MANAGED_REGISTRY_MISMATCH]
+    assert invalidated[0]["diagnostic_only"] is True
+
+
+def test_fresh_current_side_contradiction_still_hard_holds() -> None:
+    lifecycle_position = {
+        "account_id": "DUM882026",
+        "symbol": "MNQ",
+        "local_symbol": "MNQM6",
+        "con_id": 770561201,
+        "quantity": "1",
+        "side": "LONG",
+        "lifecycle_id": "current-lifecycle",
+    }
+    payload = build_track_b_broker_position_guardian(
+        config=TrackBBrokerPositionGuardianConfig(),
+        now=NOW,
+        input_overrides=_inputs(
+            position_truth=_fresh_position_truth([_mnq_position("-1")]),
+            managed_position_registry={
+                "classification": "OPEN_MANAGED_MATCHED",
+                "managed_positions": [lifecycle_position],
+                "lifecycle_open_positions": [lifecycle_position],
+            },
+        ),
+    )
+
+    assert payload["classification"] == BROKER_POSITION_GUARDIAN_HARD_HOLD
+    assert UNAUTHORIZED_REVERSE_EXPOSURE in payload["hard_classifications"]
+    assert payload["current_truth_invalidation"]["invalidated_finding_count"] == 0
+
+
+def test_current_open_order_ambiguity_still_hard_holds() -> None:
+    payload = build_track_b_broker_position_guardian(
+        config=TrackBBrokerPositionGuardianConfig(),
+        now=NOW,
+        input_overrides=_inputs(
+            open_order_truth={
+                "classification": "UNKNOWN_OPEN_ORDERS_PRESENT",
+                "canonical_refresh_scope": "GLOBAL_COMPLETE",
+                "open_order_count": 1,
+                "open_orders": [
+                    {"local_symbol": "MNQM6", "action": "BUY", "quantity": "1", "broker_order_id": "88"}
+                ],
+            },
+            managed_order_registry={"classification": "NO_MANAGED_ORDERS", "managed_orders": []},
+        ),
+    )
+
+    assert payload["classification"] == BROKER_POSITION_GUARDIAN_HARD_HOLD
+    assert OPEN_ORDER_MANAGED_REGISTRY_MISMATCH in payload["hard_classifications"]
+    assert payload["current_truth_invalidation"]["invalidated_finding_count"] == 0
+
 def _inputs(**overrides: dict) -> dict:
     payload = {
         "position_truth": {"classification": "CLEAN_FLAT_READY", "broker_positions": []},
@@ -421,6 +535,31 @@ def _inputs(**overrides: dict) -> dict:
     }
     payload.update(overrides)
     return payload
+
+
+def _fresh_position_truth(positions: list[dict]) -> dict:
+    return {
+        "classification": "CLEAN_FLAT_READY" if not positions else "ATTENTION_REQUIRED",
+        "generated_at": NOW.isoformat(),
+        "broker_positions": positions,
+        "dmc_metadata": {
+            "refresh_scope": {
+                "scope_type": "GLOBAL_COMPLETE",
+                "partial": False,
+            }
+        },
+    }
+
+
+def _global_no_open_orders() -> dict:
+    return {
+        "classification": "NO_OPEN_ORDERS",
+        "canonical_refresh_scope": "GLOBAL_COMPLETE",
+        "generated_at": NOW.isoformat(),
+        "open_order_count": 0,
+        "open_orders": [],
+        "duplicate_close_order_groups": [],
+    }
 
 
 def _mnq_position(quantity: str) -> dict:
