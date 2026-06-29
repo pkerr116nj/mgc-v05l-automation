@@ -817,10 +817,10 @@ def _position_without_close_dedupe_keys(row: Mapping[str, Any]) -> set[str]:
 
 
 def _overall_classification(*, source_stale: Mapping[str, Any], managed_orders: list[dict[str, Any]]) -> str:
-    if source_stale.get("stale") is True and not _has_due_position_without_close_order(managed_orders):
-        return ORDER_STATE_UNKNOWN_REVIEW_REQUIRED
     if not managed_orders:
         return NO_MANAGED_ORDERS
+    if source_stale.get("stale") is True and not _has_due_position_without_close_order(managed_orders):
+        return ORDER_STATE_UNKNOWN_REVIEW_REQUIRED
     priority = [
         DUPLICATE_CLOSE_ORDER_BLOCKED,
         CLOSE_ORDER_NOT_MARKETABLE,

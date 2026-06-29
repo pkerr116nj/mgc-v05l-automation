@@ -44,6 +44,29 @@ def test_no_orders_reports_no_managed_orders(tmp_path: Path) -> None:
     assert payload["live_money_eligible"] is False
 
 
+def test_zero_managed_orders_with_stale_source_freshness_reports_no_managed_orders(tmp_path: Path) -> None:
+    _seed_base(tmp_path)
+    position_truth_path = (
+        tmp_path / "outputs" / "track_b_execution_core" / "position_truth" / "latest_position_truth.json"
+    )
+    position_truth = json.loads(position_truth_path.read_text(encoding="utf-8"))
+    position_truth["generated_at"] = (NOW - timedelta(minutes=10)).isoformat()
+    position_truth_path.write_text(json.dumps(position_truth, indent=2, sort_keys=True), encoding="utf-8")
+
+    payload = build_track_b_managed_order_registry(
+        config=TrackBManagedOrderRegistryConfig(repo_root=tmp_path),
+        now=NOW,
+    )
+
+    assert payload["source_freshness"]["stale"] is True
+    assert payload["source_freshness"]["stale_sources"] == ["position_truth"]
+    assert payload["classification"] == NO_MANAGED_ORDERS
+    assert payload["summary"]["managed_order_count"] == 0
+    assert payload["summary"]["working_close_order_count"] == 0
+    assert payload["summary"]["duplicate_close_order_count"] == 0
+    assert payload["summary"]["suspicious_order_count"] == 0
+
+
 def test_managed_order_registry_includes_backward_compatible_dmc_metadata(tmp_path: Path) -> None:
     _seed_base(tmp_path)
 
