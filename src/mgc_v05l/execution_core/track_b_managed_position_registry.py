@@ -290,6 +290,14 @@ def build_track_b_managed_position_registry(
         source_stale=source_stale,
     )
     managed_positions = _repair_owner_confirmed_timebox_due_positions(managed_positions)
+    managed_positions, current_truth_invalidated_positions = _active_managed_positions_from_current_position_truth(
+        managed_positions=managed_positions,
+        broker_positions=broker_positions,
+        positions_snapshot=positions_snapshot,
+        open_order_truth=open_order_truth,
+        fresh_broker_positions_complete=fresh_broker_positions is not None,
+        now=actual_now,
+    )
     classification = _overall_classification(
         managed_positions=managed_positions,
         broker_positions=broker_positions,
@@ -336,6 +344,12 @@ def build_track_b_managed_position_registry(
             *broker_flat_lifecycle_projections,
         ],
         "projection_authority_diagnostics": projection_authority_diagnostics,
+        "current_truth_invalidation": {
+            "enabled": True,
+            "invalidated_position_count": len(current_truth_invalidated_positions),
+            "invalidated_positions": current_truth_invalidated_positions,
+            "source": "ibkr_positions_snapshot",
+        },
         "unresolved_submit_ownership": unresolved_ownership,
         "pre_restart_exposure_resolution": pre_restart_exposure_resolution,
         "source_freshness": source_stale,
@@ -376,6 +390,7 @@ def build_track_b_managed_position_registry(
             "lifecycle_position_count": len(lifecycle_positions),
             "review_required_count": len(review_positions),
             "historical_review_position_count": len(historical_review_positions),
+            "current_truth_invalidated_position_count": len(current_truth_invalidated_positions),
             "pre_restart_resolved_managed_exposure_count": pre_restart_exposure_resolution.get(
                 "resolved_managed_exposure_count"
             ),
@@ -1412,6 +1427,196 @@ def _required_close_action(*, side: Any, signed_broker_qty: Decimal | None) -> s
     if normalized_side == "SHORT":
         return "BUY"
     return None
+
+
+
+def _active_managed_positions_from_current_position_truth(
+    *,
+    managed_positions: list[dict[str, Any]],
+    broker_positions: Sequence[Mapping[str, Any]],
+    positions_snapshot: Mapping[str, Any],
+    open_order_truth: Mapping[str, Any],
+    fresh_broker_positions_complete: bool,
+    now: datetime,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    if (
+        not managed_positions
+        or not fresh_broker_positions_complete
+        or not _canonical_open_order_truth_global_complete(open_order_truth)
+    ):
+        return managed_positions, []
+    retained: list[dict[str, Any]] = []
+    invalidated: list[dict[str, Any]] = []
+    current_brokers = [dict(item) for item in broker_positions if isinstance(item, Mapping)]
+    for position in managed_positions:
+        if not isinstance(position, Mapping):
+            continue
+        row = dict(position)
+        if _current_broker_position_matches(row=row, broker_positions=current_brokers):
+            retained.append(row)
+            continue
+        if not _managed_position_row_can_be_invalidated_by_snapshot(row=row, positions_snapshot=positions_snapshot):
+            retained.append(row)
+            continue
+        invalidated.append(
+            _current_truth_invalidated_managed_position(
+                row=row,
+                positions_snapshot=positions_snapshot,
+                open_order_truth=open_order_truth,
+                now=now,
+            )
+        )
+    return retained, invalidated
+
+
+
+def _canonical_open_order_truth_global_complete(open_order_truth: Mapping[str, Any]) -> bool:
+    return str(open_order_truth.get("canonical_refresh_scope") or "") == "GLOBAL_COMPLETE"
+
+
+def _current_broker_position_matches(
+    *,
+    row: Mapping[str, Any],
+    broker_positions: Sequence[Mapping[str, Any]],
+) -> bool:
+    row_contract = _normalize_contract_row(_managed_position_identity_row(row))
+    if not _invalidatable_contract_identity(row_contract):
+        return False
+    for broker in broker_positions:
+        if not isinstance(broker, Mapping):
+            continue
+        broker_row = _normalize_contract_row(broker)
+        signed_qty = _decimal(broker_row.get("quantity") or broker_row.get("position") or broker_row.get("signed_qty"))
+        if signed_qty is None or signed_qty == 0:
+            continue
+        if _account_matches(row_contract, broker_row) and _contract_identity_matches(row_contract, broker_row):
+            return True
+    return False
+
+
+def _managed_position_row_can_be_invalidated_by_snapshot(
+    *,
+    row: Mapping[str, Any],
+    positions_snapshot: Mapping[str, Any],
+) -> bool:
+    if positions_snapshot.get("positions_complete") is not True and positions_snapshot.get("ok") is not True:
+        return False
+    identity_row = _normalize_contract_row(_managed_position_identity_row(row))
+    if not _invalidatable_contract_identity(identity_row):
+        return False
+    snapshot_account = str(
+        positions_snapshot.get("selected_account_id") or positions_snapshot.get("account") or ""
+    ).strip()
+    if not snapshot_account:
+        return False
+    row_account = str(
+        identity_row.get("account_id")
+        or identity_row.get("account")
+        or _mapping(identity_row.get("contract_identity")).get("account_id")
+        or ""
+    ).strip()
+    return bool(row_account and row_account == snapshot_account)
+
+
+def _managed_position_identity_row(row: Mapping[str, Any]) -> dict[str, Any]:
+    broker = _mapping(row.get("broker_position"))
+    lifecycle = _mapping(row.get("lifecycle_position"))
+    identity = _mapping(row.get("contract_identity"))
+    entry_identity = _mapping(row.get("entry_broker_identity"))
+    return {
+        **entry_identity,
+        **identity,
+        **lifecycle,
+        **broker,
+        **dict(row),
+        "account_id": (
+            row.get("account_id")
+            or row.get("account")
+            or broker.get("account_id")
+            or broker.get("account")
+            or lifecycle.get("account_id")
+            or lifecycle.get("account")
+            or identity.get("account_id")
+            or entry_identity.get("account_id")
+        ),
+        "local_symbol": (
+            row.get("local_symbol")
+            or row.get("localSymbol")
+            or broker.get("local_symbol")
+            or broker.get("localSymbol")
+            or lifecycle.get("local_symbol")
+            or lifecycle.get("localSymbol")
+            or identity.get("local_symbol")
+            or entry_identity.get("local_symbol")
+        ),
+        "con_id": (
+            row.get("con_id")
+            or row.get("conId")
+            or broker.get("con_id")
+            or broker.get("conId")
+            or lifecycle.get("con_id")
+            or lifecycle.get("conId")
+            or identity.get("con_id")
+            or entry_identity.get("con_id")
+        ),
+        "contract_key": (
+            row.get("contract_key")
+            or broker.get("contract_key")
+            or lifecycle.get("contract_key")
+            or identity.get("contract_key")
+            or entry_identity.get("contract_key")
+        ),
+    }
+
+
+def _invalidatable_contract_identity(row: Mapping[str, Any]) -> bool:
+    identity = _mapping(row.get("contract_identity"))
+    return bool(
+        str(row.get("con_id") or row.get("conId") or identity.get("con_id") or "").strip()
+        or str(row.get("local_symbol") or row.get("localSymbol") or identity.get("local_symbol") or "").strip()
+        or str(row.get("contract_key") or identity.get("contract_key") or "").strip()
+    )
+
+
+def _current_truth_invalidated_managed_position(
+    *,
+    row: Mapping[str, Any],
+    positions_snapshot: Mapping[str, Any],
+    open_order_truth: Mapping[str, Any],
+    now: datetime,
+) -> dict[str, Any]:
+    identity_row = _managed_position_identity_row(row)
+    invalidated = dict(row)
+    invalidated.update(
+        {
+            "historical_only": True,
+            "diagnostic_only": True,
+            "current_scope_active": False,
+            "invalidated_by_current_truth": True,
+            "invalidated_at": now.isoformat(),
+            "invalidation_reason": "POSITION_ABSENT_FROM_FRESH_COMPLETE_BROKER_POSITION_TRUTH",
+            "exit_due": False,
+            "exit_due_state": "INVALIDATED_BY_CURRENT_TRUTH",
+            "source_refs": {
+                "broker_positions_snapshot_generated_at": positions_snapshot.get("generated_at"),
+                "broker_positions_complete": positions_snapshot.get("positions_complete"),
+                "broker_positions_ok": positions_snapshot.get("ok"),
+                "broker_positions_source": positions_snapshot.get("source"),
+                "broker_positions_account": positions_snapshot.get("selected_account_id")
+                or positions_snapshot.get("account"),
+                "open_order_truth_classification": open_order_truth.get("classification"),
+                "open_order_truth_generated_at": open_order_truth.get("generated_at"),
+                "canonical_refresh_scope": open_order_truth.get("canonical_refresh_scope"),
+                "position_identity": {
+                    "account_id": identity_row.get("account_id"),
+                    "local_symbol": identity_row.get("local_symbol") or identity_row.get("localSymbol"),
+                    "con_id": identity_row.get("con_id") or identity_row.get("conId"),
+                    "contract_key": identity_row.get("contract_key"),
+                },
+            },
+        }
+    )
+    return invalidated
 
 
 def _overall_classification(

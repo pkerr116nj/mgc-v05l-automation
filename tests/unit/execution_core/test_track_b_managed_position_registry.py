@@ -1979,6 +1979,147 @@ def test_broker_flat_lifecycle_residue_stays_visible_with_same_contract_open_ord
     assert payload["managed_positions"][0]["lifecycle_id"] == "life_same_contract_order"
 
 
+
+def test_current_truth_invalidation_marks_flat_managed_projection_historical() -> None:
+    row = {
+        "account_id": "DUM882026",
+        "symbol": "ZN",
+        "local_symbol": "ZNU6",
+        "con_id": 800111222,
+        "contract_key": "ZN-202609",
+        "classification": OPEN_MANAGED_EXIT_DUE,
+        "exit_due": True,
+        "exit_due_state": "EXIT_DUE",
+        "broker_position": {
+            "account_id": "DUM882026",
+            "symbol": "ZN",
+            "local_symbol": "ZNU6",
+            "con_id": 800111222,
+            "quantity": "1",
+        },
+    }
+
+    active, invalidated = managed_position_registry_module._active_managed_positions_from_current_position_truth(
+        managed_positions=[row],
+        broker_positions=[],
+        positions_snapshot={
+            "generated_at": NOW.isoformat(),
+            "positions_complete": True,
+            "ok": True,
+            "selected_account_id": "DUM882026",
+            "positions": [],
+        },
+        open_order_truth={
+            "generated_at": NOW.isoformat(),
+            "classification": "NO_OPEN_ORDERS",
+            "canonical_refresh_scope": "GLOBAL_COMPLETE",
+        },
+        fresh_broker_positions_complete=True,
+        now=NOW,
+    )
+
+    assert active == []
+    assert invalidated[0]["historical_only"] is True
+    assert invalidated[0]["diagnostic_only"] is True
+    assert invalidated[0]["current_scope_active"] is False
+    assert invalidated[0]["invalidated_by_current_truth"] is True
+    assert invalidated[0]["exit_due"] is False
+    assert invalidated[0]["exit_due_state"] == "INVALIDATED_BY_CURRENT_TRUTH"
+    assert invalidated[0]["source_refs"]["broker_positions_complete"] is True
+
+
+def test_current_truth_invalidation_keeps_current_nonzero_broker_position() -> None:
+    broker = {
+        "account_id": "DUM882026",
+        "security_type": "FUT",
+        "symbol": "ZN",
+        "local_symbol": "ZNU6",
+        "con_id": 800111222,
+        "expiry": "20260921",
+        "quantity": "1",
+    }
+    row = {
+        "account_id": "DUM882026",
+        "symbol": "ZN",
+        "local_symbol": "ZNU6",
+        "con_id": 800111222,
+        "classification": OPEN_MANAGED_EXIT_DUE,
+        "exit_due": True,
+        "broker_position": broker,
+    }
+    normalized_broker = managed_position_registry_module._normalize_contract_row(broker)
+
+    active, invalidated = managed_position_registry_module._active_managed_positions_from_current_position_truth(
+        managed_positions=[row],
+        broker_positions=[normalized_broker],
+        positions_snapshot={
+            "generated_at": NOW.isoformat(),
+            "positions_complete": True,
+            "ok": True,
+            "selected_account_id": "DUM882026",
+            "positions": [broker],
+        },
+        open_order_truth={"classification": "NO_OPEN_ORDERS", "canonical_refresh_scope": "GLOBAL_COMPLETE"},
+        fresh_broker_positions_complete=True,
+        now=NOW,
+    )
+
+    assert active == [row]
+    assert invalidated == []
+
+
+def test_current_truth_invalidation_keeps_row_when_broker_truth_incomplete() -> None:
+    row = {
+        "account_id": "DUM882026",
+        "symbol": "ZN",
+        "local_symbol": "ZNU6",
+        "con_id": 800111222,
+        "classification": OPEN_MANAGED_EXIT_DUE,
+        "exit_due": True,
+    }
+
+    active, invalidated = managed_position_registry_module._active_managed_positions_from_current_position_truth(
+        managed_positions=[row],
+        broker_positions=[],
+        positions_snapshot={"generated_at": NOW.isoformat(), "positions_complete": False, "ok": False},
+        open_order_truth={"classification": "NO_OPEN_ORDERS", "canonical_refresh_scope": "GLOBAL_COMPLETE"},
+        fresh_broker_positions_complete=False,
+        now=NOW,
+    )
+
+    assert active == [row]
+    assert invalidated == []
+
+
+def test_current_truth_invalidation_keeps_row_on_account_mismatch() -> None:
+    row = {
+        "account_id": "OTHER_ACCOUNT",
+        "symbol": "ZN",
+        "local_symbol": "ZNU6",
+        "con_id": 800111222,
+        "classification": OPEN_MANAGED_EXIT_DUE,
+        "exit_due": True,
+    }
+
+    active, invalidated = managed_position_registry_module._active_managed_positions_from_current_position_truth(
+        managed_positions=[row],
+        broker_positions=[],
+        positions_snapshot={
+            "generated_at": NOW.isoformat(),
+            "positions_complete": True,
+            "ok": True,
+            "selected_account_id": "DUM882026",
+            "positions": [],
+        },
+        open_order_truth={"classification": "NO_OPEN_ORDERS", "canonical_refresh_scope": "GLOBAL_COMPLETE"},
+        fresh_broker_positions_complete=True,
+        now=NOW,
+    )
+
+    assert active == [row]
+    assert invalidated == []
+
+
 def test_terminal_registry_truth_suppresses_stale_lifecycle_open_projection(tmp_path: Path) -> None:
     lifecycle = _lifecycle_position(lifecycle_id="life_terminal_superseded")
     lifecycle["trade_id"] = "trade_terminal_superseded"
