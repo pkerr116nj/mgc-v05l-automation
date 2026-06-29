@@ -11863,14 +11863,14 @@ def test_paper_runtime_truth_includes_selected_paper_stack_profile(
         lanes=(),
         runtime_instance_id="track-b-paper-runtime-test",
         runtime_started_at=started_at,
-        lane_count=92,
+        lane_count=71,
     )
 
     payload = json.loads(path.read_text(encoding="utf-8"))
     metadata = json.loads((tmp_path / "paper_session" / "runtime" / "probationary_paper.pid.json").read_text())
     assert payload["profile"] == "mnq_mes_full_session_active_evidence"
     assert payload["stack_profile"] == "mnq_mes_full_session_active_evidence"
-    assert payload["lane_count"] == 92
+    assert payload["lane_count"] == 71
     assert metadata["profile"] == "mnq_mes_full_session_active_evidence"
     assert metadata["stack_profile"] == "mnq_mes_full_session_active_evidence"
 

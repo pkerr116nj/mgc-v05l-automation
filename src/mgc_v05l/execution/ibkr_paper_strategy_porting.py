@@ -436,10 +436,6 @@ for symbol, lane_ids in (
     ("ZF", _ZF_PHASE1_SUBMIT_LANE_IDS),
     ("ZN", _ZN_PHASE1_SUBMIT_LANE_IDS),
     ("ZB", _ZB_PHASE1_SUBMIT_LANE_IDS),
-    ("BTC", _BTC_PHASE1_SUBMIT_LANE_IDS),
-    ("MBT", _MBT_PHASE1_SUBMIT_LANE_IDS),
-    ("ETH", _ETH_PHASE1_SUBMIT_LANE_IDS),
-    ("MET", _MET_PHASE1_SUBMIT_LANE_IDS),
 ):
     _SUBMIT_CAPABLE_LANE_ADAPTERS |= {
         lane_id: {

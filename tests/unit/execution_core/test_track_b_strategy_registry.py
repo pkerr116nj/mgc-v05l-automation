@@ -476,8 +476,12 @@ def test_batch1_active_evidence_registry_metadata_is_valid() -> None:
             assert entry.exit_not_available is False
 
 
-def test_solana_active_evidence_registry_entries_are_not_submit_capable() -> None:
+def test_crypto_active_evidence_registry_entries_are_diagnostics_only_not_active() -> None:
     for strategy_id in (
+        "PAPER_ACTIVE_EVIDENCE_BTC_US_PARTICIPATION_LONG_V1",
+        "PAPER_ACTIVE_EVIDENCE_MBT_LONDON_OPEN_PARTICIPATION_SHORT_V1",
+        "PAPER_ACTIVE_EVIDENCE_ETH_US_PARTICIPATION_LONG_V1",
+        "PAPER_ACTIVE_EVIDENCE_MET_LONDON_OPEN_PARTICIPATION_SHORT_V1",
         "PAPER_ACTIVE_EVIDENCE_SOL_US_PARTICIPATION_LONG_V1",
         "PAPER_ACTIVE_EVIDENCE_MSL_LONDON_OPEN_PARTICIPATION_SHORT_V1",
     ):
