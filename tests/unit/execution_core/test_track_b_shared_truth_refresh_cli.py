@@ -533,6 +533,121 @@ def test_runtime_start_preflight_blocks_managed_position(tmp_path: Path) -> None
     )
 
 
+def test_runtime_start_preflight_allows_invalidated_historical_managed_position_rows(tmp_path: Path) -> None:
+    result = {
+        "generated_at": NOW.isoformat(),
+        "live_money_eligible": False,
+        "unsafe_blockers": [],
+        "artifact_paths": {},
+        "warnings": [],
+        "classifications": {
+            "Open Order Truth": "NO_OPEN_ORDERS",
+            "Managed Order Registry": "NO_MANAGED_ORDERS",
+            "Position Truth": "CLEAN_FLAT_READY",
+            "Runtime Environment Truth": "RUNTIME_DOWN_CLEAN",
+            "Managed Position Registry": "STALE_MANAGED_POSITION_EVIDENCE",
+            "Reconciliation": "BROKER_TRUTH_SETTLEMENT_CONTRADICTORY_STATE",
+            "Broker Truth Lease": "INVALIDATED_UNKNOWN_OPEN_ORDERS",
+            "Broker Position Guardian": "BROKER_POSITION_GUARDIAN_READY",
+        },
+        "active_authority": {
+            "current_flat_authority_clean": True,
+            "managed_position_registry": {
+                "classification": "STALE_MANAGED_POSITION_EVIDENCE",
+                "active_managed_position_count": 0,
+                "invalidated_position_count": 1,
+                "only_invalidated_historical_positions": True,
+                "current_truth_invalidation_enabled": True,
+            },
+            "broker_truth_lease": {
+                "invalidated_diagnostic_only": True,
+                "current_scope_active": False,
+                "diagnostic_only": True,
+                "invalidated_by_current_truth": True,
+            },
+        },
+    }
+
+    preflight = build_runtime_start_preflight_summary(result)
+
+    assert preflight["classification"] == "SHARED_TRUTH_PREFLIGHT_CLEAN"
+    assert preflight["blockers"] == []
+
+
+def test_runtime_start_preflight_blocks_active_managed_position_even_with_stale_label(tmp_path: Path) -> None:
+    result = {
+        "generated_at": NOW.isoformat(),
+        "live_money_eligible": False,
+        "unsafe_blockers": [],
+        "artifact_paths": {},
+        "warnings": [],
+        "classifications": {
+            "Open Order Truth": "NO_OPEN_ORDERS",
+            "Managed Order Registry": "NO_MANAGED_ORDERS",
+            "Position Truth": "CLEAN_FLAT_READY",
+            "Runtime Environment Truth": "RUNTIME_DOWN_CLEAN",
+            "Managed Position Registry": "STALE_MANAGED_POSITION_EVIDENCE",
+            "Reconciliation": "TRACK_B_PAPER_BROKER_RECONCILED",
+            "Broker Truth Lease": "ACTIVE",
+            "Broker Position Guardian": "BROKER_POSITION_GUARDIAN_READY",
+        },
+        "active_authority": {
+            "current_flat_authority_clean": True,
+            "managed_position_registry": {
+                "classification": "STALE_MANAGED_POSITION_EVIDENCE",
+                "active_managed_position_count": 1,
+                "invalidated_position_count": 0,
+                "only_invalidated_historical_positions": False,
+                "current_truth_invalidation_enabled": True,
+            },
+        },
+    }
+
+    preflight = build_runtime_start_preflight_summary(result)
+
+    assert preflight["classification"] == "SHARED_TRUTH_PREFLIGHT_BLOCKED"
+    assert any(
+        blocker["code"] == "managed_position_registry_not_clean_for_runtime_start"
+        for blocker in preflight["blockers"]
+    )
+
+
+def test_shared_truth_unsafe_blockers_demote_invalidated_flat_derived_residue() -> None:
+    blockers = shared_truth_module._unsafe_blockers(
+        open_order_truth={"classification": "NO_OPEN_ORDERS"},
+        managed_order_registry={"classification": "NO_MANAGED_ORDERS"},
+        position_truth={"summary": {"overall_classification": "CLEAN_FLAT_READY"}},
+        runtime_environment_truth={"classification": "RUNTIME_DOWN_CLEAN"},
+        managed_position_registry={
+            "classification": "STALE_MANAGED_POSITION_EVIDENCE",
+            "managed_positions": [],
+            "current_truth_invalidation": {
+                "enabled": True,
+                "invalidated_positions": [
+                    {
+                        "historical_only": True,
+                        "diagnostic_only": True,
+                        "current_scope_active": False,
+                        "invalidated_by_current_truth": True,
+                    }
+                ],
+            },
+        },
+        reconciliation={"classification": "BROKER_TRUTH_SETTLEMENT_CONTRADICTORY_STATE"},
+        broker_lease={
+            "lease_state": "INVALIDATED_UNKNOWN_OPEN_ORDERS",
+            "current_truth_invalidation": {
+                "current_scope_active": False,
+                "diagnostic_only": True,
+                "invalidated_by_current_truth": True,
+            },
+        },
+        broker_position_guardian={"classification": "BROKER_POSITION_GUARDIAN_READY"},
+    )
+
+    assert blockers == []
+
+
 def test_runtime_start_preflight_allows_active_degraded_broker_lease_within_valid_window(tmp_path: Path) -> None:
     result = {
         "generated_at": NOW.isoformat(),

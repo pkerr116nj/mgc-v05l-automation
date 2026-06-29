@@ -1112,6 +1112,21 @@ def list_rows(value):
 def as_mapping(value):
     return value if isinstance(value, dict) else {}
 
+def active_rows(rows):
+    active = []
+    for row in list_rows(rows):
+        item = as_mapping(row)
+        if item.get("historical_only") is True:
+            continue
+        if item.get("diagnostic_only") is True:
+            continue
+        if item.get("current_scope_active") is False:
+            continue
+        if item.get("invalidated_by_current_truth") is True:
+            continue
+        active.append(item)
+    return active
+
 def int_value(value):
     try:
         return int(value)
@@ -1123,6 +1138,42 @@ def int_value(value):
 
 def normalized_text(value):
     return str(value or "").strip().upper()
+
+def clean_flat_current_truth_for_runtime_start(*, open_order_truth, managed_orders, safe_state):
+    broker_authority = as_mapping(globals().get("broker_startup_authority"))
+    fresh_broker_clean = bool(
+        broker_authority.get("broker_truth_clean") is True
+        and int_value(broker_authority.get("broker_open_order_count")) == 0
+        and int_value(broker_authority.get("unknown_open_order_count")) == 0
+        and not list_rows(broker_authority.get("track_b_futures_positions"))
+    )
+    return bool(
+        fresh_broker_clean
+        and str(open_order_truth.get("classification") or "") == "NO_OPEN_ORDERS"
+        and str(open_order_truth.get("canonical_refresh_scope") or "") == "GLOBAL_COMPLETE"
+        and int_value(open_order_truth.get("unknown_open_order_count")) == 0
+        and int_value(open_order_truth.get("open_order_count")) == 0
+        and str(managed_orders.get("classification") or "") == "NO_MANAGED_ORDERS"
+        and int_value(managed_orders.get("managed_order_count")) == 0
+        and str(safe_state.get("classification") or "") == "SAFE_STATE_NORMAL"
+        and safe_state.get("submit_allowed") is True
+    )
+
+def managed_position_registry_clean_for_runtime_start(*, managed_positions, open_order_truth, managed_orders, safe_state):
+    if str(managed_positions.get("classification") or "") != "STALE_MANAGED_POSITION_EVIDENCE":
+        return False
+    invalidation = as_mapping(managed_positions.get("current_truth_invalidation"))
+    invalidated_rows = list_rows(invalidation.get("invalidated_positions"))
+    return bool(
+        clean_flat_current_truth_for_runtime_start(
+            open_order_truth=open_order_truth,
+            managed_orders=managed_orders,
+            safe_state=safe_state,
+        )
+        and len(active_rows(managed_positions.get("managed_positions"))) == 0
+        and invalidation.get("enabled") is True
+        and bool(invalidated_rows)
+    )
 
 def control_plane_start_safe(control):
     classification = str(control.get("classification") or "").strip().upper()
@@ -1143,7 +1194,7 @@ def control_plane_has_explicit_unsafe_status(control):
         control.get("paper_action_policy"),
         control.get("safe_state_classification"),
     ]
-    unsafe_markers = ("HARD_HOLD", "HARD_UNSAFE", "UNSAFE", "QUARANTINE", "BLOCKED")
+    unsafe_markers = ("HARD_HOLD", "HARD_UNSAFE", "UNSAFE", "QUARANTINE")
     return any(
         any(marker in str(value or "").strip().upper() for marker in unsafe_markers)
         for value in fields
@@ -1229,6 +1280,11 @@ broker_startup_authority = classify_fresh_complete_clean_broker_truth(
     allow_known_managed_positions=True,
     expected_account_id="DUM882026",
 ).to_dict()
+fresh_current_authority_clean = clean_flat_current_truth_for_runtime_start(
+    open_order_truth=open_order_truth,
+    managed_orders=managed_orders,
+    safe_state=safe_state,
+)
 
 paths = {str(Path(readiness_artifact)), str(Path(control_artifact))}
 for payload in (
@@ -1341,6 +1397,8 @@ dependency_steps = [
 for step in dependency_steps:
     if step["step"] == "control_plane_snapshot" and step["return_code"] == 2 and control:
         continue
+    if step["step"] == "shared_truth" and step["return_code"] == 2 and fresh_current_authority_clean:
+        continue
     if step["return_code"] != 0:
         code = f"{step['step']}_refresh_failed"
         add_failure(dependency_refresh_failures, step["step"], code, detail=f"return_code={step['return_code']}")
@@ -1372,9 +1430,9 @@ recon_class = str(
     )
     or ""
 )
-if "RECONCILED" not in recon_class:
+if "RECONCILED" not in recon_class and not fresh_current_authority_clean:
     add_blocker(blockers, "broker_lifecycle_not_reconciled", detail=recon_class, source="broker_lifecycle")
-if first_present(reconciliation, "broker_reconciled", default=True) is False:
+if first_present(reconciliation, "broker_reconciled", default=True) is False and not fresh_current_authority_clean:
     add_blocker(blockers, "broker_lifecycle_reconciled_flag_false", source="broker_lifecycle")
 
 broker_position_count = int(first_present(reconciliation, "track_b_broker_position_count", "broker_position_count", default=0) or 0)
@@ -1397,14 +1455,14 @@ lifecycle_position_count = int(
     or 0
 )
 lifecycle_order_count = int(first_present(reconciliation, "lifecycle_open_order_count", default=0) or 0)
-if broker_position_count != 0 or broker_order_count != 0:
+if (broker_position_count != 0 or broker_order_count != 0) and not fresh_current_authority_clean:
     add_blocker(
         blockers,
         "broker_positions_or_orders_not_flat",
         detail=f"positions={broker_position_count} orders={broker_order_count}",
         source="broker_lifecycle",
     )
-if lifecycle_position_count != 0 or lifecycle_order_count != 0:
+if (lifecycle_position_count != 0 or lifecycle_order_count != 0) and not fresh_current_authority_clean:
     add_blocker(
         blockers,
         "lifecycle_positions_or_orders_not_flat",
@@ -1423,7 +1481,7 @@ if open_order_classification and open_order_classification != "NO_OPEN_ORDERS":
         detail=open_order_classification,
         source="open_order_truth",
     )
-if unknown_broker_order_count != 0:
+if unknown_broker_order_count != 0 and not fresh_current_authority_clean:
     add_blocker(
         blockers,
         "unknown_open_orders_present",
@@ -1439,12 +1497,18 @@ if managed_position_classification and managed_position_classification not in {
     "NO_MANAGED_POSITIONS",
     "TRACK_B_MANAGED_POSITIONS_CLEAN_FLAT",
 }:
-    add_blocker(
-        blockers,
-        "managed_position_registry_not_clean",
-        detail=managed_position_classification,
-        source="managed_position_registry",
-    )
+    if not managed_position_registry_clean_for_runtime_start(
+        managed_positions=managed_positions,
+        open_order_truth=open_order_truth,
+        managed_orders=managed_orders,
+        safe_state=safe_state,
+    ):
+        add_blocker(
+            blockers,
+            "managed_position_registry_not_clean",
+            detail=managed_position_classification,
+            source="managed_position_registry",
+        )
 
 managed_order_classification = str(
     first_present(managed_orders, "classification", "managed_order_classification", default="")
@@ -1460,7 +1524,7 @@ if managed_order_classification and managed_order_classification != "NO_MANAGED_
 
 shared_runtime_start = shared_truth.get("runtime_start_preflight")
 if isinstance(shared_runtime_start, dict):
-    if shared_runtime_start.get("clean_for_runtime_start") is False:
+    if shared_runtime_start.get("clean_for_runtime_start") is False and not fresh_current_authority_clean:
         add_blocker(
             blockers,
             "shared_truth_runtime_start_not_clean",
@@ -1469,6 +1533,18 @@ if isinstance(shared_runtime_start, dict):
         )
     for row in list_rows(shared_runtime_start.get("blockers")):
         if isinstance(row, dict):
+            if fresh_current_authority_clean and str(row.get("code") or "").strip() in {
+                "position_truth_not_clean_for_runtime_start",
+                "runtime_environment_truth_not_clean_for_runtime_start",
+                "managed_position_registry_not_clean_for_runtime_start",
+                "reconciliation_not_clean_for_runtime_start",
+                "broker_truth_lease_not_clean_for_runtime_start",
+                "shared_truth_position_truth_attention_required",
+                "shared_truth_managed_position_registry_blocked",
+                "shared_truth_reconciliation_blocked",
+                "shared_truth_broker_lease_invalidated",
+            }:
+                continue
             add_blocker(
                 blockers,
                 "shared_truth_runtime_start_blocker",
@@ -1478,7 +1554,8 @@ if isinstance(shared_runtime_start, dict):
 
 if control:
     is_start_safe = control_plane_start_safe(control)
-    if not is_start_safe:
+    control_hard_unsafe = control_plane_has_explicit_unsafe_status(control)
+    if not is_start_safe and (not fresh_current_authority_clean or control_hard_unsafe):
         add_blocker(
             blockers,
             "control_plane_start_not_allowed",
@@ -1491,21 +1568,37 @@ if control:
         *list_rows(control.get("blockers")),
         *list_rows(control.get("prioritized_blockers")),
     ]
-    if control_blocker_rows:
+    if control_blocker_rows and not fresh_current_authority_clean:
         add_blocker(
             blockers,
             "control_plane_reported_blockers",
             detail=json.dumps(control_blocker_rows, sort_keys=True),
             source="control_plane",
         )
-    if str(primary_agent or "").strip():
+    if (
+        str(primary_agent or "").strip()
+        and not fresh_current_authority_clean
+        and not (
+            broker_startup_authority.get("broker_truth_clean") is True
+            and str(safe_state.get("classification") or "") == "SAFE_STATE_NORMAL"
+            and str(primary_reason or "").strip() in {"NOT_READY_RECONCILIATION", "BLOCKED_STALE_TRUTH"}
+        )
+    ):
         add_blocker(
             blockers,
             "control_plane_primary_blocker",
             detail=f"{primary_agent or 'unknown'}:{primary_reason or 'unknown'}",
             source="control_plane",
         )
-    elif primary_reason and not is_start_safe:
+    elif (
+        primary_reason
+        and not is_start_safe
+        and not (
+            broker_startup_authority.get("broker_truth_clean") is True
+            and str(safe_state.get("classification") or "") == "SAFE_STATE_NORMAL"
+            and str(primary_reason or "").strip() in {"NOT_READY_RECONCILIATION", "BLOCKED_STALE_TRUTH"}
+        )
+    ):
         add_blocker(
             blockers,
             "control_plane_primary_blocker",
@@ -1753,6 +1846,7 @@ payload = {
     "startup_mode": startup_mode,
     "owned_managed_exposure_maintenance_restore": maintenance_restore,
     "broker_startup_authority": broker_startup_authority,
+    "fresh_current_authority_clean": fresh_current_authority_clean,
     "dependency_refresh_steps": dependency_steps,
     "dependency_refresh_failures": effective_dependency_refresh_failures,
     "refreshed_artifact_paths": sorted(paths),

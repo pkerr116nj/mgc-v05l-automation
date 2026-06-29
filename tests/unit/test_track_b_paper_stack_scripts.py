@@ -823,6 +823,177 @@ def test_paper_stack_start_allows_ready_control_plane_with_informational_primary
     ]
 
 
+def test_startup_preflight_demotes_invalidated_managed_position_residue_with_fresh_current_authority(
+    tmp_path: Path,
+) -> None:
+    result = _run_startup_preflight_decision(
+        tmp_path,
+        control={
+            "classification": "CONTROL_PLANE_SNAPSHOT_READY",
+            "safe_to_start_runtime": False,
+            "top_line_classification": "BLOCKED_STALE_TRUTH",
+            "supervisor_mode": "BLOCKED_STALE_TRUTH",
+            "blockers": [{"code": "canonical_readiness_infrastructure_block", "detail": "NOT_READY_RECONCILIATION"}],
+            "primary_blocking_agent_id": "canonical_readiness",
+            "primary_blocking_reason": "NOT_READY_RECONCILIATION",
+        },
+        reconciliation={
+            "classification": "BROKER_TRUTH_SETTLEMENT_CONTRADICTORY_STATE",
+            "broker_reconciled": False,
+            "track_b_broker_position_count": 1,
+            "track_b_broker_open_order_count": 1,
+            "unknown_broker_open_order_count": 1,
+            "current_scope_lifecycle_open_position_count": 1,
+            "lifecycle_open_order_count": 0,
+        },
+        open_order_truth={
+            "classification": "NO_OPEN_ORDERS",
+            "canonical_refresh_scope": "GLOBAL_COMPLETE",
+            "open_order_count": 0,
+            "unknown_open_order_count": 0,
+            "output_path": str(tmp_path / "latest_open_order_truth.json"),
+        },
+        managed_orders={
+            "classification": "NO_MANAGED_ORDERS",
+            "managed_order_count": 0,
+            "output_path": str(tmp_path / "latest_managed_orders.json"),
+        },
+        managed_positions={
+            "classification": "STALE_MANAGED_POSITION_EVIDENCE",
+            "managed_positions": [],
+            "current_truth_invalidation": {
+                "enabled": True,
+                "invalidated_positions": [
+                    {
+                        "historical_only": True,
+                        "diagnostic_only": True,
+                        "current_scope_active": False,
+                        "invalidated_by_current_truth": True,
+                    }
+                ],
+            },
+            "output_path": str(tmp_path / "latest_managed_positions.json"),
+        },
+        shared_truth={
+            "runtime_start_preflight": {
+                "classification": "SHARED_TRUTH_PREFLIGHT_BLOCKED",
+                "clean_for_runtime_start": False,
+                "blockers": [
+                    {"code": "position_truth_not_clean_for_runtime_start"},
+                    {"code": "managed_position_registry_not_clean_for_runtime_start"},
+                    {"code": "reconciliation_not_clean_for_runtime_start"},
+                    {"code": "broker_truth_lease_not_clean_for_runtime_start"},
+                    {"code": "shared_truth_reconciliation_blocked"},
+                ],
+            },
+            "output_path": str(tmp_path / "latest_shared_truth.json"),
+        },
+        shared_truth_rc=2,
+        status={
+            "runtime": {"running": True},
+            "safety": {
+                "paper_only": True,
+                "live_money_eligible": False,
+                "paper_proof_invoked": False,
+                "broker_mutation_allowed": False,
+            },
+        },
+        safe_state={
+            "classification": "SAFE_STATE_NORMAL",
+            "submit_allowed": True,
+            "close_authority": {
+                "allowed": True,
+                "broad_flatten_allowed": False,
+                "global_flatten_allowed": False,
+            },
+            "live_money_eligible": False,
+            "paper_proof_invoked": False,
+        },
+    )
+
+    assert result["classification"] == "STARTUP_PREFLIGHT_REFRESH_CLEAN"
+    assert result["remaining_start_blockers"] == []
+
+
+def test_startup_preflight_still_blocks_real_broker_position_with_stale_residue(tmp_path: Path) -> None:
+    positions_snapshot = tmp_path / "positions_snapshot.json"
+    open_orders_snapshot = tmp_path / "open_orders_snapshot.json"
+    positions_snapshot.write_text(
+        json.dumps(
+            {
+                "account": "DUM882026",
+                "selected_account_id": "DUM882026",
+                "ok": True,
+                "positions_complete": True,
+                "positions": [
+                    {
+                        "account_id": "DUM882026",
+                        "security_type": "FUT",
+                        "symbol": "MNQ",
+                        "local_symbol": "MNQU6",
+                        "quantity": "1",
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    open_orders_snapshot.write_text(
+        json.dumps(
+            {
+                "account": "DUM882026",
+                "selected_account_id": "DUM882026",
+                "ok": True,
+                "open_orders_complete": True,
+                "open_order_count": 0,
+                "open_orders": [],
+            }
+        ),
+        encoding="utf-8",
+    )
+    result = _run_startup_preflight_decision(
+        tmp_path,
+        control={
+            "classification": "CONTROL_PLANE_SNAPSHOT_READY",
+            "safe_to_start_runtime": True,
+            "top_line_classification": "READY_FOR_OPERATOR_START",
+            "supervisor_mode": "READY_FOR_OPERATOR_START",
+            "blockers": [],
+        },
+        broker_truth={
+            "classification": "BROKER_TRUTH_REFRESH_READY",
+            "account": "DUM882026",
+            "fresh": True,
+            "positions_complete": True,
+            "open_orders_complete": True,
+            "open_order_count": 0,
+            "unknown_open_order_count": 0,
+            "live_money_eligible": False,
+            "paper_proof_invoked": False,
+            "positions_snapshot_path": str(positions_snapshot),
+            "open_orders_snapshot_path": str(open_orders_snapshot),
+        },
+        open_order_truth={
+            "classification": "NO_OPEN_ORDERS",
+            "canonical_refresh_scope": "GLOBAL_COMPLETE",
+            "open_order_count": 0,
+            "unknown_open_order_count": 0,
+        },
+        managed_orders={"classification": "NO_MANAGED_ORDERS", "managed_order_count": 0},
+        managed_positions={
+            "classification": "STALE_MANAGED_POSITION_EVIDENCE",
+            "managed_positions": [],
+            "current_truth_invalidation": {"enabled": True, "invalidated_positions": []},
+        },
+        safe_state={"classification": "SAFE_STATE_NORMAL", "submit_allowed": True},
+    )
+
+    assert result["classification"] == "STARTUP_PREFLIGHT_REFRESH_BLOCKED"
+    assert "broker_startup_authority_track_b_futures_positions_unmanaged_or_ambiguous" in {
+        row["code"] for row in result["remaining_start_blockers"]
+    }
+
+
 def test_paper_stack_start_blocks_control_plane_not_start_safe_with_primary_reason(tmp_path: Path) -> None:
     result = _run_startup_preflight_decision(
         tmp_path,
@@ -1070,7 +1241,7 @@ def test_paper_stack_start_preflight_blocks_actual_open_order_from_fresh_broker_
 
     codes = {row["code"] for row in result["remaining_start_blockers"]}
     assert result["classification"] == "STARTUP_PREFLIGHT_REFRESH_BLOCKED"
-    assert "broker_startup_authority_broker_open_orders_present" in codes
+    assert "broker_startup_authority_track_b_futures_open_orders_present" in codes
 
 
 def test_paper_stack_start_allows_owned_managed_exposure_maintenance_restore(tmp_path: Path) -> None:

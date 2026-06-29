@@ -390,6 +390,15 @@ def _open_order_count(*payloads: Mapping[str, Any], roots: frozenset[str]) -> in
     if all_orders:
         return len([row for row in all_orders if _is_track_b_future(row, roots)])
 
+    for payload in payloads:
+        payload = _mapping(payload)
+        if (
+            payload.get("open_orders_complete") is True
+            and payload.get("open_order_count") in {0, "0"}
+            and not _open_order_rows(payload)
+        ):
+            return 0
+
     scoped_count = 0
     for payload in payloads:
         payload = _mapping(payload)

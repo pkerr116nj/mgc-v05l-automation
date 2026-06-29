@@ -418,6 +418,13 @@ def refresh_track_b_shared_truth(
         "classifications": {str(row["service"]): row.get("classification") for row in services},
         "artifact_paths": {str(row["service"]): row.get("artifact_path") for row in services if row.get("artifact_path")},
         "source_refresh_artifact_path": str(config.resolve(config.shared_truth_refresh_path)),
+        "active_authority": {
+            "current_flat_authority_clean": _current_flat_truth_clean(
+                classifications={str(row["service"]): row.get("classification") for row in services}
+            ),
+            "managed_position_registry": _managed_position_registry_active_authority(managed_position_registry),
+            "broker_truth_lease": _top_level_current_truth_invalidation_state(broker_lease),
+        },
         "bounded_current_scope_fast_path": fast_path,
         "recovery_budget_ledger": recovery_budget_ledger.get("classification"),
         "recovery_budget_exhausted": recovery_budget_ledger.get("budget_exhausted") is True,
@@ -437,6 +444,10 @@ def build_runtime_start_preflight_summary(result: Mapping[str, Any]) -> dict[str
     """Validate shared-truth authority classifications for a PAPER runtime start."""
 
     classifications = _mapping(result.get("classifications"))
+    active_authority = _mapping(result.get("active_authority"))
+    managed_position_registry = _mapping(active_authority.get("managed_position_registry"))
+    current_flat_authority_clean = active_authority.get("current_flat_authority_clean") is True
+    broker_truth_lease_authority = _mapping(active_authority.get("broker_truth_lease"))
     active_hold = _managed_active_hold_pending(
         open_order_class=str(classifications.get("Open Order Truth") or ""),
         managed_order_class=str(classifications.get("Managed Order Registry") or ""),
@@ -456,6 +467,20 @@ def build_runtime_start_preflight_summary(result: Mapping[str, Any]) -> dict[str
     for service, allowed_values in RUNTIME_START_REQUIRED_CLASSIFICATIONS.items():
         observed = str(classifications.get(service) or "MISSING")
         if observed not in allowed_values:
+            if service == "Managed Position Registry" and _managed_position_registry_clean_for_runtime_start(
+                observed=observed,
+                managed_position_registry=managed_position_registry,
+                classifications=classifications,
+            ):
+                continue
+            if service == "Reconciliation" and current_flat_authority_clean:
+                continue
+            if (
+                service == "Broker Truth Lease"
+                and current_flat_authority_clean
+                and broker_truth_lease_authority.get("invalidated_diagnostic_only") is True
+            ):
+                continue
             if managed_exit_context and service in {
                 "Open Order Truth",
                 "Managed Order Registry",
@@ -514,6 +539,7 @@ def build_runtime_start_preflight_summary(result: Mapping[str, Any]) -> dict[str
         "clean_for_runtime_start": not blockers,
         "active_hold_managed_timed_exit_pending": active_hold,
         "active_managed_exit_due": active_exit_due,
+        "active_authority": active_authority,
         "classification": "SHARED_TRUTH_PREFLIGHT_CLEAN" if not blockers else "SHARED_TRUTH_PREFLIGHT_BLOCKED",
         "required_classifications": {
             service: sorted(values) for service, values in RUNTIME_START_REQUIRED_CLASSIFICATIONS.items()
@@ -527,6 +553,73 @@ def build_runtime_start_preflight_summary(result: Mapping[str, Any]) -> dict[str
         "warnings": _list(result.get("warnings")),
         "blockers": blockers,
     }
+
+
+def _active_rows(rows: Any) -> list[Mapping[str, Any]]:
+    active: list[Mapping[str, Any]] = []
+    for row in _list(rows):
+        item = _mapping(row)
+        if item.get("historical_only") is True:
+            continue
+        if item.get("diagnostic_only") is True:
+            continue
+        if item.get("current_scope_active") is False:
+            continue
+        if item.get("invalidated_by_current_truth") is True:
+            continue
+        active.append(item)
+    return active
+
+
+def _managed_position_registry_active_authority(payload: Mapping[str, Any]) -> dict[str, Any]:
+    active = _active_rows(payload.get("managed_positions"))
+    invalidation = _mapping(payload.get("current_truth_invalidation"))
+    invalidated = _list(invalidation.get("invalidated_positions"))
+    return {
+        "classification": payload.get("classification"),
+        "active_managed_position_count": len(active),
+        "invalidated_position_count": len(invalidated),
+        "only_invalidated_historical_positions": len(active) == 0 and bool(invalidated),
+        "current_truth_invalidation_enabled": invalidation.get("enabled") is True,
+    }
+
+
+def _top_level_current_truth_invalidation_state(payload: Mapping[str, Any]) -> dict[str, Any]:
+    invalidation = _mapping(payload.get("current_truth_invalidation"))
+    return {
+        "invalidated_diagnostic_only": (
+            invalidation.get("invalidated_by_current_truth") is True
+            and invalidation.get("current_scope_active") is False
+            and invalidation.get("diagnostic_only") is True
+        ),
+        "current_scope_active": invalidation.get("current_scope_active"),
+        "diagnostic_only": invalidation.get("diagnostic_only"),
+        "invalidated_by_current_truth": invalidation.get("invalidated_by_current_truth"),
+    }
+
+
+def _current_flat_truth_clean(*, classifications: Mapping[str, Any]) -> bool:
+    return (
+        str(classifications.get("Open Order Truth") or "") == NO_OPEN_ORDERS
+        and str(classifications.get("Managed Order Registry") or "") == NO_MANAGED_ORDERS
+        and str(classifications.get("Position Truth") or "") == "CLEAN_FLAT_READY"
+    )
+
+
+def _managed_position_registry_clean_for_runtime_start(
+    *,
+    observed: str,
+    managed_position_registry: Mapping[str, Any],
+    classifications: Mapping[str, Any],
+) -> bool:
+    if observed != "STALE_MANAGED_POSITION_EVIDENCE":
+        return False
+    return (
+        _current_flat_truth_clean(classifications=classifications)
+        and int(managed_position_registry.get("active_managed_position_count") or 0) == 0
+        and managed_position_registry.get("only_invalidated_historical_positions") is True
+        and managed_position_registry.get("current_truth_invalidation_enabled") is True
+    )
 
 
 def _clean_flat_fast_path_eligibility(
@@ -1304,6 +1397,26 @@ def _unsafe_blockers(
     reconciliation_class = str(reconciliation.get("classification") or "")
     lease_state = str(broker_lease.get("lease_state") or "")
     guardian_class = str(broker_position_guardian.get("classification") or "")
+    current_flat_authority_clean = _current_flat_truth_clean(
+        classifications={
+            "Open Order Truth": open_order_class,
+            "Managed Order Registry": managed_order_class,
+            "Position Truth": position_class,
+            "Managed Position Registry": managed_position_class,
+        }
+    )
+    managed_position_clean_by_current_truth = _managed_position_registry_clean_for_runtime_start(
+        observed=managed_position_class,
+        managed_position_registry=_managed_position_registry_active_authority(managed_position_registry),
+        classifications={
+            "Open Order Truth": open_order_class,
+            "Managed Order Registry": managed_order_class,
+            "Position Truth": position_class,
+        },
+    )
+    stale_derived_diagnostic_only = current_flat_authority_clean and (
+        managed_position_class == NO_MANAGED_POSITIONS or managed_position_clean_by_current_truth
+    )
     active_hold = _managed_active_hold_pending(
         open_order_class=open_order_class,
         managed_order_class=managed_order_class,
@@ -1340,7 +1453,9 @@ def _unsafe_blockers(
     ):
         blockers.append({"code": "runtime_environment_blocked", "detail": f"Runtime Environment Truth is {runtime_class}."})
     if managed_position_class not in {NO_MANAGED_POSITIONS, "OPEN_MANAGED_MATCHED", "OPEN_MANAGED_EXIT_DUE", "OPEN_MANAGED_CLOSE_WORKING"}:
-        if not (managed_position_class == "STALE_MANAGED_POSITION_EVIDENCE" and position_class == "CLEAN_FLAT_READY"):
+        if not managed_position_clean_by_current_truth and not (
+            managed_position_class == "STALE_MANAGED_POSITION_EVIDENCE" and position_class == "CLEAN_FLAT_READY"
+        ):
             blockers.append(
                 {"code": "managed_position_registry_blocked", "detail": f"Managed Position Registry is {managed_position_class}."}
             )
@@ -1348,9 +1463,14 @@ def _unsafe_blockers(
         "BROKER_LIFECYCLE_RECONCILED",
         "TRACK_B_PAPER_BROKER_RECONCILED",
     }:
-        blockers.append({"code": "reconciliation_blocked", "detail": f"Reconciliation is {reconciliation_class}."})
+        if not stale_derived_diagnostic_only:
+            blockers.append({"code": "reconciliation_blocked", "detail": f"Reconciliation is {reconciliation_class}."})
     if lease_state.startswith("INVALIDATED"):
-        blockers.append({"code": "broker_lease_invalidated", "detail": f"Broker Truth Lease is {lease_state}."})
+        if not (
+            stale_derived_diagnostic_only
+            and _top_level_current_truth_invalidation_state(broker_lease).get("invalidated_diagnostic_only") is True
+        ):
+            blockers.append({"code": "broker_lease_invalidated", "detail": f"Broker Truth Lease is {lease_state}."})
     if lease_state == "OPERATOR_REQUIRED" and position_class != "CLEAN_FLAT_READY":
         blockers.append({"code": "broker_lease_operator_required", "detail": "Broker Truth Lease requires operator attention."})
     if guardian_class and guardian_class != BROKER_POSITION_GUARDIAN_READY:
