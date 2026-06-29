@@ -19,6 +19,7 @@ from .track_b_broker_truth_lease import (
     DEFAULT_LEASE_ARTIFACT,
     DEFAULT_LEASE_HISTORY,
     classify_broker_truth_lease,
+    preserve_invalidated_previous_lease_diagnostic,
 )
 from .track_b_broker_position_guardian import (
     BROKER_POSITION_GUARDIAN_READY,
@@ -42,6 +43,7 @@ from .track_b_managed_position_registry import (
 )
 from .track_b_open_order_truth import (
     BROKER_POSITION_WITHOUT_CLOSE_ORDER,
+    DEFAULT_OPEN_ORDER_TRUTH_ARTIFACT,
     NO_OPEN_ORDERS,
     TrackBOpenOrderTruthConfig,
     build_track_b_open_order_truth,
@@ -1052,8 +1054,6 @@ def _refresh_broker_lease(
     now: datetime,
 ) -> dict[str, Any]:
     published_lease = _read_json(config.resolve(config.broker_lease_path))
-    if published_lease:
-        return published_lease
     broker_status = _read_json(config.resolve(config.broker_truth_status_path))
     latest_attempt = _read_json(config.resolve(config.broker_truth_latest_attempt_path)) or _mapping(
         broker_status.get("latest_attempt_status")
@@ -1062,6 +1062,7 @@ def _refresh_broker_lease(
         return {}
     live_position_status = _read_json(config.resolve(config.live_position_status_path))
     trade_summary = _read_json(config.resolve(config.trade_summary_path))
+    last_successful_broker_truth = _mapping(broker_status.get("last_successful_broker_truth")) or broker_status
     lease = classify_broker_truth_lease(
         {
             "account_id": config.account,
@@ -1072,7 +1073,7 @@ def _refresh_broker_lease(
                 "max_exit_age_seconds": float(config.broker_lease_max_exit_age_seconds),
                 "degraded_refresh_grace_seconds": float(config.broker_lease_degraded_refresh_grace_seconds),
             },
-            "last_successful_broker_truth": _mapping(broker_status.get("last_successful_broker_truth")) or broker_status,
+            "last_successful_broker_truth": last_successful_broker_truth,
             "latest_attempt_status": latest_attempt,
             "reconciliation": reconciliation,
             "lifecycle": _lifecycle_summary(live_position_status),
@@ -1096,6 +1097,12 @@ def _refresh_broker_lease(
                 if value is not None
             },
         }
+    )
+    lease = preserve_invalidated_previous_lease_diagnostic(
+        lease=lease,
+        previous_lease=published_lease,
+        broker_truth=last_successful_broker_truth,
+        open_order_truth=_read_json(config.resolve(DEFAULT_OPEN_ORDER_TRUTH_ARTIFACT)),
     )
     if lease:
         _write_json_atomic(config.resolve(config.broker_lease_path), lease)

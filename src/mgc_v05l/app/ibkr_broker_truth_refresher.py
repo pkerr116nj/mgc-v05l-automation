@@ -11,6 +11,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
 
+from mgc_v05l.execution_core.track_b_live_market_data_symbols import active_phase1_runtime_symbols
+
 from ..execution.ibkr_read_only_verifier import (
     IbkrReadOnlyVerificationArtifacts,
     IbkrReadOnlyVerificationConfig,
@@ -48,6 +50,14 @@ class BrokerTruthRefreshConfig:
     refresh_lease_artifact: bool = True
     gc_expiry: str = "202606"
     mgc_expiry: str = "202606"
+
+
+
+def _default_allowed_instruments(repo_root: Path) -> tuple[str, ...]:
+    try:
+        return active_phase1_runtime_symbols(repo_root / "config" / "track_b_live_market_data_symbols.yaml")
+    except Exception:
+        return active_phase1_runtime_symbols()
 
 
 def refresh_seconds_from_env(env: dict[str, str] | None = None) -> float:
@@ -388,6 +398,7 @@ def _refresh_broker_truth_lease_if_enabled(*, config: BrokerTruthRefreshConfig, 
             DEFAULT_LEASE_ARTIFACT,
             DEFAULT_LEASE_HISTORY,
             classify_broker_truth_lease,
+            preserve_invalidated_previous_lease_diagnostic,
             write_broker_truth_lease,
         )
         from mgc_v05l.execution_core.track_b_broker_session_authority import (
@@ -427,6 +438,11 @@ def _refresh_broker_truth_lease_if_enabled(*, config: BrokerTruthRefreshConfig, 
             / "track_b_execution_core"
             / "paper_trade_ledger"
             / "latest_track_b_paper_trade_summary.json",
+            "open_order_truth": repo_root
+            / "outputs"
+            / "track_b_execution_core"
+            / "open_order_truth"
+            / "latest_open_order_truth.json",
             "canonical_readiness": repo_root
             / "outputs"
             / "operator_dashboard"
@@ -443,7 +459,7 @@ def _refresh_broker_truth_lease_if_enabled(*, config: BrokerTruthRefreshConfig, 
         inputs = gather_lease_inputs(
             repo_root=repo_root,
             account_id=config.account_id,
-            allowed_instruments=["MGC", "MNQ", "MES", "GC"],
+            allowed_instruments=list(_default_allowed_instruments(repo_root)),
             current_time=current_time,
             policy={
                 "max_entry_age_seconds": 300.0,
@@ -458,6 +474,14 @@ def _refresh_broker_truth_lease_if_enabled(*, config: BrokerTruthRefreshConfig, 
         inputs["authority_writer"] = "ibkr_broker_truth_refresher"
         inputs["authority_source_timestamp"] = source_timestamp
         lease = classify_broker_truth_lease(inputs)
+        lease = preserve_invalidated_previous_lease_diagnostic(
+            lease=lease,
+            previous_lease=_read_json(output_path),
+            broker_truth=dict(inputs.get("last_successful_broker_truth") or {}),
+            open_order_truth=_read_json(
+                repo_root / "outputs" / "track_b_execution_core" / "open_order_truth" / "latest_open_order_truth.json"
+            ),
+        )
         write_broker_truth_lease(output_path=output_path, lease=lease, history_path=history_path)
         authority = build_broker_session_authority(
             lease=lease,

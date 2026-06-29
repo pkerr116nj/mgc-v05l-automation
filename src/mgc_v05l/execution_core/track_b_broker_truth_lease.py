@@ -525,6 +525,54 @@ def classify_broker_truth_lease(inputs: Mapping[str, Any]) -> dict[str, Any]:
     return payload
 
 
+
+def preserve_invalidated_previous_lease_diagnostic(
+    *,
+    lease: Mapping[str, Any],
+    previous_lease: Mapping[str, Any],
+    broker_truth: Mapping[str, Any],
+    open_order_truth: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Preserve a stale invalidated lease as diagnostic metadata only.
+
+    This does not change the freshly classified lease state. It only carries
+    forward evidence that a previous invalidated snapshot was superseded by
+    fresher complete broker/open-order truth.
+    """
+
+    result = dict(lease)
+    previous_state = str(previous_lease.get("lease_state") or previous_lease.get("state") or "").strip().upper()
+    if not previous_state.startswith("INVALIDATED"):
+        return result
+    if not _bool(broker_truth.get("positions_complete")) or not _bool(broker_truth.get("open_orders_complete")):
+        return result
+    open_order_scope = str(_mapping(open_order_truth or {}).get("canonical_refresh_scope") or "").strip().upper()
+    result["current_truth_invalidation"] = {
+        "enabled": True,
+        "invalidated_by_current_truth": True,
+        "current_scope_active": False,
+        "diagnostic_only": True,
+        "previous_lease": {
+            "lease_state": previous_state,
+            "generated_at": previous_lease.get("generated_at"),
+            "authority_writer": previous_lease.get("authority_writer"),
+            "authority_generation_id": previous_lease.get("authority_generation_id"),
+            "blockers": list(previous_lease.get("blockers") or []),
+        },
+        "source_refs": {
+            "broker_truth_generated_at": broker_truth.get("generated_at")
+            or broker_truth.get("last_success_at")
+            or broker_truth.get("latest_refresh_time"),
+            "positions_complete": broker_truth.get("positions_complete"),
+            "open_orders_complete": broker_truth.get("open_orders_complete"),
+            "open_order_truth_generated_at": _mapping(open_order_truth or {}).get("generated_at"),
+            "canonical_refresh_scope": open_order_scope or None,
+            "open_order_truth_classification": _mapping(open_order_truth or {}).get("classification"),
+        },
+    }
+    return result
+
+
 def write_broker_truth_lease(
     *,
     output_path: Path,
@@ -2255,5 +2303,6 @@ __all__ = [
     "DEFAULT_LEASE_HISTORY",
     "LEASE_STATES",
     "classify_broker_truth_lease",
+    "preserve_invalidated_previous_lease_diagnostic",
     "write_broker_truth_lease",
 ]

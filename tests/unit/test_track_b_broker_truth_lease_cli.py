@@ -16,6 +16,29 @@ def write_json(path: Path, payload: dict) -> None:
     path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
 
+def write_live_market_data_symbols(root: Path, symbols: list[str]) -> None:
+    rows = []
+    for symbol in symbols:
+        rows.append(
+            f"  - symbol: {symbol}\n"
+            "    enabled: true\n"
+            "    required_for_readiness: true\n"
+            "    asset_class: futures\n"
+            f"    execution_symbol: {symbol}\n"
+            f"    reference_symbol: {symbol}\n"
+            f"    databento_symbol: {symbol}.v.0\n"
+            "    dataset: GLBX.MDP3\n"
+            "    schema: ohlcv-1m\n"
+            "    venue: CME Globex\n"
+            "    timezone: America/New_York\n"
+            "    min_confirmed_bars: 8\n"
+            "    freshness_threshold_seconds: 180\n"
+        )
+    path = root / "config" / "track_b_live_market_data_symbols.yaml"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("version: 1\nsymbols:\n" + "".join(rows), encoding="utf-8")
+
+
 def seed_clean_artifacts(repo_root: Path) -> None:
     write_json(
         broker_status_path(repo_root),
@@ -206,6 +229,47 @@ def test_cli_does_not_overwrite_healthy_broker_published_hot_lease(tmp_path: Pat
     assert summary["hot_authority_write_skipped"] is True
     assert persisted == existing
     assert not history_path(tmp_path).exists()
+
+
+
+def test_default_allowed_instruments_uses_shared_active_symbol_universe(tmp_path: Path, capsys) -> None:
+    seed_clean_artifacts(tmp_path)
+    write_live_market_data_symbols(tmp_path, ["MGC", "MNQ", "MBT", "MET", "ZT", "ZF", "ZN", "ZB"])
+
+    exit_code = cli.main([*base_args(tmp_path), "--json"])
+
+    lease = json.loads(lease_path(tmp_path).read_text(encoding="utf-8"))
+    assert exit_code == 0
+    assert {"MBT", "MET", "ZT", "ZF", "ZN", "ZB"}.issubset(set(lease["allowed_instruments"]))
+
+
+def test_stale_invalidated_previous_lease_is_preserved_as_diagnostic_metadata(tmp_path: Path, capsys) -> None:
+    seed_clean_artifacts(tmp_path)
+    write_json(
+        lease_path(tmp_path),
+        {
+            "schema_version": "track_b_broker_truth_lease_v1",
+            "generated_at": "2026-05-18T14:00:00+00:00",
+            "lease_state": "INVALIDATED_CONTRADICTION",
+            "authority_writer": "track_b_broker_truth_lease_classifier",
+            "authority_generation_id": "old-generation",
+            "blockers": [{"code": "unexpected_broker_position"}],
+            "live_money_eligible": False,
+        },
+    )
+
+    exit_code = cli.main([*base_args(tmp_path), "--json"])
+
+    lease = json.loads(lease_path(tmp_path).read_text(encoding="utf-8"))
+    assert exit_code == 0
+    assert lease["lease_state"] == "ACTIVE"
+    invalidation = lease["current_truth_invalidation"]
+    assert invalidation["invalidated_by_current_truth"] is True
+    assert invalidation["current_scope_active"] is False
+    assert invalidation["diagnostic_only"] is True
+    assert invalidation["previous_lease"]["lease_state"] == "INVALIDATED_CONTRADICTION"
+    assert invalidation["source_refs"]["positions_complete"] is True
+    assert invalidation["source_refs"]["open_orders_complete"] is True
 
 
 def test_connection_report_supplies_flat_no_order_submit_session_liveness(tmp_path: Path) -> None:

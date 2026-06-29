@@ -17,7 +17,10 @@ from pathlib import Path
 from typing import Any, Callable, Mapping, Sequence
 
 from mgc_v05l.paths import PROJECT_ROOT, is_archived_project_root
-from mgc_v05l.execution_core.track_b_broker_truth_lease import classify_broker_truth_lease
+from mgc_v05l.execution_core.track_b_broker_truth_lease import (
+    classify_broker_truth_lease,
+    preserve_invalidated_previous_lease_diagnostic,
+)
 from mgc_v05l.execution_core.track_b_live_market_data_symbols import (
     DEFAULT_TRACK_B_LIVE_MARKET_DATA_SYMBOLS_PATH,
     TrackBLiveMarketDataSymbol,
@@ -1037,7 +1040,7 @@ def _effective_broker_truth_lease_artifact(
     lease = classify_broker_truth_lease(
         {
             "account_id": "DUM882026",
-            "allowed_instruments": ["MGC", "MNQ", "GC"],
+            "allowed_instruments": _broker_truth_lease_allowed_instruments(repo_root),
             "current_time": now.isoformat(),
             "policy": {
                 "max_entry_age_seconds": 300.0,
@@ -1079,6 +1082,12 @@ def _effective_broker_truth_lease_artifact(
             },
         }
     )
+    lease = preserve_invalidated_previous_lease_diagnostic(
+        lease=lease,
+        previous_lease=existing_lease,
+        broker_truth=last_success,
+        open_order_truth=_mapping(artifacts.get("open_order_truth")),
+    )
     lease["refreshed_by_canonical_readiness"] = True
     lease["previous_lease_state"] = existing_lease.get("lease_state") or existing_lease.get("state")
     lease["previous_lease_generated_at"] = existing_lease.get("generated_at")
@@ -1096,6 +1105,12 @@ def _published_broker_authority_lease_healthy(payload: Mapping[str, Any], *, now
     entry_valid_until = payload.get("entry_valid_until") or payload.get("valid_until")
     seconds_remaining = _seconds_until(entry_valid_until, now)
     return bool(seconds_remaining is not None and seconds_remaining > 0)
+
+
+
+def _broker_truth_lease_allowed_instruments(repo_root: Path) -> list[str]:
+    symbols = [row["symbol"] for row in _load_market_data_namelist_rows(repo_root) if row.get("enabled", True)]
+    return symbols or ["MGC", "MNQ", "MES", "GC"]
 
 
 def _broker_truth_with_connection_report(

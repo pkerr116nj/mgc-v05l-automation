@@ -12,8 +12,10 @@ from mgc_v05l.execution_core.track_b_broker_truth_lease import (
     DEFAULT_LEASE_ARTIFACT,
     DEFAULT_LEASE_HISTORY,
     classify_broker_truth_lease,
+    preserve_invalidated_previous_lease_diagnostic,
     write_broker_truth_lease,
 )
+from mgc_v05l.execution_core.track_b_live_market_data_symbols import active_phase1_runtime_symbols
 from mgc_v05l.execution_core.track_b_readiness_state import REPO_ROOT
 
 READY_EXIT_STATES = {"ACTIVE", "ACTIVE_DEGRADED_REFRESH_FAILING"}
@@ -78,7 +80,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     inputs = gather_lease_inputs(
         repo_root=repo_root,
         account_id=str(args.account_id),
-        allowed_instruments=list(args.allowed_instrument or ["MGC", "MNQ", "MES", "GC"]),
+        allowed_instruments=list(args.allowed_instrument or _default_allowed_instruments(repo_root)),
         current_time=args.current_time,
         policy={
             "max_entry_age_seconds": float(args.max_entry_age_seconds),
@@ -89,6 +91,12 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
     lease = classify_broker_truth_lease(inputs)
     existing_hot_lease = _read_json(paths["output"])
+    lease = preserve_invalidated_previous_lease_diagnostic(
+        lease=lease,
+        previous_lease=existing_hot_lease,
+        broker_truth=_mapping(inputs.get("last_successful_broker_truth")),
+        open_order_truth=_mapping(inputs.get("open_order_truth")),
+    )
     hot_authority_write_skipped = _hot_authority_write_should_be_skipped(
         repo_root=repo_root,
         output_path=paths["output"],
@@ -230,6 +238,14 @@ def exit_code_for_state(state: str) -> int:
     if state in DEGRADED_EXIT_STATES:
         return 1
     return 2
+
+
+
+def _default_allowed_instruments(repo_root: Path) -> tuple[str, ...]:
+    try:
+        return active_phase1_runtime_symbols(repo_root / "config" / "track_b_live_market_data_symbols.yaml")
+    except Exception:
+        return active_phase1_runtime_symbols()
 
 
 def _resolve_paths(*, repo_root: Path, args: argparse.Namespace) -> dict[str, Path]:

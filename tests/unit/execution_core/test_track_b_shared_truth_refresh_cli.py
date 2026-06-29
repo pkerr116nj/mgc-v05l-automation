@@ -192,15 +192,15 @@ def test_refresh_publishes_global_open_order_truth_from_complete_broker_snapshot
     assert open_order_truth["summary"]["duplicate_close_order_group_count"] == 0
 
 
-def test_refresh_consumes_published_broker_lease_without_overwriting_it(tmp_path: Path) -> None:
+def test_refresh_recomputes_published_stale_broker_lease_from_fresh_truth(tmp_path: Path) -> None:
     _seed_clean_stack(tmp_path)
     lease_path = tmp_path / "outputs/operator_dashboard/runtime/latest_broker_truth_lease.json"
     published_lease = {
         "schema_version": "track_b_broker_truth_lease_v1",
         "generated_at": OLD,
-        "lease_state": "ACTIVE",
-        "connection_mode": "SUBMIT_CAPABLE_NO_RECENT_ORDER_EVENTS",
-        "publisher": "broker_truth_refresher",
+        "lease_state": "INVALIDATED_CONTRADICTION",
+        "authority_writer": "track_b_broker_truth_lease_classifier",
+        "blockers": [{"code": "unexpected_broker_position"}],
     }
     _write(lease_path, published_lease)
 
@@ -208,9 +208,14 @@ def test_refresh_consumes_published_broker_lease_without_overwriting_it(tmp_path
 
     disk = _read(lease_path)
     row = next(row for row in result["services"] if row["service"] == "Broker Truth Lease")
-    assert disk == published_lease
+    assert disk["lease_state"] == "ACTIVE"
+    assert disk["generated_at"] == NOW.isoformat()
+    assert disk["current_truth_invalidation"]["diagnostic_only"] is True
+    assert disk["current_truth_invalidation"]["current_scope_active"] is False
+    assert disk["current_truth_invalidation"]["invalidated_by_current_truth"] is True
+    assert disk["current_truth_invalidation"]["previous_lease"]["lease_state"] == "INVALIDATED_CONTRADICTION"
     assert row["classification"] == "ACTIVE"
-    assert row["generated_at"] == OLD
+    assert row["generated_at"] == NOW.isoformat()
 
 
 def test_refresh_service_rows_match_written_authority_files(monkeypatch, tmp_path: Path) -> None:
