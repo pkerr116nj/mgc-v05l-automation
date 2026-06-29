@@ -19,6 +19,11 @@ from mgc_v05l.execution_core.track_b_broker_position_guardian import (
     BROKER_POSITION_GUARDIAN_HARD_HOLD,
     DEFAULT_BROKER_POSITION_GUARDIAN_ARTIFACT,
 )
+from mgc_v05l.execution_core.track_b_dmc_active_authority import (
+    active_authority_classification,
+    is_active_authority_row,
+    is_active_authority_payload,
+)
 from mgc_v05l.execution_core.track_b_risk_reducing_close_authority import (
     classify_runtime_stale_risk_reducing_close,
 )
@@ -757,34 +762,15 @@ def _classification(payload: Mapping[str, Any]) -> str:
 
 
 def _active_classification(payload: Mapping[str, Any]) -> str:
-    if _current_scope_inactive(payload):
-        return ""
-    return _classification(payload)
+    return str(active_authority_classification(payload, inactive_value="") or "")
 
 
 def _active_rows(rows: Sequence[Any]) -> list[Any]:
-    return [row for row in rows if not _current_scope_inactive(_mapping(row))]
+    return [row for row in rows if is_active_authority_row(_mapping(row))]
 
 
 def _current_scope_inactive(payload: Mapping[str, Any]) -> bool:
-    if not payload:
-        return False
-    if payload.get("historical_only") is True:
-        return True
-    if payload.get("diagnostic_only") is True:
-        return True
-    if payload.get("current_scope_active") is False:
-        return True
-    if payload.get("invalidated_by_current_truth") is True:
-        return True
-    invalidation = _mapping(payload.get("current_truth_invalidation"))
-    if not invalidation:
-        return False
-    return (
-        invalidation.get("current_scope_active") is False
-        and invalidation.get("diagnostic_only") is True
-        and invalidation.get("invalidated_by_current_truth") is True
-    )
+    return not is_active_authority_payload(payload)
 
 
 def _contains_true(value: Any, key: str) -> bool:
