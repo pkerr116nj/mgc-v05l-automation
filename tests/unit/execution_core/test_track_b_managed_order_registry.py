@@ -123,6 +123,61 @@ def test_one_working_close_order_is_tracked(tmp_path: Path) -> None:
     assert order["recommended_next_action"] == "WAIT"
 
 
+def test_stale_order_row_absent_from_global_complete_truth_is_diagnostic_only(tmp_path: Path) -> None:
+    _seed_base(tmp_path, order_states=[_order_state()])
+    open_order_truth_path = (
+        tmp_path / "outputs" / "track_b_execution_core" / "open_order_truth" / "latest_open_order_truth.json"
+    )
+    open_order_truth = json.loads(open_order_truth_path.read_text(encoding="utf-8"))
+    open_order_truth["canonical_refresh_scope"] = "GLOBAL_COMPLETE"
+    open_order_truth["classification"] = "NO_OPEN_ORDERS"
+    open_order_truth["summary"] = {
+        **open_order_truth.get("summary", {}),
+        "classification": "NO_OPEN_ORDERS",
+        "open_order_count": 0,
+        "duplicate_close_order_group_count": 0,
+    }
+    open_order_truth_path.write_text(json.dumps(open_order_truth, indent=2, sort_keys=True), encoding="utf-8")
+
+    payload = build_track_b_managed_order_registry(
+        config=TrackBManagedOrderRegistryConfig(repo_root=tmp_path),
+        now=NOW,
+    )
+
+    assert payload["classification"] == NO_MANAGED_ORDERS
+    assert payload["managed_orders"] == []
+    invalidation = payload["current_truth_invalidation"]
+    assert invalidation["invalidated_order_count"] == 1
+    invalidated = invalidation["invalidated_orders"][0]
+    assert invalidated["broker_order_id"] == "27"
+    assert invalidated["historical_only"] is True
+    assert invalidated["diagnostic_only"] is True
+    assert invalidated["current_scope_active"] is False
+    assert invalidated["invalidated_by_current_truth"] is True
+    assert invalidated["source_refs"]["canonical_refresh_scope"] == "GLOBAL_COMPLETE"
+
+
+def test_current_unknown_order_remains_review_required(tmp_path: Path) -> None:
+    _seed_base(
+        tmp_path,
+        order_states=[
+            _order_state(
+                classification="UNKNOWN_OPEN_ORDER",
+            )
+            | {"unknown_open_order": True}
+        ],
+    )
+
+    payload = build_track_b_managed_order_registry(
+        config=TrackBManagedOrderRegistryConfig(repo_root=tmp_path),
+        now=NOW,
+    )
+
+    assert payload["classification"] == "ORDER_STATE_UNKNOWN_REVIEW_REQUIRED"
+    assert payload["managed_orders"][0]["classification"] == "ORDER_STATE_UNKNOWN_REVIEW_REQUIRED"
+    assert payload["current_truth_invalidation"]["invalidated_order_count"] == 0
+
+
 def test_suspicious_sentinel_order_is_tracked(tmp_path: Path) -> None:
     _seed_base(
         tmp_path,

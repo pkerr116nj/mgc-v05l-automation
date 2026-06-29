@@ -136,7 +136,11 @@ def build_track_b_managed_order_registry(
         managed_positions=managed_positions,
         reconciliation=reconciliation,
     )
-    order_states = _list(open_order_truth.get("order_states"))
+    raw_order_states = _list(open_order_truth.get("order_states"))
+    order_states, current_truth_invalidated_orders = _active_order_states_from_current_truth(
+        open_order_truth=open_order_truth,
+        order_states=raw_order_states,
+    )
     duplicate_order_ids = _duplicate_order_ids(_list(open_order_truth.get("duplicate_close_order_groups")))
     flat_close_order_ids = {
         _order_identity(state.get("order") or state)
@@ -187,6 +191,12 @@ def build_track_b_managed_order_registry(
             "superseded_full_audit_only_count": len(terminal_superseded_rows),
             "superseded_full_audit_only": terminal_superseded_rows,
             "source": "track_b_live_trade_registry",
+        },
+        "current_truth_invalidation": {
+            "enabled": True,
+            "invalidated_order_count": len(current_truth_invalidated_orders),
+            "invalidated_orders": current_truth_invalidated_orders,
+            "source": "latest_open_order_truth",
         },
         "pre_restart_exposure_resolution": pre_restart_exposure_resolution,
         "source_freshness": source_stale,
@@ -882,6 +892,57 @@ def _recommended_next_action(*, classification: str, state: Mapping[str, Any]) -
     if classification in {BROKER_FLAT_WITH_WORKING_CLOSE, ORDER_STATE_UNKNOWN_REVIEW_REQUIRED}:
         return REVIEW_REQUIRED
     return WAIT
+
+
+def _active_order_states_from_current_truth(
+    *,
+    open_order_truth: Mapping[str, Any],
+    order_states: list[dict[str, Any]],
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    if not order_states or not _open_order_truth_proves_no_current_orders(open_order_truth):
+        return order_states, []
+    invalidated = [
+        _current_truth_invalidated_order_state(state=state, open_order_truth=open_order_truth)
+        for state in order_states
+    ]
+    return [], invalidated
+
+
+def _open_order_truth_proves_no_current_orders(open_order_truth: Mapping[str, Any]) -> bool:
+    summary = _mapping(open_order_truth.get("summary"))
+    open_order_count = _decimal_or_none(summary.get("open_order_count"))
+    return (
+        str(open_order_truth.get("canonical_refresh_scope") or "") == "GLOBAL_COMPLETE"
+        and str(open_order_truth.get("classification") or "") == "NO_OPEN_ORDERS"
+        and open_order_count == Decimal("0")
+        and not _list(open_order_truth.get("duplicate_close_order_groups"))
+    )
+
+
+def _current_truth_invalidated_order_state(
+    *,
+    state: Mapping[str, Any],
+    open_order_truth: Mapping[str, Any],
+) -> dict[str, Any]:
+    order = _mapping(state.get("order"))
+    row = dict(state)
+    row.update(
+        {
+            "historical_only": True,
+            "diagnostic_only": True,
+            "current_scope_active": False,
+            "invalidated_by_current_truth": True,
+            "invalidation_reason": "ORDER_ABSENT_FROM_GLOBAL_COMPLETE_OPEN_ORDER_TRUTH",
+            "order_identity": _order_identity(order or state),
+            "source_refs": {
+                "open_order_truth_classification": open_order_truth.get("classification"),
+                "open_order_truth_generated_at": open_order_truth.get("generated_at"),
+                "canonical_refresh_scope": open_order_truth.get("canonical_refresh_scope"),
+                "open_order_truth_summary": _mapping(open_order_truth.get("summary")),
+            },
+        }
+    )
+    return row
 
 
 def _source_stale(
