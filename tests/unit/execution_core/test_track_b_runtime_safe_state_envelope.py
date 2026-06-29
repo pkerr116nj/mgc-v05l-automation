@@ -6,6 +6,7 @@ from pathlib import Path
 
 from mgc_v05l.execution_core.track_b_runtime_safe_state_envelope import (
     SAFE_STATE_BROKER_MUTATION_LIMIT_HIT,
+    SAFE_STATE_DUPLICATE_INTENT_RISK,
     SAFE_STATE_HARD_HOLD,
     SAFE_STATE_LIFECYCLE_DISAGREEMENT_LIMIT_HIT,
     SAFE_STATE_NORMAL,
@@ -89,6 +90,40 @@ def test_broker_position_guardian_hard_hold_blocks_submit(tmp_path: Path) -> Non
     assert payload["entry_mutation_allowed"] is False
     assert payload["managed_close_mutation_allowed"] is False
     assert any(row["limit_id"] == "broker_position_guardian_hard_hold" for row in payload["tripped_limits"])
+
+
+def test_invalidated_guardian_hard_hold_is_diagnostic_only(tmp_path: Path) -> None:
+    _seed_base(tmp_path)
+    _write(
+        tmp_path / "outputs/track_b_execution_core/broker_position_guardian/latest_broker_position_guardian.json",
+        {
+            "generated_at": NOW.isoformat(),
+            "classification": "BROKER_POSITION_GUARDIAN_HARD_HOLD",
+            "hard_classifications": ["BROKER_LIFECYCLE_POSITION_MISMATCH"],
+            "current_truth_invalidation": {
+                "current_scope_active": False,
+                "diagnostic_only": True,
+                "invalidated_by_current_truth": True,
+                "invalidated_findings": [
+                    {
+                        "classification": "BROKER_LIFECYCLE_POSITION_MISMATCH",
+                        "historical_only": True,
+                        "diagnostic_only": True,
+                        "current_scope_active": False,
+                        "invalidated_by_current_truth": True,
+                    }
+                ],
+            },
+            "live_money_eligible": False,
+            "paper_proof_invoked": False,
+        },
+    )
+
+    payload = _build(tmp_path)
+
+    assert payload["safe_state_classification"] == SAFE_STATE_NORMAL
+    assert payload["tripped_limits"] == []
+    assert payload["submit_allowed"] is True
 
 
 def test_broker_position_guardian_hard_hold_allows_exact_managed_close_only(tmp_path: Path) -> None:
@@ -210,6 +245,139 @@ def test_too_many_submits_hits_broker_mutation_limit(tmp_path: Path) -> None:
     assert any(row["limit_id"] == "submits_per_symbol_per_window" for row in payload["tripped_limits"])
 
 
+def test_historical_managed_order_rows_do_not_count_toward_order_budget(tmp_path: Path) -> None:
+    _seed_base(tmp_path)
+    _write(
+        tmp_path / "outputs/track_b_execution_core/managed_orders/latest_managed_orders.json",
+        {
+            "generated_at": NOW.isoformat(),
+            "classification": "NO_MANAGED_ORDERS",
+            "managed_orders": [
+                {
+                    "broker_order_id": str(index),
+                    "historical_only": True,
+                    "diagnostic_only": True,
+                    "current_scope_active": False,
+                    "invalidated_by_current_truth": True,
+                }
+                for index in range(12)
+            ],
+            "summary": {"managed_order_count": 12, "working_close_order_count": 12},
+            "live_money_eligible": False,
+        },
+    )
+
+    payload = _build(tmp_path)
+
+    assert payload["safe_state_classification"] == SAFE_STATE_NORMAL
+    assert payload["limit_counters"]["orders_per_runtime_generation_id"] == 0
+    assert payload["tripped_limits"] == []
+
+
+def test_historical_managed_position_rows_do_not_count_toward_lane_limit(tmp_path: Path) -> None:
+    _seed_base(tmp_path)
+    _write(
+        tmp_path / "outputs/track_b_execution_core/managed_positions/latest_managed_positions.json",
+        {
+            "generated_at": NOW.isoformat(),
+            "classification": "NO_MANAGED_POSITIONS",
+            "managed_positions": [
+                {
+                    "strategy_lane_id": "lane-1",
+                    "classification": "OPEN_MANAGED",
+                    "historical_only": True,
+                    "diagnostic_only": True,
+                    "current_scope_active": False,
+                    "invalidated_by_current_truth": True,
+                },
+                {
+                    "strategy_lane_id": "lane-1",
+                    "classification": "OPEN_MANAGED",
+                    "historical_only": True,
+                    "diagnostic_only": True,
+                    "current_scope_active": False,
+                    "invalidated_by_current_truth": True,
+                },
+            ],
+            "live_money_eligible": False,
+        },
+    )
+
+    payload = _build(tmp_path)
+
+    assert payload["safe_state_classification"] == SAFE_STATE_NORMAL
+    assert payload["limit_counters"]["max_managed_open_positions_per_strategy_lane_observed"] == 0
+    assert payload["tripped_limits"] == []
+
+
+def test_invalidated_open_order_duplicate_classification_is_diagnostic_only(tmp_path: Path) -> None:
+    _seed_base(tmp_path)
+    _write(
+        tmp_path / "outputs/track_b_execution_core/open_order_truth/latest_open_order_truth.json",
+        {
+            "generated_at": NOW.isoformat(),
+            "classification": "DUPLICATE_CLOSE_ORDER",
+            "canonical_refresh_scope": "GLOBAL_COMPLETE",
+            "duplicate_close_order_groups": [{"duplicate_key": "DUM882026|MNQM6|SELL|1", "count": 2}],
+            "current_truth_invalidation": {
+                "current_scope_active": False,
+                "diagnostic_only": True,
+                "invalidated_by_current_truth": True,
+            },
+            "live_money_eligible": False,
+        },
+    )
+
+    payload = _build(tmp_path)
+
+    assert payload["safe_state_classification"] == SAFE_STATE_NORMAL
+    assert payload["limit_counters"]["duplicate_intent_attempts"] == 0
+    assert payload["tripped_limits"] == []
+
+
+def test_active_open_order_duplicate_classification_still_blocks(tmp_path: Path) -> None:
+    _seed_base(tmp_path)
+    _write(
+        tmp_path / "outputs/track_b_execution_core/open_order_truth/latest_open_order_truth.json",
+        {
+            "generated_at": NOW.isoformat(),
+            "classification": "DUPLICATE_CLOSE_ORDER",
+            "canonical_refresh_scope": "GLOBAL_COMPLETE",
+            "duplicate_close_order_groups": [{"duplicate_key": "DUM882026|MNQM6|SELL|1", "count": 2}],
+            "live_money_eligible": False,
+        },
+    )
+
+    payload = _build(tmp_path)
+
+    assert payload["safe_state_classification"] == SAFE_STATE_DUPLICATE_INTENT_RISK
+
+
+def test_invalidated_control_plane_duplicate_writer_is_diagnostic_only(tmp_path: Path) -> None:
+    _seed_base(tmp_path, duplicate_writer=True)
+    _write(
+        tmp_path / "outputs/track_b_execution_core/control_plane/latest_control_plane_snapshot.json",
+        {
+            "generated_at": NOW.isoformat(),
+            "control_plane_snapshot_id": "snapshot-1",
+            "safe_to_start_runtime": True,
+            "agent_health_has_duplicate_writer": True,
+            "duplicate_process_count": 2,
+            "current_truth_invalidation": {
+                "current_scope_active": False,
+                "diagnostic_only": True,
+                "invalidated_by_current_truth": True,
+            },
+            "live_money_eligible": False,
+        },
+    )
+
+    payload = _build(tmp_path)
+
+    assert payload["safe_state_classification"] == SAFE_STATE_NORMAL
+    assert payload["tripped_limits"] == []
+
+
 def test_lifecycle_disagreements_shift_to_observe_only(tmp_path: Path) -> None:
     _seed_base(tmp_path)
     _write(
@@ -226,6 +394,29 @@ def test_lifecycle_disagreements_shift_to_observe_only(tmp_path: Path) -> None:
     assert payload["safe_state_classification"] == SAFE_STATE_LIFECYCLE_DISAGREEMENT_LIMIT_HIT
     assert payload["observe_only"] is True
     assert payload["broker_mutation_allowed"] is False
+
+
+def test_invalidated_lifecycle_disagreement_counter_is_diagnostic_only(tmp_path: Path) -> None:
+    _seed_base(tmp_path)
+    _write(
+        tmp_path / "outputs/track_b_execution_core/lifecycle_state/latest_lifecycle_state_summary.json",
+        {
+            "generated_at": NOW.isoformat(),
+            "consecutive_reconciliation_disagreement_count": 3,
+            "current_truth_invalidation": {
+                "current_scope_active": False,
+                "diagnostic_only": True,
+                "invalidated_by_current_truth": True,
+            },
+            "live_money_eligible": False,
+        },
+    )
+
+    payload = _build(tmp_path)
+
+    assert payload["safe_state_classification"] == SAFE_STATE_NORMAL
+    assert payload["limit_counters"]["consecutive_lifecycle_reconciliation_disagreements"] == 0
+    assert payload["tripped_limits"] == []
 
 
 def test_position_limit_hit_hard_holds(tmp_path: Path) -> None:

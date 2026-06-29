@@ -271,23 +271,29 @@ def _limit_counters(*, inputs: Mapping[str, Mapping[str, Any]]) -> dict[str, Any
     lifecycle_summary = inputs["lifecycle_summary"]
     ledger_summary = inputs["ledger_summary"]
     runtime_generation_id = _runtime_generation_id(inputs)
-    managed_order_rows = _list(managed_orders.get("managed_orders"))
+    raw_managed_order_rows = _list(managed_orders.get("managed_orders"))
+    raw_open_order_rows = _list(open_order_truth.get("order_states")) or _list(open_order_truth.get("open_orders"))
+    managed_order_rows = _active_rows(raw_managed_order_rows)
+    open_order_rows = _active_rows(raw_open_order_rows)
     order_rows = _matching_generation_rows(
-        rows=managed_order_rows or _list(open_order_truth.get("order_states")) or _list(open_order_truth.get("open_orders")),
+        rows=managed_order_rows or open_order_rows,
         runtime_generation_id=runtime_generation_id,
     )
-    managed_position_rows = _list(managed_positions.get("managed_positions")) or _list(
-        managed_positions.get("positions")
+    managed_position_rows = _active_rows(
+        _list(managed_positions.get("managed_positions")) or _list(managed_positions.get("positions"))
     )
     open_position_counts = _open_position_counts(managed_position_rows)
     recent_attempts = _matching_generation_rows(
-        rows=_list(recovery_history.get("recent_attempts")),
+        rows=_active_rows(_list(recovery_history.get("recent_attempts"))),
         runtime_generation_id=runtime_generation_id,
     )
     return {
-        "orders_per_runtime_generation_id": len(order_rows)
-        or _summary_count(managed_orders, "managed_order_count")
-        or _summary_count(managed_orders, "working_close_order_count"),
+        "orders_per_runtime_generation_id": _order_count_for_counter(
+            order_rows=order_rows,
+            raw_managed_order_rows=raw_managed_order_rows,
+            raw_open_order_rows=raw_open_order_rows,
+            managed_orders=managed_orders,
+        ),
         "submits_per_symbol_per_window": _submits_per_symbol(strategy_report),
         "max_submits_per_symbol_per_window_observed": max(_submits_per_symbol(strategy_report).values(), default=0),
         "broker_mutation_attempts_per_window": _first_int(
@@ -303,15 +309,15 @@ def _limit_counters(*, inputs: Mapping[str, Mapping[str, Any]]) -> dict[str, Any
         "duplicate_intent_attempts": _first_int(
             strategy_report.get("duplicate_intent_attempts"),
             _summary_count(strategy_report, "duplicate_intent_attempt_count"),
-            len(_list(open_order_truth.get("duplicate_close_order_groups"))),
+            0 if _current_scope_inactive(open_order_truth) else len(_list(open_order_truth.get("duplicate_close_order_groups"))),
         ),
         "managed_open_positions_per_strategy_lane": open_position_counts,
         "max_managed_open_positions_per_strategy_lane_observed": max(open_position_counts.values(), default=0),
         "consecutive_lifecycle_reconciliation_disagreements": _first_int(
-            lifecycle_summary.get("consecutive_reconciliation_disagreement_count"),
-            reconciliation.get("consecutive_lifecycle_reconciliation_disagreements"),
-            ledger_summary.get("consecutive_lifecycle_reconciliation_disagreements"),
-            _summary_count(reconciliation, "review_required_count"),
+            _active_value(lifecycle_summary, "consecutive_reconciliation_disagreement_count"),
+            _active_value(reconciliation, "consecutive_lifecycle_reconciliation_disagreements"),
+            _active_value(ledger_summary, "consecutive_lifecycle_reconciliation_disagreements"),
+            0 if _current_scope_inactive(reconciliation) else _summary_count(reconciliation, "review_required_count"),
         ),
         "recovery_attempts_per_runtime_generation": len(recent_attempts)
         or _first_int(recovery_history.get("runtime_generation_attempt_count"), _summary_count(recovery_history, "attempt_count")),
@@ -328,7 +334,7 @@ def _tripped_limits(
     if _live_money_eligible(inputs):
         rows.append(_limit("live_money_eligible", SAFE_STATE_HARD_HOLD, True, False, "Live-money route is prohibited."))
     guardian = inputs["broker_position_guardian"]
-    if guardian.get("classification") == BROKER_POSITION_GUARDIAN_HARD_HOLD:
+    if _active_classification(guardian) == BROKER_POSITION_GUARDIAN_HARD_HOLD:
         rows.append(
             _limit(
                 "broker_position_guardian_hard_hold",
@@ -445,7 +451,7 @@ def _classify(*, inputs: Mapping[str, Mapping[str, Any]], tripped_limits: Sequen
         return SAFE_STATE_RECOVERY_ONLY
     if SAFE_STATE_OBSERVE_ONLY in classifications:
         return SAFE_STATE_OBSERVE_ONLY
-    if _classification(inputs["open_order_truth"]) in {"DUPLICATE_CLOSE_ORDER", "SUSPICIOUS_ORDER_STATE"}:
+    if _active_classification(inputs["open_order_truth"]) in {"DUPLICATE_CLOSE_ORDER", "SUSPICIOUS_ORDER_STATE"}:
         return SAFE_STATE_DUPLICATE_INTENT_RISK
     return SAFE_STATE_NORMAL
 
@@ -603,6 +609,8 @@ def _runtime_generation_id(inputs: Mapping[str, Mapping[str, Any]]) -> str:
 
 
 def _runtime_stale_with_broker_exposure(snapshot: Mapping[str, Any]) -> bool:
+    if _current_scope_inactive(snapshot):
+        return False
     return (
         snapshot.get("runtime_authority_stale_with_broker_exposure") is True
         or str(snapshot.get("runtime_authority_exposure_classification") or "")
@@ -621,6 +629,20 @@ def _submits_per_symbol(payload: Mapping[str, Any]) -> dict[str, int]:
         symbol = str(row.get("symbol") or row.get("contract_symbol") or row.get("target_symbol") or "UNKNOWN")
         counts[symbol] = counts.get(symbol, 0) + 1
     return counts
+
+
+def _order_count_for_counter(
+    *,
+    order_rows: Sequence[Mapping[str, Any]],
+    raw_managed_order_rows: Sequence[Any],
+    raw_open_order_rows: Sequence[Any],
+    managed_orders: Mapping[str, Any],
+) -> int:
+    if raw_managed_order_rows or raw_open_order_rows:
+        return len(order_rows)
+    return _summary_count(managed_orders, "managed_order_count") or _summary_count(
+        managed_orders, "working_close_order_count"
+    )
 
 
 def _open_position_counts(rows: Sequence[Any]) -> dict[str, int]:
@@ -653,6 +675,8 @@ def _live_money_eligible(inputs: Mapping[str, Mapping[str, Any]]) -> bool:
 
 def _duplicate_writer(inputs: Mapping[str, Mapping[str, Any]]) -> bool:
     snapshot = inputs["control_plane_snapshot"]
+    if _current_scope_inactive(snapshot):
+        return False
     if snapshot.get("agent_health_has_duplicate_writer") is True:
         return True
     if _as_int(snapshot.get("duplicate_process_count")) > 0:
@@ -714,6 +738,12 @@ def _summary_count(payload: Mapping[str, Any], key: str) -> int:
     return _as_int(_mapping(payload.get("summary")).get(key))
 
 
+def _active_value(payload: Mapping[str, Any], key: str) -> Any:
+    if _current_scope_inactive(payload):
+        return 0
+    return payload.get(key)
+
+
 def _first_int(*values: Any) -> int:
     for value in values:
         parsed = _as_int(value)
@@ -724,6 +754,37 @@ def _first_int(*values: Any) -> int:
 
 def _classification(payload: Mapping[str, Any]) -> str:
     return str(payload.get("classification") or "")
+
+
+def _active_classification(payload: Mapping[str, Any]) -> str:
+    if _current_scope_inactive(payload):
+        return ""
+    return _classification(payload)
+
+
+def _active_rows(rows: Sequence[Any]) -> list[Any]:
+    return [row for row in rows if not _current_scope_inactive(_mapping(row))]
+
+
+def _current_scope_inactive(payload: Mapping[str, Any]) -> bool:
+    if not payload:
+        return False
+    if payload.get("historical_only") is True:
+        return True
+    if payload.get("diagnostic_only") is True:
+        return True
+    if payload.get("current_scope_active") is False:
+        return True
+    if payload.get("invalidated_by_current_truth") is True:
+        return True
+    invalidation = _mapping(payload.get("current_truth_invalidation"))
+    if not invalidation:
+        return False
+    return (
+        invalidation.get("current_scope_active") is False
+        and invalidation.get("diagnostic_only") is True
+        and invalidation.get("invalidated_by_current_truth") is True
+    )
 
 
 def _contains_true(value: Any, key: str) -> bool:
