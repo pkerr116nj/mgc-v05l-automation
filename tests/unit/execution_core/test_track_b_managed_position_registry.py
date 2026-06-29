@@ -2028,6 +2028,39 @@ def test_current_truth_invalidation_marks_flat_managed_projection_historical() -
     assert invalidated[0]["source_refs"]["broker_positions_complete"] is True
 
 
+def test_current_truth_invalidation_keeps_historical_rows_out_of_active_projection() -> None:
+    row = {
+        "account_id": "DUM882026",
+        "symbol": "ZN",
+        "local_symbol": "ZNU6",
+        "con_id": 800111222,
+        "classification": OPEN_MANAGED_EXIT_DUE,
+        "exit_due": True,
+        "historical_only": True,
+        "diagnostic_only": True,
+        "current_scope_active": False,
+        "invalidated_by_current_truth": True,
+    }
+
+    active, invalidated = managed_position_registry_module._active_managed_positions_from_current_position_truth(
+        managed_positions=[row],
+        broker_positions=[],
+        positions_snapshot={
+            "generated_at": NOW.isoformat(),
+            "positions_complete": True,
+            "ok": True,
+            "selected_account_id": "DUM882026",
+            "positions": [],
+        },
+        open_order_truth={"classification": "NO_OPEN_ORDERS", "canonical_refresh_scope": "GLOBAL_COMPLETE"},
+        fresh_broker_positions_complete=True,
+        now=NOW,
+    )
+
+    assert active == []
+    assert invalidated == [row]
+
+
 def test_current_truth_invalidation_keeps_current_nonzero_broker_position() -> None:
     broker = {
         "account_id": "DUM882026",

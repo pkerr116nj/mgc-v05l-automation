@@ -32,6 +32,7 @@ from mgc_v05l.execution_core.track_b_pre_restart_exposure_reconciliation import 
 from mgc_v05l.execution_core.track_b_current_exposure_owner_resolver import (
     apply_current_exposure_owner_lifecycle_overlay,
 )
+from mgc_v05l.execution_core.track_b_dmc_active_authority import is_active_authority_row
 from mgc_v05l.execution_core.track_b_projection_metadata import build_projection_metadata
 from mgc_v05l.execution_core.track_b_live_trade_registry import load_live_trade_registry_records
 from mgc_v05l.execution_core.track_b_terminal_registry_truth import (
@@ -1452,6 +1453,9 @@ def _active_managed_positions_from_current_position_truth(
         if not isinstance(position, Mapping):
             continue
         row = dict(position)
+        if not is_active_authority_row(row):
+            invalidated.append(row)
+            continue
         if _current_broker_position_matches(row=row, broker_positions=current_brokers):
             retained.append(row)
             continue
