@@ -22,6 +22,7 @@ from .track_b_phase1_submit_authority import evaluate_phase1_broker_reconciliati
 from ..execution_core.phase1_gc_paper_candidate_registry import (
     is_phase1_gc_guarded_paper_eligible_strategy,
 )
+from ..execution_core.bounded_snapshot import write_bounded_snapshot_json
 from ..execution_core.track_b_runtime_authority_resolver import (
     RuntimeAuthorityResolverConfig,
     resolve_track_b_runtime_authority,
@@ -65,6 +66,7 @@ _DEFAULT_PAPER_RUNTIME_TRUTH_PATH = Path("outputs") / "probationary_pattern_engi
 _PERFORMANCE_CSV = "per_strategy_paper_performance.csv"
 _STATUS_JSON = "per_strategy_paper_status.json"
 _PROBATION_DASHBOARD_JSON = "strategy_probation_dashboard.json"
+_PROBATION_DASHBOARD_DIAGNOSTIC_JSON = "strategy_probation_dashboard_bounded_snapshot_diagnostic.json"
 _PAUSE_REASONS_CSV = "strategy_pause_reasons.csv"
 _REPORT_MD = "strategy_performance_governance_report.md"
 _AUDIT_JSONL = "ibkr_paper_strategy_governance_audit.jsonl"
@@ -456,7 +458,7 @@ def write_ibkr_paper_strategy_governance_artifacts(
     _write_csv(output_dir / _ROUTING_POLICY_REPORT_CSV, [_routing_policy_row(row) for row in artifacts.performance_rows])
     _write_csv(output_dir / _LOCAL_ONLY_AUDIT_CSV, [_local_only_audit_row(row) for row in artifacts.performance_rows if row.get("current_routing_mode") != "IBKR_ROUTED"])
     (output_dir / _STATUS_JSON).write_text(json.dumps(artifacts.status_payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-    (output_dir / _PROBATION_DASHBOARD_JSON).write_text(json.dumps(artifacts.probation_dashboard, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    _write_strategy_probation_dashboard(output_dir / _PROBATION_DASHBOARD_JSON, artifacts.probation_dashboard)
     _write_csv(output_dir / _PAUSE_REASONS_CSV, artifacts.pause_rows)
     (output_dir / _REPORT_MD).write_text(render_ibkr_paper_strategy_governance_markdown(artifacts.report) + "\n", encoding="utf-8")
     (output_dir / _ROUTING_POLICY_REPORT_MD).write_text(render_paper_lane_routing_policy_markdown(artifacts.report) + "\n", encoding="utf-8")
@@ -471,8 +473,16 @@ def write_ibkr_paper_strategy_governance_artifacts(
     status_path.write_text(json.dumps(artifacts.status_payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     dashboard_path = config.repo_root / config.var_dashboard_path
     dashboard_path.parent.mkdir(parents=True, exist_ok=True)
-    dashboard_path.write_text(json.dumps(artifacts.probation_dashboard, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    _write_strategy_probation_dashboard(dashboard_path, artifacts.probation_dashboard)
     _write_csv(config.repo_root / config.var_performance_path, artifacts.performance_rows)
+
+
+def _write_strategy_probation_dashboard(path: Path, payload: dict[str, Any]) -> None:
+    write_bounded_snapshot_json(
+        path,
+        payload,
+        diagnostic_path=path.with_name(_PROBATION_DASHBOARD_DIAGNOSTIC_JSON),
+    )
 
 
 def load_paper_strategy_governance_status(*, repo_root: Path, strategy_id: str | None = None) -> dict[str, Any]:

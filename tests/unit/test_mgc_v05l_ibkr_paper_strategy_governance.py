@@ -7,6 +7,7 @@ import pytest
 
 import mgc_v05l.execution.ibkr_paper_strategy_governance as governance_module
 from mgc_v05l.execution.ibkr_paper_strategy_governance import (
+    IbkrPaperStrategyGovernanceArtifacts,
     IbkrPaperStrategyGovernanceConfig,
     load_paper_strategy_governance_status,
     run_ibkr_paper_strategy_governance,
@@ -818,6 +819,50 @@ def test_write_artifacts_and_load_by_bridge_strategy_id(tmp_path: Path) -> None:
     payload = load_paper_strategy_governance_status(repo_root=tmp_path, strategy_id="ATP_COMPANION_V1_ASIA_US")
     assert payload["selected_strategy"]["strategy_id"] == "atp_companion_v1_asia_us"
     assert payload["selected_strategy"]["bridge_strategy_id"] == "ATP_COMPANION_V1_ASIA_US"
+
+
+def test_write_artifacts_bounds_strategy_probation_dashboard_snapshot(tmp_path: Path) -> None:
+    config = _config(tmp_path)
+    artifacts = IbkrPaperStrategyGovernanceArtifacts(
+        classification="PAPER_STRATEGY_GOVERNANCE_READY",
+        report={},
+        performance_rows=[],
+        status_payload={"generated_at": "2026-06-30T00:00:00+00:00", "classification": "READY"},
+        probation_dashboard={
+            "generated_at": "2026-06-30T00:00:00+00:00",
+            "classification": "PAPER_STRATEGY_GOVERNANCE_READY",
+            "routing_policy_classification": "PAPER_LANE_ROUTING_POLICY_READY",
+            "summary": {"status_counts": {"PROBATION_ACTIVE": 1}},
+            "active_rows": [
+                {
+                    "strategy_id": "mgc_globex_active_participation_long",
+                    "lane_id": "mgc_globex_active_participation_long",
+                    "instrument": "MGC",
+                    "strategy_status": "PROBATION_ACTIVE",
+                    "current_routing_mode": "IBKR_ROUTED",
+                    "submit_allowed": True,
+                    "backend_source_readiness": {"heavy": [{"payload": "x" * 50_000} for _ in range(300)]},
+                }
+            ],
+            "blocked_rows": [],
+            "full_evidence_trace": [{"payload": "z" * 50_000} for _ in range(300)],
+        },
+        pause_rows=[],
+        audit_events=[],
+    )
+
+    write_ibkr_paper_strategy_governance_artifacts(config=config, artifacts=artifacts)
+
+    output_dashboard = tmp_path / "outputs" / "reports" / "ibkr_strategy_governance" / "strategy_probation_dashboard.json"
+    var_dashboard = tmp_path / "var" / "strategy_probation_dashboard.json"
+    for path in (output_dashboard, var_dashboard):
+        assert path.stat().st_size <= 5 * 1024 * 1024
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        assert payload["classification"] == "PAPER_STRATEGY_GOVERNANCE_READY"
+        assert payload["active_rows"][0]["strategy_id"] == "mgc_globex_active_participation_long"
+        assert payload["active_rows"][0]["submit_allowed"] is True
+        assert payload["_bounded_snapshot"]["degraded"] is True
+        assert (path.parent / "strategy_probation_dashboard_bounded_snapshot_diagnostic.json").exists()
 
 
 def test_load_status_blocks_when_file_missing(tmp_path: Path) -> None:

@@ -180,3 +180,59 @@ def test_structured_logger_blocked_intent_latest_uses_bounded_snapshot(tmp_path:
     assert written["lane_id"] == "mnq_us_active_participation_long"
     assert written["_bounded_snapshot"]["degraded"] is True
     assert (tmp_path / "blocked_strategy_intent_bounded_snapshot_diagnostic.json").exists()
+
+
+def test_bounded_snapshot_compacts_strategy_probation_dashboard_rows(tmp_path: Path) -> None:
+    path = tmp_path / "strategy_probation_dashboard.json"
+    payload = {
+        "generated_at": "2026-06-30T00:00:00+00:00",
+        "classification": "PAPER_STRATEGY_GOVERNANCE_READY",
+        "routing_policy_classification": "PAPER_LANE_ROUTING_POLICY_READY",
+        "summary": {
+            "status_counts": {"PROBATION_ACTIVE": 1},
+            "routing_mode_counts": {"IBKR_ROUTED": 1},
+        },
+        "active_rows": [
+            {
+                "strategy_id": "mgc_globex_active_participation_long",
+                "lane_id": "mgc_globex_active_participation_long",
+                "instrument": "MGC",
+                "strategy_status": "PROBATION_ACTIVE",
+                "current_routing_mode": "IBKR_ROUTED",
+                "submit_allowed": True,
+                "backend_source_readiness": {"heavy": [{"payload": "x" * 1000} for _ in range(100)]},
+            }
+        ],
+        "blocked_rows": [
+            {
+                "strategy_id": "es_us_active_participation_short",
+                "lane_id": "es_us_active_participation_short",
+                "instrument": "ES",
+                "strategy_status": "DEGRADED",
+                "current_routing_mode": "IBKR_ROUTED",
+                "submit_allowed": False,
+                "submit_block_reasons": ["source_market_data_stale"],
+                "bridge_gate_trace": [{"payload": "y" * 1000} for _ in range(100)],
+            }
+        ],
+        "full_evidence_trace": [{"payload": "z" * 1000} for _ in range(100)],
+    }
+
+    result = write_bounded_snapshot_json(
+        path,
+        payload,
+        config=BoundedSnapshotConfig(max_bytes=5000, target_bytes=2400, max_items=8, max_string_chars=120),
+    )
+
+    assert result.degraded is True
+    assert path.stat().st_size <= 5000
+    written = _read_json(path)
+    assert written["classification"] == "PAPER_STRATEGY_GOVERNANCE_READY"
+    assert written["routing_policy_classification"] == "PAPER_LANE_ROUTING_POLICY_READY"
+    assert written["summary"]["status_counts"]["PROBATION_ACTIVE"] == 1
+    assert written["active_rows"][0]["strategy_id"] == "mgc_globex_active_participation_long"
+    assert written["active_rows"][0]["submit_allowed"] is True
+    assert "backend_source_readiness" in written["active_rows"][0]["_bounded_snapshot_omitted_keys"]
+    assert written["blocked_rows"][0]["submit_block_reasons"] == ["source_market_data_stale"]
+    assert "bridge_gate_trace" in written["blocked_rows"][0]["_bounded_snapshot_omitted_keys"]
+    assert "full_evidence_trace" in written["_bounded_snapshot"]["omitted_sections"]

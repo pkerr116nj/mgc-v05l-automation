@@ -127,11 +127,25 @@ def _degraded_snapshot(
         "runtime_pid",
         "git_head",
         "strategy_id",
+        "strategy_count",
         "lane_id",
+        "lane_count",
         "strategy_family",
         "instrument",
         "symbol",
         "side",
+        "classification",
+        "dashboard_classification",
+        "dashboard_status",
+        "routing_policy_classification",
+        "paper_monitor_health",
+        "paper_monitor_stale",
+        "legacy_monitor_authority",
+        "submit_capable_count",
+        "active_count",
+        "blocked_count",
+        "warning_count",
+        "error_count",
         "order_intent_id",
         "intent_type",
         "signal_id",
@@ -179,10 +193,26 @@ def _degraded_snapshot(
     for key, value in payload.items():
         if key in preserve_keys:
             degraded[key] = _compact_value(value, depth=0, config=config)
+        elif key in {
+            "active_rows",
+            "blocked_rows",
+            "ibkr_routed_rows",
+            "internal_only_rows",
+            "paused_or_disabled_rows",
+            "performance_rows",
+            "rows",
+            "strategies",
+            "strategy_rows",
+        } and isinstance(value, list):
+            degraded[key] = [_compact_dashboard_row(row, config=config) for row in value[: config.max_items]]
+            if len(value) > config.max_items:
+                omitted.append(f"{key}[{config.max_items}:]")
         elif key == "lanes" and isinstance(value, list):
             degraded[key] = [_compact_lane(row, config=config) for row in value[: config.max_items]]
             if len(value) > config.max_items:
                 omitted.append(f"lanes[{config.max_items}:]")
+        elif key in {"summary", "counts", "top_findings", "warnings", "errors"}:
+            degraded[key] = _compact_value(value, depth=0, config=config)
         elif key.endswith("_path") or key.endswith("_paths"):
             degraded[key] = _compact_value(value, depth=0, config=config)
         else:
@@ -261,6 +291,53 @@ def _compact_lane(row: Any, *, config: BoundedSnapshotConfig) -> Any:
         "startup_reconciliation_classification",
         "quarantine_state",
         "quarantined",
+    }
+    compact = {key: _compact_value(value, depth=0, config=config) for key, value in row.items() if key in keep}
+    omitted = sorted(str(key) for key in row if key not in keep)
+    if omitted:
+        compact["_bounded_snapshot_omitted_keys"] = omitted[: config.max_items]
+        compact["_bounded_snapshot_omitted_key_count"] = len(omitted)
+    return compact
+
+
+def _compact_dashboard_row(row: Any, *, config: BoundedSnapshotConfig) -> Any:
+    if not isinstance(row, Mapping):
+        return _compact_value(row, depth=0, config=config)
+    keep = {
+        "strategy_id",
+        "bridge_strategy_id",
+        "lane_id",
+        "display_name",
+        "instrument",
+        "symbol",
+        "side",
+        "session",
+        "strategy_family",
+        "strategy_status",
+        "current_routing_mode",
+        "current_order_destination",
+        "execution_mode",
+        "submit_allowed",
+        "strategy_approved",
+        "paper_strategy_approved",
+        "approved_phase1_strategy",
+        "ibkr_bridge_submit_capable",
+        "paper_candidate_scope",
+        "live_money_eligible",
+        "paper_proof_invoked",
+        "submit_block_reasons",
+        "pause_reasons",
+        "backend_source_readiness_detail",
+        "broker_session_authority_classification",
+        "broker_session_connection_mode",
+        "broker_session_submit_alignment",
+        "phase1_broker_reconciliation_gate",
+        "routing_policy_classification",
+        "orders_today",
+        "orders_this_week",
+        "realized_pnl",
+        "unrealized_pnl",
+        "drawdown",
     }
     compact = {key: _compact_value(value, depth=0, config=config) for key, value in row.items() if key in keep}
     omitted = sorted(str(key) for key in row if key not in keep)
