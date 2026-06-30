@@ -64,6 +64,7 @@ from .ibkr_position_reconciliation import (
 from .ibkr_read_only_verifier import _wait_for_connection_ready, IbkrReadOnlyApiTransportConfig
 from .track_b_phase1_submit_authority import evaluate_phase1_broker_reconciliation_submit_gate
 from ..execution_core.track_b_atomic_io import write_json_atomic
+from ..execution_core.bounded_snapshot import write_bounded_snapshot_json
 from ..execution_core.track_b_broker_availability import (
     BrokerAvailabilityReportConfig,
     build_broker_availability_report,
@@ -221,6 +222,7 @@ _ACTIVE_EVIDENCE_PARTICIPATION_LANE_IDS = {
 }
 _SCHEMA_ACTIONS = {"BUY", "SELL", "HOLD", "EXIT", "NO_ACTION"}
 _ARTIFACT_STEM = "ibkr_paper_strategy_bridge"
+_BRIDGE_REPORT_DIAGNOSTIC_JSON = f"{_ARTIFACT_STEM}_report_bounded_snapshot_diagnostic.json"
 _KNOWN_MANAGED_EXIT_STATE_PATH = (
     Path("outputs")
     / "track_b_execution_core"
@@ -1637,9 +1639,10 @@ def write_ibkr_paper_strategy_bridge_artifacts(
 ) -> None:
     reports_dir = Path(output_dir)
     reports_dir.mkdir(parents=True, exist_ok=True)
-    (reports_dir / f"{_ARTIFACT_STEM}_report.json").write_text(
-        json.dumps(artifacts.report, indent=2, sort_keys=True),
-        encoding="utf-8",
+    write_bounded_snapshot_json(
+        reports_dir / f"{_ARTIFACT_STEM}_report.json",
+        artifacts.report,
+        diagnostic_path=reports_dir / _BRIDGE_REPORT_DIAGNOSTIC_JSON,
     )
     (reports_dir / f"{_ARTIFACT_STEM}_report.md").write_text(
         render_ibkr_paper_strategy_bridge_markdown(artifacts.report),

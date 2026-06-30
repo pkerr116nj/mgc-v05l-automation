@@ -134,6 +134,15 @@ def _degraded_snapshot(
         "instrument",
         "symbol",
         "side",
+        "selected_account_id",
+        "current_position_quantity",
+        "broker_effect_classification",
+        "control_plane_snapshot_id",
+        "shared_truth_generation_id",
+        "callback_timeline_event_count",
+        "dashboard_projection_consumed",
+        "runtime_supervised",
+        "bridge_direct_invocation",
         "classification",
         "dashboard_classification",
         "dashboard_status",
@@ -190,9 +199,49 @@ def _degraded_snapshot(
         "last_processed_bar_end_ts",
         "current_detected_session",
     }
+    compact_dict_keys = {
+        "account_truth",
+        "caller_gate",
+        "caller_metadata",
+        "connection_diagnostics",
+        "entry_attempt_memory",
+        "entry_execution_pricing",
+        "environment",
+        "environment_lock_check",
+        "exact_contract_report",
+        "exit_attempt_policy",
+        "exit_execution_pricing",
+        "futures_contract_resolver_status",
+        "intent",
+        "open_orders",
+        "paper_strategy_exposure_status",
+        "paper_strategy_governance_status",
+        "paper_strategy_monitor_status",
+        "positions",
+        "pre_action_snapshot_validation",
+        "qualified_contract_report",
+        "quote_context",
+        "runtime_control_plane_authorization",
+        "strategy_identity",
+    }
+    compact_list_keys = {
+        "errors",
+        "live_trade_registry_events",
+        "preflight_checks",
+    }
     for key, value in payload.items():
         if key in preserve_keys:
             degraded[key] = _compact_value(value, depth=0, config=config)
+        elif key in compact_dict_keys and isinstance(value, dict):
+            degraded[key] = _compact_value(value, depth=0, config=config)
+        elif key in compact_list_keys and isinstance(value, list):
+            degraded[key] = [_compact_value(row, depth=0, config=config) for row in value[: config.max_items]]
+            if len(value) > config.max_items:
+                omitted.append(f"{key}[{config.max_items}:]")
+        elif key == "delegated_result" and isinstance(value, dict):
+            degraded[key] = _compact_bridge_delegated_result(value, config=config)
+        elif key == "prepared_submit_bundle" and isinstance(value, dict):
+            degraded[key] = _compact_prepared_submit_bundle(value, config=config)
         elif key in {
             "active_rows",
             "blocked_rows",
@@ -244,6 +293,18 @@ def _minimal_snapshot(
         "runtime_instance_id": source.get("runtime_instance_id"),
         "runtime_pid": source.get("runtime_pid"),
         "git_head": source.get("git_head"),
+        "classification": source.get("classification"),
+        "selected_account_id": source.get("selected_account_id"),
+        "current_position_quantity": source.get("current_position_quantity"),
+        "broker_effect_classification": source.get("broker_effect_classification"),
+        "intent": _compact_value(source.get("intent"), depth=0, config=config) if isinstance(source.get("intent"), dict) else {},
+        "strategy_identity": _compact_value(source.get("strategy_identity"), depth=0, config=config) if isinstance(source.get("strategy_identity"), dict) else {},
+        "environment": _compact_value(source.get("environment"), depth=0, config=config) if isinstance(source.get("environment"), dict) else {},
+        "caller_metadata": _compact_value(source.get("caller_metadata"), depth=0, config=config) if isinstance(source.get("caller_metadata"), dict) else {},
+        "qualified_contract_report": _compact_value(source.get("qualified_contract_report"), depth=0, config=config) if isinstance(source.get("qualified_contract_report"), dict) else {},
+        "exact_contract_report": _compact_value(source.get("exact_contract_report"), depth=0, config=config) if isinstance(source.get("exact_contract_report"), dict) else {},
+        "entry_execution_pricing": _compact_value(source.get("entry_execution_pricing"), depth=0, config=config) if isinstance(source.get("entry_execution_pricing"), dict) else {},
+        "delegated_result": _compact_bridge_delegated_result(source.get("delegated_result"), config=config) if isinstance(source.get("delegated_result"), dict) else None,
         "active_lane_ids": source.get("active_lane_ids") if isinstance(source.get("active_lane_ids"), list) else [],
         "paper_lane_count": source.get("paper_lane_count"),
         "health": source.get("health") if isinstance(source.get("health"), dict) else {},
@@ -341,6 +402,77 @@ def _compact_dashboard_row(row: Any, *, config: BoundedSnapshotConfig) -> Any:
     }
     compact = {key: _compact_value(value, depth=0, config=config) for key, value in row.items() if key in keep}
     omitted = sorted(str(key) for key in row if key not in keep)
+    if omitted:
+        compact["_bounded_snapshot_omitted_keys"] = omitted[: config.max_items]
+        compact["_bounded_snapshot_omitted_key_count"] = len(omitted)
+    return compact
+
+
+def _compact_bridge_delegated_result(value: Any, *, config: BoundedSnapshotConfig) -> Any:
+    if not isinstance(value, Mapping):
+        return _compact_value(value, depth=0, config=config)
+    keep = {
+        "classification",
+        "broker_effect_classification",
+        "entry_execution_pricing",
+        "execution_id",
+        "fill_price",
+        "filled_quantity",
+        "order_id",
+        "perm_id",
+        "status",
+        "submitted_order_id",
+    }
+    compact = {key: _compact_value(item, depth=0, config=config) for key, item in value.items() if key in keep}
+    report = value.get("report")
+    if isinstance(report, Mapping):
+        compact["report"] = _compact_bridge_delegate_report(report, config=config)
+    omitted = sorted(str(key) for key in value if key not in keep and key != "report")
+    if omitted:
+        compact["_bounded_snapshot_omitted_keys"] = omitted[: config.max_items]
+        compact["_bounded_snapshot_omitted_key_count"] = len(omitted)
+    return compact
+
+
+def _compact_bridge_delegate_report(report: Mapping[str, Any], *, config: BoundedSnapshotConfig) -> dict[str, Any]:
+    keep = {
+        "classification",
+        "generated_at",
+        "submit_cancel_lifecycle",
+        "latest_order_status",
+        "open_order_after_submit",
+        "open_order_after_cancel",
+        "execution_truth",
+        "preview_payload",
+        "order_state",
+        "warning_text",
+        "why_held",
+        "reject_reason",
+        "advanced_reject_json",
+    }
+    compact = {key: _compact_value(item, depth=0, config=config) for key, item in report.items() if key in keep}
+    omitted = sorted(str(key) for key in report if key not in keep)
+    if omitted:
+        compact["_bounded_snapshot_omitted_keys"] = omitted[: config.max_items]
+        compact["_bounded_snapshot_omitted_key_count"] = len(omitted)
+    return compact
+
+
+def _compact_prepared_submit_bundle(value: Any, *, config: BoundedSnapshotConfig) -> Any:
+    if not isinstance(value, Mapping):
+        return _compact_value(value, depth=0, config=config)
+    keep = {
+        "frozen_preview_path",
+        "preview_digest",
+        "bundle_path",
+        "approval_digest",
+        "approval_phrase_present",
+        "intent",
+        "contract",
+        "order",
+    }
+    compact = {key: _compact_value(item, depth=0, config=config) for key, item in value.items() if key in keep}
+    omitted = sorted(str(key) for key in value if key not in keep)
     if omitted:
         compact["_bounded_snapshot_omitted_keys"] = omitted[: config.max_items]
         compact["_bounded_snapshot_omitted_key_count"] = len(omitted)

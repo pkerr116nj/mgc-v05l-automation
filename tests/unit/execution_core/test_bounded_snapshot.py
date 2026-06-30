@@ -236,3 +236,55 @@ def test_bounded_snapshot_compacts_strategy_probation_dashboard_rows(tmp_path: P
     assert written["blocked_rows"][0]["submit_block_reasons"] == ["source_market_data_stale"]
     assert "bridge_gate_trace" in written["blocked_rows"][0]["_bounded_snapshot_omitted_keys"]
     assert "full_evidence_trace" in written["_bounded_snapshot"]["omitted_sections"]
+
+
+def test_bounded_snapshot_compacts_ibkr_bridge_report_evidence(tmp_path: Path) -> None:
+    path = tmp_path / "ibkr_paper_strategy_bridge_report.json"
+    payload = {
+        "classification": "PAPER_STRATEGY_ORDER_FILLED",
+        "generated_at": "2026-06-30T00:00:00+00:00",
+        "selected_account_id": "DUM882026",
+        "current_position_quantity": 0.0,
+        "intent": {
+            "strategy_id": "mgc_globex_active_participation_long",
+            "symbol": "MGC",
+            "action": "BUY",
+            "quantity": 1.0,
+        },
+        "qualified_contract_report": {
+            "qualified_contract": {"con_id": 732156883, "local_symbol": "MGCQ6"},
+            "api_contract_details": [{"payload": "x" * 1000} for _ in range(100)],
+        },
+        "delegated_result": {
+            "classification": "PAPER_ORDER_FILLED",
+            "report": {
+                "classification": "PAPER_ORDER_FILLED",
+                "submit_cancel_lifecycle": {"submitted_order_id": 321, "perm_id": 123456},
+                "latest_order_status": {"status": "Filled", "filled": 1},
+                "callback_timeline": [{"payload": "y" * 1000} for _ in range(100)],
+            },
+            "raw_transport_dump": [{"payload": "z" * 1000} for _ in range(100)],
+        },
+        "paper_strategy_governance_status": {"strategies": [{"payload": "a" * 1000} for _ in range(100)]},
+        "runtime_control_plane_authorization": {"snapshot": [{"payload": "b" * 1000} for _ in range(100)]},
+    }
+
+    result = write_bounded_snapshot_json(
+        path,
+        payload,
+        config=BoundedSnapshotConfig(max_bytes=7000, target_bytes=3500, max_items=8, max_string_chars=120),
+    )
+
+    assert result.degraded is True
+    assert path.stat().st_size <= 7000
+    written = _read_json(path)
+    assert written["classification"] == "PAPER_STRATEGY_ORDER_FILLED"
+    assert written["selected_account_id"] == "DUM882026"
+    assert written["intent"]["strategy_id"] == "mgc_globex_active_participation_long"
+    assert written["qualified_contract_report"]["qualified_contract"]["local_symbol"] == "MGCQ6"
+    delegated = written["delegated_result"]
+    assert delegated["classification"] == "PAPER_ORDER_FILLED"
+    assert delegated["report"]["submit_cancel_lifecycle"]["submitted_order_id"] == 321
+    assert delegated["report"]["latest_order_status"]["status"] == "Filled"
+    assert "raw_transport_dump" in delegated["_bounded_snapshot_omitted_keys"]
+    assert "callback_timeline" in delegated["report"]["_bounded_snapshot_omitted_keys"]

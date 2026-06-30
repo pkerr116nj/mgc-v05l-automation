@@ -15,6 +15,7 @@ from mgc_v05l.execution.ibkr_manual_paper_submit import (
     frozen_preview_path_for_config,
 )
 from mgc_v05l.execution.ibkr_paper_strategy_bridge import (
+    IbkrPaperStrategyBridgeArtifacts,
     IbkrPaperStrategyBridgeConfig,
     IbkrPaperStrategyOrderIntent,
     _build_entry_attempt_memory,
@@ -7768,6 +7769,54 @@ def test_write_artifacts_and_markdown(tmp_path: Path) -> None:
     markdown = render_ibkr_paper_strategy_bridge_markdown(payload)
     assert "PAPER_STRATEGY_BRIDGE_READY" in markdown
     assert (tmp_path / "per_strategy_paper_status_summary.json").exists()
+    assert (tmp_path / "ibkr_paper_strategy_bridge_audit.jsonl").exists()
+
+
+def test_write_artifacts_bounds_bridge_report_snapshot(tmp_path: Path) -> None:
+    report = {
+        "classification": "PAPER_STRATEGY_ORDER_FILLED",
+        "generated_at": "2026-06-30T00:00:00+00:00",
+        "selected_account_id": "DUM882026",
+        "intent": {
+            "strategy_id": "mgc_globex_active_participation_long",
+            "symbol": "MGC",
+            "action": "BUY",
+            "quantity": 1.0,
+        },
+        "qualified_contract_report": {
+            "qualified_contract": {"con_id": 732156883, "local_symbol": "MGCQ6"},
+            "api_contract_details": [{"payload": "x" * 50_000} for _ in range(300)],
+        },
+        "delegated_result": {
+            "classification": "PAPER_ORDER_FILLED",
+            "report": {
+                "classification": "PAPER_ORDER_FILLED",
+                "submit_cancel_lifecycle": {"submitted_order_id": 321, "perm_id": 123456},
+                "latest_order_status": {"status": "Filled", "filled": 1},
+                "callback_timeline": [{"payload": "y" * 50_000} for _ in range(300)],
+            },
+            "raw_transport_dump": [{"payload": "z" * 50_000} for _ in range(300)],
+        },
+        "paper_strategy_governance_status": {"strategies": [{"payload": "a" * 50_000} for _ in range(300)]},
+        "runtime_control_plane_authorization": {"snapshot": [{"payload": "b" * 50_000} for _ in range(300)]},
+    }
+    artifacts = IbkrPaperStrategyBridgeArtifacts(
+        classification="PAPER_STRATEGY_ORDER_FILLED",
+        report=report,
+        audit_events=[{"event_type": "intent_filled"}],
+    )
+
+    write_ibkr_paper_strategy_bridge_artifacts(output_dir=tmp_path, artifacts=artifacts)
+
+    path = tmp_path / "ibkr_paper_strategy_bridge_report.json"
+    assert path.stat().st_size <= 5 * 1024 * 1024
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    assert payload["classification"] == "PAPER_STRATEGY_ORDER_FILLED"
+    assert payload["intent"]["strategy_id"] == "mgc_globex_active_participation_long"
+    assert payload["qualified_contract_report"]["qualified_contract"]["local_symbol"] == "MGCQ6"
+    assert payload["delegated_result"]["report"]["submit_cancel_lifecycle"]["submitted_order_id"] == 321
+    assert payload["_bounded_snapshot"]["degraded"] is True
+    assert (tmp_path / "ibkr_paper_strategy_bridge_report_bounded_snapshot_diagnostic.json").exists()
     assert (tmp_path / "ibkr_paper_strategy_bridge_audit.jsonl").exists()
 
 
