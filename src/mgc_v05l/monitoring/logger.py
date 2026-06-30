@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any
 
 from mgc_v05l.execution_core.bounded_jsonl import append_bounded_jsonl
+from mgc_v05l.execution_core.bounded_snapshot import write_bounded_snapshot_json
 
 
 def get_logger(name: str) -> logging.Logger:
@@ -122,7 +123,13 @@ class StructuredLogger:
         return self._append_jsonl("blocked_strategy_intents.jsonl", payload)
 
     def write_blocked_strategy_intent_state(self, payload: dict[str, Any]) -> Path:
-        return self._write_json("blocked_strategy_intent_latest.json", payload)
+        path = self._artifact_dir / "blocked_strategy_intent_latest.json"
+        write_bounded_snapshot_json(
+            path,
+            payload,
+            diagnostic_path=self._artifact_dir / "blocked_strategy_intent_bounded_snapshot_diagnostic.json",
+        )
+        return path
 
     def log_filled_bridge_result(self, payload: dict[str, Any]) -> Path:
         return self._append_jsonl("filled_bridge_results.jsonl", payload)
@@ -131,7 +138,13 @@ class StructuredLogger:
         return self._write_json("filled_bridge_result_latest.json", payload)
 
     def write_operator_status(self, payload: dict[str, Any]) -> Path:
-        return self._write_json("operator_status.json", payload)
+        path = self._artifact_dir / "operator_status.json"
+        write_bounded_snapshot_json(
+            path,
+            payload,
+            diagnostic_path=self._artifact_dir / "operator_status_bounded_snapshot_diagnostic.json",
+        )
+        return path
 
     def write_restore_validation_state(self, payload: dict[str, Any]) -> Path:
         return self._write_json("restore_validation_latest.json", payload)
