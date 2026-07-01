@@ -4,14 +4,14 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime, time, timedelta
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
 from mgc_v05l.execution_core.bounded_jsonl import BoundedJsonlConfig, write_bounded_jsonl
 from mgc_v05l.execution_core.bounded_snapshot import BoundedSnapshotConfig, write_bounded_snapshot_json
 from mgc_v05l.execution_core.track_b_gold_regime_engine import DEFAULT_OUTPUT_ROOT
-from mgc_v05l.session_phase_labels import label_session_phase, phase_coarse_session_group
+from mgc_v05l.session_phase_labels import NEW_YORK, label_session_phase, phase_coarse_session_group
 
 
 SCHEMA_VERSION = "track_b_research_feature_dataset_v1"
@@ -25,6 +25,7 @@ RESEARCH_FEATURE_DATASET_MIGRATION_NOTES_MD = "research_feature_dataset_migratio
 DEFAULT_INSTRUMENTS = ("GC", "MGC")
 DEFAULT_TIMEFRAME = "1m"
 HORIZONS_MINUTES = (5, 15, 30, 60)
+AVWAP_ANCHORS = ("globex_session_open_18et", "london_open", "us_rth_open")
 
 
 @dataclass(frozen=True)
@@ -129,6 +130,7 @@ def build_research_feature_rows(
     for symbol in sorted(candles_by_symbol):
         candles = tuple(candles_by_symbol.get(symbol) or ())
         vwap_by_index = _session_vwap_by_index(candles, timeframe=timeframe)
+        avwap_by_index = _anchored_vwap_by_index(candles, timeframe=timeframe)
         for idx in _candidate_indexes(candles, cadence_minutes=cadence_minutes):
             candle = candles[idx]
             row = _build_row(
@@ -136,6 +138,7 @@ def build_research_feature_rows(
                 candles=candles,
                 index=idx,
                 vwap_state=vwap_by_index.get(idx, {}),
+                avwap_states=avwap_by_index.get(idx, {}),
                 generated_at=generated_at,
                 timeframe=timeframe,
                 cadence_minutes=cadence_minutes,
@@ -165,6 +168,7 @@ def build_research_feature_dataset_summary(
     missing_features: set[str] = set()
     forward_coverage = {f"{horizon}m": 0 for horizon in HORIZONS_MINUTES}
     vwap_summary = _empty_vwap_summary()
+    avwap_summary = _empty_avwap_summary()
     for row in rows:
         sessions[str(row.get("session") or "UNKNOWN")] = sessions.get(str(row.get("session") or "UNKNOWN"), 0) + 1
         instruments.add(str(row.get("instrument") or "UNKNOWN"))
@@ -175,6 +179,7 @@ def build_research_feature_dataset_summary(
             if value is not None:
                 forward_coverage[str(key)] = forward_coverage.get(str(key), 0) + 1
         _update_vwap_summary(vwap_summary, row)
+        _update_avwap_summary(avwap_summary, row)
     windows = _coverage_windows(candles_by_symbol)
     first_observation, last_observation = _observation_window(rows)
     return {
@@ -199,6 +204,12 @@ def build_research_feature_dataset_summary(
         "forward_outcome_coverage": forward_coverage,
         "mfe_mae_available_count": sum(1 for row in rows if row.get("mfe") is not None and row.get("mae") is not None),
         "vwap_coverage": _finalize_vwap_summary(vwap_summary),
+        "anchored_vwap_coverage": _finalize_avwap_summary(avwap_summary),
+        "anchored_vwap_tos_alignment_note": (
+            "globex_session_open_18et is the primary TOS-aligned daily futures anchor; "
+            "exact values may differ because of session template, volume source, candle granularity, "
+            "and contract-specific data."
+        ),
         "source_windows": windows,
         "auxiliary_sources": dict(auxiliary_sources or {}),
         "readiness_for_gre": _readiness_for_gre(rows, windows),
@@ -228,6 +239,8 @@ def render_research_feature_dataset_summary_markdown(summary: Mapping[str, Any])
         f"Missing features: `{summary.get('missing_features')}`\n\n"
         f"Forward outcome coverage: `{summary.get('forward_outcome_coverage')}`\n\n"
         f"VWAP coverage: `{summary.get('vwap_coverage')}`\n\n"
+        f"Anchored VWAP coverage: `{summary.get('anchored_vwap_coverage')}`\n\n"
+        f"Anchored VWAP TOS note: {summary.get('anchored_vwap_tos_alignment_note')}\n\n"
         f"Readiness for GRE: `{summary.get('readiness_for_gre')}`\n\n"
         f"Future plugin readiness: `{summary.get('readiness_for_future_plugins')}`\n\n"
         "Diagnostic only: `true`\n"
@@ -246,6 +259,7 @@ Required groups:
 - Market: `open`, `high`, `low`, `close`, `volume`.
 - Derived: `candle_body`, `candle_range`, `direction`, `trend_lookback`, `feature_availability`.
 - VWAP: `has_vwap`, `vwap`, `distance_from_vwap_points`, `distance_from_vwap_pct`, `vwap_relation`.
+- Anchored VWAP: `has_avwap_<anchor>`, `avwap_<anchor>`, distance, relation, slope, anchor time, and unavailable reason fields for configured anchors.
 - Forward outcomes: `forward_returns` for 5m, 15m, 30m, and 60m when retained candles allow it.
 - Validation: `mfe`, `mae`, and `mfe_mae_basis`.
 - Research metadata: `diagnostic_only`, `backfill`, `source_refs`, and authority flags set false.
@@ -279,6 +293,7 @@ def _build_row(
     candles: Sequence[Mapping[str, Any]],
     index: int,
     vwap_state: Mapping[str, Any],
+    avwap_states: Mapping[str, Mapping[str, Any]],
     generated_at: datetime,
     timeframe: str,
     cadence_minutes: int,
@@ -293,9 +308,14 @@ def _build_row(
     open_price = float(candle["open"])
     high = float(candle["high"])
     low = float(candle["low"])
-    feature_availability = _feature_availability(auxiliary_sources, has_vwap=bool(vwap_state.get("has_vwap")))
+    feature_availability = _feature_availability(
+        auxiliary_sources,
+        has_vwap=bool(vwap_state.get("has_vwap")),
+        avwap_states=avwap_states,
+    )
     forward_returns = _forward_returns(candles, index=index, ref_close=close)
     mfe, mae = _mfe_mae(candles, index=index, ref_close=close)
+    avwap_fields = _flatten_avwap_fields(avwap_states)
     return {
         "schema_version": SCHEMA_VERSION,
         "generated_at": generated_at.isoformat(),
@@ -326,6 +346,15 @@ def _build_row(
         "vwap_slope": vwap_state.get("vwap_slope"),
         "vwap_reclaim_candidate": bool(vwap_state.get("vwap_reclaim_candidate")),
         "vwap_rejection_candidate": bool(vwap_state.get("vwap_rejection_candidate")),
+        "has_anchored_vwap": any(bool(state.get("available")) for state in avwap_states.values()),
+        "anchored_vwap": {anchor: dict(avwap_states.get(anchor) or {}) for anchor in AVWAP_ANCHORS},
+        "anchored_vwap_available_anchors": [
+            anchor for anchor in AVWAP_ANCHORS if bool(dict(avwap_states.get(anchor) or {}).get("available"))
+        ],
+        "anchored_vwap_unavailable_anchors": [
+            anchor for anchor in AVWAP_ANCHORS if not bool(dict(avwap_states.get(anchor) or {}).get("available"))
+        ],
+        **avwap_fields,
         "trend_overlay": _research_reference(auxiliary_sources.get("trend_overlay")),
         "side_session_statistics": _research_reference(auxiliary_sources.get("side_session_attribution")),
         "forward_path_refs": _research_reference(auxiliary_sources.get("forward_path_capture")),
@@ -484,6 +513,191 @@ def _session_vwap_by_index(candles: Sequence[Mapping[str, Any]], *, timeframe: s
     return states
 
 
+def _anchored_vwap_by_index(candles: Sequence[Mapping[str, Any]], *, timeframe: str) -> dict[int, dict[str, dict[str, Any]]]:
+    by_index: dict[int, dict[str, dict[str, Any]]] = {}
+    for idx, candle in enumerate(candles):
+        timestamp = candle.get("timestamp")
+        states: dict[str, dict[str, Any]] = {}
+        if not isinstance(timestamp, datetime):
+            by_index[idx] = {
+                anchor: _unavailable_avwap_state(anchor=anchor, timeframe=timeframe, reason="invalid_observation_timestamp")
+                for anchor in AVWAP_ANCHORS
+            }
+            continue
+        for anchor in AVWAP_ANCHORS:
+            anchor_time = _anchor_time(anchor, timestamp)
+            states[anchor] = _anchored_vwap_state(
+                anchor=anchor,
+                anchor_time=anchor_time,
+                candles=candles,
+                observation_index=idx,
+                timeframe=timeframe,
+            )
+        by_index[idx] = states
+    return by_index
+
+
+def _anchored_vwap_state(
+    *,
+    anchor: str,
+    anchor_time: datetime,
+    candles: Sequence[Mapping[str, Any]],
+    observation_index: int,
+    timeframe: str,
+) -> dict[str, Any]:
+    observation_time = candles[observation_index]["timestamp"]
+    if observation_time < anchor_time:
+        return _unavailable_avwap_state(
+            anchor=anchor,
+            timeframe=timeframe,
+            reason="observation_before_anchor",
+            anchor_time=anchor_time,
+        )
+    anchor_index = _find_anchor_index(candles, anchor_time=anchor_time, observation_index=observation_index)
+    if anchor_index is None:
+        return _unavailable_avwap_state(
+            anchor=anchor,
+            timeframe=timeframe,
+            reason="anchor_not_present_in_retained_candles",
+            anchor_time=anchor_time,
+        )
+    cumulative_price_volume = 0.0
+    cumulative_volume = 0.0
+    previous_vwap: float | None = None
+    previous_relation: str | None = None
+    current_vwap: float | None = None
+    current_relation = "unavailable"
+    for idx in range(anchor_index, observation_index + 1):
+        candle = candles[idx]
+        volume = _positive_volume(candle.get("volume"))
+        if volume is None:
+            continue
+        typical_price = (float(candle["high"]) + float(candle["low"]) + float(candle["close"])) / 3.0
+        cumulative_price_volume += typical_price * volume
+        cumulative_volume += volume
+        if cumulative_volume > 0:
+            next_vwap = cumulative_price_volume / cumulative_volume
+            if idx < observation_index:
+                previous_vwap = next_vwap
+                previous_relation = _avwap_relation(float(candle["close"]) - next_vwap)
+            else:
+                current_vwap = next_vwap
+                current_relation = _avwap_relation(float(candle["close"]) - next_vwap)
+    if current_vwap is None or cumulative_volume <= 0:
+        return _unavailable_avwap_state(
+            anchor=anchor,
+            timeframe=timeframe,
+            reason="missing_or_zero_volume",
+            anchor_time=anchor_time,
+        )
+    close = float(candles[observation_index]["close"])
+    distance_points = close - current_vwap
+    distance_pct = None if current_vwap == 0 else (distance_points / current_vwap) * 100.0
+    return {
+        "available": True,
+        "anchor": anchor,
+        "anchor_time": anchor_time.isoformat(),
+        "anchor_definition": _anchor_definition(anchor),
+        "value": current_vwap,
+        "distance_points": distance_points,
+        "distance_pct": distance_pct,
+        "relation": current_relation,
+        "source_timeframe": timeframe,
+        "session_template": "Track B New York futures session labels",
+        "cumulative_volume": cumulative_volume,
+        "slope": None if previous_vwap is None else current_vwap - previous_vwap,
+        "reclaim_candidate": previous_relation == "below_avwap" and current_relation == "above_avwap",
+        "rejection_candidate": previous_relation == "above_avwap" and current_relation == "below_avwap",
+        "unavailable_reason": None,
+    }
+
+
+def _anchor_time(anchor: str, observation_time: datetime) -> datetime:
+    local_dt = observation_time.astimezone(NEW_YORK)
+    if anchor == "globex_session_open_18et":
+        anchor_date = local_dt.date() if local_dt.timetz().replace(tzinfo=None) >= time(18, 0) else (local_dt - timedelta(days=1)).date()
+        return datetime.combine(anchor_date, time(18, 0), tzinfo=NEW_YORK).astimezone(UTC)
+    if anchor == "london_open":
+        return datetime.combine(local_dt.date(), time(3, 0), tzinfo=NEW_YORK).astimezone(UTC)
+    if anchor == "us_rth_open":
+        return datetime.combine(local_dt.date(), time(9, 30), tzinfo=NEW_YORK).astimezone(UTC)
+    return observation_time
+
+
+def _anchor_definition(anchor: str) -> str:
+    definitions = {
+        "globex_session_open_18et": "futures session restart at approximately 18:00 ET; primary TOS-aligned daily anchor",
+        "london_open": "London/Europe open at approximately 03:00 ET",
+        "us_rth_open": "US regular trading hours open at approximately 09:30 ET",
+    }
+    return definitions.get(anchor, "unknown anchor")
+
+
+def _find_anchor_index(
+    candles: Sequence[Mapping[str, Any]],
+    *,
+    anchor_time: datetime,
+    observation_index: int,
+) -> int | None:
+    tolerance = timedelta(minutes=1)
+    for idx, candle in enumerate(candles[: observation_index + 1]):
+        timestamp = candle.get("timestamp")
+        if isinstance(timestamp, datetime) and anchor_time <= timestamp <= anchor_time + tolerance:
+            return idx
+    return None
+
+
+def _unavailable_avwap_state(
+    *,
+    anchor: str,
+    timeframe: str,
+    reason: str,
+    anchor_time: datetime | None = None,
+) -> dict[str, Any]:
+    return {
+        "available": False,
+        "anchor": anchor,
+        "anchor_time": anchor_time.isoformat() if anchor_time else None,
+        "anchor_definition": _anchor_definition(anchor),
+        "value": None,
+        "distance_points": None,
+        "distance_pct": None,
+        "relation": "unavailable",
+        "source_timeframe": timeframe,
+        "session_template": "Track B New York futures session labels",
+        "cumulative_volume": None,
+        "slope": None,
+        "reclaim_candidate": False,
+        "rejection_candidate": False,
+        "unavailable_reason": reason,
+    }
+
+
+def _avwap_relation(distance_points: float) -> str:
+    if abs(distance_points) < 1e-12:
+        return "at_avwap"
+    if distance_points > 0:
+        return "above_avwap"
+    return "below_avwap"
+
+
+def _flatten_avwap_fields(avwap_states: Mapping[str, Mapping[str, Any]]) -> dict[str, Any]:
+    fields: dict[str, Any] = {}
+    for anchor in AVWAP_ANCHORS:
+        state = dict(avwap_states.get(anchor) or {})
+        fields[f"has_avwap_{anchor}"] = bool(state.get("available"))
+        fields[f"avwap_{anchor}"] = state.get("value")
+        fields[f"distance_from_avwap_{anchor}_points"] = state.get("distance_points")
+        fields[f"distance_from_avwap_{anchor}_pct"] = state.get("distance_pct")
+        fields[f"avwap_relation_{anchor}"] = state.get("relation") or "unavailable"
+        fields[f"avwap_slope_{anchor}"] = state.get("slope")
+        fields[f"avwap_reclaim_candidate_{anchor}"] = bool(state.get("reclaim_candidate"))
+        fields[f"avwap_rejection_candidate_{anchor}"] = bool(state.get("rejection_candidate"))
+        fields[f"avwap_anchor_time_{anchor}"] = state.get("anchor_time")
+        fields[f"avwap_unavailable_reason_{anchor}"] = state.get("unavailable_reason")
+    return fields
+
+
 def _unavailable_vwap_state(*, session: str, timeframe: str, reason: str) -> dict[str, Any]:
     return {
         "has_vwap": False,
@@ -518,10 +732,20 @@ def _vwap_relation(distance_points: float) -> str:
     return "below_vwap"
 
 
-def _feature_availability(auxiliary_sources: Mapping[str, Any], *, has_vwap: bool) -> dict[str, bool]:
+def _feature_availability(
+    auxiliary_sources: Mapping[str, Any],
+    *,
+    has_vwap: bool,
+    avwap_states: Mapping[str, Mapping[str, Any]],
+) -> dict[str, bool]:
+    has_anchor_vwap = any(bool(dict(avwap_states.get(anchor) or {}).get("available")) for anchor in AVWAP_ANCHORS)
     return {
         "has_vwap": has_vwap,
-        "has_anchor_vwap": False,
+        "has_anchor_vwap": has_anchor_vwap,
+        **{
+            f"has_avwap_{anchor}": bool(dict(avwap_states.get(anchor) or {}).get("available"))
+            for anchor in AVWAP_ANCHORS
+        },
         "has_prior_session": False,
         "has_overnight_range": False,
         "has_opening_range": False,
@@ -575,6 +799,77 @@ def _finalize_vwap_summary(summary: Mapping[str, Any]) -> dict[str, Any]:
         "unavailable_reasons": dict(summary.get("unavailable_reasons") or {}),
         "relation_counts": dict(summary.get("relation_counts") or {}),
         "average_distance_from_vwap_points": None if distance_count == 0 else distance_sum / distance_count,
+    }
+
+
+def _empty_avwap_summary() -> dict[str, Any]:
+    return {
+        "available_count": 0,
+        "unavailable_count": 0,
+        "by_anchor": {
+            anchor: {
+                "available_count": 0,
+                "unavailable_count": 0,
+                "unavailable_reasons": {},
+                "relation_counts": {
+                    "above_avwap": 0,
+                    "below_avwap": 0,
+                    "at_avwap": 0,
+                    "unavailable": 0,
+                },
+                "distance_sum": 0.0,
+                "distance_count": 0,
+            }
+            for anchor in AVWAP_ANCHORS
+        },
+    }
+
+
+def _update_avwap_summary(summary: dict[str, Any], row: Mapping[str, Any]) -> None:
+    anchored_vwap = dict(row.get("anchored_vwap") or {})
+    by_anchor = dict(summary.get("by_anchor") or {})
+    for anchor in AVWAP_ANCHORS:
+        state = dict(anchored_vwap.get(anchor) or {})
+        anchor_summary = dict(by_anchor.get(anchor) or {})
+        relation = str(state.get("relation") or "unavailable")
+        relation_counts = dict(anchor_summary.get("relation_counts") or {})
+        relation_counts[relation] = relation_counts.get(relation, 0) + 1
+        anchor_summary["relation_counts"] = relation_counts
+        if state.get("available") is True:
+            summary["available_count"] = int(summary.get("available_count") or 0) + 1
+            anchor_summary["available_count"] = int(anchor_summary.get("available_count") or 0) + 1
+            distance = state.get("distance_points")
+            if distance is not None:
+                anchor_summary["distance_sum"] = float(anchor_summary.get("distance_sum") or 0.0) + float(distance)
+                anchor_summary["distance_count"] = int(anchor_summary.get("distance_count") or 0) + 1
+        else:
+            summary["unavailable_count"] = int(summary.get("unavailable_count") or 0) + 1
+            anchor_summary["unavailable_count"] = int(anchor_summary.get("unavailable_count") or 0) + 1
+            reason = str(state.get("unavailable_reason") or "unknown")
+            reasons = dict(anchor_summary.get("unavailable_reasons") or {})
+            reasons[reason] = reasons.get(reason, 0) + 1
+            anchor_summary["unavailable_reasons"] = reasons
+        by_anchor[anchor] = anchor_summary
+    summary["by_anchor"] = by_anchor
+
+
+def _finalize_avwap_summary(summary: Mapping[str, Any]) -> dict[str, Any]:
+    by_anchor: dict[str, Any] = {}
+    for anchor, anchor_summary_any in dict(summary.get("by_anchor") or {}).items():
+        anchor_summary = dict(anchor_summary_any or {})
+        distance_count = int(anchor_summary.get("distance_count") or 0)
+        distance_sum = float(anchor_summary.get("distance_sum") or 0.0)
+        by_anchor[str(anchor)] = {
+            "available_count": int(anchor_summary.get("available_count") or 0),
+            "unavailable_count": int(anchor_summary.get("unavailable_count") or 0),
+            "unavailable_reasons": dict(anchor_summary.get("unavailable_reasons") or {}),
+            "relation_counts": dict(anchor_summary.get("relation_counts") or {}),
+            "average_distance_points": None if distance_count == 0 else distance_sum / distance_count,
+        }
+    return {
+        "available_count": int(summary.get("available_count") or 0),
+        "unavailable_count": int(summary.get("unavailable_count") or 0),
+        "by_anchor": by_anchor,
     }
 
 

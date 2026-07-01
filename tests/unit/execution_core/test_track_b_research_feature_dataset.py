@@ -154,6 +154,156 @@ def test_vwap_unavailable_for_zero_or_missing_volume() -> None:
     assert all(row["feature_availability"]["has_vwap"] is False for row in rows)
 
 
+def test_anchored_vwap_cumulative_calculation() -> None:
+    candles = (
+        _candle(datetime(2026, 6, 30, 22, 0, tzinfo=UTC), open_=100.0, high=101.0, low=99.0, close=100.0, volume=10),
+        _candle(datetime(2026, 6, 30, 22, 1, tzinfo=UTC), open_=103.0, high=104.0, low=102.0, close=103.0, volume=30),
+    )
+    rows = build_research_feature_rows(
+        candles_by_symbol={"GC": candles},
+        generated_at=NOW,
+        timeframe="1m",
+        cadence_minutes=1,
+        max_rows=10,
+        backfill=True,
+        output_root=Path("outputs/track_b_execution_core"),
+        auxiliary_sources={},
+    )
+
+    row = rows[1]
+    assert row["has_avwap_globex_session_open_18et"] is True
+    assert row["avwap_globex_session_open_18et"] == 102.25
+    assert row["distance_from_avwap_globex_session_open_18et_points"] == 0.75
+    assert row["avwap_relation_globex_session_open_18et"] == "above_avwap"
+    assert row["anchored_vwap"]["globex_session_open_18et"]["anchor_time"] == "2026-06-30T22:00:00+00:00"
+
+
+def test_anchored_vwap_resets_at_18et_futures_session_restart() -> None:
+    candles = (
+        _candle(datetime(2026, 6, 30, 21, 59, tzinfo=UTC), open_=90.0, high=91.0, low=89.0, close=90.0, volume=10),
+        _candle(datetime(2026, 6, 30, 22, 0, tzinfo=UTC), open_=100.0, high=101.0, low=99.0, close=100.0, volume=10),
+        _candle(datetime(2026, 6, 30, 22, 1, tzinfo=UTC), open_=102.0, high=103.0, low=101.0, close=102.0, volume=10),
+    )
+    rows = build_research_feature_rows(
+        candles_by_symbol={"GC": candles},
+        generated_at=NOW,
+        timeframe="1m",
+        cadence_minutes=1,
+        max_rows=10,
+        backfill=True,
+        output_root=Path("outputs/track_b_execution_core"),
+        auxiliary_sources={},
+    )
+
+    assert rows[0]["has_avwap_globex_session_open_18et"] is False
+    assert rows[0]["avwap_unavailable_reason_globex_session_open_18et"] == "anchor_not_present_in_retained_candles"
+    assert rows[1]["avwap_globex_session_open_18et"] == 100.0
+    assert rows[2]["avwap_globex_session_open_18et"] == 101.0
+
+
+def test_london_open_anchor_starts_only_after_anchor_time() -> None:
+    candles = (
+        _candle(datetime(2026, 6, 30, 6, 59, tzinfo=UTC), open_=99.0, high=100.0, low=98.0, close=99.0, volume=10),
+        _candle(datetime(2026, 6, 30, 7, 0, tzinfo=UTC), open_=100.0, high=101.0, low=99.0, close=100.0, volume=10),
+    )
+    rows = build_research_feature_rows(
+        candles_by_symbol={"GC": candles},
+        generated_at=NOW,
+        timeframe="1m",
+        cadence_minutes=1,
+        max_rows=10,
+        backfill=True,
+        output_root=Path("outputs/track_b_execution_core"),
+        auxiliary_sources={},
+    )
+
+    assert rows[0]["has_avwap_london_open"] is False
+    assert rows[0]["avwap_unavailable_reason_london_open"] == "observation_before_anchor"
+    assert rows[1]["has_avwap_london_open"] is True
+    assert rows[1]["avwap_london_open"] == 100.0
+
+
+def test_us_rth_open_anchor_starts_only_after_anchor_time() -> None:
+    candles = (
+        _candle(datetime(2026, 6, 30, 13, 29, tzinfo=UTC), open_=99.0, high=100.0, low=98.0, close=99.0, volume=10),
+        _candle(datetime(2026, 6, 30, 13, 30, tzinfo=UTC), open_=100.0, high=101.0, low=99.0, close=100.0, volume=10),
+    )
+    rows = build_research_feature_rows(
+        candles_by_symbol={"GC": candles},
+        generated_at=NOW,
+        timeframe="1m",
+        cadence_minutes=1,
+        max_rows=10,
+        backfill=True,
+        output_root=Path("outputs/track_b_execution_core"),
+        auxiliary_sources={},
+    )
+
+    assert rows[0]["has_avwap_us_rth_open"] is False
+    assert rows[0]["avwap_unavailable_reason_us_rth_open"] == "observation_before_anchor"
+    assert rows[1]["has_avwap_us_rth_open"] is True
+    assert rows[1]["avwap_us_rth_open"] == 100.0
+
+
+def test_anchored_vwap_does_not_use_future_candles() -> None:
+    candles = (
+        _candle(datetime(2026, 6, 30, 22, 0, tzinfo=UTC), open_=100.0, high=101.0, low=99.0, close=100.0, volume=10),
+        _candle(datetime(2026, 6, 30, 22, 1, tzinfo=UTC), open_=1000.0, high=1001.0, low=999.0, close=1000.0, volume=1000),
+    )
+    rows = build_research_feature_rows(
+        candles_by_symbol={"GC": candles},
+        generated_at=NOW,
+        timeframe="1m",
+        cadence_minutes=1,
+        max_rows=10,
+        backfill=True,
+        output_root=Path("outputs/track_b_execution_core"),
+        auxiliary_sources={},
+    )
+
+    assert rows[0]["avwap_globex_session_open_18et"] == 100.0
+    assert rows[1]["avwap_globex_session_open_18et"] > rows[0]["avwap_globex_session_open_18et"]
+
+
+def test_anchored_vwap_unavailable_when_anchor_missing_from_retained_candles() -> None:
+    candles = (
+        _candle(datetime(2026, 6, 30, 22, 5, tzinfo=UTC), open_=100.0, high=101.0, low=99.0, close=100.0, volume=10),
+    )
+    rows = build_research_feature_rows(
+        candles_by_symbol={"GC": candles},
+        generated_at=NOW,
+        timeframe="1m",
+        cadence_minutes=1,
+        max_rows=10,
+        backfill=True,
+        output_root=Path("outputs/track_b_execution_core"),
+        auxiliary_sources={},
+    )
+
+    assert rows[0]["has_avwap_globex_session_open_18et"] is False
+    assert rows[0]["avwap_unavailable_reason_globex_session_open_18et"] == "anchor_not_present_in_retained_candles"
+
+
+def test_anchored_vwap_unavailable_for_zero_or_missing_volume() -> None:
+    candles = (
+        _candle(datetime(2026, 6, 30, 22, 0, tzinfo=UTC), open_=100.0, high=101.0, low=99.0, close=100.0, volume=0),
+        _candle(datetime(2026, 6, 30, 22, 1, tzinfo=UTC), open_=101.0, high=102.0, low=100.0, close=101.0, volume=None),
+    )
+    rows = build_research_feature_rows(
+        candles_by_symbol={"GC": candles},
+        generated_at=NOW,
+        timeframe="1m",
+        cadence_minutes=1,
+        max_rows=10,
+        backfill=True,
+        output_root=Path("outputs/track_b_execution_core"),
+        auxiliary_sources={},
+    )
+
+    assert all(row["has_avwap_globex_session_open_18et"] is False for row in rows)
+    assert all(row["avwap_unavailable_reason_globex_session_open_18et"] == "missing_or_zero_volume" for row in rows)
+
+
 def test_forward_outcome_attachment_only_uses_available_horizons() -> None:
     rows = build_research_feature_rows(
         candles_by_symbol={"GC": _candles(count=70, step=0.5)},
@@ -222,6 +372,8 @@ def test_shallow_history_summary_is_diagnostic_only() -> None:
     assert summary["vwap_coverage"]["available_count"] == len(rows)
     assert summary["vwap_coverage"]["unavailable_count"] == 0
     assert summary["vwap_coverage"]["relation_counts"]["above_vwap"] > 0
+    assert "anchored_vwap_coverage" in summary
+    assert "globex_session_open_18et" in summary["anchored_vwap_coverage"]["by_anchor"]
 
 
 def test_runner_writes_bounded_outputs_and_docs(tmp_path: Path) -> None:
