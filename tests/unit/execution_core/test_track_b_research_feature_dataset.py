@@ -10,8 +10,10 @@ from mgc_v05l.execution_core.track_b_research_feature_dataset import (
     RESEARCH_FEATURE_DATASET_JSONL,
     build_research_feature_dataset_summary,
     build_research_feature_rows,
+    run_crfd_provider_comparison,
     run_research_feature_dataset_builder,
 )
+from mgc_v05l.execution_core.track_b_canonical_research_data_provider import build_research_data_provider
 
 
 START = datetime(2026, 6, 30, 10, 0, tzinfo=UTC)
@@ -393,8 +395,137 @@ def test_runner_writes_bounded_outputs_and_docs(tmp_path: Path) -> None:
     assert result.migration_notes_path.exists()
 
 
+def test_retained_provider_matches_existing_phase1_candle_behavior(tmp_path: Path) -> None:
+    output_root = tmp_path / "outputs" / "track_b_execution_core"
+    expected = _candles(count=5, step=0.2)
+    _write_phase1(output_root, "GC", "1m", expected)
+
+    provider = build_research_data_provider("retained", output_root=output_root)
+    loaded = provider.load_candles(symbols=("GC",), timeframe="1m")["GC"]
+
+    assert provider.provider_metadata()["provider_id"] == "retained"
+    assert len(loaded) == len(expected)
+    assert loaded[0].timestamp == expected[0]["timestamp"]
+    assert loaded[0].close == expected[0]["close"]
+
+
+def test_parquet_provider_loads_historical_candles(tmp_path: Path) -> None:
+    pyarrow = __import__("pyarrow")
+    parquet = __import__("pyarrow.parquet").parquet
+    store_root = tmp_path / "outputs" / "reports" / "trend_participation_engine"
+    path = store_root / "raw_bars" / "databento_minute_backfill" / "symbol=GC" / "year=2026" / "month=07" / "bars.parquet"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    parquet.write_table(
+        pyarrow.Table.from_pylist(
+            [
+                {
+                    "bar_end": START,
+                    "open": 10.0,
+                    "high": 11.0,
+                    "low": 9.0,
+                    "close": 10.5,
+                    "volume": 100,
+                }
+            ]
+        ),
+        path,
+    )
+
+    provider = build_research_data_provider("parquet", output_root=tmp_path, research_store_root=store_root)
+    loaded = provider.load_candles(symbols=("GC",), timeframe="1m")["GC"]
+
+    assert provider.provider_metadata()["provider_id"] == "parquet"
+    assert len(loaded) == 1
+    assert loaded[0].timestamp == START
+    assert loaded[0].source_ref == str(path)
+
+
+def test_provider_selection_rejects_unknown_provider(tmp_path: Path) -> None:
+    try:
+        build_research_data_provider("mystery", output_root=tmp_path)
+    except ValueError as exc:
+        assert "Unsupported research data provider" in str(exc)
+    else:
+        raise AssertionError("unsupported provider should fail closed")
+
+
+def test_identical_candle_windows_produce_identical_crfd_features(tmp_path: Path) -> None:
+    pyarrow = __import__("pyarrow")
+    parquet = __import__("pyarrow.parquet").parquet
+    output_root = tmp_path / "outputs" / "track_b_execution_core"
+    store_root = tmp_path / "outputs" / "reports" / "trend_participation_engine"
+    candles = _candles(count=20, step=0.25)
+    _write_phase1(output_root, "GC", "1m", candles)
+    path = store_root / "raw_bars" / "databento_minute_backfill" / "symbol=GC" / "year=2026" / "month=06" / "bars.parquet"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    parquet.write_table(
+        pyarrow.Table.from_pylist(
+            [
+                {
+                    "bar_end": row["timestamp"],
+                    "open": row["open"],
+                    "high": row["high"],
+                    "low": row["low"],
+                    "close": row["close"],
+                    "volume": row["volume"],
+                }
+                for row in candles
+            ]
+        ),
+        path,
+    )
+
+    retained = run_research_feature_dataset_builder(
+        output_root=output_root,
+        now=NOW,
+        instruments=("GC",),
+        cadence_minutes=5,
+        max_rows=5,
+        provider="retained",
+        research_store_root=store_root,
+    )
+    parquet_result = run_research_feature_dataset_builder(
+        output_root=output_root,
+        now=NOW,
+        instruments=("GC",),
+        cadence_minutes=5,
+        max_rows=5,
+        provider="parquet",
+        research_store_root=store_root,
+    )
+
+    keys = ("observation_time", "open", "high", "low", "close", "has_vwap", "vwap", "forward_returns")
+    assert [{key: row.get(key) for key in keys} for row in retained.rows] == [
+        {key: row.get(key) for key in keys} for row in parquet_result.rows
+    ]
+    assert retained.summary["provider_id"] == "retained"
+    assert parquet_result.summary["provider_id"] == "parquet"
+
+
+def test_provider_comparison_writes_input_only_report(tmp_path: Path) -> None:
+    output_root = tmp_path / "outputs" / "track_b_execution_core"
+    store_root = tmp_path / "outputs" / "reports" / "trend_participation_engine"
+    _write_phase1(output_root, "GC", "1m", _candles(count=8, step=0.1))
+
+    result = run_crfd_provider_comparison(
+        output_root=output_root,
+        now=NOW,
+        instruments=("GC",),
+        cadence_minutes=5,
+        max_rows=5,
+        research_store_root=store_root,
+    )
+
+    assert result.json_path.exists()
+    assert result.markdown_path.exists()
+    assert result.comparison["source_assessment"]["gre_scores_compared"] is False
+    assert result.comparison["providers"]["retained"]["provider_id"] == "retained"
+    assert result.comparison["providers"]["parquet"]["provider_id"] == "parquet"
+
+
 def test_research_feature_dataset_import_boundary() -> None:
     paths = [
+        Path("src/mgc_v05l/execution_core/track_b_canonical_research_data_provider.py"),
         Path("src/mgc_v05l/execution_core/track_b_research_feature_dataset.py"),
         Path("src/mgc_v05l/app/track_b_research_feature_dataset.py"),
     ]

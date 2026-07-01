@@ -10,6 +10,10 @@ from typing import Any, Mapping, Sequence
 
 from mgc_v05l.execution_core.bounded_jsonl import BoundedJsonlConfig, write_bounded_jsonl
 from mgc_v05l.execution_core.bounded_snapshot import BoundedSnapshotConfig, write_bounded_snapshot_json
+from mgc_v05l.execution_core.track_b_canonical_research_data_provider import (
+    build_research_data_provider,
+    canonical_candles_as_mappings,
+)
 from mgc_v05l.execution_core.track_b_gold_regime_engine import DEFAULT_OUTPUT_ROOT
 from mgc_v05l.session_phase_labels import NEW_YORK, label_session_phase, phase_coarse_session_group
 
@@ -22,10 +26,13 @@ LATEST_RESEARCH_FEATURE_DATASET_SUMMARY_JSON = "latest_research_feature_dataset_
 LATEST_RESEARCH_FEATURE_DATASET_SUMMARY_MD = "latest_research_feature_dataset_summary.md"
 RESEARCH_FEATURE_DATASET_SCHEMA_MD = "research_feature_dataset_schema.md"
 RESEARCH_FEATURE_DATASET_MIGRATION_NOTES_MD = "research_feature_dataset_migration_notes.md"
+CRFD_PROVIDER_COMPARISON_JSON = "crfd_provider_comparison.json"
+CRFD_PROVIDER_COMPARISON_MD = "crfd_provider_comparison.md"
 DEFAULT_INSTRUMENTS = ("GC", "MGC")
 DEFAULT_TIMEFRAME = "1m"
 HORIZONS_MINUTES = (5, 15, 30, 60)
 AVWAP_ANCHORS = ("globex_session_open_18et", "london_open", "us_rth_open")
+DEFAULT_MAX_SOURCE_CANDLES = 5000
 
 
 @dataclass(frozen=True)
@@ -39,6 +46,13 @@ class ResearchFeatureDatasetResult:
     migration_notes_path: Path
 
 
+@dataclass(frozen=True)
+class ResearchFeatureProviderComparisonResult:
+    comparison: dict[str, Any]
+    json_path: Path
+    markdown_path: Path
+
+
 def run_research_feature_dataset_builder(
     *,
     output_root: Path = DEFAULT_OUTPUT_ROOT,
@@ -50,6 +64,9 @@ def run_research_feature_dataset_builder(
     backfill: bool = True,
     max_jsonl_row_bytes: int | None = None,
     max_snapshot_bytes: int | None = None,
+    provider: str = "retained",
+    research_store_root: Path | None = None,
+    max_source_candles: int | None = DEFAULT_MAX_SOURCE_CANDLES,
 ) -> ResearchFeatureDatasetResult:
     """Build and publish the diagnostic-only canonical research feature dataset."""
 
@@ -60,8 +77,30 @@ def run_research_feature_dataset_builder(
     generated_at = _coerce_now(now)
     dataset_dir = output_root / RESEARCH_FEATURE_DATASET_DIR
     dataset_dir.mkdir(parents=True, exist_ok=True)
-    candles_by_symbol = _load_candles(output_root, instruments=instruments, timeframe=timeframe)
+    data_provider = build_research_data_provider(
+        provider,
+        output_root=output_root,
+        research_store_root=research_store_root,
+    )
+    candles_by_symbol = _limit_candles_by_symbol(
+        canonical_candles_as_mappings(data_provider.load_candles(symbols=instruments, timeframe=timeframe)),
+        max_source_candles=max_source_candles,
+    )
     auxiliary_sources = _detect_auxiliary_sources(output_root)
+    auxiliary_sources["research_data_provider"] = {
+        "exists": True,
+        "provider_metadata": data_provider.provider_metadata(),
+        "coverage": {
+            symbol: {
+                "symbol": coverage.symbol,
+                "timeframe": coverage.timeframe,
+                "candle_count": coverage.candle_count,
+                "first_timestamp": None if coverage.first_timestamp is None else coverage.first_timestamp.isoformat(),
+                "latest_timestamp": None if coverage.latest_timestamp is None else coverage.latest_timestamp.isoformat(),
+            }
+            for symbol, coverage in data_provider.coverage(symbols=instruments, timeframe=timeframe).items()
+        },
+    }
     rows = tuple(
         build_research_feature_rows(
             candles_by_symbol=candles_by_symbol,
@@ -89,6 +128,7 @@ def run_research_feature_dataset_builder(
         cadence_minutes=cadence_minutes,
         rows_path=rows_path,
         auxiliary_sources=auxiliary_sources,
+        provider_metadata=data_provider.provider_metadata(),
     )
     snapshot_config = (
         BoundedSnapshotConfig(max_bytes=max_snapshot_bytes)
@@ -112,6 +152,70 @@ def run_research_feature_dataset_builder(
         schema_path=schema_path,
         migration_notes_path=migration_notes_path,
     )
+
+
+def run_crfd_provider_comparison(
+    *,
+    output_root: Path = DEFAULT_OUTPUT_ROOT,
+    now: datetime | str | None = None,
+    instruments: Sequence[str] = DEFAULT_INSTRUMENTS,
+    timeframe: str = DEFAULT_TIMEFRAME,
+    cadence_minutes: int = 5,
+    max_rows: int = 500,
+    research_store_root: Path | None = None,
+    max_source_candles: int | None = DEFAULT_MAX_SOURCE_CANDLES,
+) -> ResearchFeatureProviderComparisonResult:
+    generated_at = _coerce_now(now)
+    retained_provider = build_research_data_provider("retained", output_root=output_root, research_store_root=research_store_root)
+    parquet_provider = build_research_data_provider("parquet", output_root=output_root, research_store_root=research_store_root)
+    retained_candles = _limit_candles_by_symbol(
+        canonical_candles_as_mappings(retained_provider.load_candles(symbols=instruments, timeframe=timeframe)),
+        max_source_candles=max_source_candles,
+    )
+    parquet_candles = _limit_candles_by_symbol(
+        canonical_candles_as_mappings(parquet_provider.load_candles(symbols=instruments, timeframe=timeframe)),
+        max_source_candles=max_source_candles,
+    )
+    auxiliary_sources = _detect_auxiliary_sources(output_root)
+    retained_rows = build_research_feature_rows(
+        candles_by_symbol=retained_candles,
+        generated_at=generated_at,
+        timeframe=timeframe,
+        cadence_minutes=cadence_minutes,
+        max_rows=max_rows,
+        backfill=True,
+        output_root=output_root,
+        auxiliary_sources=auxiliary_sources,
+    )
+    parquet_rows = build_research_feature_rows(
+        candles_by_symbol=parquet_candles,
+        generated_at=generated_at,
+        timeframe=timeframe,
+        cadence_minutes=cadence_minutes,
+        max_rows=max_rows,
+        backfill=True,
+        output_root=output_root,
+        auxiliary_sources=auxiliary_sources,
+    )
+    comparison = build_crfd_provider_comparison(
+        generated_at=generated_at,
+        instruments=instruments,
+        timeframe=timeframe,
+        cadence_minutes=cadence_minutes,
+        retained_provider_metadata=retained_provider.provider_metadata(),
+        parquet_provider_metadata=parquet_provider.provider_metadata(),
+        retained_candles=retained_candles,
+        parquet_candles=parquet_candles,
+        retained_rows=retained_rows,
+        parquet_rows=parquet_rows,
+    )
+    dataset_dir = output_root / RESEARCH_FEATURE_DATASET_DIR
+    dataset_dir.mkdir(parents=True, exist_ok=True)
+    json_path = dataset_dir / CRFD_PROVIDER_COMPARISON_JSON
+    markdown_path = dataset_dir / CRFD_PROVIDER_COMPARISON_MD
+    write_bounded_snapshot_json(json_path, comparison)
+    markdown_path.write_text(render_crfd_provider_comparison_markdown(comparison), encoding="utf-8")
+    return ResearchFeatureProviderComparisonResult(comparison=comparison, json_path=json_path, markdown_path=markdown_path)
 
 
 def build_research_feature_rows(
@@ -151,6 +255,19 @@ def build_research_feature_rows(
     return rows[:max_rows]
 
 
+def _limit_candles_by_symbol(
+    candles_by_symbol: Mapping[str, Sequence[Mapping[str, Any]]],
+    *,
+    max_source_candles: int | None,
+) -> dict[str, tuple[Mapping[str, Any], ...]]:
+    if max_source_candles is None:
+        return {symbol: tuple(rows) for symbol, rows in candles_by_symbol.items()}
+    limit = max(int(max_source_candles), 0)
+    if limit <= 0:
+        return {symbol: () for symbol in candles_by_symbol}
+    return {symbol: tuple(rows)[-limit:] for symbol, rows in candles_by_symbol.items()}
+
+
 def build_research_feature_dataset_summary(
     rows: Sequence[Mapping[str, Any]],
     *,
@@ -160,6 +277,7 @@ def build_research_feature_dataset_summary(
     cadence_minutes: int,
     rows_path: Path,
     auxiliary_sources: Mapping[str, Any] | None = None,
+    provider_metadata: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     sessions: dict[str, int] = {}
     instruments: set[str] = set()
@@ -212,6 +330,9 @@ def build_research_feature_dataset_summary(
         ),
         "source_windows": windows,
         "auxiliary_sources": dict(auxiliary_sources or {}),
+        "research_data_provider": dict(provider_metadata or {}),
+        "provider_id": dict(provider_metadata or {}).get("provider_id"),
+        "provider_kind": dict(provider_metadata or {}).get("provider_kind"),
         "readiness_for_gre": _readiness_for_gre(rows, windows),
         "readiness_for_future_plugins": _future_plugin_readiness(contracts),
         "schema_notes_path": str(rows_path.with_name(RESEARCH_FEATURE_DATASET_SCHEMA_MD)),
@@ -222,6 +343,92 @@ def build_research_feature_dataset_summary(
         "strategy_authority": False,
         "trading_gate": False,
     }
+
+
+def build_crfd_provider_comparison(
+    *,
+    generated_at: datetime,
+    instruments: Sequence[str],
+    timeframe: str,
+    cadence_minutes: int,
+    retained_provider_metadata: Mapping[str, Any],
+    parquet_provider_metadata: Mapping[str, Any],
+    retained_candles: Mapping[str, Sequence[Mapping[str, Any]]],
+    parquet_candles: Mapping[str, Sequence[Mapping[str, Any]]],
+    retained_rows: Sequence[Mapping[str, Any]],
+    parquet_rows: Sequence[Mapping[str, Any]],
+) -> dict[str, Any]:
+    retained_windows = _coverage_windows(retained_candles)
+    parquet_windows = _coverage_windows(parquet_candles)
+    return {
+        "schema_version": "track_b_crfd_provider_comparison_v1",
+        "generated_at": generated_at.isoformat(),
+        "diagnostic_only": True,
+        "provider_comparison_only": True,
+        "instruments": [str(symbol).upper() for symbol in instruments],
+        "timeframe": timeframe,
+        "cadence_minutes": cadence_minutes,
+        "providers": {
+            "retained": dict(retained_provider_metadata),
+            "parquet": dict(parquet_provider_metadata),
+        },
+        "observation_counts": {
+            "retained": len(retained_rows),
+            "parquet": len(parquet_rows),
+        },
+        "candle_counts": {
+            "retained": {symbol: len(rows) for symbol, rows in retained_candles.items()},
+            "parquet": {symbol: len(rows) for symbol, rows in parquet_candles.items()},
+        },
+        "coverage": {
+            "retained": retained_windows,
+            "parquet": parquet_windows,
+        },
+        "latest_timestamps": {
+            "retained": {symbol: window.get("last_ts") for symbol, window in retained_windows.items()},
+            "parquet": {symbol: window.get("last_ts") for symbol, window in parquet_windows.items()},
+        },
+        "vwap": {
+            "retained": _feature_count(retained_rows, "has_vwap"),
+            "parquet": _feature_count(parquet_rows, "has_vwap"),
+        },
+        "anchored_vwap": {
+            "retained": _feature_count(retained_rows, "has_anchored_vwap"),
+            "parquet": _feature_count(parquet_rows, "has_anchored_vwap"),
+        },
+        "missing_features": {
+            "retained": _missing_feature_counts(retained_rows),
+            "parquet": _missing_feature_counts(parquet_rows),
+        },
+        "feature_completeness": {
+            "retained": _feature_completeness(retained_rows),
+            "parquet": _feature_completeness(parquet_rows),
+        },
+        "source_assessment": _provider_comparison_assessment(retained_rows=retained_rows, parquet_rows=parquet_rows),
+        "broker_authority": False,
+        "runtime_authority": False,
+        "managed_exit_authority": False,
+        "strategy_authority": False,
+        "trading_gate": False,
+    }
+
+
+def render_crfd_provider_comparison_markdown(comparison: Mapping[str, Any]) -> str:
+    return (
+        "# CRFD Provider Comparison\n\n"
+        f"Generated: `{comparison.get('generated_at')}`\n\n"
+        f"Instruments: `{comparison.get('instruments')}`\n\n"
+        f"Timeframe: `{comparison.get('timeframe')}`\n\n"
+        f"Observation counts: `{comparison.get('observation_counts')}`\n\n"
+        f"Candle counts: `{comparison.get('candle_counts')}`\n\n"
+        f"Latest timestamps: `{comparison.get('latest_timestamps')}`\n\n"
+        f"VWAP: `{comparison.get('vwap')}`\n\n"
+        f"Anchored VWAP: `{comparison.get('anchored_vwap')}`\n\n"
+        f"Missing features: `{comparison.get('missing_features')}`\n\n"
+        f"Feature completeness: `{comparison.get('feature_completeness')}`\n\n"
+        f"Assessment: `{comparison.get('source_assessment')}`\n\n"
+        "Diagnostic only: `true`\n"
+    )
 
 
 def render_research_feature_dataset_summary_markdown(summary: Mapping[str, Any]) -> str:
@@ -241,6 +448,7 @@ def render_research_feature_dataset_summary_markdown(summary: Mapping[str, Any])
         f"VWAP coverage: `{summary.get('vwap_coverage')}`\n\n"
         f"Anchored VWAP coverage: `{summary.get('anchored_vwap_coverage')}`\n\n"
         f"Anchored VWAP TOS note: {summary.get('anchored_vwap_tos_alignment_note')}\n\n"
+        f"Research data provider: `{summary.get('research_data_provider')}`\n\n"
         f"Readiness for GRE: `{summary.get('readiness_for_gre')}`\n\n"
         f"Future plugin readiness: `{summary.get('readiness_for_future_plugins')}`\n\n"
         "Diagnostic only: `true`\n"
@@ -371,7 +579,7 @@ def _build_row(
         "classification_feature_max_ts": observation_time.isoformat(),
         "observation_cadence_minutes": cadence_minutes,
         "source_refs": {
-            "phase1_candles": str(output_root / "phase1_runtime_market_data" / symbol / timeframe / "latest_runtime_candles.json"),
+            "candle_provider": str(candle.get("source_ref") or output_root / "phase1_runtime_market_data" / symbol / timeframe / "latest_runtime_candles.json"),
             **{key: str(value.get("path")) for key, value in auxiliary_sources.items() if isinstance(value, Mapping) and value.get("exists")},
         },
         "broker_authority": False,
@@ -915,6 +1123,45 @@ def _coverage_windows(candles_by_symbol: Mapping[str, Sequence[Mapping[str, Any]
             "last_ts": rows[-1]["timestamp"].isoformat(),
         }
     return windows
+
+
+def _feature_count(rows: Sequence[Mapping[str, Any]], key: str) -> dict[str, int]:
+    available = sum(1 for row in rows if bool(row.get(key)))
+    return {"available_count": available, "unavailable_count": max(len(rows) - available, 0)}
+
+
+def _missing_feature_counts(rows: Sequence[Mapping[str, Any]]) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for row in rows:
+        for key, value in dict(row.get("feature_availability") or {}).items():
+            if not value:
+                counts[str(key)] = counts.get(str(key), 0) + 1
+    return dict(sorted(counts.items()))
+
+
+def _feature_completeness(rows: Sequence[Mapping[str, Any]]) -> dict[str, float]:
+    totals: dict[str, int] = {}
+    available: dict[str, int] = {}
+    for row in rows:
+        for key, value in dict(row.get("feature_availability") or {}).items():
+            totals[str(key)] = totals.get(str(key), 0) + 1
+            if value:
+                available[str(key)] = available.get(str(key), 0) + 1
+    return {key: round(available.get(key, 0) / total, 4) for key, total in sorted(totals.items()) if total}
+
+
+def _provider_comparison_assessment(
+    *,
+    retained_rows: Sequence[Mapping[str, Any]],
+    parquet_rows: Sequence[Mapping[str, Any]],
+) -> dict[str, Any]:
+    return {
+        "parquet_has_more_observations": len(parquet_rows) > len(retained_rows),
+        "retained_observation_count": len(retained_rows),
+        "parquet_observation_count": len(parquet_rows),
+        "input_only_comparison": True,
+        "gre_scores_compared": False,
+    }
 
 
 def _observation_window(rows: Sequence[Mapping[str, Any]]) -> tuple[str | None, str | None]:

@@ -29,7 +29,15 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--timeframe", default=DEFAULT_TIMEFRAME)
     parser.add_argument("--cadence-minutes", type=int, default=5)
     parser.add_argument("--max-rows", type=int, default=500)
+    parser.add_argument("--max-source-candles", type=int, default=5000)
     parser.add_argument("--live-observation", action="store_true", help="Mark rows backfill=false; still diagnostic-only.")
+    parser.add_argument("--provider", choices=("retained", "parquet"), default="retained")
+    parser.add_argument(
+        "--research-store-root",
+        type=Path,
+        default=Path("outputs/reports/trend_participation_engine"),
+        help="Historical research store root used by --provider parquet.",
+    )
     return parser
 
 
@@ -43,6 +51,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         cadence_minutes=args.cadence_minutes,
         max_rows=args.max_rows,
         backfill=not args.live_observation,
+        provider=args.provider,
+        research_store_root=args.research_store_root,
+        max_source_candles=args.max_source_candles,
     )
     print(
         json.dumps(
@@ -51,6 +62,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                 "observation_count": result.summary.get("observation_count"),
                 "time_coverage": result.summary.get("time_coverage"),
                 "contracts": result.summary.get("contracts"),
+                "provider_id": result.summary.get("provider_id"),
+                "provider_kind": result.summary.get("provider_kind"),
                 "readiness_for_gre": result.summary.get("readiness_for_gre"),
                 "readiness_for_future_plugins": result.summary.get("readiness_for_future_plugins"),
                 "rows_path": str(result.rows_path),
