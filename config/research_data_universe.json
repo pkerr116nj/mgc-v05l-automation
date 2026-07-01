@@ -1,0 +1,125 @@
+{
+  "schema_version": "track_b_research_data_universe_v1",
+  "generated_at": "2026-07-01T00:00:00-04:00",
+  "description": "Explicit research-only historical data universe. This is not runtime, broker, strategy, or Managed Exit authority.",
+  "default_symbols": [
+    "GC",
+    "MGC",
+    "ES",
+    "MES",
+    "NQ",
+    "MNQ",
+    "ZT",
+    "ZF",
+    "ZN",
+    "ZB"
+  ],
+  "symbols": {
+    "GC": {
+      "enabled": true,
+      "family": "gold",
+      "databento_symbol": "GC.v.0",
+      "timeframes": [
+        "1m"
+      ]
+    },
+    "MGC": {
+      "enabled": true,
+      "family": "gold_micro",
+      "databento_symbol": "MGC.v.0",
+      "higher_timeframe_reference": "GC",
+      "timeframes": [
+        "1m"
+      ]
+    },
+    "ES": {
+      "enabled": true,
+      "family": "equity_index",
+      "databento_symbol": "ES.v.0",
+      "timeframes": [
+        "1m"
+      ]
+    },
+    "MES": {
+      "enabled": true,
+      "family": "equity_index_micro",
+      "databento_symbol": "MES.v.0",
+      "higher_timeframe_reference": "ES",
+      "timeframes": [
+        "1m"
+      ]
+    },
+    "NQ": {
+      "enabled": true,
+      "family": "equity_index",
+      "databento_symbol": "NQ.v.0",
+      "timeframes": [
+        "1m"
+      ]
+    },
+    "MNQ": {
+      "enabled": true,
+      "family": "equity_index_micro",
+      "databento_symbol": "MNQ.v.0",
+      "higher_timeframe_reference": "NQ",
+      "timeframes": [
+        "1m"
+      ]
+    },
+    "ZT": {
+      "enabled": true,
+      "family": "rates",
+      "databento_symbol": "ZT.v.0",
+      "timeframes": [
+        "1m"
+      ]
+    },
+    "ZF": {
+      "enabled": true,
+      "family": "rates",
+      "databento_symbol": "ZF.v.0",
+      "timeframes": [
+        "1m"
+      ]
+    },
+    "ZN": {
+      "enabled": true,
+      "family": "rates",
+      "databento_symbol": "ZN.v.0",
+      "timeframes": [
+        "1m"
+      ]
+    },
+    "ZB": {
+      "enabled": true,
+      "family": "rates",
+      "databento_symbol": "ZB.v.0",
+      "timeframes": [
+        "1m"
+      ]
+    },
+    "PL": {
+      "enabled": true,
+      "family": "metals_optional",
+      "databento_symbol": "PL.v.0",
+      "optional": true,
+      "timeframes": [
+        "1m"
+      ]
+    }
+  },
+  "routine_refresh_policy": {
+    "max_calendar_days_without_operator_approval": 10,
+    "estimated_1m_bars_per_calendar_day": 1380,
+    "estimated_parquet_bytes_per_1m_bar": 220,
+    "requires_explicit_date_range": true
+  },
+  "authority_boundaries": {
+    "research_artifact": true,
+    "runtime_artifact": false,
+    "broker_authority": false,
+    "strategy_authority": false,
+    "managed_exit_authority": false,
+    "trading_gate": false
+  }
+}

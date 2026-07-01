@@ -12,7 +12,7 @@ import os
 import re
 import uuid
 from dataclasses import dataclass
-from datetime import date, datetime, time, timezone
+from datetime import date, datetime, time, timedelta, timezone
 from pathlib import Path
 from typing import Any, Protocol, Sequence
 
@@ -21,7 +21,8 @@ from mgc_v05l.market_data.databento_provider import DatabentoHistoricalHttpClien
 from mgc_v05l.research.trend_participation.storage import build_layout, write_storage_manifest
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
-DEFAULT_SYMBOLS = ("MGC", "MNQ", "MES")
+DEFAULT_RESEARCH_UNIVERSE_PATH = Path("config") / "research_data_universe.json"
+FALLBACK_RESEARCH_SYMBOLS = ("MGC", "MNQ", "MES")
 DEFAULT_START_DATE = date(2010, 6, 6)
 DEFAULT_LOADED_HISTORY_START_DATE = date(2020, 1, 1)
 DEFAULT_OUTPUT_ROOT = Path("outputs") / "reports" / "trend_participation_engine"
@@ -31,6 +32,9 @@ DEFAULT_BASE_URL = "https://hist.databento.com/v0"
 SOURCE = "DATABENTO_HISTORICAL_RESEARCH_BACKFILL"
 TIMEFRAME = "1m"
 APPROVED_CHUNKS = {"monthly": 1, "quarterly": 3}
+DEFAULT_ROUTINE_MAX_CALENDAR_DAYS = 10
+DEFAULT_ESTIMATED_1M_BARS_PER_CALENDAR_DAY = 1380
+DEFAULT_ESTIMATED_PARQUET_BYTES_PER_1M_BAR = 220
 
 
 class ResearchBackfillClient(Protocol):
@@ -69,7 +73,7 @@ class BackfillChunk:
 class ResearchMinuteBackfillConfig:
     repo_root: Path = REPO_ROOT
     output_root: Path = DEFAULT_OUTPUT_ROOT
-    symbols: tuple[str, ...] = DEFAULT_SYMBOLS
+    symbols: tuple[str, ...] = FALLBACK_RESEARCH_SYMBOLS
     start_date: date = DEFAULT_START_DATE
     end_date: date | None = None
     loaded_history_start_date: date | None = DEFAULT_LOADED_HISTORY_START_DATE
@@ -86,6 +90,9 @@ class ResearchMinuteBackfillConfig:
     stype_out: str = "instrument_id"
     limit: int | None = None
     now: datetime | None = None
+    research_universe_path: Path | None = DEFAULT_RESEARCH_UNIVERSE_PATH
+    research_universe_symbols: tuple[str, ...] | None = None
+    operator_approved_large_refresh: bool = False
 
 
 @dataclass(frozen=True)
@@ -100,13 +107,17 @@ def run_research_minute_backfill(
     client: ResearchBackfillClient | None = None,
 ) -> ResearchMinuteBackfillResult:
     now = _coerce_now(config.now)
-    symbols = _normalize_symbols(config.symbols)
+    universe = _load_research_universe(config)
+    symbols = _normalize_symbols(config.symbols, universe=universe)
+    _require_explicit_date_range(config)
     chunk_months = _chunk_months(config.chunk)
     requested_end_date = config.end_date or now.date()
     backfill_end = _backfill_end_datetime(config=config, requested_end_date=requested_end_date)
     chunks = _build_chunks(config=config, symbols=symbols, final_end=backfill_end, chunk_months=chunk_months)
     if config.max_chunks is not None:
         chunks = chunks[: max(int(config.max_chunks), 0)]
+    scope_estimate = _scope_estimate(config=config, symbols=symbols, chunks=chunks, requested_end_date=requested_end_date)
+    approval_required = bool(scope_estimate["approval_required"])
 
     api_key, credential_status, credential_source = _load_databento_api_key(config.env_file)
     rows: list[dict[str, Any]] = []
@@ -124,6 +135,37 @@ def run_research_minute_backfill(
             base_url=config.base_url,
             transport=UrllibDatabentoTransport(timeout_seconds=120),
         )
+
+    if not config.dry_run and approval_required and not config.operator_approved_large_refresh:
+        rows = [
+            _symbol_row(
+                symbol=symbol,
+                chunks=[chunk for chunk in chunks if chunk.symbol == symbol],
+                status="BLOCKED",
+                block_reason="OPERATOR_APPROVAL_REQUIRED_FOR_LARGE_RESEARCH_REFRESH",
+            )
+            for symbol in symbols
+        ]
+        report = _build_report(
+            config=config,
+            now=now,
+            symbols=symbols,
+            chunks=chunks,
+            rows=rows,
+            partition_reports=[],
+            credential_status=credential_status,
+            credential_source=credential_source,
+            provider_error_count=0,
+            written_count=0,
+            skipped_count=0,
+            empty_count=0,
+            would_fetch_count=0,
+            final_verdict="RESEARCH_MINUTE_BACKFILL_APPROVAL_REQUIRED",
+            primary_blocker="OPERATOR_APPROVAL_REQUIRED_FOR_LARGE_RESEARCH_REFRESH",
+            universe=universe,
+            scope_estimate=scope_estimate,
+        )
+        return _write_reports(config=config, report=report)
 
     if not config.dry_run and seed_client is None:
         rows = [_symbol_row(symbol=symbol, chunks=[], status="BLOCKED", block_reason="DATABENTO_API_KEY_MISSING") for symbol in symbols]
@@ -143,6 +185,8 @@ def run_research_minute_backfill(
             would_fetch_count=0,
             final_verdict="RESEARCH_MINUTE_BACKFILL_BLOCKED",
             primary_blocker="DATABENTO_API_KEY_MISSING",
+            universe=universe,
+            scope_estimate=scope_estimate,
         )
         return _write_reports(config=config, report=report)
 
@@ -233,6 +277,7 @@ def run_research_minute_backfill(
 
     final_verdict = _final_verdict(
         dry_run=config.dry_run,
+        approval_required=approval_required,
         provider_error_count=provider_error_count,
         written_count=written_count,
         skipped_count=skipped_count,
@@ -255,6 +300,8 @@ def run_research_minute_backfill(
         would_fetch_count=would_fetch_count,
         final_verdict=final_verdict,
         primary_blocker="PROVIDER_ERRORS" if provider_error_count else None,
+        universe=universe,
+        scope_estimate=scope_estimate,
     )
     return _write_reports(config=config, report=report)
 
@@ -459,6 +506,8 @@ def _build_report(
     would_fetch_count: int,
     final_verdict: str,
     primary_blocker: str | None,
+    universe: dict[str, Any],
+    scope_estimate: dict[str, Any],
 ) -> dict[str, Any]:
     return {
         "schema_version": "databento_research_minute_backfill_report_v1",
@@ -476,6 +525,13 @@ def _build_report(
         "timeframe": TIMEFRAME,
         "symbols": list(symbols),
         "symbol_count": len(symbols),
+        "research_universe": {
+            "source": universe["source"],
+            "schema_version": universe.get("schema_version"),
+            "allowed_symbols": list(universe["allowed_symbols"]),
+            "requested_symbols": list(symbols),
+            "unknown_symbols_rejected": True,
+        },
         "requested_start": _start_datetime(config.start_date).isoformat(),
         "requested_end": _end_datetime(config.end_date or now.date()).isoformat(),
         "planned_fetch_end": _backfill_end_datetime(config=config, requested_end_date=config.end_date or now.date()).isoformat(),
@@ -488,6 +544,10 @@ def _build_report(
         else _end_datetime(config.end_date or now.date()).isoformat(),
         "chunk": config.chunk,
         "chunk_count": len(chunks),
+        "scope_estimate": scope_estimate,
+        "approval_required": bool(scope_estimate.get("approval_required")),
+        "approval_reason": scope_estimate.get("approval_reason"),
+        "operator_approved_large_refresh": bool(config.operator_approved_large_refresh),
         "dry_run": bool(config.dry_run),
         "force": bool(config.force),
         "max_chunks": config.max_chunks,
@@ -780,12 +840,105 @@ def _coerce_volume(value: Any) -> float:
         return 0.0
 
 
-def _normalize_symbols(symbols: Sequence[str]) -> tuple[str, ...]:
+def _load_research_universe(config: ResearchMinuteBackfillConfig) -> dict[str, Any]:
+    if config.research_universe_symbols is not None:
+        symbols = _normalize_symbol_tuple(config.research_universe_symbols)
+        return {
+            "source": "config.research_universe_symbols",
+            "schema_version": "inline_research_data_universe_v1",
+            "allowed_symbols": symbols,
+            "default_symbols": symbols,
+            "routine_max_calendar_days": DEFAULT_ROUTINE_MAX_CALENDAR_DAYS,
+            "estimated_1m_bars_per_calendar_day": DEFAULT_ESTIMATED_1M_BARS_PER_CALENDAR_DAY,
+            "estimated_parquet_bytes_per_1m_bar": DEFAULT_ESTIMATED_PARQUET_BYTES_PER_1M_BAR,
+        }
+    universe_path = config.research_universe_path or DEFAULT_RESEARCH_UNIVERSE_PATH
+    path = universe_path if universe_path.is_absolute() else Path(config.repo_root) / universe_path
+    if not path.exists():
+        symbols = FALLBACK_RESEARCH_SYMBOLS
+        return {
+            "source": f"fallback_missing:{path}",
+            "schema_version": "fallback_research_data_universe_v1",
+            "allowed_symbols": symbols,
+            "default_symbols": symbols,
+            "routine_max_calendar_days": DEFAULT_ROUTINE_MAX_CALENDAR_DAYS,
+            "estimated_1m_bars_per_calendar_day": DEFAULT_ESTIMATED_1M_BARS_PER_CALENDAR_DAY,
+            "estimated_parquet_bytes_per_1m_bar": DEFAULT_ESTIMATED_PARQUET_BYTES_PER_1M_BAR,
+        }
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    symbol_rows = payload.get("symbols") or {}
+    allowed = tuple(
+        sorted(
+            str(symbol).strip().upper()
+            for symbol, row in symbol_rows.items()
+            if str(symbol).strip() and bool((row or {}).get("enabled", True))
+        )
+    )
+    defaults = _normalize_symbol_tuple(payload.get("default_symbols") or allowed)
+    policy = payload.get("routine_refresh_policy") or {}
+    return {
+        "source": str(path),
+        "schema_version": payload.get("schema_version"),
+        "allowed_symbols": allowed,
+        "default_symbols": tuple(symbol for symbol in defaults if symbol in allowed),
+        "routine_max_calendar_days": int(policy.get("max_calendar_days_without_operator_approval") or DEFAULT_ROUTINE_MAX_CALENDAR_DAYS),
+        "estimated_1m_bars_per_calendar_day": int(policy.get("estimated_1m_bars_per_calendar_day") or DEFAULT_ESTIMATED_1M_BARS_PER_CALENDAR_DAY),
+        "estimated_parquet_bytes_per_1m_bar": int(policy.get("estimated_parquet_bytes_per_1m_bar") or DEFAULT_ESTIMATED_PARQUET_BYTES_PER_1M_BAR),
+    }
+
+
+def _normalize_symbol_tuple(symbols: Sequence[str]) -> tuple[str, ...]:
+    return tuple(dict.fromkeys(str(symbol).strip().upper() for symbol in symbols if str(symbol).strip()))
+
+
+def _normalize_symbols(symbols: Sequence[str], *, universe: dict[str, Any]) -> tuple[str, ...]:
     normalized = tuple(dict.fromkeys(str(symbol).strip().upper() for symbol in symbols if str(symbol).strip()))
-    invalid = [symbol for symbol in normalized if symbol not in DEFAULT_SYMBOLS]
+    allowed = set(universe["allowed_symbols"])
+    invalid = [symbol for symbol in normalized if symbol not in allowed]
     if invalid:
-        raise ValueError(f"Unsupported research symbols for this backfill: {invalid}")
+        raise ValueError(f"Unsupported research symbols for this backfill: {invalid}; configured_universe={sorted(allowed)}")
     return normalized
+
+
+def _require_explicit_date_range(config: ResearchMinuteBackfillConfig) -> None:
+    if config.end_date is None:
+        raise ValueError("Research minute backfill requires an explicit --end-date for preflight/download scope control.")
+
+
+def _scope_estimate(
+    *,
+    config: ResearchMinuteBackfillConfig,
+    symbols: tuple[str, ...],
+    chunks: Sequence[BackfillChunk],
+    requested_end_date: date,
+) -> dict[str, Any]:
+    start = _start_datetime(config.start_date)
+    requested_end = _end_datetime(requested_end_date)
+    planned_end = _backfill_end_datetime(config=config, requested_end_date=requested_end_date)
+    covered_seconds = max((planned_end - start).total_seconds(), 0)
+    calendar_days = int((covered_seconds + 86399) // 86400)
+    universe = _load_research_universe(config)
+    bars_per_day = int(universe["estimated_1m_bars_per_calendar_day"])
+    estimated_bars = calendar_days * bars_per_day * len(symbols)
+    estimated_bytes = estimated_bars * int(universe["estimated_parquet_bytes_per_1m_bar"])
+    routine_limit = int(universe["routine_max_calendar_days"])
+    approval_required = calendar_days > routine_limit
+    return {
+        "requested_start": start.isoformat(),
+        "requested_end": requested_end.isoformat(),
+        "planned_fetch_end": planned_end.isoformat(),
+        "symbol_count": len(symbols),
+        "chunk_count": len(chunks),
+        "calendar_days": calendar_days,
+        "routine_max_calendar_days_without_operator_approval": routine_limit,
+        "estimated_1m_bars_per_calendar_day": bars_per_day,
+        "estimated_1m_bar_count": estimated_bars,
+        "estimated_parquet_bytes": estimated_bytes,
+        "estimated_parquet_megabytes": round(estimated_bytes / 1_000_000, 3),
+        "approval_required": approval_required,
+        "approval_reason": "REQUESTED_RANGE_EXCEEDS_ROUTINE_WEEKLY_POLICY" if approval_required else None,
+        "routine_weekly_policy": not approval_required,
+    }
 
 
 def _chunk_months(chunk: str) -> int:
@@ -840,6 +993,7 @@ def _symbol_status(*, dry_run: bool, written: int, skipped: int, failed: int, to
 def _final_verdict(
     *,
     dry_run: bool,
+    approval_required: bool = False,
     provider_error_count: int,
     written_count: int,
     skipped_count: int,
@@ -847,6 +1001,8 @@ def _final_verdict(
     would_fetch_count: int,
 ) -> str:
     if dry_run:
+        if approval_required:
+            return "RESEARCH_MINUTE_BACKFILL_DRY_RUN_APPROVAL_REQUIRED"
         return "RESEARCH_MINUTE_BACKFILL_DRY_RUN_READY"
     if provider_error_count:
         return "RESEARCH_MINUTE_BACKFILL_PARTIAL_OR_BLOCKED"
@@ -867,10 +1023,10 @@ def _require_pyarrow() -> Any:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Research-only Databento historical 1m backfill for MGC/MNQ/MES.")
-    parser.add_argument("--symbols", default=",".join(DEFAULT_SYMBOLS))
+    parser = argparse.ArgumentParser(description="Research-only Databento historical 1m backfill for configured research data universe.")
+    parser.add_argument("--symbols")
     parser.add_argument("--start-date", default=DEFAULT_START_DATE.isoformat())
-    parser.add_argument("--end-date")
+    parser.add_argument("--end-date", required=True)
     parser.add_argument(
         "--loaded-history-start-date",
         default=DEFAULT_LOADED_HISTORY_START_DATE.isoformat(),
@@ -887,12 +1043,19 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--json-output", type=Path)
     parser.add_argument("--dataset", default=DEFAULT_DATASET)
     parser.add_argument("--base-url", default=DEFAULT_BASE_URL)
+    parser.add_argument("--research-universe", type=Path, default=DEFAULT_RESEARCH_UNIVERSE_PATH)
+    parser.add_argument("--operator-approved-large-refresh", action="store_true")
     return parser
 
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
-    symbols = tuple(symbol.strip().upper() for symbol in str(args.symbols).split(",") if symbol.strip())
+    universe_path = Path(args.research_universe)
+    defaults = _load_research_universe(
+        ResearchMinuteBackfillConfig(repo_root=Path(args.repo_root), research_universe_path=universe_path, end_date=date.fromisoformat(str(args.end_date)))
+    )["default_symbols"]
+    symbols_arg = args.symbols if args.symbols is not None else ",".join(defaults)
+    symbols = tuple(symbol.strip().upper() for symbol in str(symbols_arg).split(",") if symbol.strip())
     result = run_research_minute_backfill(
         config=ResearchMinuteBackfillConfig(
             repo_root=Path(args.repo_root),
@@ -910,6 +1073,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             dataset=str(args.dataset),
             base_url=str(args.base_url),
             limit=args.limit,
+            research_universe_path=universe_path,
+            operator_approved_large_refresh=bool(args.operator_approved_large_refresh),
         )
     )
     print(

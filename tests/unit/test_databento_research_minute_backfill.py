@@ -104,10 +104,12 @@ def _config(tmp_path: Path, **overrides: Any) -> ResearchMinuteBackfillConfig:
 def test_dry_run_uses_2010_start_and_all_three_symbols(tmp_path: Path) -> None:
     result = run_research_minute_backfill(config=_config(tmp_path, dry_run=True))
 
-    assert result.report["final_verdict"] == "RESEARCH_MINUTE_BACKFILL_DRY_RUN_READY"
+    assert result.report["final_verdict"] == "RESEARCH_MINUTE_BACKFILL_DRY_RUN_APPROVAL_REQUIRED"
     assert result.report["symbols"] == ["MGC", "MNQ", "MES"]
     assert result.report["requested_start"] == "2010-06-06T00:00:00+00:00"
     assert result.report["partitions_would_fetch"] == result.report["chunk_count"]
+    assert result.report["approval_required"] is True
+    assert result.report["scope_estimate"]["estimated_1m_bar_count"] > 0
     assert result.report["research_artifact"] is True
     assert result.report["runtime_artifact"] is False
     assert result.report["can_submit"] is False
@@ -140,7 +142,7 @@ def test_default_loaded_history_boundary_skips_2020_plus_duplicate_downloads(tmp
 def test_real_run_writes_atp_research_parquet_manifest_and_duckdb_view(tmp_path: Path) -> None:
     client = _FakeBackfillClient()
     result = run_research_minute_backfill(
-        config=_config(tmp_path, symbols=("MGC",), end_date=date(2010, 6, 30), max_chunks=1),
+        config=_config(tmp_path, symbols=("MGC",), end_date=date(2010, 6, 10), max_chunks=1),
         client=client,
     )
 
@@ -173,7 +175,7 @@ def test_real_run_writes_atp_research_parquet_manifest_and_duckdb_view(tmp_path:
 def test_resume_skips_complete_partition_without_force(tmp_path: Path) -> None:
     first_client = _FakeBackfillClient()
     second_client = _FakeBackfillClient()
-    config = _config(tmp_path, symbols=("MGC",), end_date=date(2010, 6, 30), max_chunks=1)
+    config = _config(tmp_path, symbols=("MGC",), end_date=date(2010, 6, 10), max_chunks=1)
 
     first = run_research_minute_backfill(config=config, client=first_client)
     second = run_research_minute_backfill(config=config, client=second_client)
@@ -187,7 +189,7 @@ def test_resume_skips_complete_partition_without_force(tmp_path: Path) -> None:
 def test_empty_chunk_writes_metadata_without_empty_parquet(tmp_path: Path) -> None:
     client = _FakeBackfillClient(empty=True)
     result = run_research_minute_backfill(
-        config=_config(tmp_path, symbols=("MGC",), end_date=date(2010, 6, 30), max_chunks=1),
+        config=_config(tmp_path, symbols=("MGC",), end_date=date(2010, 6, 10), max_chunks=1),
         client=client,
     )
 
@@ -216,8 +218,8 @@ def test_empty_chunk_writes_metadata_without_empty_parquet(tmp_path: Path) -> No
 def test_force_overwrites_complete_partition(tmp_path: Path) -> None:
     first_client = _FakeBackfillClient()
     second_client = _FakeBackfillClient()
-    base = _config(tmp_path, symbols=("MGC",), end_date=date(2010, 6, 30), max_chunks=1)
-    forced = _config(tmp_path, symbols=("MGC",), end_date=date(2010, 6, 30), max_chunks=1, force=True)
+    base = _config(tmp_path, symbols=("MGC",), end_date=date(2010, 6, 10), max_chunks=1)
+    forced = _config(tmp_path, symbols=("MGC",), end_date=date(2010, 6, 10), max_chunks=1, force=True)
 
     run_research_minute_backfill(config=base, client=first_client)
     second = run_research_minute_backfill(config=forced, client=second_client)
@@ -229,7 +231,7 @@ def test_force_overwrites_complete_partition(tmp_path: Path) -> None:
 def test_missing_credentials_fail_closed_for_real_run(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("DATABENTO_API_KEY", raising=False)
 
-    result = run_research_minute_backfill(config=_config(tmp_path, symbols=("MGC",), end_date=date(2010, 6, 30), max_chunks=1))
+    result = run_research_minute_backfill(config=_config(tmp_path, symbols=("MGC",), end_date=date(2010, 6, 10), max_chunks=1))
 
     assert result.report["final_verdict"] == "RESEARCH_MINUTE_BACKFILL_BLOCKED"
     assert result.report["primary_blocker"] == "DATABENTO_API_KEY_MISSING"
@@ -239,7 +241,7 @@ def test_missing_credentials_fail_closed_for_real_run(tmp_path: Path, monkeypatc
 
 def test_provider_error_fails_closed_without_runtime_mutation(tmp_path: Path) -> None:
     result = run_research_minute_backfill(
-        config=_config(tmp_path, symbols=("MGC",), end_date=date(2010, 6, 30), max_chunks=1),
+        config=_config(tmp_path, symbols=("MGC",), end_date=date(2010, 6, 10), max_chunks=1),
         client=_FakeBackfillClient(fail=True),
     )
 
@@ -249,9 +251,61 @@ def test_provider_error_fails_closed_without_runtime_mutation(tmp_path: Path) ->
     assert result.report["paper_trade_allowed"] is False
 
 
-def test_rejects_symbols_outside_mgc_mnq_mes(tmp_path: Path) -> None:
+def test_configured_research_universe_allows_d4a_symbols(tmp_path: Path) -> None:
+    result = run_research_minute_backfill(
+        config=_config(
+            tmp_path,
+            symbols=("GC", "MGC", "ES", "MES", "NQ", "MNQ", "ZT", "ZF", "ZN", "ZB", "PL"),
+            research_universe_symbols=("GC", "MGC", "ES", "MES", "NQ", "MNQ", "ZT", "ZF", "ZN", "ZB", "PL"),
+            start_date=date(2026, 4, 22),
+            end_date=date(2026, 7, 1),
+            loaded_history_start_date=None,
+            dry_run=True,
+        )
+    )
+
+    assert result.report["final_verdict"] == "RESEARCH_MINUTE_BACKFILL_DRY_RUN_APPROVAL_REQUIRED"
+    assert result.report["symbols"] == ["GC", "MGC", "ES", "MES", "NQ", "MNQ", "ZT", "ZF", "ZN", "ZB", "PL"]
+    assert result.report["research_universe"]["unknown_symbols_rejected"] is True
+    assert result.report["scope_estimate"]["approval_reason"] == "REQUESTED_RANGE_EXCEEDS_ROUTINE_WEEKLY_POLICY"
+
+
+def test_rejects_symbols_outside_configured_research_universe(tmp_path: Path) -> None:
     with pytest.raises(ValueError, match="Unsupported research symbols"):
-        run_research_minute_backfill(config=_config(tmp_path, symbols=("GC",), dry_run=True))
+        run_research_minute_backfill(
+            config=_config(
+                tmp_path,
+                symbols=("CL",),
+                research_universe_symbols=("GC", "MGC"),
+                dry_run=True,
+            )
+        )
+
+
+def test_requires_explicit_end_date_for_scope_control(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="requires an explicit --end-date"):
+        run_research_minute_backfill(config=_config(tmp_path, end_date=None, dry_run=True))
+
+
+def test_unapproved_large_real_refresh_fails_closed_before_provider_call(tmp_path: Path) -> None:
+    client = _FakeBackfillClient()
+
+    result = run_research_minute_backfill(
+        config=_config(
+            tmp_path,
+            symbols=("GC",),
+            research_universe_symbols=("GC",),
+            start_date=date(2026, 4, 22),
+            end_date=date(2026, 7, 1),
+            loaded_history_start_date=None,
+        ),
+        client=client,
+    )
+
+    assert result.report["final_verdict"] == "RESEARCH_MINUTE_BACKFILL_APPROVAL_REQUIRED"
+    assert result.report["primary_blocker"] == "OPERATOR_APPROVAL_REQUIRED_FOR_LARGE_RESEARCH_REFRESH"
+    assert result.report["approval_required"] is True
+    assert client.requests == []
 
 
 def test_backfill_module_has_no_broker_or_paper_proof_paths() -> None:
