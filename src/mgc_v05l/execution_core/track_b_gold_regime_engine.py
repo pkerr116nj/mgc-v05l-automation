@@ -25,6 +25,7 @@ DEFAULT_OUTPUT_ROOT = Path("outputs/track_b_execution_core")
 GOLD_REGIME_OUTPUT_DIR = Path("research/gold_regime_engine")
 LATEST_GOLD_REGIME_JSON = "latest_gold_regime_engine.json"
 LATEST_GOLD_REGIME_MD = "latest_gold_regime_engine.md"
+CRFD_DATASET_PATH = Path("research/canonical_research_feature_dataset/research_feature_dataset.jsonl")
 
 REGIME_LONG = "LONG"
 REGIME_SHORT = "SHORT"
@@ -118,6 +119,11 @@ def load_gold_regime_context(*, output_root: Path, generated_at: datetime) -> Re
         if payload:
             analytics[name] = payload
             source_refs[name] = str(path)
+    crfd_path = output_root / CRFD_DATASET_PATH
+    crfd_rows = _read_jsonl(crfd_path)
+    if crfd_rows:
+        analytics["crfd_rows"] = crfd_rows
+        source_refs["canonical_research_feature_dataset"] = str(crfd_path)
     return RegimeEngineContext(
         instrument="GOLD",
         symbols=("GC", "MGC"),
@@ -141,6 +147,7 @@ class GoldRegimePlugin:
             "candle_body_strength",
             "range_chop",
             "multi_timeframe_agreement",
+            "crfd_vwap",
         ),
     )
 
@@ -184,6 +191,12 @@ class GoldRegimePlugin:
         chop = _chop_features(primary_1m[-24:])
         multi_tf = _multi_timeframe_agreement(one_minute, five_minute)
         analytics_features = _analytics_features(context.analytics)
+        crfd_vwap = _crfd_vwap_feature(
+            context.analytics,
+            symbols=context.symbols,
+            latest_ts=latest_ts,
+            session_group=session_group,
+        )
         features = {
             "plugin_id": self.plugin_id,
             "session_label": session_label,
@@ -196,6 +209,7 @@ class GoldRegimePlugin:
             "range_chop_index": chop,
             "multi_timeframe_agreement": multi_tf,
             "analytics_context": analytics_features,
+            "crfd_vwap": crfd_vwap,
         }
 
         score = 0.0
@@ -241,8 +255,15 @@ class GoldRegimePlugin:
             positive.append(_evidence("range_chop_index", 8, "Recent range behavior is not chop-heavy.", chop))
             score += 8
         score -= 18 if chop["chop_score"] >= 0.68 else 0
+        score += _vwap_evidence(
+            positive,
+            negative,
+            conflicts,
+            vwap=crfd_vwap,
+            current_score=score,
+        )
 
-        missing.extend(_base_missing_features())
+        missing.extend(_base_missing_features(include_vwap=not bool(crfd_vwap.get("available"))))
         if not analytics_features["forward_path_available"]:
             missing.append("forward-path expectancy unavailable or stale")
         if not analytics_features["side_session_available"]:
@@ -371,6 +392,22 @@ def _read_json(path: Path) -> Mapping[str, Any]:
     except (OSError, json.JSONDecodeError):
         return {}
     return payload if isinstance(payload, Mapping) else {}
+
+
+def _read_jsonl(path: Path) -> tuple[dict[str, Any], ...]:
+    if not path.exists():
+        return ()
+    rows: list[dict[str, Any]] = []
+    try:
+        for line in path.read_text(encoding="utf-8").splitlines():
+            if not line.strip():
+                continue
+            payload = json.loads(line)
+            if isinstance(payload, Mapping):
+                rows.append(dict(payload))
+    except (OSError, json.JSONDecodeError):
+        return ()
+    return tuple(rows)
 
 
 def _extract_bars(payload: Mapping[str, Any]) -> tuple[dict[str, Any], ...]:
@@ -502,6 +539,127 @@ def _analytics_features(analytics: Mapping[str, Any]) -> dict[str, Any]:
     }
 
 
+def _crfd_vwap_feature(
+    analytics: Mapping[str, Any],
+    *,
+    symbols: Sequence[str],
+    latest_ts: datetime,
+    session_group: str,
+) -> dict[str, Any]:
+    rows = analytics.get("crfd_rows")
+    if not isinstance(rows, Sequence) or isinstance(rows, (str, bytes)):
+        return {"available": False, "reason": "CRFD rows unavailable"}
+    symbol_set = {str(symbol).upper() for symbol in symbols}
+    candidates: list[tuple[datetime, Mapping[str, Any]]] = []
+    for row in rows:
+        if not isinstance(row, Mapping):
+            continue
+        if str(row.get("instrument") or "").upper() != "GOLD":
+            continue
+        if str(row.get("contract") or "").upper() not in symbol_set:
+            continue
+        if str(row.get("session") or "").upper() != str(session_group or "").upper():
+            continue
+        observation_time = _parse_datetime(row.get("observation_time"))
+        if observation_time is None or observation_time > latest_ts:
+            continue
+        candidates.append((observation_time, row))
+    if not candidates:
+        return {"available": False, "reason": "No same-session CRFD VWAP row at or before GRE timestamp"}
+    observation_time, row = max(candidates, key=lambda item: item[0])
+    if row.get("has_vwap") is not True or row.get("vwap") is None:
+        return {
+            "available": False,
+            "reason": row.get("vwap_unavailable_reason") or "CRFD VWAP unavailable",
+            "observation_time": observation_time.isoformat(),
+            "contract": row.get("contract"),
+        }
+    return {
+        "available": True,
+        "observation_time": observation_time.isoformat(),
+        "contract": row.get("contract"),
+        "session": row.get("session"),
+        "session_label": row.get("session_label"),
+        "vwap": _optional_float(row.get("vwap")),
+        "distance_from_vwap_points": _optional_float(row.get("distance_from_vwap_points")),
+        "distance_from_vwap_pct": _optional_float(row.get("distance_from_vwap_pct")),
+        "vwap_relation": row.get("vwap_relation") or "unavailable",
+        "vwap_session": row.get("vwap_session"),
+        "vwap_source_timeframe": row.get("vwap_source_timeframe"),
+        "vwap_slope": _optional_float(row.get("vwap_slope")),
+        "vwap_reclaim_candidate": bool(row.get("vwap_reclaim_candidate")),
+        "vwap_rejection_candidate": bool(row.get("vwap_rejection_candidate")),
+        "source_ref": "canonical_research_feature_dataset",
+    }
+
+
+def _vwap_evidence(
+    positive: list[dict[str, Any]],
+    negative: list[dict[str, Any]],
+    conflicts: list[dict[str, Any]],
+    *,
+    vwap: Mapping[str, Any],
+    current_score: float,
+) -> float:
+    if not vwap.get("available"):
+        return 0.0
+    relation = str(vwap.get("vwap_relation") or "unavailable")
+    slope = _optional_float(vwap.get("vwap_slope"))
+    distance_points = _optional_float(vwap.get("distance_from_vwap_points"))
+    distance_pct = abs(_optional_float(vwap.get("distance_from_vwap_pct")) or 0.0)
+    value = {
+        "relation": relation,
+        "distance_from_vwap_points": distance_points,
+        "distance_from_vwap_pct": vwap.get("distance_from_vwap_pct"),
+        "vwap_slope": slope,
+        "reclaim_candidate": bool(vwap.get("vwap_reclaim_candidate")),
+        "rejection_candidate": bool(vwap.get("vwap_rejection_candidate")),
+        "contract": vwap.get("contract"),
+        "observation_time": vwap.get("observation_time"),
+    }
+    if relation == "above_vwap":
+        if current_score < -8:
+            conflicts.append(_evidence("crfd_vwap", 0, "Price is above VWAP while non-VWAP evidence leans bearish.", value))
+            return 0.0
+        if current_score < 24:
+            positive.append(_evidence("crfd_vwap", 2, "Price is above VWAP, but non-VWAP evidence is not strong enough for full VWAP confirmation.", value))
+            return 2.0
+        points = 5.0
+        if slope is not None and slope > 0:
+            points += 2.0
+        elif slope is not None and slope < 0:
+            points -= 2.0
+        if bool(vwap.get("vwap_reclaim_candidate")):
+            points += 1.0
+        positive.append(_evidence("crfd_vwap", points, "CRFD VWAP confirms bullish location above session VWAP.", value))
+        if distance_pct >= 0.35:
+            negative.append(_evidence("crfd_vwap_extension", -2, "Price is extended above VWAP; mean-reversion risk is elevated.", value))
+            return points - 2.0
+        return points
+    if relation == "below_vwap":
+        if current_score > 8:
+            conflicts.append(_evidence("crfd_vwap", 0, "Price is below VWAP while non-VWAP evidence leans bullish.", value))
+            return 0.0
+        if current_score > -24:
+            negative.append(_evidence("crfd_vwap", -2, "Price is below VWAP, but non-VWAP evidence is not strong enough for full VWAP confirmation.", value))
+            return -2.0
+        points = -5.0
+        if slope is not None and slope < 0:
+            points -= 2.0
+        elif slope is not None and slope > 0:
+            points += 2.0
+        if bool(vwap.get("vwap_rejection_candidate")):
+            points -= 1.0
+        negative.append(_evidence("crfd_vwap", points, "CRFD VWAP confirms bearish location below session VWAP.", value))
+        if distance_pct >= 0.35:
+            positive.append(_evidence("crfd_vwap_extension", 2, "Price is extended below VWAP; mean-reversion risk is elevated.", value))
+            return points + 2.0
+        return points
+    if relation == "at_vwap":
+        conflicts.append(_evidence("crfd_vwap", 0, "Price is near VWAP, suggesting transition or balance rather than directional confirmation.", value))
+    return 0.0
+
+
 def _add_directional_evidence(
     positive: list[dict[str, Any]],
     negative: list[dict[str, Any]],
@@ -606,13 +764,15 @@ def _evidence(feature: str, points: float, explanation: str, value: Mapping[str,
     }
 
 
-def _base_missing_features() -> list[str]:
-    return [
-        "VWAP unavailable in GRE MVP",
+def _base_missing_features(*, include_vwap: bool = True) -> list[str]:
+    items = [
         "anchored VWAP unavailable in GRE MVP",
         "overnight high/low unavailable in GRE MVP",
         "prior session high/low unavailable in GRE MVP",
     ]
+    if include_vwap:
+        items.insert(0, "VWAP unavailable in GRE MVP")
+    return items
 
 
 def _latest_timestamp(rows: Sequence[Mapping[str, Any]]) -> datetime | None:
