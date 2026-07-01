@@ -128,12 +128,14 @@ def build_research_feature_rows(
     sources = dict(auxiliary_sources or {})
     for symbol in sorted(candles_by_symbol):
         candles = tuple(candles_by_symbol.get(symbol) or ())
+        vwap_by_index = _session_vwap_by_index(candles, timeframe=timeframe)
         for idx in _candidate_indexes(candles, cadence_minutes=cadence_minutes):
             candle = candles[idx]
             row = _build_row(
                 symbol=symbol,
                 candles=candles,
                 index=idx,
+                vwap_state=vwap_by_index.get(idx, {}),
                 generated_at=generated_at,
                 timeframe=timeframe,
                 cadence_minutes=cadence_minutes,
@@ -162,6 +164,7 @@ def build_research_feature_dataset_summary(
     available_features: set[str] = set()
     missing_features: set[str] = set()
     forward_coverage = {f"{horizon}m": 0 for horizon in HORIZONS_MINUTES}
+    vwap_summary = _empty_vwap_summary()
     for row in rows:
         sessions[str(row.get("session") or "UNKNOWN")] = sessions.get(str(row.get("session") or "UNKNOWN"), 0) + 1
         instruments.add(str(row.get("instrument") or "UNKNOWN"))
@@ -171,6 +174,7 @@ def build_research_feature_dataset_summary(
         for key, value in dict(row.get("forward_returns") or {}).items():
             if value is not None:
                 forward_coverage[str(key)] = forward_coverage.get(str(key), 0) + 1
+        _update_vwap_summary(vwap_summary, row)
     windows = _coverage_windows(candles_by_symbol)
     first_observation, last_observation = _observation_window(rows)
     return {
@@ -194,6 +198,7 @@ def build_research_feature_dataset_summary(
         "missing_features": sorted(missing_features),
         "forward_outcome_coverage": forward_coverage,
         "mfe_mae_available_count": sum(1 for row in rows if row.get("mfe") is not None and row.get("mae") is not None),
+        "vwap_coverage": _finalize_vwap_summary(vwap_summary),
         "source_windows": windows,
         "auxiliary_sources": dict(auxiliary_sources or {}),
         "readiness_for_gre": _readiness_for_gre(rows, windows),
@@ -222,6 +227,7 @@ def render_research_feature_dataset_summary_markdown(summary: Mapping[str, Any])
         f"Available features: `{summary.get('available_features')}`\n\n"
         f"Missing features: `{summary.get('missing_features')}`\n\n"
         f"Forward outcome coverage: `{summary.get('forward_outcome_coverage')}`\n\n"
+        f"VWAP coverage: `{summary.get('vwap_coverage')}`\n\n"
         f"Readiness for GRE: `{summary.get('readiness_for_gre')}`\n\n"
         f"Future plugin readiness: `{summary.get('readiness_for_future_plugins')}`\n\n"
         "Diagnostic only: `true`\n"
@@ -239,6 +245,7 @@ Required groups:
 - Identity: `instrument`, `contract`, `session`, `session_label`, `timeframe`.
 - Market: `open`, `high`, `low`, `close`, `volume`.
 - Derived: `candle_body`, `candle_range`, `direction`, `trend_lookback`, `feature_availability`.
+- VWAP: `has_vwap`, `vwap`, `distance_from_vwap_points`, `distance_from_vwap_pct`, `vwap_relation`.
 - Forward outcomes: `forward_returns` for 5m, 15m, 30m, and 60m when retained candles allow it.
 - Validation: `mfe`, `mae`, and `mfe_mae_basis`.
 - Research metadata: `diagnostic_only`, `backfill`, `source_refs`, and authority flags set false.
@@ -271,6 +278,7 @@ def _build_row(
     symbol: str,
     candles: Sequence[Mapping[str, Any]],
     index: int,
+    vwap_state: Mapping[str, Any],
     generated_at: datetime,
     timeframe: str,
     cadence_minutes: int,
@@ -285,7 +293,7 @@ def _build_row(
     open_price = float(candle["open"])
     high = float(candle["high"])
     low = float(candle["low"])
-    feature_availability = _feature_availability(auxiliary_sources)
+    feature_availability = _feature_availability(auxiliary_sources, has_vwap=bool(vwap_state.get("has_vwap")))
     forward_returns = _forward_returns(candles, index=index, ref_close=close)
     mfe, mae = _mfe_mae(candles, index=index, ref_close=close)
     return {
@@ -306,6 +314,18 @@ def _build_row(
         "candle_range": high - low,
         "direction": _direction(close - open_price),
         "trend_lookback": _trend_lookback(candles, index=index),
+        "has_vwap": bool(vwap_state.get("has_vwap")),
+        "vwap": vwap_state.get("vwap"),
+        "distance_from_vwap": vwap_state.get("distance_from_vwap_points"),
+        "distance_from_vwap_points": vwap_state.get("distance_from_vwap_points"),
+        "distance_from_vwap_pct": vwap_state.get("distance_from_vwap_pct"),
+        "vwap_relation": vwap_state.get("vwap_relation") or "unavailable",
+        "vwap_session": vwap_state.get("vwap_session") or phase_coarse_session_group(session_label),
+        "vwap_source_timeframe": vwap_state.get("vwap_source_timeframe") or timeframe,
+        "vwap_unavailable_reason": vwap_state.get("vwap_unavailable_reason"),
+        "vwap_slope": vwap_state.get("vwap_slope"),
+        "vwap_reclaim_candidate": bool(vwap_state.get("vwap_reclaim_candidate")),
+        "vwap_rejection_candidate": bool(vwap_state.get("vwap_rejection_candidate")),
         "trend_overlay": _research_reference(auxiliary_sources.get("trend_overlay")),
         "side_session_statistics": _research_reference(auxiliary_sources.get("side_session_attribution")),
         "forward_path_refs": _research_reference(auxiliary_sources.get("forward_path_capture")),
@@ -407,9 +427,100 @@ def _trend_lookback(candles: Sequence[Mapping[str, Any]], *, index: int, window:
     return {"bars": len(sample), "return": trend_return, "direction": _direction(trend_return)}
 
 
-def _feature_availability(auxiliary_sources: Mapping[str, Any]) -> dict[str, bool]:
+def _session_vwap_by_index(candles: Sequence[Mapping[str, Any]], *, timeframe: str) -> dict[int, dict[str, Any]]:
+    states: dict[int, dict[str, Any]] = {}
+    current_session: str | None = None
+    cumulative_price_volume = 0.0
+    cumulative_volume = 0.0
+    previous_vwap: float | None = None
+    previous_relation: str | None = None
+    for idx, candle in enumerate(candles):
+        timestamp = candle.get("timestamp")
+        session = phase_coarse_session_group(label_session_phase(timestamp)) if isinstance(timestamp, datetime) else "UNKNOWN"
+        if session != current_session:
+            current_session = session
+            cumulative_price_volume = 0.0
+            cumulative_volume = 0.0
+            previous_vwap = None
+            previous_relation = None
+        volume = _positive_volume(candle.get("volume"))
+        if volume is None:
+            states[idx] = _unavailable_vwap_state(
+                session=session,
+                timeframe=timeframe,
+                reason="missing_or_zero_volume",
+            )
+            continue
+        typical_price = (float(candle["high"]) + float(candle["low"]) + float(candle["close"])) / 3.0
+        cumulative_price_volume += typical_price * volume
+        cumulative_volume += volume
+        if cumulative_volume <= 0:
+            states[idx] = _unavailable_vwap_state(
+                session=session,
+                timeframe=timeframe,
+                reason="no_positive_session_volume",
+            )
+            continue
+        vwap = cumulative_price_volume / cumulative_volume
+        close = float(candle["close"])
+        distance_points = close - vwap
+        distance_pct = None if vwap == 0 else (distance_points / vwap) * 100.0
+        relation = _vwap_relation(distance_points)
+        states[idx] = {
+            "has_vwap": True,
+            "vwap": vwap,
+            "distance_from_vwap_points": distance_points,
+            "distance_from_vwap_pct": distance_pct,
+            "vwap_relation": relation,
+            "vwap_session": session,
+            "vwap_source_timeframe": timeframe,
+            "vwap_unavailable_reason": None,
+            "vwap_slope": None if previous_vwap is None else vwap - previous_vwap,
+            "vwap_reclaim_candidate": previous_relation == "below_vwap" and relation == "above_vwap",
+            "vwap_rejection_candidate": previous_relation == "above_vwap" and relation == "below_vwap",
+        }
+        previous_vwap = vwap
+        previous_relation = relation
+    return states
+
+
+def _unavailable_vwap_state(*, session: str, timeframe: str, reason: str) -> dict[str, Any]:
     return {
         "has_vwap": False,
+        "vwap": None,
+        "distance_from_vwap_points": None,
+        "distance_from_vwap_pct": None,
+        "vwap_relation": "unavailable",
+        "vwap_session": session,
+        "vwap_source_timeframe": timeframe,
+        "vwap_unavailable_reason": reason,
+        "vwap_slope": None,
+        "vwap_reclaim_candidate": False,
+        "vwap_rejection_candidate": False,
+    }
+
+
+def _positive_volume(value: Any) -> float | None:
+    try:
+        volume = float(value)
+    except (TypeError, ValueError):
+        return None
+    if volume <= 0:
+        return None
+    return volume
+
+
+def _vwap_relation(distance_points: float) -> str:
+    if abs(distance_points) < 1e-12:
+        return "at_vwap"
+    if distance_points > 0:
+        return "above_vwap"
+    return "below_vwap"
+
+
+def _feature_availability(auxiliary_sources: Mapping[str, Any], *, has_vwap: bool) -> dict[str, bool]:
+    return {
+        "has_vwap": has_vwap,
         "has_anchor_vwap": False,
         "has_prior_session": False,
         "has_overnight_range": False,
@@ -417,6 +528,53 @@ def _feature_availability(auxiliary_sources: Mapping[str, Any]) -> dict[str, boo
         "has_trend_overlay": bool(dict(auxiliary_sources.get("trend_overlay") or {}).get("exists")),
         "has_side_session_stats": bool(dict(auxiliary_sources.get("side_session_attribution") or {}).get("exists")),
         "has_forward_path_refs": bool(dict(auxiliary_sources.get("forward_path_capture") or {}).get("exists")),
+    }
+
+
+def _empty_vwap_summary() -> dict[str, Any]:
+    return {
+        "available_count": 0,
+        "unavailable_count": 0,
+        "unavailable_reasons": {},
+        "relation_counts": {
+            "above_vwap": 0,
+            "below_vwap": 0,
+            "at_vwap": 0,
+            "unavailable": 0,
+        },
+        "distance_sum": 0.0,
+        "distance_count": 0,
+    }
+
+
+def _update_vwap_summary(summary: dict[str, Any], row: Mapping[str, Any]) -> None:
+    relation = str(row.get("vwap_relation") or "unavailable")
+    relation_counts = dict(summary.get("relation_counts") or {})
+    relation_counts[relation] = relation_counts.get(relation, 0) + 1
+    summary["relation_counts"] = relation_counts
+    if row.get("has_vwap") is True:
+        summary["available_count"] = int(summary.get("available_count") or 0) + 1
+        distance = row.get("distance_from_vwap_points")
+        if distance is not None:
+            summary["distance_sum"] = float(summary.get("distance_sum") or 0.0) + float(distance)
+            summary["distance_count"] = int(summary.get("distance_count") or 0) + 1
+        return
+    summary["unavailable_count"] = int(summary.get("unavailable_count") or 0) + 1
+    reason = str(row.get("vwap_unavailable_reason") or "unknown")
+    reasons = dict(summary.get("unavailable_reasons") or {})
+    reasons[reason] = reasons.get(reason, 0) + 1
+    summary["unavailable_reasons"] = reasons
+
+
+def _finalize_vwap_summary(summary: Mapping[str, Any]) -> dict[str, Any]:
+    distance_count = int(summary.get("distance_count") or 0)
+    distance_sum = float(summary.get("distance_sum") or 0.0)
+    return {
+        "available_count": int(summary.get("available_count") or 0),
+        "unavailable_count": int(summary.get("unavailable_count") or 0),
+        "unavailable_reasons": dict(summary.get("unavailable_reasons") or {}),
+        "relation_counts": dict(summary.get("relation_counts") or {}),
+        "average_distance_from_vwap_points": None if distance_count == 0 else distance_sum / distance_count,
     }
 
 

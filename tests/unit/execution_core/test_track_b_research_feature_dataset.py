@@ -58,13 +58,100 @@ def test_feature_availability_flags_are_explicit() -> None:
     )
 
     flags = rows[0]["feature_availability"]
-    assert flags["has_vwap"] is False
+    assert flags["has_vwap"] is True
     assert flags["has_anchor_vwap"] is False
     assert flags["has_prior_session"] is False
     assert flags["has_overnight_range"] is False
     assert flags["has_opening_range"] is False
     assert flags["has_trend_overlay"] is True
     assert rows[0]["trend_overlay"]["research_reference_only"] is True
+
+
+def test_vwap_cumulative_calculation() -> None:
+    candles = (
+        _candle(START, open_=100.0, high=101.0, low=99.0, close=100.0, volume=10),
+        _candle(START + timedelta(minutes=1), open_=103.0, high=104.0, low=102.0, close=103.0, volume=30),
+    )
+    rows = build_research_feature_rows(
+        candles_by_symbol={"GC": candles},
+        generated_at=NOW,
+        timeframe="1m",
+        cadence_minutes=1,
+        max_rows=10,
+        backfill=True,
+        output_root=Path("outputs/track_b_execution_core"),
+        auxiliary_sources={},
+    )
+
+    assert rows[0]["vwap"] == 100.0
+    assert rows[1]["vwap"] == 102.25
+    assert rows[1]["distance_from_vwap_points"] == 0.75
+    assert rows[1]["vwap_relation"] == "above_vwap"
+
+
+def test_vwap_resets_at_session_boundary() -> None:
+    candles = (
+        _candle(datetime(2026, 6, 30, 12, 19, tzinfo=UTC), open_=100.0, high=101.0, low=99.0, close=100.0, volume=10),
+        _candle(datetime(2026, 6, 30, 12, 20, tzinfo=UTC), open_=200.0, high=201.0, low=199.0, close=200.0, volume=10),
+    )
+    rows = build_research_feature_rows(
+        candles_by_symbol={"GC": candles},
+        generated_at=NOW,
+        timeframe="1m",
+        cadence_minutes=1,
+        max_rows=10,
+        backfill=True,
+        output_root=Path("outputs/track_b_execution_core"),
+        auxiliary_sources={},
+    )
+
+    assert rows[0]["vwap_session"] == "LONDON"
+    assert rows[1]["vwap_session"] == "US"
+    assert rows[1]["vwap"] == 200.0
+    assert rows[1]["vwap_slope"] is None
+
+
+def test_vwap_does_not_use_future_candles() -> None:
+    candles = (
+        _candle(START, open_=100.0, high=101.0, low=99.0, close=100.0, volume=10),
+        _candle(START + timedelta(minutes=1), open_=1000.0, high=1001.0, low=999.0, close=1000.0, volume=1000),
+    )
+    rows = build_research_feature_rows(
+        candles_by_symbol={"GC": candles},
+        generated_at=NOW,
+        timeframe="1m",
+        cadence_minutes=1,
+        max_rows=10,
+        backfill=True,
+        output_root=Path("outputs/track_b_execution_core"),
+        auxiliary_sources={},
+    )
+
+    assert rows[0]["vwap"] == 100.0
+    assert rows[0]["classification_feature_max_ts"] == rows[0]["observation_time"]
+    assert rows[1]["vwap"] > rows[0]["vwap"]
+
+
+def test_vwap_unavailable_for_zero_or_missing_volume() -> None:
+    candles = (
+        _candle(START, open_=100.0, high=101.0, low=99.0, close=100.0, volume=0),
+        _candle(START + timedelta(minutes=1), open_=101.0, high=102.0, low=100.0, close=101.0, volume=None),
+    )
+    rows = build_research_feature_rows(
+        candles_by_symbol={"GC": candles},
+        generated_at=NOW,
+        timeframe="1m",
+        cadence_minutes=1,
+        max_rows=10,
+        backfill=True,
+        output_root=Path("outputs/track_b_execution_core"),
+        auxiliary_sources={},
+    )
+
+    assert all(row["has_vwap"] is False for row in rows)
+    assert all(row["vwap_relation"] == "unavailable" for row in rows)
+    assert all(row["vwap_unavailable_reason"] == "missing_or_zero_volume" for row in rows)
+    assert all(row["feature_availability"]["has_vwap"] is False for row in rows)
 
 
 def test_forward_outcome_attachment_only_uses_available_horizons() -> None:
@@ -132,6 +219,9 @@ def test_shallow_history_summary_is_diagnostic_only() -> None:
     assert summary["diagnostic_only"] is True
     assert summary["readiness_for_gre"] == "SHALLOW_HISTORY_DIAGNOSTIC_ONLY"
     assert summary["readiness_for_future_plugins"]["GRE"] == "READY_FOR_RESEARCH_INPUT"
+    assert summary["vwap_coverage"]["available_count"] == len(rows)
+    assert summary["vwap_coverage"]["unavailable_count"] == 0
+    assert summary["vwap_coverage"]["relation_counts"]["above_vwap"] > 0
 
 
 def test_runner_writes_bounded_outputs_and_docs(tmp_path: Path) -> None:
@@ -201,6 +291,25 @@ def _candles(*, count: int, step: float) -> tuple[dict, ...]:
             }
         )
     return tuple(rows)
+
+
+def _candle(
+    timestamp: datetime,
+    *,
+    open_: float,
+    high: float,
+    low: float,
+    close: float,
+    volume: float | None,
+) -> dict:
+    return {
+        "timestamp": timestamp,
+        "open": open_,
+        "high": high,
+        "low": low,
+        "close": close,
+        "volume": volume,
+    }
 
 
 def _write_phase1(output_root: Path, symbol: str, timeframe: str, candles: tuple[dict, ...]) -> None:
