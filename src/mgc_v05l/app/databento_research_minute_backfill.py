@@ -93,6 +93,8 @@ class ResearchMinuteBackfillConfig:
     research_universe_path: Path | None = DEFAULT_RESEARCH_UNIVERSE_PATH
     research_universe_symbols: tuple[str, ...] | None = None
     operator_approved_large_refresh: bool = False
+    end_boundary_mode: str = "closed-day"
+    provider_available_end: datetime | None = None
 
 
 @dataclass(frozen=True)
@@ -112,11 +114,19 @@ def run_research_minute_backfill(
     _require_explicit_date_range(config)
     chunk_months = _chunk_months(config.chunk)
     requested_end_date = config.end_date or now.date()
-    backfill_end = _backfill_end_datetime(config=config, requested_end_date=requested_end_date)
+    end_resolution = _resolve_end_boundary(config=config, requested_end_date=requested_end_date, now=now)
+    backfill_end = _backfill_end_datetime(config=config, effective_requested_end=end_resolution["effective_requested_end"])
     chunks = _build_chunks(config=config, symbols=symbols, final_end=backfill_end, chunk_months=chunk_months)
     if config.max_chunks is not None:
         chunks = chunks[: max(int(config.max_chunks), 0)]
-    scope_estimate = _scope_estimate(config=config, symbols=symbols, chunks=chunks, requested_end_date=requested_end_date)
+    scope_estimate = _scope_estimate(
+        config=config,
+        symbols=symbols,
+        chunks=chunks,
+        requested_end_date=requested_end_date,
+        end_resolution=end_resolution,
+        planned_end=backfill_end,
+    )
     approval_required = bool(scope_estimate["approval_required"])
 
     api_key, credential_status, credential_source = _load_databento_api_key(config.env_file)
@@ -253,6 +263,10 @@ def run_research_minute_backfill(
                 "requested_start": _start_datetime(config.start_date).isoformat(),
                 "requested_end": _end_datetime(requested_end_date).isoformat(),
                 "planned_fetch_end": backfill_end.isoformat(),
+                "effective_requested_end": end_resolution["effective_requested_end"].isoformat(),
+                "end_boundary_mode": end_resolution["mode"],
+                "end_boundary_capped": end_resolution["capped"],
+                "end_boundary_cap_reason": end_resolution["cap_reason"],
                 "actual_start": actual_start,
                 "actual_end": actual_end,
                 "row_count": row_count,
@@ -509,6 +523,7 @@ def _build_report(
     universe: dict[str, Any],
     scope_estimate: dict[str, Any],
 ) -> dict[str, Any]:
+    end_resolution = scope_estimate.get("end_resolution") or {}
     return {
         "schema_version": "databento_research_minute_backfill_report_v1",
         "generated_at": now.isoformat(),
@@ -534,7 +549,12 @@ def _build_report(
         },
         "requested_start": _start_datetime(config.start_date).isoformat(),
         "requested_end": _end_datetime(config.end_date or now.date()).isoformat(),
-        "planned_fetch_end": _backfill_end_datetime(config=config, requested_end_date=config.end_date or now.date()).isoformat(),
+        "effective_requested_end": end_resolution.get("effective_requested_end"),
+        "planned_fetch_end": scope_estimate.get("planned_fetch_end"),
+        "end_boundary_mode": end_resolution.get("mode") or config.end_boundary_mode,
+        "end_boundary_capped": bool(end_resolution.get("capped")),
+        "end_boundary_cap_reason": end_resolution.get("cap_reason"),
+        "provider_available_end": end_resolution.get("provider_available_end"),
         "loaded_history_start_date": None if config.loaded_history_start_date is None else config.loaded_history_start_date.isoformat(),
         "loaded_history_overlap_policy": "SKIP_EXISTING_LOADED_HISTORY",
         "loaded_history_overlap_skipped": _loaded_history_overlap_skipped(config=config, requested_end_date=config.end_date or now.date()),
@@ -833,6 +853,14 @@ def _coerce_now(value: datetime | None) -> datetime:
     return value.astimezone(timezone.utc)
 
 
+def _coerce_optional_datetime(value: datetime | None) -> datetime | None:
+    if value is None:
+        return None
+    if value.tzinfo is None:
+        return value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc)
+
+
 def _coerce_volume(value: Any) -> float:
     try:
         return float(value)
@@ -911,10 +939,11 @@ def _scope_estimate(
     symbols: tuple[str, ...],
     chunks: Sequence[BackfillChunk],
     requested_end_date: date,
+    end_resolution: dict[str, Any],
+    planned_end: datetime,
 ) -> dict[str, Any]:
     start = _start_datetime(config.start_date)
     requested_end = _end_datetime(requested_end_date)
-    planned_end = _backfill_end_datetime(config=config, requested_end_date=requested_end_date)
     covered_seconds = max((planned_end - start).total_seconds(), 0)
     calendar_days = int((covered_seconds + 86399) // 86400)
     universe = _load_research_universe(config)
@@ -926,7 +955,19 @@ def _scope_estimate(
     return {
         "requested_start": start.isoformat(),
         "requested_end": requested_end.isoformat(),
+        "effective_requested_end": end_resolution["effective_requested_end"].isoformat(),
         "planned_fetch_end": planned_end.isoformat(),
+        "end_resolution": {
+            **end_resolution,
+            "raw_requested_end": end_resolution["raw_requested_end"].isoformat(),
+            "effective_requested_end": end_resolution["effective_requested_end"].isoformat(),
+            "latest_closed_day_end": None
+            if end_resolution.get("latest_closed_day_end") is None
+            else end_resolution["latest_closed_day_end"].isoformat(),
+            "provider_available_end": None
+            if end_resolution.get("provider_available_end") is None
+            else end_resolution["provider_available_end"].isoformat(),
+        },
         "symbol_count": len(symbols),
         "chunk_count": len(chunks),
         "calendar_days": calendar_days,
@@ -948,12 +989,40 @@ def _chunk_months(chunk: str) -> int:
     return APPROVED_CHUNKS[value]
 
 
-def _backfill_end_datetime(*, config: ResearchMinuteBackfillConfig, requested_end_date: date) -> datetime:
+def _resolve_end_boundary(*, config: ResearchMinuteBackfillConfig, requested_end_date: date, now: datetime) -> dict[str, Any]:
+    mode = str(config.end_boundary_mode or "closed-day").strip().lower()
+    if mode not in {"closed-day", "intraday-available-end"}:
+        raise ValueError("--end-boundary-mode must be one of ['closed-day', 'intraday-available-end']")
+    raw_end = _end_datetime(requested_end_date)
+    effective_end = raw_end
+    cap_reasons: list[str] = []
+    latest_closed_day_end: datetime | None = None
+    if mode == "closed-day":
+        latest_closed_day_end = _end_datetime((_coerce_now(now) - timedelta(days=1)).date())
+        if effective_end > latest_closed_day_end:
+            effective_end = latest_closed_day_end
+            cap_reasons.append("LATEST_FULLY_CLOSED_DAY")
+    provider_available_end = _coerce_optional_datetime(config.provider_available_end)
+    if provider_available_end is not None and effective_end > provider_available_end:
+        effective_end = provider_available_end
+        cap_reasons.append("PROVIDER_AVAILABLE_END")
+    return {
+        "mode": mode,
+        "raw_requested_end": raw_end,
+        "effective_requested_end": effective_end,
+        "latest_closed_day_end": latest_closed_day_end,
+        "provider_available_end": provider_available_end,
+        "capped": bool(cap_reasons),
+        "cap_reason": "+".join(cap_reasons) if cap_reasons else None,
+    }
+
+
+def _backfill_end_datetime(*, config: ResearchMinuteBackfillConfig, effective_requested_end: datetime) -> datetime:
     """Clip the long-lookback pull before already-loaded canonical history."""
     if config.loaded_history_start_date is None:
-        return _end_datetime(requested_end_date)
-    if requested_end_date < config.loaded_history_start_date:
-        return _end_datetime(requested_end_date)
+        return effective_requested_end
+    if effective_requested_end < _start_datetime(config.loaded_history_start_date):
+        return effective_requested_end
     return _start_datetime(config.loaded_history_start_date)
 
 
@@ -1045,6 +1114,13 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--base-url", default=DEFAULT_BASE_URL)
     parser.add_argument("--research-universe", type=Path, default=DEFAULT_RESEARCH_UNIVERSE_PATH)
     parser.add_argument("--operator-approved-large-refresh", action="store_true")
+    parser.add_argument(
+        "--end-boundary-mode",
+        choices=("closed-day", "intraday-available-end"),
+        default="closed-day",
+        help="closed-day caps current/future requests to the latest fully closed UTC day; intraday-available-end may use --provider-available-end.",
+    )
+    parser.add_argument("--provider-available-end", help="Optional provider available-end timestamp used to cap intraday/current-day requests.")
     return parser
 
 
@@ -1075,6 +1151,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             limit=args.limit,
             research_universe_path=universe_path,
             operator_approved_large_refresh=bool(args.operator_approved_large_refresh),
+            end_boundary_mode=str(args.end_boundary_mode),
+            provider_available_end=_parse_datetime(args.provider_available_end),
         )
     )
     print(
@@ -1084,6 +1162,9 @@ def main(argv: Sequence[str] | None = None) -> int:
                 "symbols": result.report["symbols"],
                 "chunk_count": result.report["chunk_count"],
                 "planned_fetch_end": result.report["planned_fetch_end"],
+                "effective_requested_end": result.report["effective_requested_end"],
+                "end_boundary_capped": result.report["end_boundary_capped"],
+                "end_boundary_cap_reason": result.report["end_boundary_cap_reason"],
                 "loaded_history_overlap_skipped": result.report["loaded_history_overlap_skipped"],
                 "partitions_written": result.report["partitions_written"],
                 "partitions_would_fetch": result.report["partitions_would_fetch"],

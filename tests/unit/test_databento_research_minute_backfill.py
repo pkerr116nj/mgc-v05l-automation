@@ -308,6 +308,134 @@ def test_unapproved_large_real_refresh_fails_closed_before_provider_call(tmp_pat
     assert client.requests == []
 
 
+def test_requested_end_after_provider_available_end_is_capped(tmp_path: Path) -> None:
+    provider_available_end = datetime(2026, 7, 1, 13, 10, tzinfo=timezone.utc)
+
+    result = run_research_minute_backfill(
+        config=_config(
+            tmp_path,
+            symbols=("GC",),
+            research_universe_symbols=("GC",),
+            start_date=date(2026, 7, 1),
+            end_date=date(2026, 7, 1),
+            loaded_history_start_date=None,
+            dry_run=True,
+            end_boundary_mode="intraday-available-end",
+            provider_available_end=provider_available_end,
+        )
+    )
+
+    assert result.report["requested_end"] == "2026-07-01T23:59:59+00:00"
+    assert result.report["effective_requested_end"] == "2026-07-01T13:10:00+00:00"
+    assert result.report["planned_fetch_end"] == "2026-07-01T13:10:00+00:00"
+    assert result.report["end_boundary_capped"] is True
+    assert result.report["end_boundary_cap_reason"] == "PROVIDER_AVAILABLE_END"
+    assert result.report["partition_reports"][0]["requested_end"] == "2026-07-01T13:10:00+00:00"
+
+
+def test_weekly_mode_uses_latest_fully_closed_day_for_current_day(tmp_path: Path) -> None:
+    result = run_research_minute_backfill(
+        config=_config(
+            tmp_path,
+            symbols=("GC",),
+            research_universe_symbols=("GC",),
+            start_date=date(2026, 6, 29),
+            end_date=date(2026, 7, 1),
+            loaded_history_start_date=None,
+            dry_run=True,
+            now=datetime(2026, 7, 1, 14, 0, tzinfo=timezone.utc),
+            end_boundary_mode="closed-day",
+        )
+    )
+
+    assert result.report["effective_requested_end"] == "2026-06-30T23:59:59+00:00"
+    assert result.report["planned_fetch_end"] == "2026-06-30T23:59:59+00:00"
+    assert result.report["end_boundary_capped"] is True
+    assert result.report["end_boundary_cap_reason"] == "LATEST_FULLY_CLOSED_DAY"
+
+
+def test_intraday_mode_may_use_provider_available_end(tmp_path: Path) -> None:
+    result = run_research_minute_backfill(
+        config=_config(
+            tmp_path,
+            symbols=("GC",),
+            research_universe_symbols=("GC",),
+            start_date=date(2026, 7, 1),
+            end_date=date(2026, 7, 1),
+            loaded_history_start_date=None,
+            dry_run=True,
+            now=datetime(2026, 7, 1, 14, 0, tzinfo=timezone.utc),
+            end_boundary_mode="intraday-available-end",
+            provider_available_end=datetime(2026, 7, 1, 13, 10, tzinfo=timezone.utc),
+        )
+    )
+
+    assert result.report["end_boundary_mode"] == "intraday-available-end"
+    assert result.report["effective_requested_end"] == "2026-07-01T13:10:00+00:00"
+    assert result.report["partition_reports"][0]["status"] == "DRY_RUN_WOULD_FETCH"
+
+
+def test_dry_run_reports_capped_end_and_reason(tmp_path: Path) -> None:
+    result = run_research_minute_backfill(
+        config=_config(
+            tmp_path,
+            symbols=("GC",),
+            research_universe_symbols=("GC",),
+            start_date=date(2026, 7, 1),
+            end_date=date(2026, 7, 1),
+            loaded_history_start_date=None,
+            dry_run=True,
+            end_boundary_mode="intraday-available-end",
+            provider_available_end=datetime(2026, 7, 1, 13, 10, tzinfo=timezone.utc),
+        )
+    )
+
+    assert result.report["scope_estimate"]["end_resolution"]["raw_requested_end"] == "2026-07-01T23:59:59+00:00"
+    assert result.report["scope_estimate"]["end_resolution"]["effective_requested_end"] == "2026-07-01T13:10:00+00:00"
+    assert result.report["scope_estimate"]["end_resolution"]["cap_reason"] == "PROVIDER_AVAILABLE_END"
+
+
+def test_resume_plan_excludes_already_written_partitions(tmp_path: Path) -> None:
+    config = _config(
+        tmp_path,
+        symbols=("GC",),
+        research_universe_symbols=("GC",),
+        start_date=date(2026, 4, 22),
+        end_date=date(2026, 7, 1),
+        loaded_history_start_date=None,
+        operator_approved_large_refresh=True,
+        now=datetime(2026, 7, 1, 14, 0, tzinfo=timezone.utc),
+        end_boundary_mode="intraday-available-end",
+        provider_available_end=datetime(2026, 7, 1, 13, 10, tzinfo=timezone.utc),
+        max_chunks=3,
+    )
+    first = run_research_minute_backfill(config=config, client=_FakeBackfillClient())
+    resume = run_research_minute_backfill(
+        config=_config(
+            tmp_path,
+            symbols=("GC",),
+            research_universe_symbols=("GC",),
+            start_date=date(2026, 4, 22),
+            end_date=date(2026, 7, 1),
+            loaded_history_start_date=None,
+            dry_run=True,
+            now=datetime(2026, 7, 1, 14, 0, tzinfo=timezone.utc),
+            end_boundary_mode="intraday-available-end",
+            provider_available_end=datetime(2026, 7, 1, 13, 10, tzinfo=timezone.utc),
+        )
+    )
+
+    assert first.report["partitions_written"] == 3
+    assert resume.report["partitions_skipped"] == 3
+    assert resume.report["partitions_would_fetch"] == 1
+    assert [row["status"] for row in resume.report["partition_reports"]] == [
+        "SKIPPED_EXISTING_COMPLETE",
+        "SKIPPED_EXISTING_COMPLETE",
+        "SKIPPED_EXISTING_COMPLETE",
+        "DRY_RUN_WOULD_FETCH",
+    ]
+
+
 def test_backfill_module_has_no_broker_or_paper_proof_paths() -> None:
     source = Path(backfill.__file__).read_text(encoding="utf-8")
 
