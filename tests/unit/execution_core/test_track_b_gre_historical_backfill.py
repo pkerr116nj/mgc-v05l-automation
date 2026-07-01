@@ -8,6 +8,11 @@ from pathlib import Path
 from mgc_v05l.execution_core.track_b_gold_regime_engine import GOLD_REGIME_OUTPUT_DIR
 from mgc_v05l.execution_core.track_b_gre_historical_backfill import (
     BACKFILL_ROWS_JSONL,
+    HISTORICAL_ANALYZER_JSON,
+    HISTORICAL_BACKFILL_SUMMARY_JSON,
+    HISTORICAL_SCORECARD_JSON,
+    HISTORICAL_VALIDATION_SUMMARY_JSON,
+    HISTORICAL_VS_RETAINED_COMPARISON_JSON,
     generate_backfill_observations,
     run_gre_historical_backfill,
 )
@@ -100,6 +105,69 @@ def test_backfilled_rows_are_marked_backfill_and_diagnostic(tmp_path: Path) -> N
     assert result.analyzer["backfill"] is True
 
 
+def test_historical_parquet_provider_expands_backfill_with_provider_identity(tmp_path: Path) -> None:
+    output_root = tmp_path / "outputs" / "track_b_execution_core"
+    store_root = tmp_path / "outputs" / "reports" / "trend_participation_engine"
+    candles = _candles(count=160, step=0.18)
+    _write_parquet(store_root, "GC", candles)
+    _write_parquet(store_root, "MGC", candles)
+
+    result = run_gre_historical_backfill(
+        output_root=output_root,
+        now=NOW,
+        cadence_minutes=10,
+        max_observations=12,
+        provider="parquet",
+        research_store_root=store_root,
+        max_source_candles=120,
+        crfd_max_rows=40,
+    )
+    rows = [json.loads(line) for line in result.rows_path.read_text(encoding="utf-8").splitlines()]
+
+    assert 0 < len(rows) <= 12
+    assert result.summary["provider_id"] == "parquet"
+    assert result.summary["crfd_summary"]["observation_count"] > len(rows)
+    assert result.summary["crfd_summary"]["vwap_coverage"]["available_count"] > 0
+    assert result.validation_summary["row_sample_count"] == len(rows)
+    assert result.scorecard["overall_metrics"]["total_observations"] == len(rows)
+    assert result.analyzer["sample_assessment"]["sample_status"] in {
+        "INSUFFICIENT_SAMPLE",
+        "EARLY_RESEARCH_SIGNAL",
+        "SHADOW_RESEARCH_READY",
+    }
+    assert result.comparison["historical_parquet"]["observation_count"] == len(rows)
+    assert all(row["provider_metadata"]["provider_id"] == "parquet" for row in rows)
+    assert all(row["historical_provider_backfill"] is True for row in rows)
+
+
+def test_historical_outputs_include_requested_report_artifacts(tmp_path: Path) -> None:
+    output_root = tmp_path / "outputs" / "track_b_execution_core"
+    store_root = tmp_path / "outputs" / "reports" / "trend_participation_engine"
+    _write_parquet(store_root, "GC", _candles(count=90, step=0.12))
+
+    result = run_gre_historical_backfill(
+        output_root=output_root,
+        now=NOW,
+        cadence_minutes=15,
+        max_observations=4,
+        provider="parquet",
+        research_store_root=store_root,
+    )
+    gold_dir = output_root / GOLD_REGIME_OUTPUT_DIR
+
+    assert result.summary_path.exists()
+    assert result.validation_summary_path.exists()
+    assert result.comparison_path.exists()
+    for name in (
+        HISTORICAL_BACKFILL_SUMMARY_JSON,
+        HISTORICAL_VALIDATION_SUMMARY_JSON,
+        HISTORICAL_SCORECARD_JSON,
+        HISTORICAL_ANALYZER_JSON,
+        HISTORICAL_VS_RETAINED_COMPARISON_JSON,
+    ):
+        assert (gold_dir / name).exists()
+
+
 def test_gre_backfill_import_boundary() -> None:
     paths = [
         Path("src/mgc_v05l/execution_core/track_b_gre_historical_backfill.py"),
@@ -168,3 +236,26 @@ def _write_phase1(output_root: Path, symbol: str, timeframe: str, candles: tuple
         for row in candles
     ]
     path.write_text(json.dumps({"bars": rows}), encoding="utf-8")
+
+
+def _write_parquet(store_root: Path, symbol: str, candles: tuple[dict, ...]) -> None:
+    pyarrow = __import__("pyarrow")
+    parquet = __import__("pyarrow.parquet").parquet
+    path = store_root / "raw_bars" / "databento_minute_backfill" / f"symbol={symbol}" / "year=2026" / "month=06" / "bars.parquet"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    parquet.write_table(
+        pyarrow.Table.from_pylist(
+            [
+                {
+                    "bar_end": row["timestamp"],
+                    "open": row["open"],
+                    "high": row["high"],
+                    "low": row["low"],
+                    "close": row["close"],
+                    "volume": row["volume"],
+                }
+                for row in candles
+            ]
+        ),
+        path,
+    )
