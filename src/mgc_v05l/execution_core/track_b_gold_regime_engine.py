@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Any, Iterable, Mapping, Protocol, Sequence
 
 from mgc_v05l.execution_core.bounded_snapshot import BoundedSnapshotConfig, write_bounded_snapshot_json
+from mgc_v05l.execution_core.track_b_regime_engine_interface import RegimePluginDescriptor
 from mgc_v05l.session_phase_labels import label_session_phase, phase_coarse_session_group
 
 
@@ -130,6 +131,18 @@ def load_gold_regime_context(*, output_root: Path, generated_at: datetime) -> Re
 class GoldRegimePlugin:
     plugin_id = "GRE"
     instrument = "GOLD"
+    descriptor = RegimePluginDescriptor(
+        engine_name="Gold Regime Engine",
+        plugin_id="GRE",
+        instrument_family="GOLD",
+        feature_providers=(
+            "session_label",
+            "trend_persistence",
+            "candle_body_strength",
+            "range_chop",
+            "multi_timeframe_agreement",
+        ),
+    )
 
     def evaluate(self, context: RegimeEngineContext) -> dict[str, Any]:
         gc_1m = context.candles_by_symbol_timeframe.get("GC", {}).get("1m", ())
