@@ -22,6 +22,9 @@ SELECTED_AVWAP_ANCHOR = "globex_session_open_18et"
 OBSERVATIONS_JSONL = "gre_shadow_gate_observations.jsonl"
 SUMMARY_JSON = "latest_gre_shadow_gate_observation_summary.json"
 SUMMARY_MD = "latest_gre_shadow_gate_observation_summary.md"
+ADAPTER_VALIDATION_JSON = "shadow_candidate_adapter_validation.json"
+ADAPTER_VALIDATION_MD = "shadow_candidate_adapter_validation.md"
+ADAPTER_MIGRATION_MD = "shadow_candidate_adapter_migration_summary.md"
 DEFAULT_MAX_SOURCE_ARTIFACT_BYTES = 10 * 1024 * 1024
 DEFAULT_MAX_CANDIDATES = 200
 GOLD_SYMBOLS = {"GC", "MGC"}
@@ -34,6 +37,8 @@ class ShadowObservationResult:
     rows_path: Path
     summary_json_path: Path
     summary_markdown_path: Path
+    adapter_validation_path: Path
+    adapter_migration_path: Path
 
 
 def run_gre_shadow_observation_generator(
@@ -53,14 +58,23 @@ def run_gre_shadow_observation_generator(
     source_crfd = crfd_rows_path or output_root / RESEARCH_FEATURE_DATASET_DIR / RESEARCH_FEATURE_DATASET_JSONL
     gre_payload, gre_status = _read_json_mapping(source_gre, max_bytes=max_source_artifact_bytes)
     crfd_rows = _read_jsonl(source_crfd)
-    candidates, candidate_source_status = discover_candidate_intents(
+    mixed_candidates, candidate_source_status = discover_candidate_intents(
         output_root=output_root,
         candidate_paths=candidate_paths,
         max_candidates=max_candidates,
         max_source_artifact_bytes=max_source_artifact_bytes,
     )
+    candidates, adapter_report = discover_canonical_shadow_candidates(mixed_candidates, source_status=candidate_source_status)
     rows = build_shadow_observation_rows(
         candidates,
+        gre_payload=gre_payload,
+        crfd_rows=crfd_rows,
+        generated_at=generated_at,
+        gre_path=source_gre,
+        crfd_rows_path=source_crfd,
+    )
+    previous_rows = build_shadow_observation_rows(
+        mixed_candidates,
         gre_payload=gre_payload,
         crfd_rows=crfd_rows,
         generated_at=generated_at,
@@ -75,6 +89,15 @@ def run_gre_shadow_observation_generator(
         candidate_source_status=candidate_source_status,
         gre_path=source_gre,
         crfd_rows_path=source_crfd,
+        adapter_report=adapter_report,
+    )
+    validation = build_adapter_validation_report(
+        previous_rows=previous_rows,
+        canonical_rows=rows,
+        mixed_candidates=mixed_candidates,
+        canonical_candidates=candidates,
+        adapter_report=adapter_report,
+        generated_at=generated_at,
     )
 
     gold_dir.mkdir(parents=True, exist_ok=True)
@@ -85,12 +108,20 @@ def run_gre_shadow_observation_generator(
     write_bounded_snapshot_json(summary_json_path, report, config=BoundedSnapshotConfig())
     summary_markdown_path = gold_dir / SUMMARY_MD
     summary_markdown_path.write_text(render_shadow_observation_summary_markdown(report), encoding="utf-8")
+    adapter_validation_path = gold_dir / ADAPTER_VALIDATION_JSON
+    write_bounded_snapshot_json(adapter_validation_path, validation, config=BoundedSnapshotConfig())
+    adapter_validation_md_path = gold_dir / ADAPTER_VALIDATION_MD
+    adapter_validation_md_path.write_text(render_adapter_validation_markdown(validation), encoding="utf-8")
+    adapter_migration_path = gold_dir / ADAPTER_MIGRATION_MD
+    adapter_migration_path.write_text(render_adapter_migration_markdown(validation), encoding="utf-8")
     return ShadowObservationResult(
         report=report,
         rows=rows,
         rows_path=rows_path,
         summary_json_path=summary_json_path,
         summary_markdown_path=summary_markdown_path,
+        adapter_validation_path=adapter_validation_path,
+        adapter_migration_path=adapter_migration_path,
     )
 
 
@@ -128,6 +159,33 @@ def discover_candidate_intents(
         if len(candidates) >= max_candidates:
             break
     return candidates[:max_candidates], source_status
+
+
+def discover_canonical_shadow_candidates(
+    candidates: Sequence[Mapping[str, Any]],
+    *,
+    source_status: Sequence[Mapping[str, Any]] | None = None,
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    canonical = []
+    for candidate in candidates:
+        if not _is_gold_candidate(candidate):
+            continue
+        item = dict(candidate)
+        item.setdefault("candidate_observation_time", _candidate_observation_time(candidate))
+        canonical.append(item)
+    report = {
+        "adapter_id": "gold_only_timestamped_strategy_intent_candidates",
+        "diagnostic_only": True,
+        "runtime_independent": True,
+        "input_candidate_count": len(candidates),
+        "canonical_candidate_count": len(canonical),
+        "filtered_non_gold_count": len(candidates) - len(canonical),
+        "preserves_intended_direction": all(_intended_direction(candidate) in {"LONG", "SHORT"} for candidate in canonical),
+        "preserves_strategy_or_lane_identity_count": sum(1 for candidate in canonical if candidate.get("strategy_id") or candidate.get("lane_id")),
+        "timestamp_available_count": sum(1 for candidate in canonical if candidate.get("candidate_observation_time")),
+        "source_status": [dict(item) for item in source_status or ()],
+    }
+    return canonical, report
 
 
 def build_shadow_observation_rows(
@@ -210,6 +268,7 @@ def build_shadow_observation_row(
             "gre_output": str(gre_path),
             "crfd_rows": str(crfd_rows_path),
             "candidate_source": candidate.get("source_path"),
+            "candidate_observation_time": candidate.get("candidate_observation_time"),
             "crfd_observation_time": crfd.get("observation_time"),
         },
     }
@@ -248,6 +307,7 @@ def build_shadow_observation_summary(
     candidate_source_status: Sequence[Mapping[str, Any]],
     gre_path: Path | str,
     crfd_rows_path: Path | str,
+    adapter_report: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     counts = _count_by(rows, "shadow_gate_result")
     source_notes = _source_notes(candidates, gre_status, candidate_source_status)
@@ -265,6 +325,7 @@ def build_shadow_observation_summary(
             "gre_output": str(gre_path),
             "crfd_rows": str(crfd_rows_path),
         },
+        "candidate_adapter": dict(adapter_report or {}),
         "gre_source_status": dict(gre_status),
         "candidate_source_status": [dict(item) for item in candidate_source_status],
         "source_notes": source_notes,
@@ -283,6 +344,93 @@ def build_shadow_observation_summary(
     }
 
 
+def build_adapter_validation_report(
+    *,
+    previous_rows: Sequence[Mapping[str, Any]],
+    canonical_rows: Sequence[Mapping[str, Any]],
+    mixed_candidates: Sequence[Mapping[str, Any]],
+    canonical_candidates: Sequence[Mapping[str, Any]],
+    adapter_report: Mapping[str, Any],
+    generated_at: datetime,
+) -> dict[str, Any]:
+    previous = _population_metrics(previous_rows, mixed_candidates)
+    canonical = _population_metrics(canonical_rows, canonical_candidates)
+    return {
+        "schema_version": "track_b_gre_shadow_candidate_adapter_validation_v1",
+        "generated_at": generated_at.isoformat(),
+        "diagnostic_only": True,
+        "production_effect": False,
+        "adapter": dict(adapter_report),
+        "previous_observation_population": previous,
+        "canonical_observation_population": canonical,
+        "migration_delta": {
+            "candidate_count_delta": canonical["candidate_count"] - previous["candidate_count"],
+            "observation_count_delta": canonical["observation_count"] - previous["observation_count"],
+            "would_allow_delta": canonical["result_counts"].get("WOULD_ALLOW", 0) - previous["result_counts"].get("WOULD_ALLOW", 0),
+            "would_block_delta": canonical["result_counts"].get("WOULD_BLOCK", 0) - previous["result_counts"].get("WOULD_BLOCK", 0),
+            "insufficient_evidence_delta": canonical["result_counts"].get("INSUFFICIENT_EVIDENCE", 0)
+            - previous["result_counts"].get("INSUFFICIENT_EVIDENCE", 0),
+            "both_join_rate_delta": _delta(canonical["join_quality"]["both_join_rate"], previous["join_quality"]["both_join_rate"]),
+        },
+        "recommendations": {
+            "shadow_framework_v1_architecturally_complete": True,
+            "future_work_shift_to_general_research_platform": True,
+            "remaining_shadow_work_policy_evaluation_not_infrastructure": True,
+            "runtime_hook_needed": False,
+            "production_gate_recommended": False,
+        },
+        "safety_contract": {
+            "runtime_hook": False,
+            "trading_gate": False,
+            "broker_actions": False,
+            "managed_exit_integration": False,
+            "strategy_decision_changes": False,
+            "gre_scoring_changes": False,
+        },
+    }
+
+
+def _population_metrics(rows: Sequence[Mapping[str, Any]], candidates: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
+    return {
+        "candidate_count": len(candidates),
+        "observation_count": len(rows),
+        "result_counts": _count_by(rows, "shadow_gate_result"),
+        "contract_counts": _count_by(rows, "contract"),
+        "session_counts": _count_by(rows, "session"),
+        "intended_direction_counts": _count_by(rows, "intended_direction"),
+        "join_quality": _join_quality(rows, candidates),
+    }
+
+
+def _join_quality(rows: Sequence[Mapping[str, Any]], candidates: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
+    count = len(rows)
+    gre_joined = sum(1 for row in rows if row.get("gre_label") not in {None, "", "INSUFFICIENT_EVIDENCE"})
+    crfd_joined = sum(1 for row in rows if (row.get("source_refs") or {}).get("crfd_observation_time"))
+    both_joined = sum(
+        1
+        for row in rows
+        if row.get("gre_label") not in {None, "", "INSUFFICIENT_EVIDENCE"} and (row.get("source_refs") or {}).get("crfd_observation_time")
+    )
+    timestamped = sum(1 for candidate in candidates if candidate.get("candidate_observation_time"))
+    missing_reasons: list[str] = []
+    for row, candidate in zip(rows, candidates, strict=False):
+        if row.get("gre_label") in {None, "", "INSUFFICIENT_EVIDENCE"}:
+            missing_reasons.append("missing_gre_join")
+        if not (row.get("source_refs") or {}).get("crfd_observation_time"):
+            missing_reasons.append("missing_crfd_join")
+        if not candidate.get("candidate_observation_time"):
+            missing_reasons.append("missing_candidate_timestamp")
+        if row.get(f"avwap_{SELECTED_AVWAP_ANCHOR}_relation") == "unavailable":
+            missing_reasons.append("missing_globex_avwap")
+    return {
+        "gre_join_rate": _rate(gre_joined, count),
+        "crfd_join_rate": _rate(crfd_joined, count),
+        "both_join_rate": _rate(both_joined, count),
+        "timestamp_alignment_quality": _rate(timestamped, len(candidates)),
+        "missing_reasons": _count_values(missing_reasons),
+    }
+
+
 def render_shadow_observation_summary_markdown(report: Mapping[str, Any]) -> str:
     counts = report.get("result_counts") or {}
     lines = [
@@ -292,6 +440,7 @@ def render_shadow_observation_summary_markdown(report: Mapping[str, Any]) -> str
         f"- Diagnostic only: {report.get('diagnostic_only')}",
         f"- Production effect: {report.get('production_effect')}",
         f"- Policy: {report.get('selected_shadow_policy')}",
+        f"- Candidate adapter: {(report.get('candidate_adapter') or {}).get('adapter_id')}",
         f"- Observations: {report.get('observation_count')}",
         f"- Candidates: {report.get('candidate_count')}",
         f"- WOULD_ALLOW: {counts.get('WOULD_ALLOW', 0)}",
@@ -311,6 +460,54 @@ def render_shadow_observation_summary_markdown(report: Mapping[str, Any]) -> str
         ]
     )
     return "\n".join(lines) + "\n"
+
+
+def render_adapter_validation_markdown(report: Mapping[str, Any]) -> str:
+    previous = report.get("previous_observation_population") or {}
+    canonical = report.get("canonical_observation_population") or {}
+    delta = report.get("migration_delta") or {}
+    return "\n".join(
+        [
+            "# Shadow Candidate Adapter Validation",
+            "",
+            f"- Generated at: {report.get('generated_at')}",
+            f"- Adapter: {(report.get('adapter') or {}).get('adapter_id')}",
+            f"- Previous observations: {previous.get('observation_count')}",
+            f"- Canonical observations: {canonical.get('observation_count')}",
+            f"- Previous results: {_format_counts(previous.get('result_counts'))}",
+            f"- Canonical results: {_format_counts(canonical.get('result_counts'))}",
+            f"- Both-join rate delta: {delta.get('both_join_rate_delta')}",
+            f"- Runtime hook needed: {(report.get('recommendations') or {}).get('runtime_hook_needed')}",
+            "",
+        ]
+    )
+
+
+def render_adapter_migration_markdown(report: Mapping[str, Any]) -> str:
+    previous = report.get("previous_observation_population") or {}
+    canonical = report.get("canonical_observation_population") or {}
+    rec = report.get("recommendations") or {}
+    return "\n".join(
+        [
+            "# Shadow Candidate Adapter Migration Summary",
+            "",
+            "| Population | Candidates | Observations | Results | Both join | Timestamp quality |",
+            "|---|---:|---:|---|---:|---:|",
+            f"| Previous mixed offline | {previous.get('candidate_count')} | {previous.get('observation_count')} | "
+            f"{_format_counts(previous.get('result_counts'))} | {previous.get('join_quality', {}).get('both_join_rate')} | "
+            f"{previous.get('join_quality', {}).get('timestamp_alignment_quality')} |",
+            f"| Canonical Gold-only | {canonical.get('candidate_count')} | {canonical.get('observation_count')} | "
+            f"{_format_counts(canonical.get('result_counts'))} | {canonical.get('join_quality', {}).get('both_join_rate')} | "
+            f"{canonical.get('join_quality', {}).get('timestamp_alignment_quality')} |",
+            "",
+            "## Recommendation",
+            f"- Shadow Framework V1 architecturally complete: {rec.get('shadow_framework_v1_architecturally_complete')}",
+            f"- Future work should shift to general research platform: {rec.get('future_work_shift_to_general_research_platform')}",
+            f"- Remaining shadow work should be policy evaluation: {rec.get('remaining_shadow_work_policy_evaluation_not_infrastructure')}",
+            f"- Production gate recommended: {rec.get('production_gate_recommended')}",
+            "",
+        ]
+    )
 
 
 class _CrfdIndex:
@@ -388,19 +585,26 @@ def _extract_candidates(payload: Any, *, source_path: Path, max_items: int) -> l
 
 def _walk_candidate_mappings(payload: Any, *, max_items: int) -> list[Mapping[str, Any]]:
     result: list[Mapping[str, Any]] = []
+    inherited_keys = ("bar_id", "generated_at", "timestamp", "session", "session_label", "strategy_id", "lane_id")
 
-    def visit(value: Any, depth: int) -> None:
+    def visit(value: Any, depth: int, inherited: Mapping[str, Any]) -> None:
         if len(result) >= max_items or depth > 5:
             return
         if isinstance(value, Mapping):
-            result.append(value)
+            merged = {key: nested for key, nested in inherited.items() if key not in value}
+            merged.update(value)
+            result.append(merged)
+            next_inherited = dict(inherited)
+            for key in inherited_keys:
+                if value.get(key) is not None:
+                    next_inherited[key] = value[key]
             for nested in value.values():
-                visit(nested, depth + 1)
+                visit(nested, depth + 1, next_inherited)
         elif isinstance(value, list):
             for nested in value[:max_items]:
-                visit(nested, depth + 1)
+                visit(nested, depth + 1, inherited)
 
-    visit(payload, 0)
+    visit(payload, 0, {})
     return result
 
 
@@ -419,6 +623,7 @@ def _normalize_candidate(item: Mapping[str, Any], *, source_path: Path) -> dict[
         "side": _first_string(item, ("side", "action", "order_action")),
         "intended_direction": direction,
         "session": _first_string(item, ("session", "session_label")),
+        "candidate_observation_time": _candidate_observation_time(item),
         "runtime_action_taken": _first_string(item, ("runtime_action_taken", "runtime_action", "action_taken")),
         "source_path": str(source_path),
     }
@@ -475,7 +680,7 @@ def _source_notes(
     if gre_status.get("status") != "read":
         notes.append(f"GRE source not usable: {gre_status.get('status')}")
     if not candidates:
-        notes.append("No candidate strategy-intent diagnostics were available from the configured offline artifact paths.")
+        notes.append("No canonical Gold strategy-intent candidates were available from the configured offline artifact paths.")
     for item in candidate_source_status:
         if item.get("status") in {"missing", "skipped_oversized_artifact", "read_failed"}:
             notes.append(f"{item.get('path')}: {item.get('status')}")
@@ -490,6 +695,10 @@ def _contract_from_candidate(candidate: Mapping[str, Any]) -> str:
             return value.upper()
     value = _first_string(candidate, ("contract", "local_symbol", "symbol", "root_symbol", "instrument"))
     return str(value or "GC").upper()
+
+
+def _is_gold_candidate(candidate: Mapping[str, Any]) -> bool:
+    return _root_symbol(_contract_from_candidate(candidate)) in GOLD_SYMBOLS
 
 
 def _root_symbol(contract: str) -> str:
@@ -516,6 +725,19 @@ def _intended_direction(candidate: Mapping[str, Any]) -> str | None:
             return "LONG"
         if upper == "SELL":
             return "SHORT"
+    return None
+
+
+def _candidate_observation_time(candidate: Mapping[str, Any]) -> str | None:
+    for key in ("candidate_observation_time", "observation_time", "generated_at", "timestamp", "bar_end_ts", "bar_timestamp"):
+        value = candidate.get(key)
+        if value:
+            parsed = _parse_datetime(value)
+            return parsed.isoformat() if parsed else str(value)
+    bar_id = _first_string(candidate, ("bar_id",))
+    if bar_id and "|" in bar_id:
+        parsed = _parse_datetime(bar_id.rsplit("|", 1)[-1])
+        return parsed.isoformat() if parsed else None
     return None
 
 
@@ -557,6 +779,32 @@ def _count_by(rows: Sequence[Mapping[str, Any]], key: str) -> dict[str, int]:
         value = str(row.get(key) or "UNKNOWN")
         result[value] = result.get(value, 0) + 1
     return dict(sorted(result.items()))
+
+
+def _count_values(values: Sequence[Any]) -> dict[str, int]:
+    result: dict[str, int] = {}
+    for value in values:
+        text = str(value or "UNKNOWN")
+        result[text] = result.get(text, 0) + 1
+    return dict(sorted(result.items()))
+
+
+def _format_counts(value: Any) -> str:
+    if not isinstance(value, Mapping):
+        return "{}"
+    return ", ".join(f"{key}={count}" for key, count in value.items()) or "{}"
+
+
+def _rate(part: int, whole: int) -> float | None:
+    if whole <= 0:
+        return None
+    return round(part / whole, 4)
+
+
+def _delta(left: float | None, right: float | None) -> float | None:
+    if left is None or right is None:
+        return None
+    return round(left - right, 4)
 
 
 def _observation_id(generated_at: datetime, sequence: int) -> str:

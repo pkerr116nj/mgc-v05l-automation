@@ -11,6 +11,7 @@ from mgc_v05l.execution_core import track_b_gre_shadow_observation as observatio
 from mgc_v05l.execution_core.track_b_gre_shadow_observation import (
     _CrfdIndex,
     build_shadow_observation_row,
+    discover_canonical_shadow_candidates,
     evaluate_shadow_policy,
     run_gre_shadow_observation_generator,
 )
@@ -85,7 +86,7 @@ def test_no_candidate_artifacts_produces_safe_zero_summary(tmp_path: Path) -> No
     assert result.report["candidate_count"] == 0
     assert result.rows_path.exists()
     assert result.summary_json_path.exists()
-    assert "No candidate strategy-intent diagnostics" in "\n".join(result.report["source_notes"])
+    assert "No canonical Gold strategy-intent candidates" in "\n".join(result.report["source_notes"])
 
 
 def test_production_effect_and_diagnostic_only_are_forced() -> None:
@@ -135,6 +136,61 @@ def test_bounded_jsonl_writer_used(monkeypatch: pytest.MonkeyPatch, tmp_path: Pa
     assert called["path"] == result.rows_path
     assert result.report["writer"]["observations"] == "bounded_jsonl"
     assert result.report["observation_count"] == 1
+    assert result.report["candidate_adapter"]["adapter_id"] == "gold_only_timestamped_strategy_intent_candidates"
+    assert result.adapter_validation_path.exists()
+    assert result.adapter_migration_path.exists()
+
+
+def test_canonical_adapter_filters_to_gold_and_preserves_timestamp() -> None:
+    candidates = [
+        {
+            "contract": "GC",
+            "intended_direction": "LONG",
+            "bar_id": "GC|1m|2026-07-01T16:54:00Z",
+            "strategy_id": "gold_strategy",
+        },
+        {"contract": "MNQ", "intended_direction": "LONG", "bar_id": "MNQ|1m|2026-07-01T16:54:00Z"},
+    ]
+
+    canonical, report = discover_canonical_shadow_candidates(candidates)
+
+    assert len(canonical) == 1
+    assert canonical[0]["contract"] == "GC"
+    assert canonical[0]["candidate_observation_time"] == "2026-07-01T16:54:00+00:00"
+    assert report["canonical_candidate_count"] == 1
+    assert report["filtered_non_gold_count"] == 1
+
+
+def test_adapter_validation_reports_migration_delta(tmp_path: Path) -> None:
+    gre_path = tmp_path / "gre.json"
+    crfd_path = tmp_path / "crfd.jsonl"
+    candidate_path = tmp_path / "candidates.jsonl"
+    gre_path.write_text(json.dumps(_gre("LONG")), encoding="utf-8")
+    crfd_path.write_text(json.dumps(_crfd("above_avwap")) + "\n", encoding="utf-8")
+    candidate_path.write_text(
+        "\n".join(
+            [
+                json.dumps({**_candidate(direction="LONG"), "bar_id": "GC|1m|2026-07-01T16:54:00Z"}),
+                json.dumps({"contract": "MNQ", "side": "BUY", "strategy_id": "mnq_strategy", "bar_id": "MNQ|1m|2026-07-01T16:54:00Z"}),
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    result = run_gre_shadow_observation_generator(
+        output_root=tmp_path / "outputs" / "track_b_execution_core",
+        now=NOW,
+        gre_path=gre_path,
+        crfd_rows_path=crfd_path,
+        candidate_paths=[candidate_path],
+    )
+    validation = json.loads(result.adapter_validation_path.read_text(encoding="utf-8"))
+
+    assert validation["previous_observation_population"]["candidate_count"] == 2
+    assert validation["canonical_observation_population"]["candidate_count"] == 1
+    assert validation["canonical_observation_population"]["join_quality"]["both_join_rate"] == 1.0
+    assert validation["migration_delta"]["candidate_count_delta"] == -1
 
 
 def test_shadow_observation_import_boundary() -> None:
