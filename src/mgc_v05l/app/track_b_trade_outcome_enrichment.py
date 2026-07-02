@@ -11,6 +11,7 @@ from typing import Sequence
 from mgc_v05l.execution_core.track_b_trade_outcome_enrichment import (
     DEFAULT_CRFD_ROWS,
     DEFAULT_GRE_REPORT,
+    DEFAULT_MARKET_CONTEXT_ROWS,
     DEFAULT_OUTCOMES_PATH,
     DEFAULT_OUTPUT_DIR,
     run_trade_outcome_enrichment,
@@ -24,6 +25,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--outcomes-path", type=Path, default=DEFAULT_OUTCOMES_PATH)
     parser.add_argument("--crfd-rows-path", type=Path, default=DEFAULT_CRFD_ROWS)
     parser.add_argument("--gre-report-path", type=Path, default=DEFAULT_GRE_REPORT)
+    parser.add_argument("--market-context-rows-path", type=Path, default=DEFAULT_MARKET_CONTEXT_ROWS)
     parser.add_argument("--output-dir", type=Path, default=DEFAULT_OUTPUT_DIR)
     parser.add_argument("--now", help="Optional ISO timestamp for deterministic report generation.")
     return parser
@@ -35,6 +37,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         outcomes_path=args.outcomes_path,
         crfd_rows_path=args.crfd_rows_path,
         gre_report_path=args.gre_report_path,
+        market_context_rows_path=args.market_context_rows_path,
         output_dir=args.output_dir,
         now=args.now,
     )
@@ -48,6 +51,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                 "crfd_coverage": overall.get("crfd_coverage"),
                 "vwap_coverage": overall.get("vwap_coverage"),
                 "avwap_coverage": overall.get("avwap_coverage"),
+                "vix_coverage": overall.get("vix_coverage"),
+                "market_context_coverage": overall.get("market_context_coverage"),
                 "enrichment_path": str(result.enrichment_path),
                 "summary_path": str(result.summary_path),
                 "diagnostic_only": result.summary.get("diagnostic_only"),

@@ -28,6 +28,66 @@ def test_enrichment_joins_crfd_vwap_and_avwap() -> None:
     assert "missing_crfd_context" not in row["data_quality_flags"]
 
 
+def test_enrichment_joins_nearest_prior_market_context() -> None:
+    enrichments = build_trade_outcome_enrichments(
+        [_outcome("GC", "GCQ6", entry_time="2026-07-01T10:05:00Z")],
+        crfd_rows=[_crfd("GC")],
+        market_context_rows=[
+            _vix_context("2026-06-30T20:15:00Z", level=16.45),
+            _vix_context("2026-07-01T20:15:00Z", level=16.59),
+        ],
+        generated_at=NOW,
+    )
+
+    row = enrichments[0]
+    assert row["market_context_join_success"] is True
+    assert row["vix_level"] == 16.45
+    assert row["vix_regime"] == "LOW"
+    assert row["vix_daily_change"] == -1.2
+    assert row["vix_percentile"] == 0.31
+    assert row["vix_ma20"] == 18.1
+    assert row["vix_ma50"] == 17.6
+    assert row["market_context_provider"] == "VIX"
+    assert row["market_context_source"] == "cboe_official_daily_history"
+    assert row["market_context_timestamp"] == "2026-06-30T20:15:00+00:00"
+    assert row["market_context_staleness"] == 49800.0
+    assert "missing_market_context" not in row["data_quality_flags"]
+    assert row["source_refs"]["market_context_rows"] == ""
+
+
+def test_market_context_join_does_not_use_future_observation() -> None:
+    enrichments = build_trade_outcome_enrichments(
+        [_outcome("GC", "GCQ6", entry_time="2026-07-01T10:05:00Z")],
+        market_context_rows=[_vix_context("2026-07-01T20:15:00Z", level=16.59)],
+        generated_at=NOW,
+    )
+
+    row = enrichments[0]
+    assert row["market_context_join_success"] is False
+    assert row["vix_level"] is None
+    assert "missing_market_context" in row["data_quality_flags"]
+
+
+def test_missing_market_context_is_null_and_flagged() -> None:
+    enrichments = build_trade_outcome_enrichments(
+        [_outcome("GC", "GCQ6")],
+        crfd_rows=[_crfd("GC")],
+        market_context_rows=[],
+        generated_at=NOW,
+    )
+
+    row = enrichments[0]
+    assert row["market_context_join_success"] is False
+    assert row["vix_level"] is None
+    assert row["vix_regime"] is None
+    assert row["market_context_source"] is None
+    assert row["market_context_provider"] is None
+    assert row["market_context_timestamp"] is None
+    assert row["market_context_staleness"] is None
+    assert "missing_market_context" in row["data_quality_flags"]
+    assert "missing_vix_context" in row["data_quality_flags"]
+
+
 def test_missing_gre_context_is_flagged() -> None:
     enrichments = build_trade_outcome_enrichments(
         [_outcome("GC", "GCQ6")],
@@ -82,6 +142,7 @@ def test_summary_generation() -> None:
     enrichments = build_trade_outcome_enrichments(
         [_outcome("GC", "GCQ6"), _outcome("NQ", "NQU6")],
         crfd_rows=[_crfd("GC", vwap_relation="above_vwap", avwap_relation="above_avwap")],
+        market_context_rows=[_vix_context("2026-06-30T20:15:00Z", level=16.45)],
         generated_at=NOW,
     )
     summary = build_trade_outcome_enrichment_summary(
@@ -89,6 +150,7 @@ def test_summary_generation() -> None:
         outcome_count=2,
         crfd_row_count=1,
         gre_report={},
+        market_context_row_count=1,
         generated_at=NOW,
     )
 
@@ -96,6 +158,11 @@ def test_summary_generation() -> None:
     assert summary["coverage_counts"]["crfd"] == 1
     assert summary["coverage_counts"]["vwap"] == 1
     assert summary["coverage_counts"]["avwap"] == 1
+    assert summary["coverage_counts"]["market_context"] == 2
+    assert summary["coverage_counts"]["vix"] == 2
+    assert summary["overall"]["vix_coverage"] == 1.0
+    assert summary["market_context"]["successful_joins"] == 2
+    assert summary["market_context"]["failed_joins"] == 0
     assert summary["missing_reasons"]["missing_gre_context"] == 2
 
 
@@ -114,6 +181,9 @@ def test_empty_dataset_handled_safely(tmp_path: Path) -> None:
     assert result.summary["overall"]["enrichment_count"] == 0
     assert result.enrichment_path.exists()
     assert result.summary_path.exists()
+    assert result.market_context_report_path.exists()
+    assert result.market_context_join_quality_path.exists()
+    assert result.market_context_data_quality_path.exists()
 
 
 def test_trade_outcome_enrichment_import_boundary() -> None:
@@ -185,4 +255,27 @@ def _crfd(
         "avwap_globex_session_open_18et": 3998.0,
         "avwap_relation_globex_session_open_18et": avwap_relation,
         "diagnostic_only": True,
+    }
+
+
+def _vix_context(observation_time: str, *, level: float) -> dict:
+    normalized_time = observation_time.replace("Z", "+00:00")
+    return {
+        "schema_version": "track_b_canonical_market_context_v1",
+        "provider_name": "VIX",
+        "provider_kind": "historical_vix",
+        "context_key": "vix",
+        "symbol": "VIX",
+        "vix_available": True,
+        "vix_level": level,
+        "vix_observation_time": normalized_time,
+        "vix_source": "cboe_official_daily_history",
+        "vix_daily_change": -1.2,
+        "vix_regime": "LOW",
+        "vix_percentile": 0.31,
+        "vix_ma_20": 18.1,
+        "vix_ma_50": 17.6,
+        "source_provenance": {"source_ref": "vix_fixture"},
+        "diagnostic_only": True,
+        "production_effect": False,
     }
