@@ -1,0 +1,462 @@
+"""Canonical research enrichment for Track B trade outcome records."""
+
+from __future__ import annotations
+
+import json
+from dataclasses import dataclass
+from datetime import UTC, datetime
+from pathlib import Path
+from typing import Any, Mapping, Sequence
+
+from mgc_v05l.execution_core.bounded_jsonl import BoundedJsonlConfig, write_bounded_jsonl
+from mgc_v05l.execution_core.bounded_snapshot import BoundedSnapshotConfig, write_bounded_snapshot_json
+from mgc_v05l.execution_core.track_b_trade_outcome_layer import (
+    DEFAULT_OUTPUT_DIR as DEFAULT_OUTCOME_LAYER_DIR,
+    OUTCOMES_JSONL,
+)
+
+
+DEFAULT_OUTPUT_ROOT = Path("outputs") / "track_b_execution_core"
+DEFAULT_OUTCOMES_PATH = DEFAULT_OUTCOME_LAYER_DIR / OUTCOMES_JSONL
+DEFAULT_CRFD_ROWS = DEFAULT_OUTPUT_ROOT / "research" / "canonical_research_feature_dataset" / "research_feature_dataset.jsonl"
+DEFAULT_GRE_REPORT = DEFAULT_OUTPUT_ROOT / "research" / "gold_regime_engine" / "latest_gold_regime_engine.json"
+DEFAULT_OUTPUT_DIR = DEFAULT_OUTPUT_ROOT / "trade_outcome_enrichment"
+
+ENRICHMENT_JSONL = "canonical_trade_outcome_enrichment.jsonl"
+SUMMARY_JSON = "latest_trade_outcome_enrichment_summary.json"
+SUMMARY_MD = "latest_trade_outcome_enrichment_summary.md"
+CONTRACT_MD = "trade_outcome_enrichment_contract.md"
+DATA_QUALITY_MD = "trade_outcome_enrichment_data_quality.md"
+
+SCHEMA_VERSION = "track_b_trade_outcome_enrichment_v1"
+SUMMARY_SCHEMA_VERSION = "track_b_trade_outcome_enrichment_summary_v1"
+DEFAULT_MAX_CRFD_JOIN_AGE_SECONDS = 7 * 24 * 60 * 60
+DEFAULT_MAX_GRE_JOIN_AGE_SECONDS = 60 * 60
+
+
+@dataclass(frozen=True)
+class TradeOutcomeEnrichmentResult:
+    enrichments: list[dict[str, Any]]
+    summary: dict[str, Any]
+    enrichment_path: Path
+    summary_path: Path
+    summary_markdown_path: Path
+    contract_path: Path
+    data_quality_path: Path
+
+
+def run_trade_outcome_enrichment(
+    *,
+    outcomes_path: Path = DEFAULT_OUTCOMES_PATH,
+    crfd_rows_path: Path = DEFAULT_CRFD_ROWS,
+    gre_report_path: Path = DEFAULT_GRE_REPORT,
+    output_dir: Path = DEFAULT_OUTPUT_DIR,
+    now: datetime | str | None = None,
+    max_snapshot_bytes: int | None = None,
+    jsonl_config: BoundedJsonlConfig | None = None,
+) -> TradeOutcomeEnrichmentResult:
+    generated_at = _coerce_now(now)
+    outcomes = _read_jsonl(outcomes_path)
+    crfd_rows = _read_jsonl(crfd_rows_path)
+    gre_report = _read_json_mapping(gre_report_path)
+    enrichments = build_trade_outcome_enrichments(
+        outcomes,
+        crfd_rows=crfd_rows,
+        gre_report=gre_report,
+        generated_at=generated_at,
+        source_paths={
+            "canonical_trade_outcomes": outcomes_path,
+            "crfd_rows": crfd_rows_path,
+            "gre_report": gre_report_path,
+        },
+    )
+    summary = build_trade_outcome_enrichment_summary(
+        enrichments,
+        outcome_count=len(outcomes),
+        crfd_row_count=len(crfd_rows),
+        gre_report=gre_report,
+        generated_at=generated_at,
+        source_paths={
+            "canonical_trade_outcomes": outcomes_path,
+            "crfd_rows": crfd_rows_path,
+            "gre_report": gre_report_path,
+        },
+    )
+    output_dir.mkdir(parents=True, exist_ok=True)
+    enrichment_path = output_dir / ENRICHMENT_JSONL
+    write_bounded_jsonl(enrichment_path, enrichments, config=jsonl_config)
+    snapshot_config = BoundedSnapshotConfig(max_bytes=max_snapshot_bytes) if max_snapshot_bytes else BoundedSnapshotConfig()
+    summary_path = output_dir / SUMMARY_JSON
+    write_bounded_snapshot_json(summary_path, summary, config=snapshot_config)
+    summary_md = output_dir / SUMMARY_MD
+    summary_md.write_text(render_enrichment_summary_markdown(summary), encoding="utf-8")
+    contract_path = output_dir / CONTRACT_MD
+    contract_path.write_text(render_enrichment_contract_markdown(), encoding="utf-8")
+    data_quality_path = output_dir / DATA_QUALITY_MD
+    data_quality_path.write_text(render_enrichment_data_quality_markdown(summary), encoding="utf-8")
+    return TradeOutcomeEnrichmentResult(
+        enrichments=enrichments,
+        summary=summary,
+        enrichment_path=enrichment_path,
+        summary_path=summary_path,
+        summary_markdown_path=summary_md,
+        contract_path=contract_path,
+        data_quality_path=data_quality_path,
+    )
+
+
+def build_trade_outcome_enrichments(
+    outcomes: Sequence[Mapping[str, Any]],
+    *,
+    crfd_rows: Sequence[Mapping[str, Any]] = (),
+    gre_report: Mapping[str, Any] | None = None,
+    generated_at: datetime,
+    source_paths: Mapping[str, Path | str] | None = None,
+    max_crfd_join_age_seconds: int = DEFAULT_MAX_CRFD_JOIN_AGE_SECONDS,
+    max_gre_join_age_seconds: int = DEFAULT_MAX_GRE_JOIN_AGE_SECONDS,
+) -> list[dict[str, Any]]:
+    crfd_index = _CrfdIndex(crfd_rows)
+    gre = dict(gre_report or {})
+    enrichments: list[dict[str, Any]] = []
+    for outcome in outcomes:
+        entry_time = _parse_datetime(outcome.get("entry_time"))
+        contract = str(outcome.get("contract") or outcome.get("instrument") or "")
+        crfd = crfd_index.latest_at_or_before(contract=contract, timestamp=entry_time)
+        crfd_age = _age_seconds(crfd.get("observation_time") if crfd else None, entry_time)
+        crfd_join_success = crfd is not None and (crfd_age is None or crfd_age <= max_crfd_join_age_seconds)
+        if not crfd_join_success:
+            crfd = None
+        gre_context = _select_gre_context(
+            outcome,
+            crfd=crfd,
+            gre_report=gre,
+            entry_time=entry_time,
+            max_age_seconds=max_gre_join_age_seconds,
+        )
+        flags = _enrichment_flags(outcome=outcome, crfd=crfd, gre_context=gre_context, crfd_age=crfd_age)
+        enrichments.append(
+            {
+                "schema_version": SCHEMA_VERSION,
+                "generated_at": generated_at.isoformat(),
+                "trade_outcome_id": outcome.get("trade_outcome_id"),
+                "strategy_id": outcome.get("strategy_id"),
+                "lane_id": outcome.get("lane_id"),
+                "instrument": outcome.get("instrument"),
+                "contract": outcome.get("contract"),
+                "side": outcome.get("side"),
+                "entry_time": outcome.get("entry_time"),
+                "exit_time": outcome.get("exit_time"),
+                "session": _first_non_null(
+                    outcome.get("session_at_entry"),
+                    crfd.get("session") if crfd else None,
+                    crfd.get("session_label") if crfd else None,
+                ),
+                "crfd_join_success": crfd is not None,
+                "crfd_observation_time": crfd.get("observation_time") if crfd else None,
+                "crfd_join_age_seconds": crfd_age if crfd is not None else None,
+                "research_provider_used": crfd.get("provider_id") or crfd.get("provider_kind") if crfd else None,
+                "gre_label": gre_context.get("label"),
+                "gre_confidence": gre_context.get("confidence"),
+                "gre_provenance": gre_context.get("provenance"),
+                "vwap_relation": crfd.get("vwap_relation") if crfd else None,
+                "vwap": crfd.get("vwap") if crfd else None,
+                "distance_from_vwap_points": _first_non_null(
+                    crfd.get("distance_from_vwap_points") if crfd else None,
+                    crfd.get("distance_from_vwap") if crfd else None,
+                ),
+                "avwap_relation": crfd.get("avwap_relation_globex_session_open_18et") if crfd else None,
+                "avwap_anchor": "globex_session_open_18et" if crfd else None,
+                "avwap": crfd.get("avwap_globex_session_open_18et") if crfd else None,
+                "data_quality_flags": sorted(set(flags)),
+                "source_refs": {
+                    "canonical_trade_outcomes": str((source_paths or {}).get("canonical_trade_outcomes", "")),
+                    "crfd_rows": str((source_paths or {}).get("crfd_rows", "")) if crfd else None,
+                    "gre_report": str((source_paths or {}).get("gre_report", "")) if gre_context.get("provenance") else None,
+                    "source_outcome_refs": outcome.get("source_refs"),
+                },
+                "diagnostic_only": True,
+            }
+        )
+    return enrichments
+
+
+def build_trade_outcome_enrichment_summary(
+    enrichments: Sequence[Mapping[str, Any]],
+    *,
+    outcome_count: int,
+    crfd_row_count: int,
+    gre_report: Mapping[str, Any] | None,
+    generated_at: datetime,
+    source_paths: Mapping[str, Path | str] | None = None,
+) -> dict[str, Any]:
+    flags = _counts(flag for row in enrichments for flag in row.get("data_quality_flags", ()))
+    gre_count = sum(1 for row in enrichments if row.get("gre_label") is not None)
+    crfd_count = sum(1 for row in enrichments if row.get("crfd_join_success") is True)
+    vwap_count = sum(1 for row in enrichments if row.get("vwap_relation") not in (None, "unavailable"))
+    avwap_count = sum(1 for row in enrichments if row.get("avwap_relation") not in (None, "unavailable"))
+    return {
+        "schema_version": SUMMARY_SCHEMA_VERSION,
+        "generated_at": generated_at.isoformat(),
+        "analytics_only": True,
+        "diagnostic_only": True,
+        "production_effect": False,
+        "source_paths": {key: str(value) for key, value in (source_paths or {}).items()},
+        "input_counts": {
+            "outcome_count": outcome_count,
+            "crfd_row_count": crfd_row_count,
+            "gre_report_present": bool(gre_report),
+        },
+        "overall": {
+            "enrichment_count": len(enrichments),
+            "gre_coverage": _rate(gre_count, len(enrichments)),
+            "crfd_coverage": _rate(crfd_count, len(enrichments)),
+            "vwap_coverage": _rate(vwap_count, len(enrichments)),
+            "avwap_coverage": _rate(avwap_count, len(enrichments)),
+            "join_success": _rate(crfd_count, len(enrichments)),
+        },
+        "coverage_counts": {
+            "gre": gre_count,
+            "crfd": crfd_count,
+            "vwap": vwap_count,
+            "avwap": avwap_count,
+        },
+        "missing_reasons": flags,
+        "top_enrichment_limitations": _top_limitations(flags),
+        "safety_contract": {
+            "broker_actions": False,
+            "runtime_restart": False,
+            "managed_exit_restart": False,
+            "strategy_changes": False,
+            "trading_gates": False,
+            "db_mutation": False,
+        },
+    }
+
+
+def render_enrichment_summary_markdown(summary: Mapping[str, Any]) -> str:
+    overall = summary.get("overall") or {}
+    counts = summary.get("coverage_counts") or {}
+    return "\n".join(
+        [
+            "# Trade Outcome Enrichment Summary",
+            "",
+            f"- Generated at: {summary.get('generated_at')}",
+            f"- Enrichments: {overall.get('enrichment_count')}",
+            f"- GRE coverage: {overall.get('gre_coverage')} ({counts.get('gre')})",
+            f"- CRFD coverage: {overall.get('crfd_coverage')} ({counts.get('crfd')})",
+            f"- VWAP coverage: {overall.get('vwap_coverage')} ({counts.get('vwap')})",
+            f"- AVWAP coverage: {overall.get('avwap_coverage')} ({counts.get('avwap')})",
+            "",
+        ]
+    )
+
+
+def render_enrichment_contract_markdown() -> str:
+    return "\n".join(
+        [
+            "# Trade Outcome Enrichment Contract",
+            "",
+            "The enrichment layer decorates canonical trade outcomes with research context without modifying the outcome schema.",
+            "",
+            "## Rules",
+            "- Preserve one enrichment row per canonical trade outcome.",
+            "- Do not fabricate GRE, CRFD, VWAP, AVWAP, or session values.",
+            "- Missing research context is represented as null plus explicit data-quality flags.",
+            "- Enrichment rows are diagnostic-only and have no broker, runtime, strategy, or gate authority.",
+            "",
+        ]
+    )
+
+
+def render_enrichment_data_quality_markdown(summary: Mapping[str, Any]) -> str:
+    lines = ["# Trade Outcome Enrichment Data Quality", "", "## Top Limitations", ""]
+    for item in summary.get("top_enrichment_limitations") or []:
+        lines.append(f"- {item}")
+    lines.extend(["", "## Missing Reasons", ""])
+    for reason, count in (summary.get("missing_reasons") or {}).items():
+        lines.append(f"- {reason}: {count}")
+    lines.append("")
+    return "\n".join(lines)
+
+
+def _select_gre_context(
+    outcome: Mapping[str, Any],
+    *,
+    crfd: Mapping[str, Any] | None,
+    gre_report: Mapping[str, Any],
+    entry_time: datetime | None,
+    max_age_seconds: int,
+) -> dict[str, Any]:
+    if outcome.get("gre_label_at_entry") is not None:
+        return {
+            "label": outcome.get("gre_label_at_entry"),
+            "confidence": outcome.get("gre_confidence_at_entry"),
+            "provenance": "canonical_trade_outcome",
+        }
+    if crfd and crfd.get("gre_label") is not None:
+        return {
+            "label": crfd.get("gre_label"),
+            "confidence": crfd.get("gre_confidence"),
+            "provenance": "canonical_research_feature_dataset",
+        }
+    if not gre_report or not _is_gold_instrument(outcome.get("instrument") or outcome.get("contract")):
+        return {"label": None, "confidence": None, "provenance": None}
+    gre_time = _parse_datetime(gre_report.get("generated_at"))
+    age = abs((gre_time - entry_time).total_seconds()) if gre_time and entry_time else None
+    if age is not None and age <= max_age_seconds:
+        return {
+            "label": gre_report.get("regime_label"),
+            "confidence": gre_report.get("confidence"),
+            "provenance": "latest_gold_regime_engine_time_aligned",
+        }
+    return {"label": None, "confidence": None, "provenance": None}
+
+
+def _enrichment_flags(
+    *,
+    outcome: Mapping[str, Any],
+    crfd: Mapping[str, Any] | None,
+    gre_context: Mapping[str, Any],
+    crfd_age: float | None,
+) -> list[str]:
+    flags = list(outcome.get("data_quality_flags") or ())
+    if crfd is None:
+        flags.append("missing_crfd_context")
+    elif crfd_age is not None and crfd_age > DEFAULT_MAX_CRFD_JOIN_AGE_SECONDS:
+        flags.append("stale_crfd_context")
+    if gre_context.get("label") is None:
+        flags.append("missing_gre_context")
+    if crfd is None or crfd.get("vwap_relation") in (None, "unavailable"):
+        flags.append("missing_vwap_context")
+    if crfd is None or crfd.get("avwap_relation_globex_session_open_18et") in (None, "unavailable"):
+        flags.append("missing_avwap_context")
+    return flags
+
+
+class _CrfdIndex:
+    def __init__(self, rows: Sequence[Mapping[str, Any]]) -> None:
+        by_contract: dict[str, list[tuple[datetime, Mapping[str, Any]]]] = {}
+        for row in rows:
+            ts = _parse_datetime(row.get("observation_time"))
+            contract = str(row.get("contract") or "").upper()
+            if ts is None or not contract:
+                continue
+            by_contract.setdefault(contract, []).append((ts, row))
+        self._rows = {contract: sorted(values, key=lambda item: item[0]) for contract, values in by_contract.items()}
+
+    def latest_at_or_before(self, *, contract: str, timestamp: datetime | None) -> Mapping[str, Any] | None:
+        if timestamp is None:
+            return None
+        rows = self._rows.get(_root_symbol(contract), ()) or self._rows.get(str(contract or "").upper(), ())
+        candidate: Mapping[str, Any] | None = None
+        for row_ts, row in rows:
+            if row_ts > timestamp:
+                break
+            candidate = row
+        return candidate
+
+
+def _top_limitations(flags: Mapping[str, int]) -> list[str]:
+    mapping = {
+        "missing_gre_context": "GRE context is unavailable for most historical outcomes.",
+        "missing_crfd_context": "CRFD context is unavailable or stale for some outcomes.",
+        "missing_vwap_context": "VWAP context is missing where CRFD did not join or VWAP was unavailable.",
+        "missing_avwap_context": "AVWAP context is missing where anchors were unavailable.",
+    }
+    return [mapping[key] for key in mapping if flags.get(key)]
+
+
+def _age_seconds(source_time: Any, target_time: datetime | None) -> float | None:
+    source = _parse_datetime(source_time)
+    if source is None or target_time is None:
+        return None
+    return max((target_time - source).total_seconds(), 0.0)
+
+
+def _is_gold_instrument(value: Any) -> bool:
+    return _root_symbol(value) in {"GC", "MGC"}
+
+
+def _root_symbol(value: Any) -> str:
+    root = "".join(ch for ch in str(value or "").upper() if ch.isalpha())
+    if root.startswith("MGC"):
+        return "MGC"
+    if root.startswith("GC"):
+        return "GC"
+    if root.startswith("MNQ"):
+        return "MNQ"
+    if root.startswith("NQ"):
+        return "NQ"
+    if root.startswith("MES"):
+        return "MES"
+    if root.startswith("ES"):
+        return "ES"
+    return root
+
+
+def _first_non_null(*values: Any) -> Any:
+    for value in values:
+        if value is not None:
+            return value
+    return None
+
+
+def _rate(part: int, whole: int) -> float | None:
+    if whole <= 0:
+        return None
+    return round(part / whole, 6)
+
+
+def _counts(values: Any) -> dict[str, int]:
+    result: dict[str, int] = {}
+    for value in values:
+        key = str(value or "UNKNOWN")
+        result[key] = result.get(key, 0) + 1
+    return dict(sorted(result.items(), key=lambda item: (-item[1], item[0])))
+
+
+def _read_jsonl(path: Path) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    if not path.exists():
+        return rows
+    try:
+        for line in path.read_text(encoding="utf-8").splitlines():
+            if not line.strip():
+                continue
+            payload = json.loads(line)
+            if isinstance(payload, dict):
+                rows.append(payload)
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+        return []
+    return rows
+
+
+def _read_json_mapping(path: Path) -> dict[str, Any]:
+    if not path.exists():
+        return {}
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def _coerce_now(value: datetime | str | None) -> datetime:
+    if value is None:
+        return datetime.now(UTC)
+    if isinstance(value, datetime):
+        return value if value.tzinfo else value.replace(tzinfo=UTC)
+    parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    return parsed if parsed.tzinfo else parsed.replace(tzinfo=UTC)
+
+
+def _parse_datetime(value: Any) -> datetime | None:
+    if not value:
+        return None
+    if isinstance(value, datetime):
+        return value if value.tzinfo else value.replace(tzinfo=UTC)
+    try:
+        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return parsed if parsed.tzinfo else parsed.replace(tzinfo=UTC)
