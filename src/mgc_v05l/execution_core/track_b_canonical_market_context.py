@@ -24,6 +24,8 @@ SUMMARY_MD = "latest_canonical_market_context_summary.md"
 CONTRACT_MD = "canonical_market_context_contract.md"
 DATA_QUALITY_MD = "canonical_market_context_data_quality.md"
 CAPABILITY_MATRIX_MD = "market_context_provider_capability_matrix.md"
+HISTORICAL_PROVIDER_REPORT_MD = "historical_market_context_provider_report.md"
+VIX_HISTORICAL_DATA_QUALITY_MD = "vix_historical_provider_data_quality.md"
 
 SCHEMA_VERSION = "track_b_canonical_market_context_v1"
 SUMMARY_SCHEMA_VERSION = "track_b_canonical_market_context_summary_v1"
@@ -62,12 +64,15 @@ class CanonicalMarketContextResult:
     contract_path: Path
     data_quality_path: Path
     capability_matrix_path: Path
+    historical_provider_report_path: Path
+    vix_historical_data_quality_path: Path
 
 
 class VixProvider:
     provider_name = "VIX"
     context_key = "vix"
     symbol = "VIX"
+    provider_kind = "historical_vix"
 
     def __init__(
         self,
@@ -83,7 +88,7 @@ class VixProvider:
 
     @property
     def source_ref(self) -> str:
-        path = self._resolved_source_path()
+        path = self._selected_source_path()
         return str(path) if path else str(self.warehouse_root / "datasets" / "vol_regime_daily")
 
     def load_observations(self) -> list[dict[str, Any]]:
@@ -109,6 +114,7 @@ class VixProvider:
                 "schema_version": SCHEMA_VERSION,
                 "generated_at": generated_at.isoformat(),
                 "provider_name": self.provider_name,
+                "provider_kind": self.provider_kind,
                 "context_key": self.context_key,
                 "symbol": self.symbol,
                 "vix_available": True,
@@ -124,6 +130,7 @@ class VixProvider:
                 "vix_ma_50": row.get("vix_ma_50"),
                 "data_quality_flags": list(row.get("data_quality_flags") or []),
                 "source_refs": row.get("source_refs") or {},
+                "source_provenance": row.get("source_provenance") or {},
                 "diagnostic_only": True,
                 "production_effect": False,
             }
@@ -135,22 +142,26 @@ class VixProvider:
         if not observations:
             return {
                 "provider_name": self.provider_name,
+                "provider_kind": self.provider_kind,
                 "context_key": self.context_key,
                 "available": False,
                 "row_count": 0,
                 "earliest_observation_time": None,
                 "latest_observation_time": None,
                 "source_ref": self.source_ref,
+                "source_candidates": self.source_audit(),
                 "missing_data_requirement": "Provide VIX daily/regime rows in warehouse vol_regime_daily, vix_daily, or an explicit JSONL/CSV source.",
             }
         return {
             "provider_name": self.provider_name,
+            "provider_kind": self.provider_kind,
             "context_key": self.context_key,
             "available": True,
             "row_count": len(observations),
             "earliest_observation_time": observations[0]["vix_observation_time"],
             "latest_observation_time": observations[-1]["vix_observation_time"],
             "source_ref": self.source_ref,
+            "source_candidates": self.source_audit(),
             "missing_data_requirement": None,
         }
 
@@ -159,6 +170,7 @@ class VixProvider:
         staleness = _age_seconds(latest.get("vix_observation_time") if latest else None, generated_at)
         return {
             "provider_name": self.provider_name,
+            "provider_kind": self.provider_kind,
             "context_key": self.context_key,
             "freshness_available": latest is not None,
             "latest_observation_time": latest.get("vix_observation_time") if latest else None,
@@ -179,6 +191,7 @@ class VixProvider:
         if index < 0:
             return {
                 "provider_name": self.provider_name,
+                "provider_kind": self.provider_kind,
                 "context_key": self.context_key,
                 "symbol": self.symbol,
                 "vix_available": False,
@@ -195,6 +208,7 @@ class VixProvider:
         matched = observations[index]
         return {
             "provider_name": self.provider_name,
+            "provider_kind": self.provider_kind,
             "context_key": self.context_key,
             "symbol": self.symbol,
             "vix_available": True,
@@ -210,6 +224,7 @@ class VixProvider:
             "vix_ma_50": matched.get("vix_ma_50"),
             "data_quality_flags": list(matched.get("data_quality_flags") or []),
             "source_refs": matched.get("source_refs") or {},
+            "source_provenance": matched.get("source_provenance") or {},
             "diagnostic_only": True,
             "production_effect": False,
         }
@@ -218,6 +233,7 @@ class VixProvider:
         coverage = self.coverage_report()
         return {
             "provider_name": self.provider_name,
+            "provider_kind": self.provider_kind,
             "context_key": self.context_key,
             "symbol": self.symbol,
             "implemented": True,
@@ -241,16 +257,16 @@ class VixProvider:
             "diagnostic_only": True,
         }
 
+    def source_audit(self) -> list[dict[str, Any]]:
+        return audit_historical_vix_sources(
+            warehouse_root=self.warehouse_root,
+            explicit_source_path=self.vix_source_path,
+        )
+
     def _load_source_rows(self) -> list[dict[str, Any]]:
-        explicit = self._resolved_source_path()
-        if explicit is not None:
-            return _read_rows_from_path(explicit)
-        vol_regime_root = self.warehouse_root / "datasets" / "vol_regime_daily"
-        vix_daily_root = self.warehouse_root / "datasets" / "vix_daily"
-        if vol_regime_root.exists():
-            return _read_rows_from_path(vol_regime_root)
-        if vix_daily_root.exists():
-            return _read_rows_from_path(vix_daily_root)
+        selected = self._selected_source_path()
+        if selected is not None:
+            return _read_rows_from_path(selected)
         return []
 
     def _resolved_source_path(self) -> Path | None:
@@ -258,12 +274,28 @@ class VixProvider:
             return self.vix_source_path
         return None
 
+    def _selected_source_path(self) -> Path | None:
+        explicit = self._resolved_source_path()
+        if explicit is not None:
+            return explicit
+        for candidate in self._default_source_candidates():
+            if candidate.exists():
+                return candidate
+        return None
+
+    def _default_source_candidates(self) -> tuple[Path, ...]:
+        return (
+            self.warehouse_root / "datasets" / "vol_regime_daily",
+            self.warehouse_root / "datasets" / "vix_daily",
+        )
+
     def _unavailable_row(self, *, generated_at: datetime) -> dict[str, Any]:
         reason = "missing_vix_source_data"
         return {
             "schema_version": SCHEMA_VERSION,
             "generated_at": generated_at.isoformat(),
             "provider_name": self.provider_name,
+            "provider_kind": self.provider_kind,
             "context_key": self.context_key,
             "symbol": self.symbol,
             "vix_available": False,
@@ -279,9 +311,18 @@ class VixProvider:
             "vix_ma_50": None,
             "data_quality_flags": [reason],
             "source_refs": {"vix_source": self.source_ref},
+            "source_provenance": {
+                "provider_kind": self.provider_kind,
+                "source_ref": self.source_ref,
+                "source_audit": self.source_audit(),
+            },
             "diagnostic_only": True,
             "production_effect": False,
         }
+
+
+class HistoricalVixProvider(VixProvider):
+    """Historical/read-only VIX context provider backed by warehouse or flat files."""
 
 
 def run_canonical_market_context(
@@ -298,7 +339,7 @@ def run_canonical_market_context(
     actual_providers: Sequence[MarketContextProvider] = providers
     if actual_providers is None:
         actual_providers = [
-            VixProvider(
+            HistoricalVixProvider(
                 warehouse_root=warehouse_root,
                 vix_source_path=vix_source_path,
             )
@@ -318,6 +359,10 @@ def run_canonical_market_context(
     data_quality_path.write_text(render_data_quality_markdown(summary), encoding="utf-8")
     capability_matrix_path = output_dir / CAPABILITY_MATRIX_MD
     capability_matrix_path.write_text(render_capability_matrix_markdown(summary), encoding="utf-8")
+    historical_provider_report_path = output_dir / HISTORICAL_PROVIDER_REPORT_MD
+    historical_provider_report_path.write_text(render_historical_provider_report_markdown(summary), encoding="utf-8")
+    vix_historical_data_quality_path = output_dir / VIX_HISTORICAL_DATA_QUALITY_MD
+    vix_historical_data_quality_path.write_text(render_vix_historical_data_quality_markdown(summary), encoding="utf-8")
     return CanonicalMarketContextResult(
         rows=rows,
         summary=summary,
@@ -327,6 +372,8 @@ def run_canonical_market_context(
         contract_path=contract_path,
         data_quality_path=data_quality_path,
         capability_matrix_path=capability_matrix_path,
+        historical_provider_report_path=historical_provider_report_path,
+        vix_historical_data_quality_path=vix_historical_data_quality_path,
     )
 
 
@@ -391,6 +438,33 @@ def build_canonical_market_context_summary(
             "MOVE",
         ],
     }
+
+
+def audit_historical_vix_sources(
+    *,
+    warehouse_root: Path = DEFAULT_WAREHOUSE_ROOT,
+    explicit_source_path: Path | None = None,
+) -> list[dict[str, Any]]:
+    candidates: list[tuple[str, Path]] = []
+    if explicit_source_path is not None:
+        candidates.append(("explicit_source", Path(explicit_source_path)))
+    candidates.extend(
+        [
+            ("warehouse_vol_regime_daily", Path(warehouse_root) / "datasets" / "vol_regime_daily"),
+            ("warehouse_vix_daily", Path(warehouse_root) / "datasets" / "vix_daily"),
+        ]
+    )
+    return [
+        {
+            "source_name": name,
+            "path": str(path),
+            "exists": path.exists(),
+            "file_count": _count_supported_source_files(path),
+            "supported": _source_path_supported(path),
+            "preferred_order": index,
+        }
+        for index, (name, path) in enumerate(candidates, start=1)
+    ]
 
 
 def classify_vix_regime(level: float | None) -> str | None:
@@ -526,6 +600,74 @@ def render_capability_matrix_markdown(summary: Mapping[str, Any]) -> str:
     return "\n".join(lines) + "\n"
 
 
+def render_historical_provider_report_markdown(summary: Mapping[str, Any]) -> str:
+    vix = summary.get("vix") or {}
+    coverage = vix.get("coverage_window") or {}
+    provider_coverage = ((summary.get("providers") or {}).get("coverage") or [])
+    vix_provider = next((item for item in provider_coverage if item.get("context_key") == "vix"), {})
+    lines = [
+        "# Historical Market Context Provider Report",
+        "",
+        f"- Generated at: `{summary.get('generated_at')}`",
+        "- Provider: `HistoricalVixProvider`",
+        "- Context key: `vix`",
+        f"- Available: `{vix.get('available')}`",
+        f"- Row count: `{vix.get('row_count')}`",
+        f"- Coverage start: `{coverage.get('start')}`",
+        f"- Coverage end: `{coverage.get('end')}`",
+        f"- Source ref: `{vix.get('source_ref')}`",
+        "- Join method: `nearest_prior_observation_lte_timestamp`",
+        "",
+        "## Source Audit",
+    ]
+    candidates = vix_provider.get("source_candidates") or []
+    if candidates:
+        lines.extend(
+            f"- `{row.get('source_name')}` exists=`{row.get('exists')}` files=`{row.get('file_count')}` path=`{row.get('path')}`"
+            for row in candidates
+        )
+    else:
+        lines.append("- No source candidates reported.")
+    lines.extend(
+        [
+            "",
+            "## Contract",
+            "",
+            "Historical VIX rows are read-only, diagnostic-only market context. They are not trading gates and are not integrated into trade outcome enrichment or GRE in M3.",
+        ]
+    )
+    return "\n".join(lines) + "\n"
+
+
+def render_vix_historical_data_quality_markdown(summary: Mapping[str, Any]) -> str:
+    vix = summary.get("vix") or {}
+    freshness = vix.get("freshness") or {}
+    flags = summary.get("data_quality_flags") or []
+    missing = summary.get("missing_data_requirements") or []
+    lines = [
+        "# VIX Historical Provider Data Quality",
+        "",
+        f"- VIX available: `{vix.get('available')}`",
+        f"- VIX row count: `{vix.get('row_count')}`",
+        f"- Freshness status: `{freshness.get('freshness_status')}`",
+        f"- Latest observation: `{freshness.get('latest_observation_time')}`",
+        f"- Staleness seconds: `{freshness.get('staleness_seconds')}`",
+        "",
+        "## Data Quality Flags",
+    ]
+    if flags:
+        lines.extend(f"- `{flag}`" for flag in flags)
+    else:
+        lines.append("- No data-quality flags.")
+    lines.append("")
+    lines.append("## Missing Data Requirements")
+    if missing:
+        lines.extend(f"- {item}" for item in missing)
+    else:
+        lines.append("- None.")
+    return "\n".join(lines) + "\n"
+
+
 def _read_rows_from_path(path: Path) -> list[dict[str, Any]]:
     if not path.exists():
         return []
@@ -563,6 +705,23 @@ def _read_rows_from_path(path: Path) -> list[dict[str, Any]]:
     if suffix == ".parquet":
         return _read_parquet_rows([path])
     return []
+
+
+def _source_path_supported(path: Path) -> bool:
+    if path.is_dir():
+        return _count_supported_source_files(path) > 0
+    return path.suffix.lower() in {".json", ".jsonl", ".csv", ".parquet"} and path.exists()
+
+
+def _count_supported_source_files(path: Path) -> int:
+    if not path.exists():
+        return 0
+    if path.is_file():
+        return 1 if path.suffix.lower() in {".json", ".jsonl", ".csv", ".parquet"} else 0
+    count = 0
+    for suffix in ("*.parquet", "*.jsonl", "*.json", "*.csv"):
+        count += sum(1 for item in path.rglob(suffix) if item.name != "_schema.parquet")
+    return count
 
 
 def _read_jsonl(path: Path) -> list[dict[str, Any]]:
@@ -626,6 +785,11 @@ def _normalize_vix_row(row: Mapping[str, Any], *, source_ref: str) -> dict[str, 
         "vix_ma_50": _parse_float(row.get("vix_ma_50")),
         "data_quality_flags": [],
         "source_refs": {"vix_source": source_ref},
+        "source_provenance": {
+            "source_ref": source_ref,
+            "source_type": _source_type_from_ref(source_ref),
+            "raw_fields_present": sorted(str(key) for key in row.keys()),
+        },
     }
 
 
@@ -657,6 +821,21 @@ def _summary_flags(*, rows: Sequence[Mapping[str, Any]], coverage: Sequence[Mapp
         if not item.get("available"):
             flags.add(f"{item.get('context_key')}_missing_source_data")
     return sorted(flags)
+
+
+def _source_type_from_ref(source_ref: str) -> str:
+    lowered = source_ref.lower()
+    if "vol_regime_daily" in lowered:
+        return "cboe_vix_regime_warehouse"
+    if "vix_daily" in lowered:
+        return "cboe_vix_daily_warehouse"
+    if lowered.endswith(".jsonl"):
+        return "jsonl"
+    if lowered.endswith(".csv"):
+        return "csv"
+    if lowered.endswith(".parquet") or "parquet" in lowered:
+        return "parquet"
+    return "unknown"
 
 
 def _freshness_status(staleness: int | None) -> str:

@@ -6,7 +6,9 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from mgc_v05l.execution_core.track_b_canonical_market_context import (
+    HistoricalVixProvider,
     VixProvider,
+    audit_historical_vix_sources,
     build_canonical_market_context_summary,
     classify_vix_regime,
     run_canonical_market_context,
@@ -53,30 +55,14 @@ def test_vix_provider_unavailable_still_publishes_clean_summary(tmp_path: Path) 
 
     assert result.summary["vix"]["available"] is False
     assert result.summary["vix"]["join_readiness"] == "MISSING_SOURCE_DATA"
-    assert result.rows == [
-        {
-            "schema_version": "track_b_canonical_market_context_v1",
-            "generated_at": "2026-07-03T00:00:00+00:00",
-            "provider_name": "VIX",
-            "context_key": "vix",
-            "symbol": "VIX",
-            "vix_available": False,
-            "vix_level": None,
-            "vix_observation_time": None,
-            "vix_staleness_seconds": None,
-            "vix_source": str(tmp_path / "missing.jsonl"),
-            "vix_unavailable_reason": "missing_vix_source_data",
-            "vix_daily_change": None,
-            "vix_regime": None,
-            "vix_percentile": None,
-            "vix_ma_20": None,
-            "vix_ma_50": None,
-            "data_quality_flags": ["missing_vix_source_data"],
-            "source_refs": {"vix_source": str(tmp_path / "missing.jsonl")},
-            "diagnostic_only": True,
-            "production_effect": False,
-        }
-    ]
+    row = result.rows[0]
+    assert row["provider_kind"] == "historical_vix"
+    assert row["vix_available"] is False
+    assert row["vix_source"] == str(tmp_path / "missing.jsonl")
+    assert row["vix_unavailable_reason"] == "missing_vix_source_data"
+    assert row["source_provenance"]["source_ref"] == str(tmp_path / "missing.jsonl")
+    assert row["diagnostic_only"] is True
+    assert row["production_effect"] is False
 
 
 def test_timestamp_join_uses_nearest_prior_not_future_observation(tmp_path: Path) -> None:
@@ -127,6 +113,68 @@ def test_missing_optional_vix_fields_do_not_fail(tmp_path: Path) -> None:
     assert rows[0]["vix_daily_change"] is None
     assert rows[0]["vix_ma_20"] is None
     assert rows[0]["vix_ma_50"] is None
+
+
+def test_historical_vix_provider_reports_source_audit_and_coverage(tmp_path: Path) -> None:
+    warehouse = tmp_path / "warehouse"
+    source = warehouse / "datasets" / "vix_daily" / "vix.jsonl"
+    _write_jsonl(
+        source,
+        [
+            {"vix_trade_date": "2026-07-01", "vix_close": 17.0},
+            {"vix_trade_date": "2026-07-02", "vix_close": 22.0},
+        ],
+    )
+    provider = HistoricalVixProvider(warehouse_root=warehouse)
+
+    coverage = provider.coverage_report()
+    freshness = provider.freshness_report(generated_at=datetime(2026, 7, 3, 0, 0, tzinfo=UTC))
+
+    assert coverage["available"] is True
+    assert coverage["row_count"] == 2
+    assert coverage["source_ref"].endswith("datasets/vix_daily")
+    assert any(item["source_name"] == "warehouse_vix_daily" and item["exists"] for item in coverage["source_candidates"])
+    assert freshness["freshness_available"] is True
+
+
+def test_vix_daily_change_and_percentile_ma_derivation(tmp_path: Path) -> None:
+    source = tmp_path / "vix.jsonl"
+    rows = [
+        {"vix_asof_ts": f"2026-06-{day:02d}T21:15:00+00:00", "vix_close": float(day)}
+        for day in range(1, 22)
+    ]
+    _write_jsonl(source, rows)
+    provider = HistoricalVixProvider(vix_source_path=source)
+
+    context_rows = provider.context_rows(generated_at=datetime(2026, 6, 22, tzinfo=UTC))
+
+    assert context_rows[1]["vix_daily_change"] == 1.0
+    assert context_rows[18]["vix_ma_20"] is None
+    assert context_rows[19]["vix_ma_20"] == 10.5
+    assert context_rows[19]["vix_percentile"] == 1.0
+    assert context_rows[19]["vix_ma_50"] is None
+
+
+def test_historical_provider_reports_are_published(tmp_path: Path) -> None:
+    source = tmp_path / "vix.csv"
+    source.write_text("vix_asof_ts,vix_close\n2026-07-02T21:15:00+00:00,18.5\n", encoding="utf-8")
+
+    result = run_canonical_market_context(
+        vix_source_path=source,
+        output_dir=tmp_path / "out",
+        now="2026-07-03T00:00:00+00:00",
+    )
+
+    assert result.historical_provider_report_path.exists()
+    assert result.vix_historical_data_quality_path.exists()
+    assert "HistoricalVixProvider" in result.historical_provider_report_path.read_text(encoding="utf-8")
+
+
+def test_historical_vix_source_audit_marks_missing_sources(tmp_path: Path) -> None:
+    audit = audit_historical_vix_sources(warehouse_root=tmp_path / "warehouse")
+
+    assert [row["source_name"] for row in audit] == ["warehouse_vol_regime_daily", "warehouse_vix_daily"]
+    assert all(row["exists"] is False for row in audit)
 
 
 def test_empty_provider_set_is_handled_safely() -> None:
