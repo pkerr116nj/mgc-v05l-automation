@@ -1,0 +1,86 @@
+{
+  "schema_version": "canonical_market_context_m2_vix_source_integration_plan_v1",
+  "phase": "M2",
+  "generated_at": "2026-07-02T00:00:00-04:00",
+  "scope": {
+    "broker_actions": false,
+    "runtime_restart": false,
+    "managed_exit_restart": false,
+    "strategy_changes": false,
+    "trading_gates": false,
+    "production_behavior_changes": false,
+    "db_mutation": false,
+    "trade_enrichment_integration": false
+  },
+  "current_state": {
+    "m1_framework": "implemented",
+    "m1_vix_provider": "implemented",
+    "m1_vix_available": false,
+    "m1_join_readiness": "MISSING_SOURCE_DATA",
+    "default_historical_paths": [
+      "outputs/research_platform/warehouse/historical_evaluator/datasets/vol_regime_daily",
+      "outputs/research_platform/warehouse/historical_evaluator/datasets/vix_daily"
+    ]
+  },
+  "audit_findings": {
+    "phase1_live_universe": {
+      "path": "config/track_b_live_market_data_symbols.yaml",
+      "finding": "Futures-focused and strict; VIX is not configured and should not be added as a trading/readiness symbol."
+    },
+    "databento_current_quote_boundary": {
+      "path": "src/mgc_v05l/execution_core/databento_current_quote.py",
+      "finding": "Transport-injected no-submit current quote boundary can be reused conceptually for one-shot live VIX context once dataset/symbol/schema are confirmed."
+    },
+    "databento_market_provider": {
+      "path": "src/mgc_v05l/market_data/databento_provider.py",
+      "finding": "Generic live quotes/trades are not wired; live VIX should be context-only and explicit."
+    },
+    "historical_vix": {
+      "paths": [
+        "src/mgc_v05l/market_data/vix_daily_ingest.py",
+        "src/mgc_v05l/research/regime/vix_regime_builder.py",
+        "src/mgc_v05l/research/regime/vix_join.py",
+        "config/research_regime_buckets.json"
+      ],
+      "finding": "Existing Cboe daily VIX path is suitable for historical/research context after data is materialized."
+    }
+  },
+  "provider_split": {
+    "live": {
+      "name": "LiveVixMarketContextProvider",
+      "source": "Databento context-only current VIX snapshot",
+      "status": "requires confirmed dataset/symbol/schema",
+      "default_max_age_seconds": 120,
+      "runtime_gate": false
+    },
+    "historical": {
+      "name": "HistoricalVixMarketContextProvider",
+      "source": "Cboe daily VIX warehouse first; Databento historical only after entitlement/schema confirmation",
+      "join_method": "nearest_prior_observation_lte_timestamp",
+      "runtime_gate": false
+    }
+  },
+  "databento_symbol_schema_status": {
+    "known_in_repo": false,
+    "operator_clarification": "Databento can provide live VIX levels when trades occur.",
+    "m3_required_action": "Add context-only config and preflight; do not guess dataset/symbol/schema."
+  },
+  "fallback_behavior": {
+    "vix_available": false,
+    "numeric_fields": null,
+    "reason_required": true,
+    "diagnostic_only": true,
+    "production_effect": false,
+    "blocks_runtime": false,
+    "blocks_strategy": false
+  },
+  "m3_recommendation": {
+    "implement_context_source_config": true,
+    "implement_databento_vix_preflight": true,
+    "implement_live_vix_snapshot_if_symbol_schema_confirmed": true,
+    "wire_historical_cboe_provider": true,
+    "integrate_trade_enrichment": false,
+    "integrate_gre": false,
+    "add_runtime_hook": false
+  }
+}
