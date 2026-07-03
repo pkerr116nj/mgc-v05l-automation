@@ -16,6 +16,7 @@ from typing import Any, Iterable, Mapping, Sequence
 SCHEMA_VERSION = "track_b_canonical_analytics_engine_v1"
 QUERY_SCHEMA_VERSION = "track_b_canonical_analytics_query_v1"
 RESULT_SCHEMA_VERSION = "track_b_canonical_analytics_result_v1"
+CATALOG_SCHEMA_VERSION = "track_b_canonical_analytics_catalog_v1"
 
 SAMPLE_RANK = {"RESEARCH_GRADE": 4, "DEVELOPING": 3, "PRELIMINARY": 2, "EXPLORATORY": 1}
 
@@ -117,6 +118,78 @@ class CanonicalAnalyticsResult:
         }
 
 
+@dataclass(frozen=True)
+class DimensionCatalogEntry:
+    identifier: str
+    display_name: str
+    description: str
+    value_type: str
+    allowed_values: tuple[str, ...]
+    source_system: str
+    validity_requirements: tuple[str, ...]
+    availability: str
+    sample_limitations: tuple[str, ...]
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "identifier": self.identifier,
+            "display_name": self.display_name,
+            "description": self.description,
+            "value_type": self.value_type,
+            "allowed_values": list(self.allowed_values),
+            "source_system": self.source_system,
+            "validity_requirements": list(self.validity_requirements),
+            "availability": self.availability,
+            "sample_limitations": list(self.sample_limitations),
+        }
+
+
+@dataclass(frozen=True)
+class MetricCatalogEntry:
+    identifier: str
+    display_name: str
+    description: str
+    formula_summary: str
+    required_fields: tuple[str, ...]
+    quality_level: str
+    null_behavior: str
+    data_quality_flags: tuple[str, ...]
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "identifier": self.identifier,
+            "display_name": self.display_name,
+            "description": self.description,
+            "formula_summary": self.formula_summary,
+            "required_fields": list(self.required_fields),
+            "quality_level": self.quality_level,
+            "null_behavior": self.null_behavior,
+            "data_quality_flags": list(self.data_quality_flags),
+        }
+
+
+@dataclass(frozen=True)
+class FilterCatalogEntry:
+    identifier: str
+    display_name: str
+    description: str
+    field: str | None
+    operation: str | None
+    value_type: str
+    validity_requirements: tuple[str, ...]
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "identifier": self.identifier,
+            "display_name": self.display_name,
+            "description": self.description,
+            "field": self.field,
+            "operation": self.operation,
+            "value_type": self.value_type,
+            "validity_requirements": list(self.validity_requirements),
+        }
+
+
 class CanonicalAnalyticsEngine:
     def __init__(
         self,
@@ -170,6 +243,30 @@ class CanonicalAnalyticsEngine:
             validity_metadata=validity_metadata,
             provenance=dict(provenance or {}),
         )
+
+    def catalog(self) -> dict[str, Any]:
+        dimension_catalog = default_dimension_catalog()
+        metric_catalog = default_metric_catalog()
+        filter_catalog = default_filter_catalog()
+        return {
+            "schema_version": CATALOG_SCHEMA_VERSION,
+            "diagnostic_only": True,
+            "production_recommendation": False,
+            "trading_gate": False,
+            "dimensions": {
+                name: dimension_catalog.get(name, _fallback_dimension_catalog_entry(definition)).to_dict()
+                for name, definition in sorted(self.dimensions.items())
+            },
+            "metrics": {
+                name: metric_catalog.get(name, _fallback_metric_catalog_entry(metric)).to_dict()
+                for name, metric in sorted(self.metrics.items())
+            },
+            "filters": {
+                name: filter_catalog.get(name, _fallback_filter_catalog_entry(definition)).to_dict()
+                for name, definition in sorted(self.filters.items())
+            },
+            "query_capabilities": query_capability_metadata(),
+        }
 
     def to_request(self, query: CanonicalAnalyticsQuery) -> CanonicalAnalyticsRequest:
         dimension_fields = tuple(self._dimension_field(name) for name in query.dimensions)
@@ -290,6 +387,93 @@ def default_filter_registry() -> dict[str, FilterDefinition]:
         "valid_vix_only": FilterDefinition("valid_vix_only", None, None, "Require valid VIX market context.", ContextValidityRule("market_context_validity_classification")),
         "side": FilterDefinition("side", "side", "eq", "Side equality filter template."),
         "date_window": FilterDefinition("date_window", "entry_time", "gte/lte", "Use explicit entry_time gte/lte filters."),
+    }
+
+
+def default_dimension_catalog() -> dict[str, DimensionCatalogEntry]:
+    return {
+        "strategy": DimensionCatalogEntry("strategy", "Strategy", "Strategy identifier.", "string", (), "canonical_trade_outcomes", (), "READY", ()),
+        "lane": DimensionCatalogEntry("lane", "Lane", "Lane identifier.", "string", (), "canonical_trade_outcomes", (), "READY", ()),
+        "session": DimensionCatalogEntry("session", "Session", "Session at trade entry.", "enum", ("ASIA", "LONDON", "LONDON_LATE", "US_RTH", "UNKNOWN"), "canonical_trade_outcomes", (), "READY", ()),
+        "instrument": DimensionCatalogEntry("instrument", "Instrument", "Instrument family.", "string", (), "canonical_trade_outcomes", (), "READY", ()),
+        "contract": DimensionCatalogEntry("contract", "Contract", "Contract symbol.", "string", (), "canonical_trade_outcomes", (), "READY", ()),
+        "side": DimensionCatalogEntry("side", "Side", "Trade side.", "enum", ("LONG", "SHORT", "UNKNOWN"), "canonical_trade_outcomes", (), "READY", ()),
+        "vix_regime": DimensionCatalogEntry("vix_regime", "VIX Regime", "Cash VIX market context regime.", "enum", ("LOW", "NORMAL", "ELEVATED", "EXTREME", "UNKNOWN"), "canonical_market_context", ("market_context_validity_classification=VALID",), "READY", ("Requires valid CMC/VIX enrichment.",)),
+        "vix_percentile_bucket": DimensionCatalogEntry("vix_percentile_bucket", "VIX Percentile Bucket", "Bucketed VIX percentile context.", "enum", ("0-20", "20-40", "40-60", "60-80", "80-100", "UNKNOWN"), "canonical_market_context", ("market_context_validity_classification=VALID",), "READY", ("Requires valid CMC/VIX enrichment.",)),
+        "gre_label": DimensionCatalogEntry("gre_label", "GRE Label", "Historical Gold Regime Engine label.", "enum", ("LONG", "SHORT", "CHOP", "TRANSITION", "INSUFFICIENT_EVIDENCE", "UNKNOWN"), "historical_gre", ("gre_validity_classification=VALID",), "PARTIAL", ("Gold-scoped historical coverage only.",)),
+        "gre_confidence_bucket": DimensionCatalogEntry("gre_confidence_bucket", "GRE Confidence Bucket", "Bucketed historical GRE confidence.", "enum", ("0-20", "20-40", "40-60", "60-80", "80-100", "UNKNOWN"), "historical_gre", ("gre_validity_classification=VALID",), "PARTIAL", ("Gold-scoped historical coverage only.",)),
+        "crfd_regime": DimensionCatalogEntry("crfd_regime", "CRFD Regime", "CRFD/regime label when present.", "string", (), "canonical_research_feature_dataset", ("crfd_validity_classification=VALID",), "PARTIAL", ("Availability depends on CRFD provider coverage.",)),
+        "exit_policy": DimensionCatalogEntry("exit_policy", "Exit Policy", "Exit policy identifier.", "string", (), "canonical_trade_outcomes", (), "READY", ("Exit-efficiency interpretation still limited by sparse MFE/MAE.",)),
+    }
+
+
+def default_metric_catalog() -> dict[str, MetricCatalogEntry]:
+    return {
+        "trade_count": _metric_catalog("trade_count", "Trade Count", "Grouped row count.", "count(rows)", (), "HIGH", "Returns 0 for empty groups.", ()),
+        "win_rate": _metric_catalog("win_rate", "Win Rate", "Share of positive P&L proxy rows.", "count(pnl_proxy > 0) / count(pnl_proxy)", ("realized_pnl_proxy",), "PROXY", "Returns null when P&L proxy is unavailable.", ()),
+        "average_pnl_proxy": _metric_catalog("average_pnl_proxy", "Average P&L Proxy", "Mean realized P&L proxy.", "mean(realized_pnl_proxy)", ("realized_pnl_proxy",), "PROXY", "Returns null when P&L proxy is unavailable.", ()),
+        "median_pnl_proxy": _metric_catalog("median_pnl_proxy", "Median P&L Proxy", "Median realized P&L proxy.", "median(realized_pnl_proxy)", ("realized_pnl_proxy",), "PROXY", "Returns null when P&L proxy is unavailable.", ()),
+        "expectancy_proxy": _metric_catalog("expectancy_proxy", "Expectancy Proxy", "Mean realized P&L proxy under canonical expectancy name.", "mean(realized_pnl_proxy)", ("realized_pnl_proxy",), "PROXY", "Returns null when P&L proxy is unavailable.", ()),
+        "average_duration": _metric_catalog("average_duration", "Average Duration", "Average hold duration.", "mean(hold_seconds)", ("hold_seconds",), "HIGH", "Returns null when hold duration is unavailable.", ()),
+        "sample_class": _metric_catalog("sample_class", "Sample Class", "Existing CAE sample class.", "classify(count)", (), "HIGH", "Always returns a class for grouped rows.", ()),
+        "average_realized_points": _metric_catalog("average_realized_points", "Average Realized Points", "Mean realized points.", "mean(realized_points)", ("realized_points",), "PROXY", "Returns null when realized points are unavailable.", ()),
+        "median_realized_points": _metric_catalog("median_realized_points", "Median Realized Points", "Median realized points.", "median(realized_points)", ("realized_points",), "PROXY", "Returns null when realized points are unavailable.", ()),
+        "pnl_percentiles": _metric_catalog("pnl_percentiles", "P&L Percentiles", "P&L proxy p0/p10/p25/p50/p75/p90/p100.", "percentiles(realized_pnl_proxy)", ("realized_pnl_proxy",), "PROXY", "Percentile values are null when P&L proxy is unavailable.", ()),
+        "best_trade": _metric_catalog("best_trade", "Best Trade", "Trade reference with highest P&L proxy.", "max_by(realized_pnl_proxy)", ("realized_pnl_proxy",), "PROXY", "Returns null when P&L proxy is unavailable.", ()),
+        "worst_trade": _metric_catalog("worst_trade", "Worst Trade", "Trade reference with lowest P&L proxy.", "min_by(realized_pnl_proxy)", ("realized_pnl_proxy",), "PROXY", "Returns null when P&L proxy is unavailable.", ()),
+        "average_hold_seconds": _metric_catalog("average_hold_seconds", "Average Hold Seconds", "Average hold duration in seconds.", "mean(hold_seconds)", ("hold_seconds",), "HIGH", "Returns null when hold duration is unavailable.", ()),
+        "median_hold_seconds": _metric_catalog("median_hold_seconds", "Median Hold Seconds", "Median hold duration in seconds.", "median(hold_seconds)", ("hold_seconds",), "HIGH", "Returns null when hold duration is unavailable.", ()),
+        "data_quality_flags": _metric_catalog("data_quality_flags", "Data Quality Flags", "Grouped source data-quality flag counts.", "count_by_flag(data_quality_flags)", ("data_quality_flags",), "HIGH", "Returns an empty object when no flags exist.", ()),
+        "enrichment_data_quality_flags": _metric_catalog("enrichment_data_quality_flags", "Enrichment Data Quality Flags", "Grouped enrichment data-quality flag counts.", "count_by_flag(enrichment_data_quality_flags)", ("enrichment_data_quality_flags",), "HIGH", "Returns an empty object when no flags exist.", ()),
+        "profit_factor_proxy": _metric_catalog("profit_factor_proxy", "Profit Factor Proxy", "Positive P&L proxy divided by absolute negative P&L proxy.", "sum(winners) / abs(sum(losers))", ("realized_pnl_proxy",), "PROXY", "Returns null with flags when no winners, no losses, or no P&L proxy.", ("missing_pnl_proxy_for_profit_factor", "profit_factor_no_winners", "profit_factor_no_losses")),
+        "average_winner_pnl_proxy": _metric_catalog("average_winner_pnl_proxy", "Average Winner P&L Proxy", "Average positive P&L proxy.", "mean(pnl_proxy > 0)", ("realized_pnl_proxy",), "PROXY", "Returns null with flag when no winners exist.", ("average_winner_no_winners",)),
+        "average_loser_pnl_proxy": _metric_catalog("average_loser_pnl_proxy", "Average Loser P&L Proxy", "Average negative P&L proxy.", "mean(pnl_proxy < 0)", ("realized_pnl_proxy",), "PROXY", "Returns null with flag when no losses exist.", ("average_loser_no_losses",)),
+        "payoff_ratio_proxy": _metric_catalog("payoff_ratio_proxy", "Payoff Ratio Proxy", "Average winner divided by absolute average loser.", "avg_winner / abs(avg_loser)", ("realized_pnl_proxy",), "PROXY", "Returns null with flag when winners or losses are insufficient.", ("payoff_ratio_insufficient_winners_or_losses",)),
+        "max_win_pnl_proxy": _metric_catalog("max_win_pnl_proxy", "Max Win P&L Proxy", "Maximum positive P&L proxy.", "max(pnl_proxy > 0)", ("realized_pnl_proxy",), "PROXY", "Returns null with flag when no winners exist.", ("winner_extrema_no_winners",)),
+        "max_loss_pnl_proxy": _metric_catalog("max_loss_pnl_proxy", "Max Loss P&L Proxy", "Most negative P&L proxy.", "min(pnl_proxy < 0)", ("realized_pnl_proxy",), "PROXY", "Returns null with flag when no losses exist.", ("loser_extrema_no_losses",)),
+        "median_winner_pnl_proxy": _metric_catalog("median_winner_pnl_proxy", "Median Winner P&L Proxy", "Median positive P&L proxy.", "median(pnl_proxy > 0)", ("realized_pnl_proxy",), "PROXY", "Returns null with flag when no winners exist.", ("median_winner_no_winners",)),
+        "median_loser_pnl_proxy": _metric_catalog("median_loser_pnl_proxy", "Median Loser P&L Proxy", "Median negative P&L proxy.", "median(pnl_proxy < 0)", ("realized_pnl_proxy",), "PROXY", "Returns null with flag when no losses exist.", ("median_loser_no_losses",)),
+        "p10_pnl_proxy": _metric_catalog("p10_pnl_proxy", "P10 P&L Proxy", "10th percentile P&L proxy.", "percentile(realized_pnl_proxy, 10)", ("realized_pnl_proxy",), "PROXY", "Returns null when P&L proxy is unavailable.", ("missing_p10_pnl_proxy_pnl_proxy",)),
+        "p25_pnl_proxy": _metric_catalog("p25_pnl_proxy", "P25 P&L Proxy", "25th percentile P&L proxy.", "percentile(realized_pnl_proxy, 25)", ("realized_pnl_proxy",), "PROXY", "Returns null when P&L proxy is unavailable.", ("missing_p25_pnl_proxy_pnl_proxy",)),
+        "p75_pnl_proxy": _metric_catalog("p75_pnl_proxy", "P75 P&L Proxy", "75th percentile P&L proxy.", "percentile(realized_pnl_proxy, 75)", ("realized_pnl_proxy",), "PROXY", "Returns null when P&L proxy is unavailable.", ("missing_p75_pnl_proxy_pnl_proxy",)),
+        "p90_pnl_proxy": _metric_catalog("p90_pnl_proxy", "P90 P&L Proxy", "90th percentile P&L proxy.", "percentile(realized_pnl_proxy, 90)", ("realized_pnl_proxy",), "PROXY", "Returns null when P&L proxy is unavailable.", ("missing_p90_pnl_proxy_pnl_proxy",)),
+        "downside_tail_mean_proxy": _metric_catalog("downside_tail_mean_proxy", "Downside Tail Mean Proxy", "Mean of lowest P&L proxy decile, at least one row.", "mean(lowest_decile(realized_pnl_proxy))", ("realized_pnl_proxy",), "PROXY", "Returns null with flag when P&L proxy is unavailable.", ("downside_tail_mean_missing_pnl_proxy",)),
+        "upside_tail_mean_proxy": _metric_catalog("upside_tail_mean_proxy", "Upside Tail Mean Proxy", "Mean of highest P&L proxy decile, at least one row.", "mean(highest_decile(realized_pnl_proxy))", ("realized_pnl_proxy",), "PROXY", "Returns null with flag when P&L proxy is unavailable.", ("upside_tail_mean_missing_pnl_proxy",)),
+        "consecutive_win_streak_max": _metric_catalog("consecutive_win_streak_max", "Max Consecutive Win Streak", "Maximum ordered streak of positive P&L proxy.", "max_streak(pnl_proxy > 0 order by exit_time, entry_time)", ("realized_pnl_proxy", "exit_time", "entry_time"), "PROXY", "Missing P&L proxy breaks a streak.", ()),
+        "consecutive_loss_streak_max": _metric_catalog("consecutive_loss_streak_max", "Max Consecutive Loss Streak", "Maximum ordered streak of negative P&L proxy.", "max_streak(pnl_proxy < 0 order by exit_time, entry_time)", ("realized_pnl_proxy", "exit_time", "entry_time"), "PROXY", "Missing P&L proxy breaks a streak.", ()),
+        "loss_rate": _metric_catalog("loss_rate", "Loss Rate", "Share of negative P&L proxy rows.", "count(pnl_proxy < 0) / count(pnl_proxy)", ("realized_pnl_proxy",), "PROXY", "Returns null when P&L proxy is unavailable.", ()),
+        "breakeven_rate": _metric_catalog("breakeven_rate", "Breakeven Rate", "Share of zero P&L proxy rows.", "count(pnl_proxy == 0) / count(pnl_proxy)", ("realized_pnl_proxy",), "PROXY", "Returns null when P&L proxy is unavailable.", ()),
+        "sample_confidence_label": _metric_catalog("sample_confidence_label", "Sample Confidence Label", "Sample-size label without statistical significance claims.", "label(sample_class)", (), "HIGH", "Always returns a label for grouped rows.", ()),
+    }
+
+
+def default_filter_catalog() -> dict[str, FilterCatalogEntry]:
+    return {
+        "instrument": FilterCatalogEntry("instrument", "Instrument Filter", "Template for instrument equality filters.", "instrument", "eq", "string", ()),
+        "strategy": FilterCatalogEntry("strategy", "Strategy Filter", "Template for strategy equality filters.", "strategy_id", "eq", "string", ()),
+        "session": FilterCatalogEntry("session", "Session Filter", "Template for session equality filters.", "session_at_entry", "eq", "enum", ()),
+        "valid_gre_only": FilterCatalogEntry("valid_gre_only", "Valid GRE Only", "Require valid historical GRE context.", None, None, "validity", ("gre_validity_classification=VALID",)),
+        "valid_vix_only": FilterCatalogEntry("valid_vix_only", "Valid VIX Only", "Require valid market context.", None, None, "validity", ("market_context_validity_classification=VALID",)),
+        "side": FilterCatalogEntry("side", "Side Filter", "Template for side equality filters.", "side", "eq", "enum", ()),
+        "date_window": FilterCatalogEntry("date_window", "Date Window", "Use explicit entry_time date_gte/date_lte filters.", "entry_time", "date_gte/date_lte", "datetime", ()),
+    }
+
+
+def query_capability_metadata() -> dict[str, Any]:
+    return {
+        "supports_dimensions": True,
+        "supports_metrics": True,
+        "supports_explicit_filters": True,
+        "supports_named_filters": True,
+        "supports_context_validity_requirements": True,
+        "supports_ordering": True,
+        "supports_minimum_sample_size": True,
+        "supports_minimum_sample_class": True,
+        "supports_date_windows": True,
+        "supports_provenance": True,
+        "diagnostic_only": True,
+        "production_recommendation": False,
+        "trading_gate": False,
     }
 
 
@@ -690,6 +874,73 @@ def counts(values: Iterable[Any]) -> dict[str, int]:
         key = str(value)
         result[key] = result.get(key, 0) + 1
     return dict(sorted(result.items(), key=lambda item: (-item[1], item[0])))
+
+
+def _metric_catalog(
+    identifier: str,
+    display_name: str,
+    description: str,
+    formula_summary: str,
+    required_fields: tuple[str, ...],
+    quality_level: str,
+    null_behavior: str,
+    data_quality_flags: tuple[str, ...],
+) -> MetricCatalogEntry:
+    return MetricCatalogEntry(
+        identifier=identifier,
+        display_name=display_name,
+        description=description,
+        formula_summary=formula_summary,
+        required_fields=required_fields,
+        quality_level=quality_level,
+        null_behavior=null_behavior,
+        data_quality_flags=data_quality_flags,
+    )
+
+
+def _fallback_dimension_catalog_entry(definition: DimensionDefinition) -> DimensionCatalogEntry:
+    validity = (f"{definition.validity_rule.field}={','.join(definition.validity_rule.valid_values)}",) if definition.validity_rule else ()
+    return DimensionCatalogEntry(
+        identifier=definition.name,
+        display_name=_display_name(definition.name),
+        description=definition.description,
+        value_type="unknown",
+        allowed_values=(),
+        source_system="custom",
+        validity_requirements=validity,
+        availability="UNKNOWN",
+        sample_limitations=(),
+    )
+
+
+def _fallback_metric_catalog_entry(metric: AnalyticsMetric) -> MetricCatalogEntry:
+    return MetricCatalogEntry(
+        identifier=metric.name,
+        display_name=_display_name(metric.name),
+        description=f"Custom metric of kind {metric.kind}.",
+        formula_summary=metric.kind,
+        required_fields=(metric.source_field,) if metric.source_field else (),
+        quality_level="UNKNOWN",
+        null_behavior="Depends on metric implementation.",
+        data_quality_flags=(),
+    )
+
+
+def _fallback_filter_catalog_entry(definition: FilterDefinition) -> FilterCatalogEntry:
+    validity = (f"{definition.validity_rule.field}={','.join(definition.validity_rule.valid_values)}",) if definition.validity_rule else ()
+    return FilterCatalogEntry(
+        identifier=definition.name,
+        display_name=_display_name(definition.name),
+        description=definition.description,
+        field=definition.field,
+        operation=definition.op,
+        value_type="unknown",
+        validity_requirements=validity,
+    )
+
+
+def _display_name(identifier: str) -> str:
+    return identifier.replace("_", " ").title()
 
 
 def coerce_datetime(value: datetime | str | None) -> datetime:

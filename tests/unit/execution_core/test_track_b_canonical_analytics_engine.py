@@ -266,6 +266,36 @@ def test_advanced_sample_confidence_label() -> None:
     assert result.grouped_rows[0]["sample_confidence_label"] == "PRELIMINARY_SAMPLE_LOW_CONFIDENCE"
 
 
+def test_catalog_contains_every_registered_dimension_metric_and_filter() -> None:
+    engine = CanonicalAnalyticsEngine()
+    catalog = engine.catalog()
+
+    assert set(catalog["dimensions"]) == set(default_dimension_registry())
+    assert set(catalog["metrics"]) == set(default_metric_registry())
+    assert set(catalog["filters"]) == set(default_filter_registry())
+    assert catalog["diagnostic_only"] is True
+    assert catalog["production_recommendation"] is False
+    assert catalog["trading_gate"] is False
+
+
+def test_catalog_dimension_metric_and_filter_metadata_shape() -> None:
+    catalog = CanonicalAnalyticsEngine().catalog()
+
+    gre = catalog["dimensions"]["gre_label"]
+    assert gre["display_name"] == "GRE Label"
+    assert gre["validity_requirements"] == ["gre_validity_classification=VALID"]
+    assert gre["availability"] == "PARTIAL"
+
+    metric = catalog["metrics"]["profit_factor_proxy"]
+    assert metric["formula_summary"] == "sum(winners) / abs(sum(losers))"
+    assert "realized_pnl_proxy" in metric["required_fields"]
+    assert "profit_factor_no_losses" in metric["data_quality_flags"]
+
+    filt = catalog["filters"]["valid_vix_only"]
+    assert filt["validity_requirements"] == ["market_context_validity_classification=VALID"]
+    assert catalog["query_capabilities"]["supports_date_windows"] is True
+
+
 def _row(
     trade_id: str,
     *,

@@ -1,0 +1,733 @@
+{
+  "diagnostic_only": true,
+  "dimensions": {
+    "contract": {
+      "allowed_values": [],
+      "availability": "READY",
+      "description": "Contract symbol.",
+      "display_name": "Contract",
+      "identifier": "contract",
+      "sample_limitations": [],
+      "source_system": "canonical_trade_outcomes",
+      "validity_requirements": [],
+      "value_type": "string"
+    },
+    "crfd_regime": {
+      "allowed_values": [],
+      "availability": "PARTIAL",
+      "description": "CRFD/regime label when present.",
+      "display_name": "CRFD Regime",
+      "identifier": "crfd_regime",
+      "sample_limitations": [
+        "Availability depends on CRFD provider coverage."
+      ],
+      "source_system": "canonical_research_feature_dataset",
+      "validity_requirements": [
+        "crfd_validity_classification=VALID"
+      ],
+      "value_type": "string"
+    },
+    "exit_policy": {
+      "allowed_values": [],
+      "availability": "READY",
+      "description": "Exit policy identifier.",
+      "display_name": "Exit Policy",
+      "identifier": "exit_policy",
+      "sample_limitations": [
+        "Exit-efficiency interpretation still limited by sparse MFE/MAE."
+      ],
+      "source_system": "canonical_trade_outcomes",
+      "validity_requirements": [],
+      "value_type": "string"
+    },
+    "gre_confidence_bucket": {
+      "allowed_values": [
+        "0-20",
+        "20-40",
+        "40-60",
+        "60-80",
+        "80-100",
+        "UNKNOWN"
+      ],
+      "availability": "PARTIAL",
+      "description": "Bucketed historical GRE confidence.",
+      "display_name": "GRE Confidence Bucket",
+      "identifier": "gre_confidence_bucket",
+      "sample_limitations": [
+        "Gold-scoped historical coverage only."
+      ],
+      "source_system": "historical_gre",
+      "validity_requirements": [
+        "gre_validity_classification=VALID"
+      ],
+      "value_type": "enum"
+    },
+    "gre_label": {
+      "allowed_values": [
+        "LONG",
+        "SHORT",
+        "CHOP",
+        "TRANSITION",
+        "INSUFFICIENT_EVIDENCE",
+        "UNKNOWN"
+      ],
+      "availability": "PARTIAL",
+      "description": "Historical Gold Regime Engine label.",
+      "display_name": "GRE Label",
+      "identifier": "gre_label",
+      "sample_limitations": [
+        "Gold-scoped historical coverage only."
+      ],
+      "source_system": "historical_gre",
+      "validity_requirements": [
+        "gre_validity_classification=VALID"
+      ],
+      "value_type": "enum"
+    },
+    "instrument": {
+      "allowed_values": [],
+      "availability": "READY",
+      "description": "Instrument family.",
+      "display_name": "Instrument",
+      "identifier": "instrument",
+      "sample_limitations": [],
+      "source_system": "canonical_trade_outcomes",
+      "validity_requirements": [],
+      "value_type": "string"
+    },
+    "lane": {
+      "allowed_values": [],
+      "availability": "READY",
+      "description": "Lane identifier.",
+      "display_name": "Lane",
+      "identifier": "lane",
+      "sample_limitations": [],
+      "source_system": "canonical_trade_outcomes",
+      "validity_requirements": [],
+      "value_type": "string"
+    },
+    "session": {
+      "allowed_values": [
+        "ASIA",
+        "LONDON",
+        "LONDON_LATE",
+        "US_RTH",
+        "UNKNOWN"
+      ],
+      "availability": "READY",
+      "description": "Session at trade entry.",
+      "display_name": "Session",
+      "identifier": "session",
+      "sample_limitations": [],
+      "source_system": "canonical_trade_outcomes",
+      "validity_requirements": [],
+      "value_type": "enum"
+    },
+    "side": {
+      "allowed_values": [
+        "LONG",
+        "SHORT",
+        "UNKNOWN"
+      ],
+      "availability": "READY",
+      "description": "Trade side.",
+      "display_name": "Side",
+      "identifier": "side",
+      "sample_limitations": [],
+      "source_system": "canonical_trade_outcomes",
+      "validity_requirements": [],
+      "value_type": "enum"
+    },
+    "strategy": {
+      "allowed_values": [],
+      "availability": "READY",
+      "description": "Strategy identifier.",
+      "display_name": "Strategy",
+      "identifier": "strategy",
+      "sample_limitations": [],
+      "source_system": "canonical_trade_outcomes",
+      "validity_requirements": [],
+      "value_type": "string"
+    },
+    "vix_percentile_bucket": {
+      "allowed_values": [
+        "0-20",
+        "20-40",
+        "40-60",
+        "60-80",
+        "80-100",
+        "UNKNOWN"
+      ],
+      "availability": "READY",
+      "description": "Bucketed VIX percentile context.",
+      "display_name": "VIX Percentile Bucket",
+      "identifier": "vix_percentile_bucket",
+      "sample_limitations": [
+        "Requires valid CMC/VIX enrichment."
+      ],
+      "source_system": "canonical_market_context",
+      "validity_requirements": [
+        "market_context_validity_classification=VALID"
+      ],
+      "value_type": "enum"
+    },
+    "vix_regime": {
+      "allowed_values": [
+        "LOW",
+        "NORMAL",
+        "ELEVATED",
+        "EXTREME",
+        "UNKNOWN"
+      ],
+      "availability": "READY",
+      "description": "Cash VIX market context regime.",
+      "display_name": "VIX Regime",
+      "identifier": "vix_regime",
+      "sample_limitations": [
+        "Requires valid CMC/VIX enrichment."
+      ],
+      "source_system": "canonical_market_context",
+      "validity_requirements": [
+        "market_context_validity_classification=VALID"
+      ],
+      "value_type": "enum"
+    }
+  },
+  "filters": {
+    "date_window": {
+      "description": "Use explicit entry_time date_gte/date_lte filters.",
+      "display_name": "Date Window",
+      "field": "entry_time",
+      "identifier": "date_window",
+      "operation": "date_gte/date_lte",
+      "validity_requirements": [],
+      "value_type": "datetime"
+    },
+    "instrument": {
+      "description": "Template for instrument equality filters.",
+      "display_name": "Instrument Filter",
+      "field": "instrument",
+      "identifier": "instrument",
+      "operation": "eq",
+      "validity_requirements": [],
+      "value_type": "string"
+    },
+    "session": {
+      "description": "Template for session equality filters.",
+      "display_name": "Session Filter",
+      "field": "session_at_entry",
+      "identifier": "session",
+      "operation": "eq",
+      "validity_requirements": [],
+      "value_type": "enum"
+    },
+    "side": {
+      "description": "Template for side equality filters.",
+      "display_name": "Side Filter",
+      "field": "side",
+      "identifier": "side",
+      "operation": "eq",
+      "validity_requirements": [],
+      "value_type": "enum"
+    },
+    "strategy": {
+      "description": "Template for strategy equality filters.",
+      "display_name": "Strategy Filter",
+      "field": "strategy_id",
+      "identifier": "strategy",
+      "operation": "eq",
+      "validity_requirements": [],
+      "value_type": "string"
+    },
+    "valid_gre_only": {
+      "description": "Require valid historical GRE context.",
+      "display_name": "Valid GRE Only",
+      "field": null,
+      "identifier": "valid_gre_only",
+      "operation": null,
+      "validity_requirements": [
+        "gre_validity_classification=VALID"
+      ],
+      "value_type": "validity"
+    },
+    "valid_vix_only": {
+      "description": "Require valid market context.",
+      "display_name": "Valid VIX Only",
+      "field": null,
+      "identifier": "valid_vix_only",
+      "operation": null,
+      "validity_requirements": [
+        "market_context_validity_classification=VALID"
+      ],
+      "value_type": "validity"
+    }
+  },
+  "metrics": {
+    "average_duration": {
+      "data_quality_flags": [],
+      "description": "Average hold duration.",
+      "display_name": "Average Duration",
+      "formula_summary": "mean(hold_seconds)",
+      "identifier": "average_duration",
+      "null_behavior": "Returns null when hold duration is unavailable.",
+      "quality_level": "HIGH",
+      "required_fields": [
+        "hold_seconds"
+      ]
+    },
+    "average_hold_seconds": {
+      "data_quality_flags": [],
+      "description": "Average hold duration in seconds.",
+      "display_name": "Average Hold Seconds",
+      "formula_summary": "mean(hold_seconds)",
+      "identifier": "average_hold_seconds",
+      "null_behavior": "Returns null when hold duration is unavailable.",
+      "quality_level": "HIGH",
+      "required_fields": [
+        "hold_seconds"
+      ]
+    },
+    "average_loser_pnl_proxy": {
+      "data_quality_flags": [
+        "average_loser_no_losses"
+      ],
+      "description": "Average negative P&L proxy.",
+      "display_name": "Average Loser P&L Proxy",
+      "formula_summary": "mean(pnl_proxy < 0)",
+      "identifier": "average_loser_pnl_proxy",
+      "null_behavior": "Returns null with flag when no losses exist.",
+      "quality_level": "PROXY",
+      "required_fields": [
+        "realized_pnl_proxy"
+      ]
+    },
+    "average_pnl_proxy": {
+      "data_quality_flags": [],
+      "description": "Mean realized P&L proxy.",
+      "display_name": "Average P&L Proxy",
+      "formula_summary": "mean(realized_pnl_proxy)",
+      "identifier": "average_pnl_proxy",
+      "null_behavior": "Returns null when P&L proxy is unavailable.",
+      "quality_level": "PROXY",
+      "required_fields": [
+        "realized_pnl_proxy"
+      ]
+    },
+    "average_realized_points": {
+      "data_quality_flags": [],
+      "description": "Mean realized points.",
+      "display_name": "Average Realized Points",
+      "formula_summary": "mean(realized_points)",
+      "identifier": "average_realized_points",
+      "null_behavior": "Returns null when realized points are unavailable.",
+      "quality_level": "PROXY",
+      "required_fields": [
+        "realized_points"
+      ]
+    },
+    "average_winner_pnl_proxy": {
+      "data_quality_flags": [
+        "average_winner_no_winners"
+      ],
+      "description": "Average positive P&L proxy.",
+      "display_name": "Average Winner P&L Proxy",
+      "formula_summary": "mean(pnl_proxy > 0)",
+      "identifier": "average_winner_pnl_proxy",
+      "null_behavior": "Returns null with flag when no winners exist.",
+      "quality_level": "PROXY",
+      "required_fields": [
+        "realized_pnl_proxy"
+      ]
+    },
+    "best_trade": {
+      "data_quality_flags": [],
+      "description": "Trade reference with highest P&L proxy.",
+      "display_name": "Best Trade",
+      "formula_summary": "max_by(realized_pnl_proxy)",
+      "identifier": "best_trade",
+      "null_behavior": "Returns null when P&L proxy is unavailable.",
+      "quality_level": "PROXY",
+      "required_fields": [
+        "realized_pnl_proxy"
+      ]
+    },
+    "breakeven_rate": {
+      "data_quality_flags": [],
+      "description": "Share of zero P&L proxy rows.",
+      "display_name": "Breakeven Rate",
+      "formula_summary": "count(pnl_proxy == 0) / count(pnl_proxy)",
+      "identifier": "breakeven_rate",
+      "null_behavior": "Returns null when P&L proxy is unavailable.",
+      "quality_level": "PROXY",
+      "required_fields": [
+        "realized_pnl_proxy"
+      ]
+    },
+    "consecutive_loss_streak_max": {
+      "data_quality_flags": [],
+      "description": "Maximum ordered streak of negative P&L proxy.",
+      "display_name": "Max Consecutive Loss Streak",
+      "formula_summary": "max_streak(pnl_proxy < 0 order by exit_time, entry_time)",
+      "identifier": "consecutive_loss_streak_max",
+      "null_behavior": "Missing P&L proxy breaks a streak.",
+      "quality_level": "PROXY",
+      "required_fields": [
+        "realized_pnl_proxy",
+        "exit_time",
+        "entry_time"
+      ]
+    },
+    "consecutive_win_streak_max": {
+      "data_quality_flags": [],
+      "description": "Maximum ordered streak of positive P&L proxy.",
+      "display_name": "Max Consecutive Win Streak",
+      "formula_summary": "max_streak(pnl_proxy > 0 order by exit_time, entry_time)",
+      "identifier": "consecutive_win_streak_max",
+      "null_behavior": "Missing P&L proxy breaks a streak.",
+      "quality_level": "PROXY",
+      "required_fields": [
+        "realized_pnl_proxy",
+        "exit_time",
+        "entry_time"
+      ]
+    },
+    "data_quality_flags": {
+      "data_quality_flags": [],
+      "description": "Grouped source data-quality flag counts.",
+      "display_name": "Data Quality Flags",
+      "formula_summary": "count_by_flag(data_quality_flags)",
+      "identifier": "data_quality_flags",
+      "null_behavior": "Returns an empty object when no flags exist.",
+      "quality_level": "HIGH",
+      "required_fields": [
+        "data_quality_flags"
+      ]
+    },
+    "downside_tail_mean_proxy": {
+      "data_quality_flags": [
+        "downside_tail_mean_missing_pnl_proxy"
+      ],
+      "description": "Mean of lowest P&L proxy decile, at least one row.",
+      "display_name": "Downside Tail Mean Proxy",
+      "formula_summary": "mean(lowest_decile(realized_pnl_proxy))",
+      "identifier": "downside_tail_mean_proxy",
+      "null_behavior": "Returns null with flag when P&L proxy is unavailable.",
+      "quality_level": "PROXY",
+      "required_fields": [
+        "realized_pnl_proxy"
+      ]
+    },
+    "enrichment_data_quality_flags": {
+      "data_quality_flags": [],
+      "description": "Grouped enrichment data-quality flag counts.",
+      "display_name": "Enrichment Data Quality Flags",
+      "formula_summary": "count_by_flag(enrichment_data_quality_flags)",
+      "identifier": "enrichment_data_quality_flags",
+      "null_behavior": "Returns an empty object when no flags exist.",
+      "quality_level": "HIGH",
+      "required_fields": [
+        "enrichment_data_quality_flags"
+      ]
+    },
+    "expectancy_proxy": {
+      "data_quality_flags": [],
+      "description": "Mean realized P&L proxy under canonical expectancy name.",
+      "display_name": "Expectancy Proxy",
+      "formula_summary": "mean(realized_pnl_proxy)",
+      "identifier": "expectancy_proxy",
+      "null_behavior": "Returns null when P&L proxy is unavailable.",
+      "quality_level": "PROXY",
+      "required_fields": [
+        "realized_pnl_proxy"
+      ]
+    },
+    "loss_rate": {
+      "data_quality_flags": [],
+      "description": "Share of negative P&L proxy rows.",
+      "display_name": "Loss Rate",
+      "formula_summary": "count(pnl_proxy < 0) / count(pnl_proxy)",
+      "identifier": "loss_rate",
+      "null_behavior": "Returns null when P&L proxy is unavailable.",
+      "quality_level": "PROXY",
+      "required_fields": [
+        "realized_pnl_proxy"
+      ]
+    },
+    "max_loss_pnl_proxy": {
+      "data_quality_flags": [
+        "loser_extrema_no_losses"
+      ],
+      "description": "Most negative P&L proxy.",
+      "display_name": "Max Loss P&L Proxy",
+      "formula_summary": "min(pnl_proxy < 0)",
+      "identifier": "max_loss_pnl_proxy",
+      "null_behavior": "Returns null with flag when no losses exist.",
+      "quality_level": "PROXY",
+      "required_fields": [
+        "realized_pnl_proxy"
+      ]
+    },
+    "max_win_pnl_proxy": {
+      "data_quality_flags": [
+        "winner_extrema_no_winners"
+      ],
+      "description": "Maximum positive P&L proxy.",
+      "display_name": "Max Win P&L Proxy",
+      "formula_summary": "max(pnl_proxy > 0)",
+      "identifier": "max_win_pnl_proxy",
+      "null_behavior": "Returns null with flag when no winners exist.",
+      "quality_level": "PROXY",
+      "required_fields": [
+        "realized_pnl_proxy"
+      ]
+    },
+    "median_hold_seconds": {
+      "data_quality_flags": [],
+      "description": "Median hold duration in seconds.",
+      "display_name": "Median Hold Seconds",
+      "formula_summary": "median(hold_seconds)",
+      "identifier": "median_hold_seconds",
+      "null_behavior": "Returns null when hold duration is unavailable.",
+      "quality_level": "HIGH",
+      "required_fields": [
+        "hold_seconds"
+      ]
+    },
+    "median_loser_pnl_proxy": {
+      "data_quality_flags": [
+        "median_loser_no_losses"
+      ],
+      "description": "Median negative P&L proxy.",
+      "display_name": "Median Loser P&L Proxy",
+      "formula_summary": "median(pnl_proxy < 0)",
+      "identifier": "median_loser_pnl_proxy",
+      "null_behavior": "Returns null with flag when no losses exist.",
+      "quality_level": "PROXY",
+      "required_fields": [
+        "realized_pnl_proxy"
+      ]
+    },
+    "median_pnl_proxy": {
+      "data_quality_flags": [],
+      "description": "Median realized P&L proxy.",
+      "display_name": "Median P&L Proxy",
+      "formula_summary": "median(realized_pnl_proxy)",
+      "identifier": "median_pnl_proxy",
+      "null_behavior": "Returns null when P&L proxy is unavailable.",
+      "quality_level": "PROXY",
+      "required_fields": [
+        "realized_pnl_proxy"
+      ]
+    },
+    "median_realized_points": {
+      "data_quality_flags": [],
+      "description": "Median realized points.",
+      "display_name": "Median Realized Points",
+      "formula_summary": "median(realized_points)",
+      "identifier": "median_realized_points",
+      "null_behavior": "Returns null when realized points are unavailable.",
+      "quality_level": "PROXY",
+      "required_fields": [
+        "realized_points"
+      ]
+    },
+    "median_winner_pnl_proxy": {
+      "data_quality_flags": [
+        "median_winner_no_winners"
+      ],
+      "description": "Median positive P&L proxy.",
+      "display_name": "Median Winner P&L Proxy",
+      "formula_summary": "median(pnl_proxy > 0)",
+      "identifier": "median_winner_pnl_proxy",
+      "null_behavior": "Returns null with flag when no winners exist.",
+      "quality_level": "PROXY",
+      "required_fields": [
+        "realized_pnl_proxy"
+      ]
+    },
+    "p10_pnl_proxy": {
+      "data_quality_flags": [
+        "missing_p10_pnl_proxy_pnl_proxy"
+      ],
+      "description": "10th percentile P&L proxy.",
+      "display_name": "P10 P&L Proxy",
+      "formula_summary": "percentile(realized_pnl_proxy, 10)",
+      "identifier": "p10_pnl_proxy",
+      "null_behavior": "Returns null when P&L proxy is unavailable.",
+      "quality_level": "PROXY",
+      "required_fields": [
+        "realized_pnl_proxy"
+      ]
+    },
+    "p25_pnl_proxy": {
+      "data_quality_flags": [
+        "missing_p25_pnl_proxy_pnl_proxy"
+      ],
+      "description": "25th percentile P&L proxy.",
+      "display_name": "P25 P&L Proxy",
+      "formula_summary": "percentile(realized_pnl_proxy, 25)",
+      "identifier": "p25_pnl_proxy",
+      "null_behavior": "Returns null when P&L proxy is unavailable.",
+      "quality_level": "PROXY",
+      "required_fields": [
+        "realized_pnl_proxy"
+      ]
+    },
+    "p75_pnl_proxy": {
+      "data_quality_flags": [
+        "missing_p75_pnl_proxy_pnl_proxy"
+      ],
+      "description": "75th percentile P&L proxy.",
+      "display_name": "P75 P&L Proxy",
+      "formula_summary": "percentile(realized_pnl_proxy, 75)",
+      "identifier": "p75_pnl_proxy",
+      "null_behavior": "Returns null when P&L proxy is unavailable.",
+      "quality_level": "PROXY",
+      "required_fields": [
+        "realized_pnl_proxy"
+      ]
+    },
+    "p90_pnl_proxy": {
+      "data_quality_flags": [
+        "missing_p90_pnl_proxy_pnl_proxy"
+      ],
+      "description": "90th percentile P&L proxy.",
+      "display_name": "P90 P&L Proxy",
+      "formula_summary": "percentile(realized_pnl_proxy, 90)",
+      "identifier": "p90_pnl_proxy",
+      "null_behavior": "Returns null when P&L proxy is unavailable.",
+      "quality_level": "PROXY",
+      "required_fields": [
+        "realized_pnl_proxy"
+      ]
+    },
+    "payoff_ratio_proxy": {
+      "data_quality_flags": [
+        "payoff_ratio_insufficient_winners_or_losses"
+      ],
+      "description": "Average winner divided by absolute average loser.",
+      "display_name": "Payoff Ratio Proxy",
+      "formula_summary": "avg_winner / abs(avg_loser)",
+      "identifier": "payoff_ratio_proxy",
+      "null_behavior": "Returns null with flag when winners or losses are insufficient.",
+      "quality_level": "PROXY",
+      "required_fields": [
+        "realized_pnl_proxy"
+      ]
+    },
+    "pnl_percentiles": {
+      "data_quality_flags": [],
+      "description": "P&L proxy p0/p10/p25/p50/p75/p90/p100.",
+      "display_name": "P&L Percentiles",
+      "formula_summary": "percentiles(realized_pnl_proxy)",
+      "identifier": "pnl_percentiles",
+      "null_behavior": "Percentile values are null when P&L proxy is unavailable.",
+      "quality_level": "PROXY",
+      "required_fields": [
+        "realized_pnl_proxy"
+      ]
+    },
+    "profit_factor_proxy": {
+      "data_quality_flags": [
+        "missing_pnl_proxy_for_profit_factor",
+        "profit_factor_no_winners",
+        "profit_factor_no_losses"
+      ],
+      "description": "Positive P&L proxy divided by absolute negative P&L proxy.",
+      "display_name": "Profit Factor Proxy",
+      "formula_summary": "sum(winners) / abs(sum(losers))",
+      "identifier": "profit_factor_proxy",
+      "null_behavior": "Returns null with flags when no winners, no losses, or no P&L proxy.",
+      "quality_level": "PROXY",
+      "required_fields": [
+        "realized_pnl_proxy"
+      ]
+    },
+    "sample_class": {
+      "data_quality_flags": [],
+      "description": "Existing CAE sample class.",
+      "display_name": "Sample Class",
+      "formula_summary": "classify(count)",
+      "identifier": "sample_class",
+      "null_behavior": "Always returns a class for grouped rows.",
+      "quality_level": "HIGH",
+      "required_fields": []
+    },
+    "sample_confidence_label": {
+      "data_quality_flags": [],
+      "description": "Sample-size label without statistical significance claims.",
+      "display_name": "Sample Confidence Label",
+      "formula_summary": "label(sample_class)",
+      "identifier": "sample_confidence_label",
+      "null_behavior": "Always returns a label for grouped rows.",
+      "quality_level": "HIGH",
+      "required_fields": []
+    },
+    "trade_count": {
+      "data_quality_flags": [],
+      "description": "Grouped row count.",
+      "display_name": "Trade Count",
+      "formula_summary": "count(rows)",
+      "identifier": "trade_count",
+      "null_behavior": "Returns 0 for empty groups.",
+      "quality_level": "HIGH",
+      "required_fields": []
+    },
+    "upside_tail_mean_proxy": {
+      "data_quality_flags": [
+        "upside_tail_mean_missing_pnl_proxy"
+      ],
+      "description": "Mean of highest P&L proxy decile, at least one row.",
+      "display_name": "Upside Tail Mean Proxy",
+      "formula_summary": "mean(highest_decile(realized_pnl_proxy))",
+      "identifier": "upside_tail_mean_proxy",
+      "null_behavior": "Returns null with flag when P&L proxy is unavailable.",
+      "quality_level": "PROXY",
+      "required_fields": [
+        "realized_pnl_proxy"
+      ]
+    },
+    "win_rate": {
+      "data_quality_flags": [],
+      "description": "Share of positive P&L proxy rows.",
+      "display_name": "Win Rate",
+      "formula_summary": "count(pnl_proxy > 0) / count(pnl_proxy)",
+      "identifier": "win_rate",
+      "null_behavior": "Returns null when P&L proxy is unavailable.",
+      "quality_level": "PROXY",
+      "required_fields": [
+        "realized_pnl_proxy"
+      ]
+    },
+    "worst_trade": {
+      "data_quality_flags": [],
+      "description": "Trade reference with lowest P&L proxy.",
+      "display_name": "Worst Trade",
+      "formula_summary": "min_by(realized_pnl_proxy)",
+      "identifier": "worst_trade",
+      "null_behavior": "Returns null when P&L proxy is unavailable.",
+      "quality_level": "PROXY",
+      "required_fields": [
+        "realized_pnl_proxy"
+      ]
+    }
+  },
+  "production_recommendation": false,
+  "query_capabilities": {
+    "diagnostic_only": true,
+    "production_recommendation": false,
+    "supports_context_validity_requirements": true,
+    "supports_date_windows": true,
+    "supports_dimensions": true,
+    "supports_explicit_filters": true,
+    "supports_metrics": true,
+    "supports_minimum_sample_class": true,
+    "supports_minimum_sample_size": true,
+    "supports_named_filters": true,
+    "supports_ordering": true,
+    "supports_provenance": true,
+    "trading_gate": false
+  },
+  "schema_version": "track_b_canonical_analytics_catalog_v1",
+  "trading_gate": false
+}
