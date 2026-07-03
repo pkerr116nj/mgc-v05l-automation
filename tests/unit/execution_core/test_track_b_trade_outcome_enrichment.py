@@ -5,7 +5,12 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from mgc_v05l.execution_core.track_b_trade_outcome_enrichment import (
+    VALIDITY_OUTSIDE_PROVIDER_WINDOW,
+    VALIDITY_STALE,
+    VALIDITY_UNAVAILABLE,
+    VALIDITY_VALID,
     build_trade_outcome_enrichment_summary,
+    build_context_validity,
     build_trade_outcome_enrichments,
     run_trade_outcome_enrichment,
 )
@@ -51,6 +56,8 @@ def test_enrichment_joins_nearest_prior_market_context() -> None:
     assert row["market_context_source"] == "cboe_official_daily_history"
     assert row["market_context_timestamp"] == "2026-06-30T20:15:00+00:00"
     assert row["market_context_staleness"] == 49800.0
+    assert row["market_context_freshness_window_seconds"] == 604800
+    assert row["market_context_validity_classification"] == VALIDITY_VALID
     assert "missing_market_context" not in row["data_quality_flags"]
     assert row["source_refs"]["market_context_rows"] == ""
 
@@ -74,6 +81,9 @@ def test_enrichment_joins_nearest_prior_historical_gre() -> None:
     assert row["gre_timestamp"] == "2026-07-01T09:55:00+00:00"
     assert row["gre_join_method"] == "nearest_prior_historical_gre_observation"
     assert row["gre_staleness"] == 600.0
+    assert row["gre_freshness_window_seconds"] == 3600
+    assert row["gre_validity_classification"] == VALIDITY_VALID
+    assert row["gre_context_validity"]["provenance"] == "historical_gre_backfill"
     assert row["gre_research_readiness"] == "VALIDATED"
     assert row["gre_source_refs"] == {"gre_report": "BACKFILL_GENERATED_GRE_OBSERVATION"}
     assert "missing_gre_context" not in row["data_quality_flags"]
@@ -89,6 +99,7 @@ def test_historical_gre_join_does_not_use_future_observation() -> None:
     row = enrichments[0]
     assert row["gre_label"] is None
     assert row["gre_timestamp"] is None
+    assert row["gre_validity_classification"] == VALIDITY_UNAVAILABLE
     assert "missing_gre_context" in row["data_quality_flags"]
 
 
@@ -160,6 +171,7 @@ def test_missing_market_context_is_null_and_flagged() -> None:
     assert row["market_context_provider"] is None
     assert row["market_context_timestamp"] is None
     assert row["market_context_staleness"] is None
+    assert row["market_context_validity_classification"] == VALIDITY_UNAVAILABLE
     assert "missing_market_context" in row["data_quality_flags"]
     assert "missing_vix_context" in row["data_quality_flags"]
 
@@ -240,6 +252,68 @@ def test_summary_generation() -> None:
     assert summary["market_context"]["successful_joins"] == 2
     assert summary["market_context"]["failed_joins"] == 0
     assert summary["missing_reasons"]["missing_gre_context"] == 2
+    assert summary["context_validity"]["market_context"]["classification_counts"][VALIDITY_VALID] == 2
+    assert summary["context_validity"]["gre"]["classification_counts"][VALIDITY_UNAVAILABLE] == 2
+
+
+def test_context_validity_marks_stale_join() -> None:
+    validity = build_context_validity(
+        provider="historical_gre_backfill",
+        provider_timestamp="2026-07-01T10:00:00Z",
+        observation_timestamp="2026-07-01T10:00:00Z",
+        join_timestamp="2026-07-01T12:00:01Z",
+        age_seconds=7201,
+        freshness_window_seconds=3600,
+        provenance="historical_gre_backfill",
+    )
+
+    assert validity["validity_classification"] == VALIDITY_STALE
+    assert validity["provenance"] == "historical_gre_backfill"
+
+
+def test_context_validity_marks_outside_provider_window() -> None:
+    validity = build_context_validity(
+        provider="historical_gre_backfill",
+        provider_timestamp="2026-07-01T13:05:00Z",
+        observation_timestamp="2026-07-01T13:05:00Z",
+        join_timestamp="2026-07-01T18:07:53Z",
+        age_seconds=18173,
+        freshness_window_seconds=3600,
+        provenance="historical_gre_backfill",
+        provider_window_end="2026-07-01T13:05:00Z",
+        provider_window_end_is_hard_boundary=True,
+    )
+
+    assert validity["validity_classification"] == VALIDITY_OUTSIDE_PROVIDER_WINDOW
+
+
+def test_context_validity_marks_unavailable_context() -> None:
+    validity = build_context_validity(
+        provider=None,
+        provider_timestamp=None,
+        observation_timestamp=None,
+        join_timestamp="2026-07-01T18:07:53Z",
+        age_seconds=None,
+        freshness_window_seconds=3600,
+        provenance=None,
+    )
+
+    assert validity["validity_classification"] == VALIDITY_UNAVAILABLE
+
+
+def test_historical_gre_tail_is_classified_outside_provider_window() -> None:
+    enrichments = build_trade_outcome_enrichments(
+        [_outcome("GC", "GCQ6", entry_time="2026-07-01T18:07:53Z")],
+        historical_gre_rows=[
+            _historical_gre("2026-07-01T13:05:00Z", label="LONG", confidence=71),
+        ],
+        generated_at=NOW,
+    )
+
+    row = enrichments[0]
+    assert row["gre_label"] == "LONG"
+    assert row["gre_validity_classification"] == VALIDITY_OUTSIDE_PROVIDER_WINDOW
+    assert "outside_provider_window_gre_context" in row["data_quality_flags"]
 
 
 def test_empty_dataset_handled_safely(tmp_path: Path) -> None:
