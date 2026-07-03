@@ -85,6 +85,17 @@ DEFAULT_STRATEGY_BRIDGE_SUBMIT_REPORT_ARTIFACT = (
     Path("outputs") / "track_b_execution_core" / "strategy_bridge" / "latest_strategy_bridge_submit_report.json"
 )
 DEFAULT_BROKER_POSITION_GUARDIAN_PATH = DEFAULT_BROKER_POSITION_GUARDIAN_ARTIFACT
+DEFAULT_SAFE_STATE_RISK_POLICY_CONFIG = Path("config") / "track_b_safe_state_risk_policy.json"
+DEFAULT_RUNTIME_CONFIG_IN_FORCE_ARTIFACT = (
+    Path("outputs") / "probationary_pattern_engine" / "paper_session" / "runtime" / "paper_config_in_force.json"
+)
+DEFAULT_GUARDED_ROSTER_ARTIFACT = (
+    Path("outputs")
+    / "probationary_pattern_engine"
+    / "paper_session"
+    / "runtime"
+    / "paper_stack_mnq_mes_full_session_active_evidence_guarded_roster.json"
+)
 
 
 @dataclass(frozen=True)
@@ -104,7 +115,12 @@ class TrackBRuntimeSafeStateEnvelopeConfig:
     ledger_summary_path: Path = DEFAULT_LEDGER_SUMMARY_ARTIFACT
     strategy_bridge_submit_report_path: Path = DEFAULT_STRATEGY_BRIDGE_SUBMIT_REPORT_ARTIFACT
     broker_position_guardian_path: Path = DEFAULT_BROKER_POSITION_GUARDIAN_PATH
+    safe_state_risk_policy_path: Path = DEFAULT_SAFE_STATE_RISK_POLICY_CONFIG
+    runtime_config_in_force_path: Path = DEFAULT_RUNTIME_CONFIG_IN_FORCE_ARTIFACT
+    guarded_roster_path: Path = DEFAULT_GUARDED_ROSTER_ARTIFACT
     max_orders_per_runtime_generation_id: int = 4
+    max_active_managed_exposures: int = 4
+    max_open_broker_orders: int = 4
     max_submits_per_symbol_per_window: int = 3
     max_broker_mutation_attempts_per_window: int = 5
     max_failed_broker_mutations_per_window: int = 2
@@ -117,6 +133,72 @@ class TrackBRuntimeSafeStateEnvelopeConfig:
         return path if path.is_absolute() else self.repo_root / path
 
 
+@dataclass(frozen=True)
+class TrackBRuntimeSafeStateRefreshResult:
+    authority_path: Path
+    payload: dict[str, Any]
+    summary: dict[str, Any]
+
+
+@dataclass(frozen=True)
+class SafeStateRiskPolicy:
+    policy_source: str
+    profile_id: str
+    runtime_roster_symbols: tuple[str, ...]
+    runtime_roster_lane_count: int
+    limit_policy_version: str
+    legacy_fallback_used: bool
+    max_active_managed_exposures: int
+    max_open_broker_orders: int
+    max_broker_mutation_events_per_runtime_generation: int
+    max_submits_per_symbol_per_window: int
+    max_broker_mutation_attempts_per_window: int
+    max_failed_broker_mutations_per_window: int
+    max_duplicate_intent_attempts: int
+    max_managed_open_positions_per_strategy_lane: int
+    max_consecutive_lifecycle_reconciliation_disagreements: int
+    max_recovery_attempts_per_runtime_generation: int
+
+    def to_payload(self) -> dict[str, Any]:
+        return {
+            "policy_source": self.policy_source,
+            "profile_id": self.profile_id,
+            "runtime_roster_symbols": list(self.runtime_roster_symbols),
+            "runtime_roster_lane_count": self.runtime_roster_lane_count,
+            "limit_policy_version": self.limit_policy_version,
+            "legacy_fallback_used": self.legacy_fallback_used,
+            "limits": {
+                "max_active_managed_exposures": self.max_active_managed_exposures,
+                "max_open_broker_orders": self.max_open_broker_orders,
+                "max_broker_mutation_events_per_runtime_generation": self.max_broker_mutation_events_per_runtime_generation,
+                "max_submits_per_symbol_per_window": self.max_submits_per_symbol_per_window,
+                "max_broker_mutation_attempts_per_window": self.max_broker_mutation_attempts_per_window,
+                "max_failed_broker_mutations_per_window": self.max_failed_broker_mutations_per_window,
+                "max_duplicate_intent_attempts": self.max_duplicate_intent_attempts,
+                "max_managed_open_positions_per_strategy_lane": self.max_managed_open_positions_per_strategy_lane,
+                "max_consecutive_lifecycle_reconciliation_disagreements": (
+                    self.max_consecutive_lifecycle_reconciliation_disagreements
+                ),
+                "max_recovery_attempts_per_runtime_generation": self.max_recovery_attempts_per_runtime_generation,
+            },
+        }
+
+
+def refresh_track_b_runtime_safe_state_envelope(
+    *,
+    config: TrackBRuntimeSafeStateEnvelopeConfig,
+    now: datetime | None = None,
+) -> TrackBRuntimeSafeStateRefreshResult:
+    """Build and write the read-only Safe-State envelope from current inputs."""
+    payload = build_track_b_runtime_safe_state_envelope(config=config, now=now)
+    authority_path = write_track_b_runtime_safe_state_envelope(config=config, payload=payload)
+    return TrackBRuntimeSafeStateRefreshResult(
+        authority_path=authority_path,
+        payload=payload,
+        summary=_summary(payload=payload, authority_path=authority_path),
+    )
+
+
 def build_track_b_runtime_safe_state_envelope(
     *,
     config: TrackBRuntimeSafeStateEnvelopeConfig,
@@ -125,8 +207,9 @@ def build_track_b_runtime_safe_state_envelope(
 ) -> dict[str, Any]:
     actual_now = _ensure_utc(now or datetime.now(UTC))
     inputs = _inputs(config=config, overrides=input_overrides or {})
+    risk_policy = _safe_state_risk_policy(config=config, inputs=inputs)
     counters = _limit_counters(inputs=inputs)
-    tripped_limits = _tripped_limits(config=config, inputs=inputs, counters=counters)
+    tripped_limits = _tripped_limits(policy=risk_policy, inputs=inputs, counters=counters)
     classification = _classify(inputs=inputs, tripped_limits=tripped_limits)
     posture = _posture(classification=classification, inputs=inputs, tripped_limits=tripped_limits)
     close_authority = _managed_close_authority(inputs=inputs, tripped_limits=tripped_limits)
@@ -175,6 +258,13 @@ def build_track_b_runtime_safe_state_envelope(
         "recovery_only": posture["recovery_only"],
         "tripped_limits": tripped_limits,
         "limit_counters": counters,
+        "safe_state_risk_policy": risk_policy.to_payload(),
+        "policy_source": risk_policy.policy_source,
+        "profile_id": risk_policy.profile_id,
+        "runtime_roster_symbols": list(risk_policy.runtime_roster_symbols),
+        "runtime_roster_lane_count": risk_policy.runtime_roster_lane_count,
+        "limit_policy_version": risk_policy.limit_policy_version,
+        "legacy_fallback_used": risk_policy.legacy_fallback_used,
         "runtime_generation_id": runtime_generation_id,
         "control_plane_snapshot_id": snapshot_id,
         "shared_truth_generation_id": control_plane.get("shared_truth_refresh_generation_id"),
@@ -217,9 +307,13 @@ def main(argv: Sequence[str] | None = None) -> int:
         repo_root=Path(args.repo_root).expanduser().resolve(),
         output_path=Path(args.output_path),
     )
-    payload = build_track_b_runtime_safe_state_envelope(config=config)
-    authority_path = write_track_b_runtime_safe_state_envelope(config=config, payload=payload)
-    summary = {
+    result = refresh_track_b_runtime_safe_state_envelope(config=config)
+    print(json.dumps(result.payload if bool(args.json) else result.summary, indent=2, sort_keys=True))
+    return 0 if result.payload.get("safe_state_classification") == SAFE_STATE_NORMAL else 2
+
+
+def _summary(*, payload: Mapping[str, Any], authority_path: Path) -> dict[str, Any]:
+    return {
         "safe_state_classification": payload.get("safe_state_classification"),
         "runtime_generation_id": payload.get("runtime_generation_id"),
         "control_plane_snapshot_id": payload.get("control_plane_snapshot_id"),
@@ -232,6 +326,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         "observe_only": payload.get("observe_only"),
         "recovery_only": payload.get("recovery_only"),
         "tripped_limits": payload.get("tripped_limits"),
+        "safe_state_risk_policy": payload.get("safe_state_risk_policy"),
         "operator_explanation": payload.get("operator_explanation"),
         "recommended_next_step": payload.get("recommended_next_step"),
         "authority_path": str(authority_path),
@@ -239,8 +334,6 @@ def main(argv: Sequence[str] | None = None) -> int:
         "paper_proof_invoked": False,
         "live_money_eligible": payload.get("live_money_eligible"),
     }
-    print(json.dumps(payload if bool(args.json) else summary, indent=2, sort_keys=True))
-    return 0 if payload.get("safe_state_classification") == SAFE_STATE_NORMAL else 2
 
 
 def _inputs(
@@ -262,6 +355,9 @@ def _inputs(
         "ledger_summary": config.ledger_summary_path,
         "strategy_bridge_submit_report": config.strategy_bridge_submit_report_path,
         "broker_position_guardian": config.broker_position_guardian_path,
+        "safe_state_risk_policy": config.safe_state_risk_policy_path,
+        "runtime_config_in_force": config.runtime_config_in_force_path,
+        "guarded_roster": config.guarded_roster_path,
     }
     return {name: overrides.get(name) or _read_json(config.resolve(path)) for name, path in paths.items()}
 
@@ -292,13 +388,19 @@ def _limit_counters(*, inputs: Mapping[str, Mapping[str, Any]]) -> dict[str, Any
         rows=_active_rows(_list(recovery_history.get("recent_attempts"))),
         runtime_generation_id=runtime_generation_id,
     )
+    broker_mutation_event_count = _order_count_for_counter(
+        order_rows=order_rows,
+        raw_managed_order_rows=raw_managed_order_rows,
+        raw_open_order_rows=raw_open_order_rows,
+        managed_orders=managed_orders,
+    )
     return {
-        "orders_per_runtime_generation_id": _order_count_for_counter(
-            order_rows=order_rows,
-            raw_managed_order_rows=raw_managed_order_rows,
-            raw_open_order_rows=raw_open_order_rows,
-            managed_orders=managed_orders,
-        ),
+        "active_managed_exposure_count": len(managed_position_rows),
+        "active_managed_exposure_count_by_symbol": _managed_exposure_counts_by_symbol(managed_position_rows),
+        "open_broker_order_count": len(open_order_rows),
+        "broker_mutation_events_per_runtime_generation": broker_mutation_event_count,
+        "orders_per_runtime_generation_id": broker_mutation_event_count,
+        "orders_per_runtime_generation_id_deprecated": True,
         "submits_per_symbol_per_window": _submits_per_symbol(strategy_report),
         "max_submits_per_symbol_per_window_observed": max(_submits_per_symbol(strategy_report).values(), default=0),
         "broker_mutation_attempts_per_window": _first_int(
@@ -331,7 +433,7 @@ def _limit_counters(*, inputs: Mapping[str, Mapping[str, Any]]) -> dict[str, Any
 
 def _tripped_limits(
     *,
-    config: TrackBRuntimeSafeStateEnvelopeConfig,
+    policy: SafeStateRiskPolicy,
     inputs: Mapping[str, Mapping[str, Any]],
     counters: Mapping[str, Any],
 ) -> list[dict[str, Any]]:
@@ -371,18 +473,34 @@ def _tripped_limits(
         )
     _append_if_limit(
         rows,
-        "orders_per_runtime_generation_id",
+        "active_managed_exposure_count",
+        SAFE_STATE_POSITION_LIMIT_HIT,
+        _as_int(counters.get("active_managed_exposure_count")),
+        policy.max_active_managed_exposures,
+        "Active managed exposure count exceeded the Safe-State exposure policy.",
+    )
+    _append_if_limit(
+        rows,
+        "open_broker_order_count",
         SAFE_STATE_BROKER_MUTATION_LIMIT_HIT,
-        _as_int(counters.get("orders_per_runtime_generation_id")),
-        config.max_orders_per_runtime_generation_id,
-        "Runtime generation order count exceeded the PAPER containment budget.",
+        _as_int(counters.get("open_broker_order_count")),
+        policy.max_open_broker_orders,
+        "Open broker order count exceeded the Safe-State order policy.",
+    )
+    _append_if_limit(
+        rows,
+        "broker_mutation_events_per_runtime_generation",
+        SAFE_STATE_BROKER_MUTATION_LIMIT_HIT,
+        _as_int(counters.get("broker_mutation_events_per_runtime_generation")),
+        policy.max_broker_mutation_events_per_runtime_generation,
+        "Runtime generation broker mutation event count exceeded the Safe-State policy.",
     )
     _append_if_limit(
         rows,
         "submits_per_symbol_per_window",
         SAFE_STATE_BROKER_MUTATION_LIMIT_HIT,
         _as_int(counters.get("max_submits_per_symbol_per_window_observed")),
-        config.max_submits_per_symbol_per_window,
+        policy.max_submits_per_symbol_per_window,
         "Submit attempts per symbol exceeded the PAPER containment budget.",
     )
     _append_if_limit(
@@ -390,7 +508,7 @@ def _tripped_limits(
         "broker_mutation_attempts_per_window",
         SAFE_STATE_BROKER_MUTATION_LIMIT_HIT,
         _as_int(counters.get("broker_mutation_attempts_per_window")),
-        config.max_broker_mutation_attempts_per_window,
+        policy.max_broker_mutation_attempts_per_window,
         "Broker mutation attempts exceeded the PAPER containment budget.",
     )
     _append_if_limit(
@@ -398,18 +516,18 @@ def _tripped_limits(
         "failed_broker_mutations_per_window",
         SAFE_STATE_BROKER_MUTATION_LIMIT_HIT,
         _as_int(counters.get("failed_broker_mutations_per_window")),
-        config.max_failed_broker_mutations_per_window,
+        policy.max_failed_broker_mutations_per_window,
         "Failed broker mutation attempts exceeded the PAPER containment budget.",
     )
     duplicate_attempts = _as_int(counters.get("duplicate_intent_attempts"))
-    if duplicate_attempts > config.max_duplicate_intent_attempts:
-        severity = SAFE_STATE_HARD_HOLD if duplicate_attempts > config.max_duplicate_intent_attempts * 2 else SAFE_STATE_DUPLICATE_INTENT_RISK
+    if duplicate_attempts > policy.max_duplicate_intent_attempts:
+        severity = SAFE_STATE_HARD_HOLD if duplicate_attempts > policy.max_duplicate_intent_attempts * 2 else SAFE_STATE_DUPLICATE_INTENT_RISK
         rows.append(
             _limit(
                 "duplicate_intent_attempts",
                 severity,
                 duplicate_attempts,
-                config.max_duplicate_intent_attempts,
+                policy.max_duplicate_intent_attempts,
                 "Duplicate submit/close intent attempts exceeded the PAPER containment budget.",
             )
         )
@@ -418,7 +536,7 @@ def _tripped_limits(
         "managed_open_positions_per_strategy_lane",
         SAFE_STATE_POSITION_LIMIT_HIT,
         _as_int(counters.get("max_managed_open_positions_per_strategy_lane_observed")),
-        config.max_managed_open_positions_per_strategy_lane,
+        policy.max_managed_open_positions_per_strategy_lane,
         "Managed open positions per strategy/lane exceeded the PAPER containment budget.",
     )
     _append_if_limit(
@@ -426,7 +544,7 @@ def _tripped_limits(
         "consecutive_lifecycle_reconciliation_disagreements",
         SAFE_STATE_LIFECYCLE_DISAGREEMENT_LIMIT_HIT,
         _as_int(counters.get("consecutive_lifecycle_reconciliation_disagreements")),
-        config.max_consecutive_lifecycle_reconciliation_disagreements,
+        policy.max_consecutive_lifecycle_reconciliation_disagreements,
         "Lifecycle/reconciliation disagreements exceeded the PAPER containment budget.",
     )
     _append_if_limit(
@@ -434,7 +552,7 @@ def _tripped_limits(
         "recovery_attempts_per_runtime_generation",
         SAFE_STATE_RECOVERY_ONLY,
         _as_int(counters.get("recovery_attempts_per_runtime_generation")),
-        config.max_recovery_attempts_per_runtime_generation,
+        policy.max_recovery_attempts_per_runtime_generation,
         "Recovery attempts for this runtime generation exceeded the PAPER containment budget.",
     )
     return rows
@@ -613,6 +731,144 @@ def _runtime_generation_id(inputs: Mapping[str, Mapping[str, Any]]) -> str:
     )
 
 
+def _safe_state_risk_policy(
+    *,
+    config: TrackBRuntimeSafeStateEnvelopeConfig,
+    inputs: Mapping[str, Mapping[str, Any]],
+) -> SafeStateRiskPolicy:
+    explicit_policy = inputs["safe_state_risk_policy"]
+    runtime_config = inputs["runtime_config_in_force"]
+    guarded_roster = inputs["guarded_roster"]
+    embedded_policy = _mapping(runtime_config.get("safe_state_risk_policy") or runtime_config.get("safe_state_policy"))
+    policy_payload = explicit_policy if explicit_policy else embedded_policy
+    if explicit_policy:
+        policy_source = "explicit_safe_state_risk_policy_config"
+    elif embedded_policy:
+        policy_source = "active_runtime_profile_embedded_policy"
+    else:
+        policy_source = "legacy_config_fallback"
+    profile_id = _profile_id(policy_payload=policy_payload, runtime_config=runtime_config, guarded_roster=guarded_roster)
+    symbols = _runtime_roster_symbols(runtime_config)
+    lane_count = _runtime_roster_lane_count(runtime_config)
+    return SafeStateRiskPolicy(
+        policy_source=policy_source,
+        profile_id=profile_id,
+        runtime_roster_symbols=tuple(symbols),
+        runtime_roster_lane_count=lane_count,
+        limit_policy_version=str(
+            policy_payload.get("limit_policy_version")
+            or policy_payload.get("policy_version")
+            or policy_payload.get("schema_version")
+            or ("legacy_safe_state_limits_v1" if not policy_payload else "safe_state_risk_policy_v1")
+        ),
+        legacy_fallback_used=not bool(policy_payload),
+        max_active_managed_exposures=_policy_int(
+            policy_payload,
+            config.max_active_managed_exposures,
+            "max_active_managed_exposures",
+            "max_active_managed_exposure_count",
+            "active_managed_exposure_limit",
+        ),
+        max_open_broker_orders=_policy_int(
+            policy_payload,
+            config.max_open_broker_orders,
+            "max_open_broker_orders",
+            "max_open_broker_order_count",
+            "open_broker_order_limit",
+        ),
+        max_broker_mutation_events_per_runtime_generation=_policy_int(
+            policy_payload,
+            config.max_orders_per_runtime_generation_id,
+            "max_broker_mutation_events_per_runtime_generation",
+            "max_orders_per_runtime_generation_id",
+            "broker_mutation_event_limit",
+        ),
+        max_submits_per_symbol_per_window=_policy_int(
+            policy_payload,
+            config.max_submits_per_symbol_per_window,
+            "max_submits_per_symbol_per_window",
+        ),
+        max_broker_mutation_attempts_per_window=_policy_int(
+            policy_payload,
+            config.max_broker_mutation_attempts_per_window,
+            "max_broker_mutation_attempts_per_window",
+        ),
+        max_failed_broker_mutations_per_window=_policy_int(
+            policy_payload,
+            config.max_failed_broker_mutations_per_window,
+            "max_failed_broker_mutations_per_window",
+        ),
+        max_duplicate_intent_attempts=_policy_int(
+            policy_payload,
+            config.max_duplicate_intent_attempts,
+            "max_duplicate_intent_attempts",
+        ),
+        max_managed_open_positions_per_strategy_lane=_policy_int(
+            policy_payload,
+            config.max_managed_open_positions_per_strategy_lane,
+            "max_managed_open_positions_per_strategy_lane",
+        ),
+        max_consecutive_lifecycle_reconciliation_disagreements=_policy_int(
+            policy_payload,
+            config.max_consecutive_lifecycle_reconciliation_disagreements,
+            "max_consecutive_lifecycle_reconciliation_disagreements",
+        ),
+        max_recovery_attempts_per_runtime_generation=_policy_int(
+            policy_payload,
+            config.max_recovery_attempts_per_runtime_generation,
+            "max_recovery_attempts_per_runtime_generation",
+        ),
+    )
+
+
+def _profile_id(
+    *,
+    policy_payload: Mapping[str, Any],
+    runtime_config: Mapping[str, Any],
+    guarded_roster: Mapping[str, Any],
+) -> str:
+    return str(
+        policy_payload.get("profile_id")
+        or policy_payload.get("profile")
+        or runtime_config.get("profile_id")
+        or runtime_config.get("runtime_profile")
+        or runtime_config.get("profile")
+        or guarded_roster.get("profile_id")
+        or guarded_roster.get("profile")
+        or ""
+    )
+
+
+def _runtime_roster_symbols(runtime_config: Mapping[str, Any]) -> list[str]:
+    symbols: set[str] = set()
+    for row in _list(runtime_config.get("lanes")):
+        mapped = _mapping(row)
+        symbol = str(mapped.get("symbol") or _mapping(mapped.get("bridge_execution_target")).get("symbol") or "").strip()
+        if symbol:
+            symbols.add(symbol)
+    return sorted(symbols)
+
+
+def _runtime_roster_lane_count(runtime_config: Mapping[str, Any]) -> int:
+    lanes = _list(runtime_config.get("lanes"))
+    if lanes:
+        return len(lanes)
+    active_lane_ids = _list(runtime_config.get("active_lane_ids"))
+    if active_lane_ids:
+        return len(active_lane_ids)
+    return _first_int(runtime_config.get("runtime_roster_lane_count"), runtime_config.get("lane_count"), runtime_config.get("expected_lane_count"))
+
+
+def _policy_int(payload: Mapping[str, Any], fallback: int, *keys: str) -> int:
+    limits = _mapping(payload.get("limits"))
+    for key in keys:
+        if key in payload:
+            return _as_int(payload.get(key))
+        if key in limits:
+            return _as_int(limits.get(key))
+    return fallback
+
+
 def _runtime_stale_with_broker_exposure(snapshot: Mapping[str, Any]) -> bool:
     if _current_scope_inactive(snapshot):
         return False
@@ -659,6 +915,15 @@ def _open_position_counts(rows: Sequence[Any]) -> dict[str, int]:
             continue
         lane = str(row.get("strategy_lane_id") or row.get("lane_id") or row.get("strategy_id") or "unknown")
         counts[lane] = counts.get(lane, 0) + 1
+    return counts
+
+
+def _managed_exposure_counts_by_symbol(rows: Sequence[Any]) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for item in rows:
+        row = _mapping(item)
+        symbol = str(row.get("symbol") or row.get("contract_symbol") or row.get("local_symbol") or "UNKNOWN").strip()
+        counts[symbol or "UNKNOWN"] = counts.get(symbol or "UNKNOWN", 0) + 1
     return counts
 
 
@@ -714,6 +979,9 @@ def _source_artifact_paths(config: TrackBRuntimeSafeStateEnvelopeConfig) -> dict
         "ledger_summary": str(config.resolve(config.ledger_summary_path)),
         "strategy_bridge_submit_report": str(config.resolve(config.strategy_bridge_submit_report_path)),
         "broker_position_guardian": str(config.resolve(config.broker_position_guardian_path)),
+        "safe_state_risk_policy": str(config.resolve(config.safe_state_risk_policy_path)),
+        "runtime_config_in_force": str(config.resolve(config.runtime_config_in_force_path)),
+        "guarded_roster": str(config.resolve(config.guarded_roster_path)),
     }
 
 
