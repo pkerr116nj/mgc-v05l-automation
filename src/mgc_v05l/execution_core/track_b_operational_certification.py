@@ -245,11 +245,13 @@ def _runtime_domain(
     generated_at = _parse_dt(runtime.get("generated_at"))
     freshest_progress = _freshest_runtime_progress(runtime_progress_sources)
     progress_at = _parse_dt(freshest_progress.get("observed_at")) if freshest_progress else None
+    progress_fresh = _fresh(progress_at, now, freshness_seconds)
+    startup_marker_present = _contains_value(runtime_status, "TRADING_LOOP_ENTERED") or _contains_value(runtime, "TRADING_LOOP_ENTERED")
     checks = [
         _check("runtime_process_alive", _pid_alive(pid), "critical", {"pid": pid}),
         _check(
             "runtime_heartbeat_fresh",
-            _fresh(progress_at, now, freshness_seconds),
+            progress_fresh,
             "critical",
             {"progress_source": freshest_progress},
         ),
@@ -261,7 +263,16 @@ def _runtime_domain(
         ),
         _check("runtime_commit_loaded", bool(commit), "critical", {"commit": commit}),
         _check("runtime_lane_count_expected", lane_count == expected_lane_count, "critical", {"lane_count": lane_count, "expected_lane_count": expected_lane_count}),
-        _check("runtime_trading_loop_entered", _contains_value(runtime_status, "TRADING_LOOP_ENTERED") or _contains_value(runtime, "TRADING_LOOP_ENTERED"), "critical", {"source_path": str(runtime_status_path)}),
+        _check(
+            "runtime_startup_marker_present",
+            startup_marker_present,
+            "warning",
+            {
+                "source_path": str(runtime_status_path),
+                "current_progress_fresh": progress_fresh,
+                "diagnostic_only": True,
+            },
+        ),
     ]
     return _domain(
         checks,
@@ -285,6 +296,7 @@ def _runtime_domain(
             "expected_lane_count": expected_lane_count,
             "identity_generated_at": _iso(generated_at),
             "progress_source": freshest_progress,
+            "startup_marker_present": startup_marker_present,
         },
     )
 

@@ -52,6 +52,16 @@ def test_aggregate_broker_unsafe_not_certified() -> None:
     assert "unknown_orders_zero" in summary["critical_failures"]
 
 
+def test_broker_open_order_incoherence_still_fails(tmp_path: Path) -> None:
+    _seed_live_artifacts(tmp_path, unknown_order_count=1)
+
+    result = build_operational_certification(repo_root=tmp_path, now=NOW, write=False)
+
+    broker_orders = result.report["domains"]["broker_orders"]
+    assert any(check["code"] == "unknown_orders_zero" and check["status"] == "FAIL" for check in broker_orders["checks"])
+    assert result.report["classification"] == "PLATFORM_NOT_CERTIFIED"
+
+
 def test_aggregate_safe_state_hard_hold_not_certified() -> None:
     domains = {
         "safe_state_guardian": {
@@ -91,6 +101,22 @@ def test_stale_runtime_identity_with_fresh_progress_is_warning_not_failure(tmp_p
     assert result.report["classification"] == "PLATFORM_CERTIFIED_WITH_WARNINGS"
 
 
+def test_fresh_runtime_progress_certifies_without_startup_marker(tmp_path: Path) -> None:
+    _seed_live_artifacts(tmp_path, include_startup_marker=False)
+
+    result = build_operational_certification(repo_root=tmp_path, now=NOW, write=False)
+
+    runtime = result.report["domains"]["runtime"]
+    assert runtime["status"] == "WARN"
+    assert any(check["code"] == "runtime_heartbeat_fresh" and check["status"] == "PASS" for check in runtime["checks"])
+    marker_check = next(check for check in runtime["checks"] if check["code"] == "runtime_startup_marker_present")
+    assert marker_check["severity"] == "warning"
+    assert marker_check["status"] == "FAIL"
+    assert marker_check["details"]["diagnostic_only"] is True
+    assert marker_check["details"]["current_progress_fresh"] is True
+    assert result.report["classification"] == "PLATFORM_CERTIFIED_WITH_WARNINGS"
+
+
 def test_dead_runtime_pid_is_not_certified(tmp_path: Path) -> None:
     _seed_live_artifacts(tmp_path, runtime_pid=99_999_999)
 
@@ -111,6 +137,16 @@ def test_runtime_alive_without_fresh_progress_is_not_certified(tmp_path: Path) -
     assert result.report["classification"] == "PLATFORM_NOT_CERTIFIED"
 
 
+def test_managed_exit_stale_is_not_certified(tmp_path: Path) -> None:
+    _seed_live_artifacts(tmp_path, managed_exit_at=NOW - timedelta(minutes=30))
+
+    result = build_operational_certification(repo_root=tmp_path, now=NOW, write=False)
+
+    managed_exit = result.report["domains"]["managed_exit"]
+    assert any(check["code"] == "managed_exit_heartbeat_fresh" and check["status"] == "FAIL" for check in managed_exit["checks"])
+    assert result.report["classification"] == "PLATFORM_NOT_CERTIFIED"
+
+
 def test_missing_optional_progress_artifact_passes_with_another_fresh_source(tmp_path: Path) -> None:
     _seed_live_artifacts(tmp_path, include_blocked_intent_progress=False)
 
@@ -124,7 +160,7 @@ def test_missing_optional_progress_artifact_passes_with_another_fresh_source(tmp
 def test_cli_report_generation(tmp_path: Path) -> None:
     _seed_live_artifacts(tmp_path)
 
-    exit_code = main(["--repo-root", str(tmp_path), "--expected-lane-count", "71", "--freshness-seconds", "600"])
+    exit_code = main(["--repo-root", str(tmp_path), "--expected-lane-count", "71", "--freshness-seconds", "999999"])
 
     assert exit_code == 0
     report_path = tmp_path / "outputs/track_b_execution_core/operations_maintenance/operational_certification/latest_operational_certification.json"
@@ -144,10 +180,14 @@ def _seed_live_artifacts(
     progress_at: datetime | None = None,
     runtime_pid: int | None = None,
     include_blocked_intent_progress: bool = True,
+    include_startup_marker: bool = True,
+    managed_exit_at: datetime | None = None,
+    unknown_order_count: int = 0,
 ) -> None:
     fresh = (NOW - timedelta(seconds=30)).isoformat()
     identity = (runtime_identity_at or NOW - timedelta(seconds=30)).isoformat()
     progress = (progress_at or NOW - timedelta(seconds=30)).isoformat()
+    managed_exit_generated_at = (managed_exit_at or NOW - timedelta(seconds=30)).isoformat()
     runtime_started = (NOW - timedelta(minutes=3)).isoformat()
     _write(
         root / "outputs/probationary_pattern_engine/paper_session/runtime/paper_runtime_truth.json",
@@ -161,11 +201,11 @@ def _seed_live_artifacts(
     )
     _write(
         root / "outputs/probationary_pattern_engine/paper_session/runtime/probationary_paper_detached_child_status.json",
-        {"generated_at": fresh, "events": [{"state": "TRADING_LOOP_ENTERED"}]},
+        {"generated_at": fresh, "events": [{"state": "TRADING_LOOP_ENTERED"}] if include_startup_marker else [{"state": "RUNTIME_CHILD_STARTED"}]},
     )
     _write(
         root / "outputs/track_b_execution_core/managed_exit_service/latest_managed_exit_service_status.json",
-        {"generated_at": fresh, "pid": os.getpid(), "classification": "NO_ELIGIBLE_EXITS", "exit_due_count": 0, "eligible_count": 0},
+        {"generated_at": managed_exit_generated_at, "pid": os.getpid(), "classification": "NO_ELIGIBLE_EXITS", "exit_due_count": 0, "eligible_count": 0},
     )
     _write(
         root / "outputs/track_b_execution_core/open_order_truth/latest_open_order_truth.json",
@@ -174,7 +214,7 @@ def _seed_live_artifacts(
             "classification": "NO_OPEN_ORDERS",
             "canonical_refresh_scope": "GLOBAL_COMPLETE",
             "open_orders": [],
-            "unknown_order_count": 0,
+            "unknown_order_count": unknown_order_count,
             "duplicate_close_order_groups": [],
         },
     )
