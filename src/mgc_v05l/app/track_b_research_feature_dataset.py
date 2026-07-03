@@ -30,6 +30,13 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--cadence-minutes", type=int, default=5)
     parser.add_argument("--max-rows", type=int, default=500)
     parser.add_argument("--max-source-candles", type=int, default=5000)
+    parser.add_argument("--start-time", help="Optional inclusive ISO timestamp for source candle filtering.")
+    parser.add_argument("--end-time", help="Optional inclusive ISO timestamp for source candle filtering.")
+    parser.add_argument(
+        "--complete-corpus-rows",
+        action="store_true",
+        help="Persist every historical research row with a manifest; intended for isolated corpus builds.",
+    )
     parser.add_argument("--live-observation", action="store_true", help="Mark rows backfill=false; still diagnostic-only.")
     parser.add_argument("--provider", choices=("retained", "parquet"), default="retained")
     parser.add_argument(
@@ -54,6 +61,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         provider=args.provider,
         research_store_root=args.research_store_root,
         max_source_candles=args.max_source_candles,
+        start_time=args.start_time,
+        end_time=args.end_time,
+        complete_corpus_rows=args.complete_corpus_rows,
     )
     print(
         json.dumps(
@@ -67,6 +77,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 "readiness_for_gre": result.summary.get("readiness_for_gre"),
                 "readiness_for_future_plugins": result.summary.get("readiness_for_future_plugins"),
                 "rows_path": str(result.rows_path),
+                "rows_manifest_path": None if result.rows_manifest_path is None else str(result.rows_manifest_path),
                 "summary_path": str(result.summary_path),
                 "diagnostic_only": result.summary.get("diagnostic_only"),
                 "broker_authority": result.summary.get("broker_authority"),

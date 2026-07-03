@@ -395,6 +395,30 @@ def test_runner_writes_bounded_outputs_and_docs(tmp_path: Path) -> None:
     assert result.migration_notes_path.exists()
 
 
+def test_runner_can_write_complete_research_corpus_with_manifest(tmp_path: Path) -> None:
+    output_root = tmp_path / "outputs" / "track_b_execution_core"
+    _write_phase1(output_root, "GC", "1m", _candles(count=95, step=0.2))
+
+    result = run_research_feature_dataset_builder(
+        output_root=output_root,
+        now=NOW,
+        instruments=("GC",),
+        cadence_minutes=5,
+        max_rows=30,
+        complete_corpus_rows=True,
+    )
+    rows = [json.loads(line) for line in result.rows_path.read_text(encoding="utf-8").splitlines()]
+
+    assert len(rows) == len(result.rows) == result.summary["observation_count"]
+    assert result.rows_manifest_path is not None
+    assert result.rows_manifest_path.exists()
+    assert result.rows_manifest is not None
+    assert result.rows_manifest["schema_version"] == "complete_research_corpus_jsonl_v1"
+    assert result.rows_manifest["row_count"] == result.summary["observation_count"]
+    assert result.rows_manifest["first_timestamp"] == rows[0]["observation_time"]
+    assert result.rows_manifest["latest_timestamp"] == rows[-1]["observation_time"]
+
+
 def test_retained_provider_matches_existing_phase1_candle_behavior(tmp_path: Path) -> None:
     output_root = tmp_path / "outputs" / "track_b_execution_core"
     expected = _candles(count=5, step=0.2)
@@ -500,6 +524,53 @@ def test_identical_candle_windows_produce_identical_crfd_features(tmp_path: Path
     ]
     assert retained.summary["provider_id"] == "retained"
     assert parquet_result.summary["provider_id"] == "parquet"
+
+
+def test_parquet_crfd_respects_requested_time_window(tmp_path: Path) -> None:
+    pyarrow = __import__("pyarrow")
+    parquet = __import__("pyarrow.parquet").parquet
+    output_root = tmp_path / "outputs" / "track_b_execution_core"
+    store_root = tmp_path / "outputs" / "reports" / "trend_participation_engine"
+    candles = _candles(count=30, step=0.25)
+    path = store_root / "raw_bars" / "databento_minute_backfill" / "symbol=GC" / "year=2026" / "month=06" / "bars.parquet"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    parquet.write_table(
+        pyarrow.Table.from_pylist(
+            [
+                {
+                    "bar_end": row["timestamp"],
+                    "open": row["open"],
+                    "high": row["high"],
+                    "low": row["low"],
+                    "close": row["close"],
+                    "volume": row["volume"],
+                }
+                for row in candles
+            ]
+        ),
+        path,
+    )
+
+    start = START + timedelta(minutes=10)
+    end = START + timedelta(minutes=20)
+    result = run_research_feature_dataset_builder(
+        output_root=output_root,
+        now=NOW,
+        instruments=("GC",),
+        cadence_minutes=5,
+        max_rows=20,
+        provider="parquet",
+        research_store_root=store_root,
+        start_time=start,
+        end_time=end,
+    )
+
+    observation_times = [datetime.fromisoformat(row["observation_time"]) for row in result.rows]
+    assert observation_times
+    assert min(observation_times) >= start
+    assert max(observation_times) <= end
+    assert result.summary["time_coverage"]["requested_start_time"] == start.isoformat()
+    assert result.summary["time_coverage"]["requested_end_time"] == end.isoformat()
 
 
 def test_provider_comparison_writes_input_only_report(tmp_path: Path) -> None:

@@ -10,6 +10,7 @@ from typing import Any, Mapping, Sequence
 
 from mgc_v05l.execution_core.bounded_jsonl import BoundedJsonlConfig, write_bounded_jsonl
 from mgc_v05l.execution_core.bounded_snapshot import BoundedSnapshotConfig, write_bounded_snapshot_json
+from mgc_v05l.execution_core.complete_research_corpus import write_complete_research_jsonl
 from mgc_v05l.execution_core.track_b_canonical_research_data_provider import (
     build_research_data_provider,
     canonical_candles_as_mappings,
@@ -40,6 +41,8 @@ class ResearchFeatureDatasetResult:
     rows: tuple[dict[str, Any], ...]
     summary: dict[str, Any]
     rows_path: Path
+    rows_manifest: dict[str, Any] | None
+    rows_manifest_path: Path | None
     summary_path: Path
     summary_markdown_path: Path
     schema_path: Path
@@ -67,6 +70,9 @@ def run_research_feature_dataset_builder(
     provider: str = "retained",
     research_store_root: Path | None = None,
     max_source_candles: int | None = DEFAULT_MAX_SOURCE_CANDLES,
+    start_time: datetime | str | None = None,
+    end_time: datetime | str | None = None,
+    complete_corpus_rows: bool = False,
 ) -> ResearchFeatureDatasetResult:
     """Build and publish the diagnostic-only canonical research feature dataset."""
 
@@ -81,9 +87,15 @@ def run_research_feature_dataset_builder(
         provider,
         output_root=output_root,
         research_store_root=research_store_root,
+        start_time=start_time,
+        end_time=end_time,
     )
     candles_by_symbol = _limit_candles_by_symbol(
-        canonical_candles_as_mappings(data_provider.load_candles(symbols=instruments, timeframe=timeframe)),
+        _filter_candles_by_time(
+            canonical_candles_as_mappings(data_provider.load_candles(symbols=instruments, timeframe=timeframe)),
+            start_time=start_time,
+            end_time=end_time,
+        ),
         max_source_candles=max_source_candles,
     )
     auxiliary_sources = _detect_auxiliary_sources(output_root)
@@ -114,12 +126,24 @@ def run_research_feature_dataset_builder(
         )
     )
     rows_path = dataset_dir / RESEARCH_FEATURE_DATASET_JSONL
-    jsonl_config = (
-        BoundedJsonlConfig(max_row_bytes=max_jsonl_row_bytes)
-        if max_jsonl_row_bytes is not None
-        else BoundedJsonlConfig()
-    )
-    write_bounded_jsonl(rows_path, rows, config=jsonl_config)
+    rows_manifest: dict[str, Any] | None = None
+    rows_manifest_path: Path | None = None
+    if complete_corpus_rows:
+        rows_manifest = write_complete_research_jsonl(
+            rows_path,
+            rows,
+            generated_at=generated_at,
+            corpus_name="canonical_research_feature_dataset",
+            timestamp_keys=("observation_time", "generated_at"),
+        )
+        rows_manifest_path = Path(str(rows_manifest["manifest_path"]))
+    else:
+        jsonl_config = (
+            BoundedJsonlConfig(max_row_bytes=max_jsonl_row_bytes)
+            if max_jsonl_row_bytes is not None
+            else BoundedJsonlConfig()
+        )
+        write_bounded_jsonl(rows_path, rows, config=jsonl_config)
     summary = build_research_feature_dataset_summary(
         rows,
         candles_by_symbol=candles_by_symbol,
@@ -129,6 +153,8 @@ def run_research_feature_dataset_builder(
         rows_path=rows_path,
         auxiliary_sources=auxiliary_sources,
         provider_metadata=data_provider.provider_metadata(),
+        requested_start_time=_iso_or_none(start_time),
+        requested_end_time=_iso_or_none(end_time),
     )
     snapshot_config = (
         BoundedSnapshotConfig(max_bytes=max_snapshot_bytes)
@@ -147,6 +173,8 @@ def run_research_feature_dataset_builder(
         rows=rows,
         summary=summary,
         rows_path=rows_path,
+        rows_manifest=rows_manifest,
+        rows_manifest_path=rows_manifest_path,
         summary_path=summary_path,
         summary_markdown_path=summary_markdown_path,
         schema_path=schema_path,
@@ -268,6 +296,32 @@ def _limit_candles_by_symbol(
     return {symbol: tuple(rows)[-limit:] for symbol, rows in candles_by_symbol.items()}
 
 
+def _filter_candles_by_time(
+    candles_by_symbol: Mapping[str, Sequence[Mapping[str, Any]]],
+    *,
+    start_time: datetime | str | None,
+    end_time: datetime | str | None,
+) -> dict[str, tuple[Mapping[str, Any], ...]]:
+    start = _parse_datetime(start_time)
+    end = _parse_datetime(end_time)
+    if start is None and end is None:
+        return {symbol: tuple(rows) for symbol, rows in candles_by_symbol.items()}
+    filtered: dict[str, tuple[Mapping[str, Any], ...]] = {}
+    for symbol, rows in candles_by_symbol.items():
+        kept: list[Mapping[str, Any]] = []
+        for row in rows:
+            timestamp = _parse_datetime(row.get("timestamp") or row.get("bar_end") or row.get("bar_ts") or row.get("bar_start"))
+            if timestamp is None:
+                continue
+            if start is not None and timestamp < start:
+                continue
+            if end is not None and timestamp > end:
+                continue
+            kept.append(row)
+        filtered[symbol] = tuple(kept)
+    return filtered
+
+
 def build_research_feature_dataset_summary(
     rows: Sequence[Mapping[str, Any]],
     *,
@@ -278,6 +332,8 @@ def build_research_feature_dataset_summary(
     rows_path: Path,
     auxiliary_sources: Mapping[str, Any] | None = None,
     provider_metadata: Mapping[str, Any] | None = None,
+    requested_start_time: str | None = None,
+    requested_end_time: str | None = None,
 ) -> dict[str, Any]:
     sessions: dict[str, int] = {}
     instruments: set[str] = set()
@@ -313,6 +369,8 @@ def build_research_feature_dataset_summary(
             "first_observation_time": first_observation,
             "last_observation_time": last_observation,
             "coverage_minutes": _coverage_minutes(first_observation, last_observation),
+            "requested_start_time": requested_start_time,
+            "requested_end_time": requested_end_time,
         },
         "instruments": sorted(instruments),
         "contracts": sorted(contracts),
@@ -1240,6 +1298,11 @@ def _parse_datetime(value: Any) -> datetime | None:
     except ValueError:
         return None
     return parsed if parsed.tzinfo else parsed.replace(tzinfo=UTC)
+
+
+def _iso_or_none(value: Any) -> str | None:
+    parsed = _parse_datetime(value)
+    return None if parsed is None else parsed.isoformat()
 
 
 def _coerce_now(value: datetime | str | None) -> datetime:

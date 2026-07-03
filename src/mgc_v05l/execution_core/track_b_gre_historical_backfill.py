@@ -10,6 +10,7 @@ from typing import Any, Mapping, Sequence
 
 from mgc_v05l.execution_core.bounded_jsonl import BoundedJsonlConfig, write_bounded_jsonl
 from mgc_v05l.execution_core.bounded_snapshot import BoundedSnapshotConfig, write_bounded_snapshot_json
+from mgc_v05l.execution_core.complete_research_corpus import write_complete_research_jsonl
 from mgc_v05l.execution_core.track_b_canonical_research_data_provider import (
     build_research_data_provider,
     canonical_candles_as_mappings,
@@ -63,6 +64,8 @@ class BackfillResult:
     analyzer: dict[str, Any]
     comparison: dict[str, Any]
     rows_path: Path
+    rows_manifest: dict[str, Any] | None
+    rows_manifest_path: Path | None
     summary_path: Path
     validation_summary_path: Path
     scorecard_path: Path
@@ -82,6 +85,9 @@ def run_gre_historical_backfill(
     crfd_max_rows: int | None = None,
     max_jsonl_row_bytes: int | None = None,
     max_snapshot_bytes: int | None = None,
+    start_time: datetime | str | None = None,
+    end_time: datetime | str | None = None,
+    complete_corpus_rows: bool = False,
 ) -> BackfillResult:
     generated_at = _coerce_now(now)
     if cadence_minutes <= 0:
@@ -106,12 +112,17 @@ def run_gre_historical_backfill(
         provider=provider_id,
         research_store_root=research_store_root,
         max_source_candles=max_source_candles,
+        start_time=start_time,
+        end_time=end_time,
+        complete_corpus_rows=complete_corpus_rows,
     )
     candles_by_symbol, provider_metadata = _load_gold_candles(
         output_root,
         provider=provider_id,
         research_store_root=research_store_root,
         max_source_candles=max_source_candles,
+        start_time=start_time,
+        end_time=end_time,
     )
     rows = generate_backfill_observations(
         candles_by_symbol=candles_by_symbol,
@@ -123,12 +134,24 @@ def run_gre_historical_backfill(
         provider_metadata=provider_metadata,
     )
     rows_path = gold_dir / BACKFILL_ROWS_JSONL
-    jsonl_config = (
-        BoundedJsonlConfig(max_row_bytes=max_jsonl_row_bytes)
-        if max_jsonl_row_bytes is not None
-        else BoundedJsonlConfig()
-    )
-    write_bounded_jsonl(rows_path, rows, config=jsonl_config)
+    rows_manifest: dict[str, Any] | None = None
+    rows_manifest_path: Path | None = None
+    if complete_corpus_rows:
+        rows_manifest = write_complete_research_jsonl(
+            rows_path,
+            rows,
+            generated_at=generated_at,
+            corpus_name="gold_regime_engine_historical_backfill",
+            timestamp_keys=("gre_generated_at", "observation_time", "generated_at"),
+        )
+        rows_manifest_path = Path(str(rows_manifest["manifest_path"]))
+    else:
+        jsonl_config = (
+            BoundedJsonlConfig(max_row_bytes=max_jsonl_row_bytes)
+            if max_jsonl_row_bytes is not None
+            else BoundedJsonlConfig()
+        )
+        write_bounded_jsonl(rows_path, rows, config=jsonl_config)
     summary = build_backfill_summary(
         rows,
         candles_by_symbol=candles_by_symbol,
@@ -188,6 +211,8 @@ def run_gre_historical_backfill(
         analyzer=analyzer,
         comparison=comparison,
         rows_path=rows_path,
+        rows_manifest=rows_manifest,
+        rows_manifest_path=rows_manifest_path,
         summary_path=summary_path,
         validation_summary_path=validation_summary_path,
         scorecard_path=scorecard_path,
@@ -374,6 +399,8 @@ def _load_gold_candles(
     provider: str = "retained",
     research_store_root: Path | None = None,
     max_source_candles: int | None = DEFAULT_MAX_SOURCE_CANDLES,
+    start_time: datetime | str | None = None,
+    end_time: datetime | str | None = None,
 ) -> tuple[dict[str, dict[str, tuple[dict[str, Any], ...]]], dict[str, Any]]:
     provider_id = str(provider).strip().lower()
     if provider_id == "retained":
@@ -382,8 +409,15 @@ def _load_gold_candles(
             "provider_kind": "retained_phase1_candles",
             "max_source_candles": max_source_candles,
         }
-    data_provider = build_research_data_provider(provider_id, output_root=output_root, research_store_root=research_store_root)
+    data_provider = build_research_data_provider(
+        provider_id,
+        output_root=output_root,
+        research_store_root=research_store_root,
+        start_time=start_time,
+        end_time=end_time,
+    )
     loaded = canonical_candles_as_mappings(data_provider.load_candles(symbols=("GC", "MGC"), timeframe="1m"))
+    loaded = _filter_candles_by_time(loaded, start_time=start_time, end_time=end_time)
     loaded = _limit_candles_by_symbol(loaded, max_source_candles=max_source_candles)
     result: dict[str, dict[str, tuple[dict[str, Any], ...]]] = {}
     for symbol, rows in loaded.items():
@@ -510,6 +544,32 @@ def _limit_candles_by_symbol(
     if limit <= 0:
         return {symbol: () for symbol in candles_by_symbol}
     return {symbol: tuple(dict(row) for row in tuple(rows)[-limit:]) for symbol, rows in candles_by_symbol.items()}
+
+
+def _filter_candles_by_time(
+    candles_by_symbol: Mapping[str, Sequence[Mapping[str, Any]]],
+    *,
+    start_time: datetime | str | None,
+    end_time: datetime | str | None,
+) -> dict[str, tuple[dict[str, Any], ...]]:
+    start = _parse_datetime(start_time)
+    end = _parse_datetime(end_time)
+    if start is None and end is None:
+        return {symbol: tuple(dict(row) for row in rows) for symbol, rows in candles_by_symbol.items()}
+    filtered: dict[str, tuple[dict[str, Any], ...]] = {}
+    for symbol, rows in candles_by_symbol.items():
+        kept: list[dict[str, Any]] = []
+        for row in rows:
+            timestamp = _parse_datetime(row.get("timestamp") or row.get("bar_end") or row.get("bar_ts") or row.get("bar_start"))
+            if timestamp is None:
+                continue
+            if start is not None and timestamp < start:
+                continue
+            if end is not None and timestamp > end:
+                continue
+            kept.append(dict(row))
+        filtered[symbol] = tuple(kept)
+    return filtered
 
 
 def _derive_5m_bars(rows: Sequence[Mapping[str, Any]]) -> tuple[dict[str, Any], ...]:

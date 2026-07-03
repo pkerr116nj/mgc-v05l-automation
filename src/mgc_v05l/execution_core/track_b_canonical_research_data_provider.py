@@ -99,6 +99,8 @@ class RetainedPhase1ResearchDataProvider:
 @dataclass(frozen=True)
 class HistoricalParquetResearchDataProvider:
     research_store_root: Path
+    start_time: datetime | str | None = None
+    end_time: datetime | str | None = None
     provider_id: str = "parquet"
     provider_kind: str = "historical_databento_parquet"
 
@@ -111,6 +113,8 @@ class HistoricalParquetResearchDataProvider:
             "provider_id": self.provider_id,
             "provider_kind": self.provider_kind,
             "root": str(self.raw_bars_root),
+            "requested_start_time": _iso_or_none(self.start_time),
+            "requested_end_time": _iso_or_none(self.end_time),
             "read_only": True,
             "diagnostic_only": True,
         }
@@ -131,10 +135,18 @@ class HistoricalParquetResearchDataProvider:
             return {symbol: () for symbol in _normalize_symbols(symbols)}
         result: dict[str, tuple[CanonicalResearchCandle, ...]] = {}
         for symbol in _normalize_symbols(symbols):
-            paths = sorted((self.raw_bars_root / f"symbol={symbol}").glob("year=*/month=*/bars.parquet"))
+            paths = [
+                path
+                for path in sorted((self.raw_bars_root / f"symbol={symbol}").glob("year=*/month=*/bars.parquet"))
+                if _partition_may_intersect_window(path, start_time=self.start_time, end_time=self.end_time)
+            ]
             candles: list[CanonicalResearchCandle] = []
             for path in paths:
-                candles.extend(_read_parquet_candles(path, symbol=symbol, timeframe=timeframe))
+                candles.extend(
+                    candle
+                    for candle in _read_parquet_candles(path, symbol=symbol, timeframe=timeframe)
+                    if _timestamp_in_window(candle.timestamp, start_time=self.start_time, end_time=self.end_time)
+                )
             candles.sort(key=lambda row: row.timestamp)
             deduped = {row.timestamp.isoformat(): row for row in candles}
             result[symbol] = tuple(deduped[key] for key in sorted(deduped))
@@ -149,12 +161,18 @@ def build_research_data_provider(
     *,
     output_root: Path,
     research_store_root: Path | None = None,
+    start_time: datetime | str | None = None,
+    end_time: datetime | str | None = None,
 ) -> CanonicalResearchDataProvider:
     provider_id = str(provider).strip().lower()
     if provider_id == "retained":
         return RetainedPhase1ResearchDataProvider(output_root=output_root)
     if provider_id == "parquet":
-        return HistoricalParquetResearchDataProvider(research_store_root=research_store_root or Path("outputs/reports/trend_participation_engine"))
+        return HistoricalParquetResearchDataProvider(
+            research_store_root=research_store_root or Path("outputs/reports/trend_participation_engine"),
+            start_time=start_time,
+            end_time=end_time,
+        )
     raise ValueError(f"Unsupported research data provider: {provider!r}; expected one of ['retained', 'parquet']")
 
 
@@ -171,6 +189,43 @@ def _read_parquet_candles(path: Path, *, symbol: str, timeframe: str) -> list[Ca
         if candle is not None:
             candles.append(candle)
     return candles
+
+
+def _partition_may_intersect_window(path: Path, *, start_time: datetime | str | None, end_time: datetime | str | None) -> bool:
+    start = _parse_datetime(start_time)
+    end = _parse_datetime(end_time)
+    year: int | None = None
+    month: int | None = None
+    for part in path.parts:
+        if part.startswith("year="):
+            try:
+                year = int(part.split("=", 1)[1])
+            except ValueError:
+                year = None
+        if part.startswith("month="):
+            try:
+                month = int(part.split("=", 1)[1])
+            except ValueError:
+                month = None
+    if year is None or month is None:
+        return True
+    partition_start = datetime(year, month, 1, tzinfo=UTC)
+    partition_end = datetime(year + int(month == 12), 1 if month == 12 else month + 1, 1, tzinfo=UTC)
+    if end is not None and partition_start > end:
+        return False
+    if start is not None and partition_end <= start:
+        return False
+    return True
+
+
+def _timestamp_in_window(timestamp: datetime, *, start_time: datetime | str | None, end_time: datetime | str | None) -> bool:
+    start = _parse_datetime(start_time)
+    end = _parse_datetime(end_time)
+    if start is not None and timestamp < start:
+        return False
+    if end is not None and timestamp > end:
+        return False
+    return True
 
 
 def _extract_phase1_bars(payload: Mapping[str, Any], *, symbol: str, timeframe: str, source_ref: str) -> tuple[CanonicalResearchCandle, ...]:
@@ -273,6 +328,11 @@ def _parse_datetime(value: Any) -> datetime | None:
     if parsed.tzinfo is None:
         return parsed.replace(tzinfo=UTC)
     return parsed.astimezone(UTC)
+
+
+def _iso_or_none(value: Any) -> str | None:
+    parsed = _parse_datetime(value)
+    return None if parsed is None else parsed.isoformat()
 
 
 def _optional_float(value: Any) -> float | None:

@@ -105,6 +105,31 @@ def test_backfilled_rows_are_marked_backfill_and_diagnostic(tmp_path: Path) -> N
     assert result.analyzer["backfill"] is True
 
 
+def test_backfill_can_write_complete_research_corpus_with_manifest(tmp_path: Path) -> None:
+    output_root = tmp_path / "outputs" / "track_b_execution_core"
+    candles = _candles(count=120, step=0.2)
+    _write_phase1(output_root, "GC", "1m", candles)
+    _write_phase1(output_root, "GC", "5m", candles[::5])
+
+    result = run_gre_historical_backfill(
+        output_root=output_root,
+        now=NOW,
+        cadence_minutes=10,
+        max_observations=10,
+        complete_corpus_rows=True,
+    )
+    rows = [json.loads(line) for line in result.rows_path.read_text(encoding="utf-8").splitlines()]
+
+    assert len(rows) == result.summary["observation_count"]
+    assert result.rows_manifest_path is not None
+    assert result.rows_manifest_path.exists()
+    assert result.rows_manifest is not None
+    assert result.rows_manifest["schema_version"] == "complete_research_corpus_jsonl_v1"
+    assert result.rows_manifest["row_count"] == result.summary["observation_count"]
+    assert result.rows_manifest["first_timestamp"] == rows[0]["gre_generated_at"]
+    assert result.rows_manifest["latest_timestamp"] == rows[-1]["gre_generated_at"]
+
+
 def test_historical_parquet_provider_expands_backfill_with_provider_identity(tmp_path: Path) -> None:
     output_root = tmp_path / "outputs" / "track_b_execution_core"
     store_root = tmp_path / "outputs" / "reports" / "trend_participation_engine"
@@ -138,6 +163,37 @@ def test_historical_parquet_provider_expands_backfill_with_provider_identity(tmp
     assert result.comparison["historical_parquet"]["observation_count"] == len(rows)
     assert all(row["provider_metadata"]["provider_id"] == "parquet" for row in rows)
     assert all(row["historical_provider_backfill"] is True for row in rows)
+
+
+def test_historical_parquet_backfill_respects_requested_time_window(tmp_path: Path) -> None:
+    output_root = tmp_path / "outputs" / "track_b_execution_core"
+    store_root = tmp_path / "outputs" / "reports" / "trend_participation_engine"
+    candles = _candles(count=80, step=0.18)
+    _write_parquet(store_root, "GC", candles)
+    _write_parquet(store_root, "MGC", candles)
+    start = START + timedelta(minutes=20)
+    end = START + timedelta(minutes=50)
+
+    result = run_gre_historical_backfill(
+        output_root=output_root,
+        now=NOW,
+        cadence_minutes=5,
+        max_observations=20,
+        provider="parquet",
+        research_store_root=store_root,
+        max_source_candles=100,
+        crfd_max_rows=40,
+        start_time=start,
+        end_time=end,
+    )
+    rows = [json.loads(line) for line in result.rows_path.read_text(encoding="utf-8").splitlines()]
+
+    observation_times = [datetime.fromisoformat(row["gre_generated_at"]) for row in rows]
+    assert observation_times
+    assert min(observation_times) >= start
+    assert max(observation_times) <= end
+    assert result.summary["crfd_summary"]["time_coverage"]["requested_start_time"] == start.isoformat()
+    assert result.summary["crfd_summary"]["time_coverage"]["requested_end_time"] == end.isoformat()
 
 
 def test_historical_outputs_include_requested_report_artifacts(tmp_path: Path) -> None:
