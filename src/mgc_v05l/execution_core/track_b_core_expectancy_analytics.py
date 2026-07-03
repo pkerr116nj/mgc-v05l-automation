@@ -15,6 +15,15 @@ from statistics import median
 from typing import Any, Iterable, Mapping, Sequence
 
 from mgc_v05l.execution_core.bounded_snapshot import BoundedSnapshotConfig, write_bounded_snapshot_json
+from mgc_v05l.execution_core.track_b_canonical_analytics_engine import (
+    AnalyticsFilter,
+    CanonicalAnalyticsRequest,
+    ContextValidityRule,
+    aggregate_metric_group as engine_aggregate_metric_group,
+    percentile_distribution as engine_percentile_distribution,
+    run_canonical_analytics,
+    sample_class_for_count as engine_sample_class_for_count,
+)
 from mgc_v05l.execution_core.track_b_trade_outcome_enrichment import (
     DEFAULT_OUTPUT_DIR as DEFAULT_ENRICHMENT_DIR,
     ENRICHMENT_JSONL,
@@ -213,7 +222,12 @@ def build_core_expectancy_analytics(
         "side": aggregate_expectancy_groups(bucketed, ("side",)),
         "exit_policy": aggregate_expectancy_groups(bucketed, ("exit_policy",)),
         "vix_context": aggregate_expectancy_groups(bucketed, ("vix_regime", "vix_percentile_bucket")),
-        "valid_gre_context": aggregate_expectancy_groups([row for row in bucketed if _valid_context(row.get("gre_validity_classification")) and row.get("gre_label")], ("gre_label", "gre_confidence_bucket")),
+        "valid_gre_context": aggregate_expectancy_groups(
+            bucketed,
+            ("gre_label", "gre_confidence_bucket"),
+            validity_rules=(ContextValidityRule("gre_validity_classification"),),
+            required_fields=("gre_label",),
+        ),
     }
     data_quality = {
         "missing_realized_r_proxy": sum(1 for row in rows if _number(row.get("realized_r_proxy")) is None),
@@ -284,58 +298,41 @@ def merge_outcomes_with_enrichment(
     return rows
 
 
-def aggregate_expectancy_groups(rows: Sequence[Mapping[str, Any]], key_fields: Sequence[str]) -> list[dict[str, Any]]:
-    groups: dict[str, list[Mapping[str, Any]]] = {}
-    for row in rows:
-        key = " | ".join(str(row.get(field) or "UNKNOWN") for field in key_fields)
-        groups.setdefault(key, []).append(row)
-    return sorted(
-        [aggregate_expectancy_group(key, values) for key, values in groups.items()],
-        key=lambda row: (row.get("sample_rank", 0), row.get("average_pnl_proxy") or 0.0),
-        reverse=True,
+def aggregate_expectancy_groups(
+    rows: Sequence[Mapping[str, Any]],
+    key_fields: Sequence[str],
+    *,
+    validity_rules: Sequence[ContextValidityRule] = (),
+    required_fields: Sequence[str] = (),
+) -> list[dict[str, Any]]:
+    filters = tuple(
+        # The canonical engine treats this as a pure record-shape filter, not a
+        # trading rule. It keeps partial-context views honest.
+        AnalyticsFilter(field, "exists")
+        for field in required_fields
     )
+    result = run_canonical_analytics(
+        rows,
+        CanonicalAnalyticsRequest(
+            name="core_expectancy_group",
+            dimensions=tuple(key_fields),
+            filters=filters,
+            validity_rules=tuple(validity_rules),
+        ),
+    )
+    return list(result.get("groups") or [])
 
 
 def aggregate_expectancy_group(key: str, rows: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
-    pnl = _numeric_values(rows, "realized_pnl_proxy")
-    points = _numeric_values(rows, "realized_points")
-    hold = _numeric_values(rows, "hold_seconds")
-    sample_class = sample_class_for_count(len(rows))
-    return {
-        "key": key,
-        "count": len(rows),
-        "sample_class": sample_class,
-        "sample_rank": {"RESEARCH_GRADE": 4, "DEVELOPING": 3, "PRELIMINARY": 2, "EXPLORATORY": 1}.get(sample_class, 0),
-        "win_rate": _win_rate(rows),
-        "average_pnl_proxy": _average(pnl),
-        "median_pnl_proxy": _median(pnl),
-        "average_realized_points": _average(points),
-        "median_realized_points": _median(points),
-        "pnl_percentiles": percentile_distribution(pnl),
-        "best_trade": _trade_ref(_max_by(rows, "realized_pnl_proxy")),
-        "worst_trade": _trade_ref(_min_by(rows, "realized_pnl_proxy")),
-        "average_hold_seconds": _average(hold),
-        "median_hold_seconds": _median(hold),
-        "data_quality_flags": _counts(flag for row in rows for flag in row.get("data_quality_flags", [])),
-        "enrichment_data_quality_flags": _counts(flag for row in rows for flag in row.get("enrichment_data_quality_flags", [])),
-    }
+    return engine_aggregate_metric_group(key, rows)
 
 
 def percentile_distribution(values: Sequence[float]) -> dict[str, float | None]:
-    if not values:
-        return {"p0": None, "p10": None, "p25": None, "p50": None, "p75": None, "p90": None, "p100": None}
-    sorted_values = sorted(values)
-    return {f"p{pct}": _percentile(sorted_values, pct) for pct in (0, 10, 25, 50, 75, 90, 100)}
+    return engine_percentile_distribution(values)
 
 
 def sample_class_for_count(count: int) -> str:
-    if count >= 100:
-        return "RESEARCH_GRADE"
-    if count >= 30:
-        return "DEVELOPING"
-    if count >= 10:
-        return "PRELIMINARY"
-    return "EXPLORATORY"
+    return engine_sample_class_for_count(count)
 
 
 def render_coverage_matrix_markdown(matrix: Mapping[str, Any]) -> str:

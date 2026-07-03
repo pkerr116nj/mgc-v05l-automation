@@ -1,0 +1,61 @@
+{
+  "schema_version": "cae1_canonical_analytics_engine_design_v1",
+  "generated_at": "2026-07-03T00:00:00-04:00",
+  "diagnostic_only": true,
+  "production_recommendation": false,
+  "trading_gate": false,
+  "engine_module": "mgc_v05l.execution_core.track_b_canonical_analytics_engine",
+  "purpose": "Reusable diagnostic aggregation over records, dimensions, metrics, filters, and context-validity rules.",
+  "input_contract": {
+    "records": "Sequence of mapping-like analytics rows.",
+    "dimensions": "Tuple of field names used to form grouped keys.",
+    "filters": "JSON-friendly predicates: eq, ne, in, not_in, exists, missing, gt, gte, lt, lte.",
+    "validity_rules": "Provider-independent validity predicates such as gre_validity_classification == VALID.",
+    "metrics": "Metric specifications with kind, source field, output field, and optional percentiles."
+  },
+  "mvp_metrics": [
+    "count",
+    "sample_class",
+    "win_rate",
+    "average_pnl_proxy",
+    "median_pnl_proxy",
+    "average_realized_points",
+    "median_realized_points",
+    "pnl_percentiles",
+    "best_trade",
+    "worst_trade",
+    "average_hold_seconds",
+    "median_hold_seconds",
+    "data_quality_flags",
+    "enrichment_data_quality_flags"
+  ],
+  "migrated_clients": [
+    "track_b_core_expectancy_analytics"
+  ],
+  "migrated_views": [
+    "strategy_lane",
+    "session",
+    "instrument",
+    "side",
+    "exit_policy",
+    "vix_context",
+    "valid_gre_context"
+  ],
+  "future_clients": [
+    "context_aware_trade_analytics",
+    "trade_outcome_scorecards",
+    "research_discovery_engine",
+    "shadow_research_summaries",
+    "regime_validation_scorecards"
+  ],
+  "safety_contract": {
+    "broker_actions": false,
+    "runtime_restart": false,
+    "managed_exit_restart": false,
+    "strategy_changes": false,
+    "trading_gates": false,
+    "production_behavior_changes": false,
+    "databento_download": false,
+    "db_mutation": false
+  }
+}

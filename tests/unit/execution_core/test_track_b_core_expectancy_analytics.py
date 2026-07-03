@@ -94,6 +94,7 @@ def test_empty_dataset_handled_safely(tmp_path: Path) -> None:
 
 def test_core_expectancy_import_boundary() -> None:
     paths = [
+        Path("src/mgc_v05l/execution_core/track_b_canonical_analytics_engine.py"),
         Path("src/mgc_v05l/execution_core/track_b_core_expectancy_analytics.py"),
         Path("src/mgc_v05l/app/track_b_core_expectancy_analytics.py"),
     ]
