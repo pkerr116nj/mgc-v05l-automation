@@ -55,6 +55,82 @@ def test_enrichment_joins_nearest_prior_market_context() -> None:
     assert row["source_refs"]["market_context_rows"] == ""
 
 
+def test_enrichment_joins_nearest_prior_historical_gre() -> None:
+    enrichments = build_trade_outcome_enrichments(
+        [_outcome("GC", "GCQ6", entry_time="2026-07-01T10:05:00Z")],
+        historical_gre_rows=[
+            _historical_gre("2026-07-01T09:55:00Z", label="LONG", confidence=71),
+            _historical_gre("2026-07-01T10:10:00Z", label="SHORT", confidence=80),
+        ],
+        generated_at=NOW,
+    )
+
+    row = enrichments[0]
+    assert row["gre_label"] == "LONG"
+    assert row["gre_confidence"] == 71
+    assert row["gre_provenance"] == "historical_gre_backfill"
+    assert row["gre_provider"] == "historical_databento_parquet"
+    assert row["gre_provider_version"] == "track_b_gre_validation_row_v1"
+    assert row["gre_timestamp"] == "2026-07-01T09:55:00+00:00"
+    assert row["gre_join_method"] == "nearest_prior_historical_gre_observation"
+    assert row["gre_staleness"] == 600.0
+    assert row["gre_research_readiness"] == "VALIDATED"
+    assert row["gre_source_refs"] == {"gre_report": "BACKFILL_GENERATED_GRE_OBSERVATION"}
+    assert "missing_gre_context" not in row["data_quality_flags"]
+
+
+def test_historical_gre_join_does_not_use_future_observation() -> None:
+    enrichments = build_trade_outcome_enrichments(
+        [_outcome("GC", "GCQ6", entry_time="2026-07-01T10:05:00Z")],
+        historical_gre_rows=[_historical_gre("2026-07-01T10:10:00Z", label="SHORT", confidence=80)],
+        generated_at=NOW,
+    )
+
+    row = enrichments[0]
+    assert row["gre_label"] is None
+    assert row["gre_timestamp"] is None
+    assert "missing_gre_context" in row["data_quality_flags"]
+
+
+def test_missing_historical_gre_is_null_and_flagged() -> None:
+    enrichments = build_trade_outcome_enrichments(
+        [_outcome("GC", "GCQ6")],
+        historical_gre_rows=[],
+        generated_at=NOW,
+    )
+
+    row = enrichments[0]
+    assert row["gre_label"] is None
+    assert row["gre_confidence"] is None
+    assert row["gre_provider"] is None
+    assert row["gre_timestamp"] is None
+    assert row["gre_staleness"] is None
+    assert "missing_gre_context" in row["data_quality_flags"]
+
+
+def test_empty_historical_gre_dataset_handled_safely(tmp_path: Path) -> None:
+    outcomes = tmp_path / "outcomes.jsonl"
+    outcomes.write_text(json_line(_outcome("GC", "GCQ6")) + "\n", encoding="utf-8")
+    historical_gre = tmp_path / "gre.jsonl"
+    historical_gre.write_text("", encoding="utf-8")
+
+    result = run_trade_outcome_enrichment(
+        outcomes_path=outcomes,
+        crfd_rows_path=tmp_path / "missing_crfd.jsonl",
+        gre_report_path=tmp_path / "missing_gre.json",
+        historical_gre_rows_path=historical_gre,
+        market_context_rows_path=tmp_path / "missing_context.jsonl",
+        output_dir=tmp_path / "out",
+        now=NOW,
+    )
+
+    assert result.summary["coverage_counts"]["historical_gre"] == 0
+    assert result.summary["historical_gre"]["failed_joins"] == 1
+    assert result.historical_gre_report_path.exists()
+    assert result.historical_gre_join_quality_path.exists()
+    assert result.historical_gre_data_quality_path.exists()
+
+
 def test_market_context_join_does_not_use_future_observation() -> None:
     enrichments = build_trade_outcome_enrichments(
         [_outcome("GC", "GCQ6", entry_time="2026-07-01T10:05:00Z")],
@@ -184,6 +260,9 @@ def test_empty_dataset_handled_safely(tmp_path: Path) -> None:
     assert result.market_context_report_path.exists()
     assert result.market_context_join_quality_path.exists()
     assert result.market_context_data_quality_path.exists()
+    assert result.historical_gre_report_path.exists()
+    assert result.historical_gre_join_quality_path.exists()
+    assert result.historical_gre_data_quality_path.exists()
 
 
 def test_trade_outcome_enrichment_import_boundary() -> None:
@@ -279,3 +358,31 @@ def _vix_context(observation_time: str, *, level: float) -> dict:
         "diagnostic_only": True,
         "production_effect": False,
     }
+
+
+def _historical_gre(observation_time: str, *, label: str, confidence: int) -> dict:
+    normalized_time = observation_time.replace("Z", "+00:00")
+    return {
+        "schema_version": "track_b_gre_validation_row_v1",
+        "gre_generated_at": normalized_time,
+        "classification_candle_max_ts": normalized_time,
+        "instrument": "GOLD",
+        "contract": "GC",
+        "regime_label": label,
+        "confidence": confidence,
+        "directional_bias": "BULLISH" if label == "LONG" else "BEARISH" if label == "SHORT" else "NEUTRAL",
+        "validation_status": "VALIDATED",
+        "provider_metadata": {
+            "provider_id": "parquet",
+            "provider_kind": "historical_databento_parquet",
+            "diagnostic_only": True,
+        },
+        "source_refs": {"gre_report": "BACKFILL_GENERATED_GRE_OBSERVATION"},
+        "diagnostic_only": True,
+    }
+
+
+def json_line(payload: dict) -> str:
+    import json
+
+    return json.dumps(payload, sort_keys=True)

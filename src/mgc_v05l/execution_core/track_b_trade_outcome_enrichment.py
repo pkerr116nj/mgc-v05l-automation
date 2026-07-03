@@ -20,6 +20,7 @@ DEFAULT_OUTPUT_ROOT = Path("outputs") / "track_b_execution_core"
 DEFAULT_OUTCOMES_PATH = DEFAULT_OUTCOME_LAYER_DIR / OUTCOMES_JSONL
 DEFAULT_CRFD_ROWS = DEFAULT_OUTPUT_ROOT / "research" / "canonical_research_feature_dataset" / "research_feature_dataset.jsonl"
 DEFAULT_GRE_REPORT = DEFAULT_OUTPUT_ROOT / "research" / "gold_regime_engine" / "latest_gold_regime_engine.json"
+DEFAULT_HISTORICAL_GRE_ROWS = DEFAULT_OUTPUT_ROOT / "research" / "gold_regime_engine" / "gre_backfill_observations.jsonl"
 DEFAULT_MARKET_CONTEXT_ROWS = DEFAULT_OUTPUT_ROOT / "research" / "canonical_market_context" / "canonical_market_context.jsonl"
 DEFAULT_OUTPUT_DIR = DEFAULT_OUTPUT_ROOT / "trade_outcome_enrichment"
 
@@ -31,6 +32,9 @@ DATA_QUALITY_MD = "trade_outcome_enrichment_data_quality.md"
 MARKET_CONTEXT_REPORT_MD = "market_context_enrichment_report.md"
 MARKET_CONTEXT_JOIN_QUALITY_MD = "market_context_join_quality.md"
 MARKET_CONTEXT_DATA_QUALITY_MD = "trade_outcome_market_context_data_quality.md"
+HISTORICAL_GRE_REPORT_MD = "historical_gre_trade_enrichment_report.md"
+HISTORICAL_GRE_JOIN_QUALITY_MD = "historical_gre_join_quality.md"
+HISTORICAL_GRE_DATA_QUALITY_MD = "historical_gre_trade_data_quality.md"
 
 SCHEMA_VERSION = "track_b_trade_outcome_enrichment_v1"
 SUMMARY_SCHEMA_VERSION = "track_b_trade_outcome_enrichment_summary_v1"
@@ -50,6 +54,9 @@ class TradeOutcomeEnrichmentResult:
     market_context_report_path: Path
     market_context_join_quality_path: Path
     market_context_data_quality_path: Path
+    historical_gre_report_path: Path
+    historical_gre_join_quality_path: Path
+    historical_gre_data_quality_path: Path
 
 
 def run_trade_outcome_enrichment(
@@ -57,6 +64,7 @@ def run_trade_outcome_enrichment(
     outcomes_path: Path = DEFAULT_OUTCOMES_PATH,
     crfd_rows_path: Path = DEFAULT_CRFD_ROWS,
     gre_report_path: Path = DEFAULT_GRE_REPORT,
+    historical_gre_rows_path: Path = DEFAULT_HISTORICAL_GRE_ROWS,
     market_context_rows_path: Path = DEFAULT_MARKET_CONTEXT_ROWS,
     output_dir: Path = DEFAULT_OUTPUT_DIR,
     now: datetime | str | None = None,
@@ -67,17 +75,20 @@ def run_trade_outcome_enrichment(
     outcomes = _read_jsonl(outcomes_path)
     crfd_rows = _read_jsonl(crfd_rows_path)
     gre_report = _read_json_mapping(gre_report_path)
+    historical_gre_rows = _read_jsonl(historical_gre_rows_path)
     market_context_rows = _read_jsonl(market_context_rows_path)
     enrichments = build_trade_outcome_enrichments(
         outcomes,
         crfd_rows=crfd_rows,
         gre_report=gre_report,
+        historical_gre_rows=historical_gre_rows,
         market_context_rows=market_context_rows,
         generated_at=generated_at,
         source_paths={
             "canonical_trade_outcomes": outcomes_path,
             "crfd_rows": crfd_rows_path,
             "gre_report": gre_report_path,
+            "historical_gre_rows": historical_gre_rows_path,
             "market_context_rows": market_context_rows_path,
         },
     )
@@ -86,12 +97,14 @@ def run_trade_outcome_enrichment(
         outcome_count=len(outcomes),
         crfd_row_count=len(crfd_rows),
         gre_report=gre_report,
+        historical_gre_row_count=len(historical_gre_rows),
         market_context_row_count=len(market_context_rows),
         generated_at=generated_at,
         source_paths={
             "canonical_trade_outcomes": outcomes_path,
             "crfd_rows": crfd_rows_path,
             "gre_report": gre_report_path,
+            "historical_gre_rows": historical_gre_rows_path,
             "market_context_rows": market_context_rows_path,
         },
     )
@@ -113,6 +126,12 @@ def run_trade_outcome_enrichment(
     market_context_join_quality_path.write_text(render_market_context_join_quality_markdown(summary), encoding="utf-8")
     market_context_data_quality_path = output_dir / MARKET_CONTEXT_DATA_QUALITY_MD
     market_context_data_quality_path.write_text(render_market_context_data_quality_markdown(summary), encoding="utf-8")
+    historical_gre_report_path = output_dir / HISTORICAL_GRE_REPORT_MD
+    historical_gre_report_path.write_text(render_historical_gre_report_markdown(summary), encoding="utf-8")
+    historical_gre_join_quality_path = output_dir / HISTORICAL_GRE_JOIN_QUALITY_MD
+    historical_gre_join_quality_path.write_text(render_historical_gre_join_quality_markdown(summary), encoding="utf-8")
+    historical_gre_data_quality_path = output_dir / HISTORICAL_GRE_DATA_QUALITY_MD
+    historical_gre_data_quality_path.write_text(render_historical_gre_data_quality_markdown(summary), encoding="utf-8")
     return TradeOutcomeEnrichmentResult(
         enrichments=enrichments,
         summary=summary,
@@ -124,6 +143,9 @@ def run_trade_outcome_enrichment(
         market_context_report_path=market_context_report_path,
         market_context_join_quality_path=market_context_join_quality_path,
         market_context_data_quality_path=market_context_data_quality_path,
+        historical_gre_report_path=historical_gre_report_path,
+        historical_gre_join_quality_path=historical_gre_join_quality_path,
+        historical_gre_data_quality_path=historical_gre_data_quality_path,
     )
 
 
@@ -132,6 +154,7 @@ def build_trade_outcome_enrichments(
     *,
     crfd_rows: Sequence[Mapping[str, Any]] = (),
     gre_report: Mapping[str, Any] | None = None,
+    historical_gre_rows: Sequence[Mapping[str, Any]] = (),
     market_context_rows: Sequence[Mapping[str, Any]] = (),
     generated_at: datetime,
     source_paths: Mapping[str, Path | str] | None = None,
@@ -139,6 +162,7 @@ def build_trade_outcome_enrichments(
     max_gre_join_age_seconds: int = DEFAULT_MAX_GRE_JOIN_AGE_SECONDS,
 ) -> list[dict[str, Any]]:
     crfd_index = _CrfdIndex(crfd_rows)
+    historical_gre_index = _HistoricalGreIndex(historical_gre_rows)
     market_context_index = _MarketContextIndex(market_context_rows)
     gre = dict(gre_report or {})
     enrichments: list[dict[str, Any]] = []
@@ -154,6 +178,7 @@ def build_trade_outcome_enrichments(
             outcome,
             crfd=crfd,
             gre_report=gre,
+            historical_gre=historical_gre_index.latest_at_or_before(outcome=outcome, timestamp=entry_time),
             entry_time=entry_time,
             max_age_seconds=max_gre_join_age_seconds,
         )
@@ -193,6 +218,13 @@ def build_trade_outcome_enrichments(
                 "gre_label": gre_context.get("label"),
                 "gre_confidence": gre_context.get("confidence"),
                 "gre_provenance": gre_context.get("provenance"),
+                "gre_provider": gre_context.get("provider"),
+                "gre_provider_version": gre_context.get("provider_version"),
+                "gre_timestamp": gre_context.get("timestamp"),
+                "gre_join_method": gre_context.get("join_method"),
+                "gre_staleness": gre_context.get("staleness"),
+                "gre_research_readiness": gre_context.get("research_readiness"),
+                "gre_source_refs": gre_context.get("source_refs"),
                 "vwap_relation": crfd.get("vwap_relation") if crfd else None,
                 "vwap": crfd.get("vwap") if crfd else None,
                 "distance_from_vwap_points": _first_non_null(
@@ -219,6 +251,7 @@ def build_trade_outcome_enrichments(
                     "canonical_trade_outcomes": str((source_paths or {}).get("canonical_trade_outcomes", "")),
                     "crfd_rows": str((source_paths or {}).get("crfd_rows", "")) if crfd else None,
                     "gre_report": str((source_paths or {}).get("gre_report", "")) if gre_context.get("provenance") else None,
+                    "historical_gre_rows": str((source_paths or {}).get("historical_gre_rows", "")) if gre_context.get("provenance") == "historical_gre_backfill" else None,
                     "market_context_rows": str((source_paths or {}).get("market_context_rows", "")) if market_context else None,
                     "source_outcome_refs": outcome.get("source_refs"),
                 },
@@ -234,12 +267,14 @@ def build_trade_outcome_enrichment_summary(
     outcome_count: int,
     crfd_row_count: int,
     gre_report: Mapping[str, Any] | None,
+    historical_gre_row_count: int = 0,
     market_context_row_count: int = 0,
     generated_at: datetime,
     source_paths: Mapping[str, Path | str] | None = None,
 ) -> dict[str, Any]:
     flags = _counts(flag for row in enrichments for flag in row.get("data_quality_flags", ()))
     gre_count = sum(1 for row in enrichments if row.get("gre_label") is not None)
+    historical_gre_count = sum(1 for row in enrichments if row.get("gre_provenance") == "historical_gre_backfill")
     crfd_count = sum(1 for row in enrichments if row.get("crfd_join_success") is True)
     vwap_count = sum(1 for row in enrichments if row.get("vwap_relation") not in (None, "unavailable"))
     avwap_count = sum(1 for row in enrichments if row.get("avwap_relation") not in (None, "unavailable"))
@@ -255,6 +290,16 @@ def build_trade_outcome_enrichment_summary(
         for row in enrichments
         if row.get("market_context_timestamp")
     ]
+    gre_staleness_values = [
+        float(row["gre_staleness"])
+        for row in enrichments
+        if row.get("gre_staleness") is not None
+    ]
+    gre_timestamps = [
+        str(row.get("gre_timestamp"))
+        for row in enrichments
+        if row.get("gre_timestamp")
+    ]
     return {
         "schema_version": SUMMARY_SCHEMA_VERSION,
         "generated_at": generated_at.isoformat(),
@@ -265,12 +310,14 @@ def build_trade_outcome_enrichment_summary(
         "input_counts": {
             "outcome_count": outcome_count,
             "crfd_row_count": crfd_row_count,
+            "historical_gre_row_count": historical_gre_row_count,
             "market_context_row_count": market_context_row_count,
             "gre_report_present": bool(gre_report),
         },
         "overall": {
             "enrichment_count": len(enrichments),
             "gre_coverage": _rate(gre_count, len(enrichments)),
+            "historical_gre_coverage": _rate(historical_gre_count, len(enrichments)),
             "crfd_coverage": _rate(crfd_count, len(enrichments)),
             "vwap_coverage": _rate(vwap_count, len(enrichments)),
             "avwap_coverage": _rate(avwap_count, len(enrichments)),
@@ -280,6 +327,7 @@ def build_trade_outcome_enrichment_summary(
         },
         "coverage_counts": {
             "gre": gre_count,
+            "historical_gre": historical_gre_count,
             "crfd": crfd_count,
             "vwap": vwap_count,
             "avwap": avwap_count,
@@ -296,6 +344,17 @@ def build_trade_outcome_enrichment_summary(
                 "end": max(market_context_timestamps) if market_context_timestamps else None,
             },
             "join_quality": _join_quality_stats(staleness_values),
+        },
+        "historical_gre": {
+            "provider": "historical_gre_backfill",
+            "successful_joins": historical_gre_count,
+            "failed_joins": max(len(enrichments) - historical_gre_count, 0),
+            "gre_coverage": _rate(historical_gre_count, len(enrichments)),
+            "coverage_window": {
+                "start": min(gre_timestamps) if gre_timestamps else None,
+                "end": max(gre_timestamps) if gre_timestamps else None,
+            },
+            "join_quality": _join_quality_stats(gre_staleness_values),
         },
         "missing_reasons": flags,
         "top_enrichment_limitations": _top_limitations(flags),
@@ -321,6 +380,7 @@ def render_enrichment_summary_markdown(summary: Mapping[str, Any]) -> str:
             f"- Generated at: {summary.get('generated_at')}",
             f"- Enrichments: {overall.get('enrichment_count')}",
             f"- GRE coverage: {overall.get('gre_coverage')} ({counts.get('gre')})",
+            f"- Historical GRE coverage: {overall.get('historical_gre_coverage')} ({counts.get('historical_gre')})",
             f"- CRFD coverage: {overall.get('crfd_coverage')} ({counts.get('crfd')})",
             f"- VWAP coverage: {overall.get('vwap_coverage')} ({counts.get('vwap')})",
             f"- AVWAP coverage: {overall.get('avwap_coverage')} ({counts.get('avwap')})",
@@ -424,11 +484,71 @@ def render_market_context_data_quality_markdown(summary: Mapping[str, Any]) -> s
     return "\n".join(lines)
 
 
+def render_historical_gre_report_markdown(summary: Mapping[str, Any]) -> str:
+    gre = summary.get("historical_gre") or {}
+    coverage = gre.get("coverage_window") or {}
+    return "\n".join(
+        [
+            "# Historical GRE Trade Enrichment Report",
+            "",
+            f"- Generated at: {summary.get('generated_at')}",
+            f"- Provider: {gre.get('provider')}",
+            f"- Enrichment count: {(summary.get('overall') or {}).get('enrichment_count')}",
+            f"- Historical GRE coverage: {gre.get('gre_coverage')}",
+            f"- Successful joins: {gre.get('successful_joins')}",
+            f"- Failed joins: {gre.get('failed_joins')}",
+            f"- Coverage start: {coverage.get('start')}",
+            f"- Coverage end: {coverage.get('end')}",
+            "",
+            "Historical GRE context is diagnostic-only and sourced from the historical GRE backfill corpus.",
+            "",
+        ]
+    )
+
+
+def render_historical_gre_join_quality_markdown(summary: Mapping[str, Any]) -> str:
+    gre = summary.get("historical_gre") or {}
+    stats = gre.get("join_quality") or {}
+    return "\n".join(
+        [
+            "# Historical GRE Join Quality",
+            "",
+            f"- Successful joins: {gre.get('successful_joins')}",
+            f"- Failed joins: {gre.get('failed_joins')}",
+            f"- Minimum staleness seconds: {stats.get('min_staleness_seconds')}",
+            f"- Maximum staleness seconds: {stats.get('max_staleness_seconds')}",
+            f"- Average staleness seconds: {stats.get('avg_staleness_seconds')}",
+            f"- Median staleness seconds: {stats.get('median_staleness_seconds')}",
+            "",
+            "Join rule: nearest prior historical GRE observation at or before trade entry timestamp.",
+            "",
+        ]
+    )
+
+
+def render_historical_gre_data_quality_markdown(summary: Mapping[str, Any]) -> str:
+    flags = summary.get("missing_reasons") or {}
+    lines = ["# Historical GRE Trade Data Quality", ""]
+    if flags.get("missing_gre_context"):
+        lines.append(f"- missing_gre_context: {flags.get('missing_gre_context')}")
+    else:
+        lines.append("- No missing GRE context values.")
+    lines.extend(
+        [
+            "",
+            "Remaining limitation: historical GRE coverage depends on the R15 backfill window and only joins trades at or after the first historical GRE observation.",
+            "",
+        ]
+    )
+    return "\n".join(lines)
+
+
 def _select_gre_context(
     outcome: Mapping[str, Any],
     *,
     crfd: Mapping[str, Any] | None,
     gre_report: Mapping[str, Any],
+    historical_gre: Mapping[str, Any] | None = None,
     entry_time: datetime | None,
     max_age_seconds: int,
 ) -> dict[str, Any]:
@@ -437,15 +557,45 @@ def _select_gre_context(
             "label": outcome.get("gre_label_at_entry"),
             "confidence": outcome.get("gre_confidence_at_entry"),
             "provenance": "canonical_trade_outcome",
+            "provider": "canonical_trade_outcome",
+            "provider_version": outcome.get("schema_version"),
+            "timestamp": outcome.get("entry_time"),
+            "join_method": "embedded_at_entry",
+            "staleness": 0.0,
+            "research_readiness": None,
+            "source_refs": outcome.get("source_refs"),
+        }
+    if historical_gre:
+        gre_time = _parse_datetime(historical_gre.get("gre_generated_at") or historical_gre.get("classification_candle_max_ts"))
+        provider_metadata = historical_gre.get("provider_metadata") or {}
+        age = _age_seconds(gre_time, entry_time)
+        return {
+            "label": historical_gre.get("regime_label"),
+            "confidence": historical_gre.get("confidence"),
+            "provenance": "historical_gre_backfill",
+            "provider": provider_metadata.get("provider_kind") or historical_gre.get("source_mode") or "historical_gre_backfill",
+            "provider_version": historical_gre.get("schema_version"),
+            "timestamp": (gre_time.isoformat() if gre_time else historical_gre.get("gre_generated_at")),
+            "join_method": "nearest_prior_historical_gre_observation",
+            "staleness": age,
+            "research_readiness": historical_gre.get("validation_status"),
+            "source_refs": historical_gre.get("source_refs"),
         }
     if crfd and crfd.get("gre_label") is not None:
         return {
             "label": crfd.get("gre_label"),
             "confidence": crfd.get("gre_confidence"),
             "provenance": "canonical_research_feature_dataset",
+            "provider": crfd.get("provider_kind") or crfd.get("provider_id"),
+            "provider_version": crfd.get("schema_version"),
+            "timestamp": crfd.get("observation_time"),
+            "join_method": "crfd_embedded_gre_context",
+            "staleness": _age_seconds(crfd.get("observation_time"), entry_time),
+            "research_readiness": None,
+            "source_refs": crfd.get("source_refs"),
         }
     if not gre_report or not _is_gold_instrument(outcome.get("instrument") or outcome.get("contract")):
-        return {"label": None, "confidence": None, "provenance": None}
+        return _missing_gre_context()
     gre_time = _parse_datetime(gre_report.get("generated_at"))
     age = abs((gre_time - entry_time).total_seconds()) if gre_time and entry_time else None
     if age is not None and age <= max_age_seconds:
@@ -453,8 +603,15 @@ def _select_gre_context(
             "label": gre_report.get("regime_label"),
             "confidence": gre_report.get("confidence"),
             "provenance": "latest_gold_regime_engine_time_aligned",
+            "provider": "latest_gold_regime_engine",
+            "provider_version": gre_report.get("schema_version"),
+            "timestamp": gre_report.get("generated_at"),
+            "join_method": "latest_gre_time_aligned",
+            "staleness": age,
+            "research_readiness": None,
+            "source_refs": gre_report.get("source_refs"),
         }
-    return {"label": None, "confidence": None, "provenance": None}
+    return _missing_gre_context()
 
 
 def _enrichment_flags(
@@ -507,6 +664,29 @@ class _CrfdIndex:
         return candidate
 
 
+class _HistoricalGreIndex:
+    def __init__(self, rows: Sequence[Mapping[str, Any]]) -> None:
+        values: list[tuple[datetime, Mapping[str, Any]]] = []
+        for row in rows:
+            if row.get("diagnostic_only") is False:
+                continue
+            ts = _parse_datetime(row.get("gre_generated_at") or row.get("classification_candle_max_ts"))
+            if ts is None:
+                continue
+            values.append((ts, row))
+        self._rows = sorted(values, key=lambda item: item[0])
+
+    def latest_at_or_before(self, *, outcome: Mapping[str, Any], timestamp: datetime | None) -> Mapping[str, Any] | None:
+        if timestamp is None or not _is_gold_instrument(outcome.get("instrument") or outcome.get("contract")):
+            return None
+        candidate: Mapping[str, Any] | None = None
+        for row_ts, row in self._rows:
+            if row_ts > timestamp:
+                break
+            candidate = row
+        return candidate
+
+
 class _MarketContextIndex:
     def __init__(self, rows: Sequence[Mapping[str, Any]]) -> None:
         values: list[tuple[datetime, Mapping[str, Any]]] = []
@@ -540,6 +720,21 @@ def _top_limitations(flags: Mapping[str, int]) -> list[str]:
         "missing_vix_context": "VIX context is unavailable for some outcomes.",
     }
     return [mapping[key] for key in mapping if flags.get(key)]
+
+
+def _missing_gre_context() -> dict[str, Any]:
+    return {
+        "label": None,
+        "confidence": None,
+        "provenance": None,
+        "provider": None,
+        "provider_version": None,
+        "timestamp": None,
+        "join_method": None,
+        "staleness": None,
+        "research_readiness": None,
+        "source_refs": None,
+    }
 
 
 def _join_quality_stats(values: Sequence[float]) -> dict[str, float | int | None]:
