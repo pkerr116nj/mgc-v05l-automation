@@ -259,6 +259,25 @@ def default_metric_registry() -> dict[str, AnalyticsMetric]:
         "median_hold_seconds": AnalyticsMetric("median_hold_seconds", "median", source_field="hold_seconds"),
         "data_quality_flags": AnalyticsMetric("data_quality_flags", "counts", source_field="data_quality_flags"),
         "enrichment_data_quality_flags": AnalyticsMetric("enrichment_data_quality_flags", "counts", source_field="enrichment_data_quality_flags"),
+        "profit_factor_proxy": AnalyticsMetric("profit_factor_proxy", "profit_factor", source_field="realized_pnl_proxy"),
+        "average_winner_pnl_proxy": AnalyticsMetric("average_winner_pnl_proxy", "average_winner", source_field="realized_pnl_proxy"),
+        "average_loser_pnl_proxy": AnalyticsMetric("average_loser_pnl_proxy", "average_loser", source_field="realized_pnl_proxy"),
+        "payoff_ratio_proxy": AnalyticsMetric("payoff_ratio_proxy", "payoff_ratio", source_field="realized_pnl_proxy"),
+        "max_win_pnl_proxy": AnalyticsMetric("max_win_pnl_proxy", "max_win", source_field="realized_pnl_proxy"),
+        "max_loss_pnl_proxy": AnalyticsMetric("max_loss_pnl_proxy", "max_loss", source_field="realized_pnl_proxy"),
+        "median_winner_pnl_proxy": AnalyticsMetric("median_winner_pnl_proxy", "median_winner", source_field="realized_pnl_proxy"),
+        "median_loser_pnl_proxy": AnalyticsMetric("median_loser_pnl_proxy", "median_loser", source_field="realized_pnl_proxy"),
+        "p10_pnl_proxy": AnalyticsMetric("p10_pnl_proxy", "percentile_value", source_field="realized_pnl_proxy", percentiles=(10,)),
+        "p25_pnl_proxy": AnalyticsMetric("p25_pnl_proxy", "percentile_value", source_field="realized_pnl_proxy", percentiles=(25,)),
+        "p75_pnl_proxy": AnalyticsMetric("p75_pnl_proxy", "percentile_value", source_field="realized_pnl_proxy", percentiles=(75,)),
+        "p90_pnl_proxy": AnalyticsMetric("p90_pnl_proxy", "percentile_value", source_field="realized_pnl_proxy", percentiles=(90,)),
+        "downside_tail_mean_proxy": AnalyticsMetric("downside_tail_mean_proxy", "downside_tail_mean", source_field="realized_pnl_proxy"),
+        "upside_tail_mean_proxy": AnalyticsMetric("upside_tail_mean_proxy", "upside_tail_mean", source_field="realized_pnl_proxy"),
+        "consecutive_win_streak_max": AnalyticsMetric("consecutive_win_streak_max", "win_streak", source_field="realized_pnl_proxy"),
+        "consecutive_loss_streak_max": AnalyticsMetric("consecutive_loss_streak_max", "loss_streak", source_field="realized_pnl_proxy"),
+        "loss_rate": AnalyticsMetric("loss_rate", "loss_rate", source_field="realized_pnl_proxy"),
+        "breakeven_rate": AnalyticsMetric("breakeven_rate", "breakeven_rate", source_field="realized_pnl_proxy"),
+        "sample_confidence_label": AnalyticsMetric("sample_confidence_label", "sample_confidence_label"),
     }
 
 
@@ -377,6 +396,7 @@ def aggregate_metric_group(
         "sample_class": sample_class,
         "sample_rank": SAMPLE_RANK.get(sample_class, 0),
     }
+    metric_flags: dict[str, int] = {}
     for metric in metrics or default_expectancy_metrics():
         output_field = metric.output_field or metric.name
         if metric.kind == "win_rate":
@@ -397,8 +417,45 @@ def aggregate_metric_group(
             payload[output_field] = len(rows)
         elif metric.kind == "sample_class":
             payload[output_field] = sample_class
+        elif metric.kind == "profit_factor":
+            payload[output_field] = profit_factor(rows, metric.source_field or "realized_pnl_proxy", metric_flags)
+        elif metric.kind == "average_winner":
+            payload[output_field] = average_winner(rows, metric.source_field or "realized_pnl_proxy", metric_flags)
+        elif metric.kind == "average_loser":
+            payload[output_field] = average_loser(rows, metric.source_field or "realized_pnl_proxy", metric_flags)
+        elif metric.kind == "payoff_ratio":
+            payload[output_field] = payoff_ratio(rows, metric.source_field or "realized_pnl_proxy", metric_flags)
+        elif metric.kind == "max_win":
+            payload[output_field] = extrema_winner(rows, metric.source_field or "realized_pnl_proxy", metric_flags, maximum=True)
+        elif metric.kind == "max_loss":
+            payload[output_field] = extrema_loser(rows, metric.source_field or "realized_pnl_proxy", metric_flags, minimum=True)
+        elif metric.kind == "median_winner":
+            payload[output_field] = median_winner(rows, metric.source_field or "realized_pnl_proxy", metric_flags)
+        elif metric.kind == "median_loser":
+            payload[output_field] = median_loser(rows, metric.source_field or "realized_pnl_proxy", metric_flags)
+        elif metric.kind == "percentile_value":
+            values = numeric_values(rows, metric.source_field or "")
+            pct = metric.percentiles[0] if metric.percentiles else 50
+            payload[output_field] = percentile(sorted(values), pct) if values else None
+            if not values:
+                _add_metric_flag(metric_flags, f"missing_{output_field}_pnl_proxy")
+        elif metric.kind == "downside_tail_mean":
+            payload[output_field] = tail_mean(rows, metric.source_field or "realized_pnl_proxy", metric_flags, side="downside")
+        elif metric.kind == "upside_tail_mean":
+            payload[output_field] = tail_mean(rows, metric.source_field or "realized_pnl_proxy", metric_flags, side="upside")
+        elif metric.kind == "win_streak":
+            payload[output_field] = streak_max(rows, metric.source_field or "realized_pnl_proxy", target="win")
+        elif metric.kind == "loss_streak":
+            payload[output_field] = streak_max(rows, metric.source_field or "realized_pnl_proxy", target="loss")
+        elif metric.kind == "loss_rate":
+            payload[output_field] = loss_rate(rows, metric.source_field or "realized_pnl_proxy")
+        elif metric.kind == "breakeven_rate":
+            payload[output_field] = breakeven_rate(rows, metric.source_field or "realized_pnl_proxy")
+        elif metric.kind == "sample_confidence_label":
+            payload[output_field] = sample_confidence_label(len(rows))
         else:
             payload[output_field] = None
+    payload["metric_data_quality_flags"] = metric_flags
     return payload
 
 
@@ -444,6 +501,131 @@ def win_rate(rows: Sequence[Mapping[str, Any]], key: str) -> float | None:
     if not values:
         return None
     return round(sum(1 for value in values if value > 0) / len(values), 6)
+
+
+def loss_rate(rows: Sequence[Mapping[str, Any]], key: str) -> float | None:
+    values = numeric_values(rows, key)
+    if not values:
+        return None
+    return round(sum(1 for value in values if value < 0) / len(values), 6)
+
+
+def breakeven_rate(rows: Sequence[Mapping[str, Any]], key: str) -> float | None:
+    values = numeric_values(rows, key)
+    if not values:
+        return None
+    return round(sum(1 for value in values if value == 0) / len(values), 6)
+
+
+def profit_factor(rows: Sequence[Mapping[str, Any]], key: str, flags: dict[str, int] | None = None) -> float | None:
+    values = numeric_values(rows, key)
+    winners = [value for value in values if value > 0]
+    losers = [value for value in values if value < 0]
+    if not values:
+        _add_metric_flag(flags, "missing_pnl_proxy_for_profit_factor")
+        return None
+    if not winners:
+        _add_metric_flag(flags, "profit_factor_no_winners")
+        return None
+    if not losers:
+        _add_metric_flag(flags, "profit_factor_no_losses")
+        return None
+    return round(sum(winners) / abs(sum(losers)), 6)
+
+
+def average_winner(rows: Sequence[Mapping[str, Any]], key: str, flags: dict[str, int] | None = None) -> float | None:
+    winners = [value for value in numeric_values(rows, key) if value > 0]
+    if not winners:
+        _add_metric_flag(flags, "average_winner_no_winners")
+        return None
+    return average(winners)
+
+
+def average_loser(rows: Sequence[Mapping[str, Any]], key: str, flags: dict[str, int] | None = None) -> float | None:
+    losers = [value for value in numeric_values(rows, key) if value < 0]
+    if not losers:
+        _add_metric_flag(flags, "average_loser_no_losses")
+        return None
+    return average(losers)
+
+
+def payoff_ratio(rows: Sequence[Mapping[str, Any]], key: str, flags: dict[str, int] | None = None) -> float | None:
+    winner_average = average_winner(rows, key, flags)
+    loser_average = average_loser(rows, key, flags)
+    if winner_average is None or loser_average is None or loser_average == 0:
+        _add_metric_flag(flags, "payoff_ratio_insufficient_winners_or_losses")
+        return None
+    return round(winner_average / abs(loser_average), 6)
+
+
+def extrema_winner(rows: Sequence[Mapping[str, Any]], key: str, flags: dict[str, int] | None = None, *, maximum: bool) -> float | None:
+    winners = [value for value in numeric_values(rows, key) if value > 0]
+    if not winners:
+        _add_metric_flag(flags, "winner_extrema_no_winners")
+        return None
+    return round(max(winners) if maximum else min(winners), 6)
+
+
+def extrema_loser(rows: Sequence[Mapping[str, Any]], key: str, flags: dict[str, int] | None = None, *, minimum: bool) -> float | None:
+    losers = [value for value in numeric_values(rows, key) if value < 0]
+    if not losers:
+        _add_metric_flag(flags, "loser_extrema_no_losses")
+        return None
+    return round(min(losers) if minimum else max(losers), 6)
+
+
+def median_winner(rows: Sequence[Mapping[str, Any]], key: str, flags: dict[str, int] | None = None) -> float | None:
+    winners = [value for value in numeric_values(rows, key) if value > 0]
+    if not winners:
+        _add_metric_flag(flags, "median_winner_no_winners")
+        return None
+    return median_value(winners)
+
+
+def median_loser(rows: Sequence[Mapping[str, Any]], key: str, flags: dict[str, int] | None = None) -> float | None:
+    losers = [value for value in numeric_values(rows, key) if value < 0]
+    if not losers:
+        _add_metric_flag(flags, "median_loser_no_losses")
+        return None
+    return median_value(losers)
+
+
+def tail_mean(rows: Sequence[Mapping[str, Any]], key: str, flags: dict[str, int] | None = None, *, side: str) -> float | None:
+    values = sorted(numeric_values(rows, key))
+    if not values:
+        _add_metric_flag(flags, f"{side}_tail_mean_missing_pnl_proxy")
+        return None
+    tail_count = max(1, int(len(values) * 0.1))
+    tail_values = values[:tail_count] if side == "downside" else values[-tail_count:]
+    return average(tail_values)
+
+
+def streak_max(rows: Sequence[Mapping[str, Any]], key: str, *, target: str) -> int:
+    current = 0
+    best = 0
+    for row in sorted(rows, key=_row_time_sort_key):
+        value = number(row.get(key))
+        if value is None:
+            current = 0
+            continue
+        matched = value > 0 if target == "win" else value < 0
+        if matched:
+            current += 1
+            best = max(best, current)
+        else:
+            current = 0
+    return best
+
+
+def sample_confidence_label(count: int) -> str:
+    sample_class = sample_class_for_count(count)
+    if sample_class == "RESEARCH_GRADE":
+        return "RESEARCH_GRADE_SAMPLE_NOT_STATISTICAL_SIGNIFICANCE"
+    if sample_class == "DEVELOPING":
+        return "DEVELOPING_SAMPLE_REVIEW_ONLY"
+    if sample_class == "PRELIMINARY":
+        return "PRELIMINARY_SAMPLE_LOW_CONFIDENCE"
+    return "EXPLORATORY_SAMPLE_LOW_CONFIDENCE"
 
 
 def numeric_values(rows: Sequence[Mapping[str, Any]], key: str) -> list[float]:
@@ -591,6 +773,23 @@ def _sort_value(value: Any) -> float | str:
     if numeric is not None:
         return numeric
     return str(value or "")
+
+
+def _add_metric_flag(flags: dict[str, int] | None, flag: str) -> None:
+    if flags is None:
+        return
+    flags[flag] = flags.get(flag, 0) + 1
+
+
+def _row_time_sort_key(row: Mapping[str, Any]) -> tuple[str, str, str]:
+    exit_time = _coerce_optional_datetime(row.get("exit_time"))
+    entry_time = _coerce_optional_datetime(row.get("entry_time"))
+    primary = exit_time or entry_time
+    return (
+        primary.isoformat() if primary else "",
+        str(row.get("entry_time") or ""),
+        str(row.get("trade_outcome_id") or ""),
+    )
 
 
 def _group_meets_sample_rules(row: Mapping[str, Any], *, min_sample_size: int, min_sample_class: str | None) -> bool:

@@ -54,6 +54,20 @@ ANALYTICS_NEXT_STEPS_MD = "analytics_next_steps.md"
 
 SCHEMA_VERSION = "track_b_core_expectancy_analytics_v1"
 COVERAGE_SCHEMA_VERSION = "track_b_analytics_coverage_matrix_v1"
+CORE_EXPECTANCY_QUERY_METRICS = (
+    "win_rate",
+    "average_pnl_proxy",
+    "median_pnl_proxy",
+    "average_realized_points",
+    "median_realized_points",
+    "pnl_percentiles",
+    "best_trade",
+    "worst_trade",
+    "average_hold_seconds",
+    "median_hold_seconds",
+    "data_quality_flags",
+    "enrichment_data_quality_flags",
+)
 
 
 @dataclass(frozen=True)
@@ -316,6 +330,7 @@ def aggregate_expectancy_groups(
         CanonicalAnalyticsQuery(
             name="core_expectancy_group",
             dimensions=tuple(key_fields),
+            metrics=CORE_EXPECTANCY_QUERY_METRICS,
             filters=filters,
             validity_rules=tuple(validity_rules),
         ),

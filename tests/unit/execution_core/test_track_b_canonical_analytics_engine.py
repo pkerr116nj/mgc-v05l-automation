@@ -163,14 +163,118 @@ def test_registries_expose_expected_names_and_reject_unknown_metric() -> None:
         raise AssertionError("unsupported metric did not raise")
 
 
+def test_advanced_profit_factor_normal_case() -> None:
+    result = run_canonical_query(
+        [_row("a", pnl=10.0), _row("b", pnl=5.0), _row("c", pnl=-3.0), _row("d", pnl=-2.0)],
+        CanonicalAnalyticsQuery(name="advanced", metrics=("profit_factor_proxy",)),
+    )
+
+    row = result.grouped_rows[0]
+    assert row["profit_factor_proxy"] == 3.0
+    assert row["metric_data_quality_flags"] == {}
+
+
+def test_advanced_profit_factor_no_loss_returns_null_and_flag() -> None:
+    result = run_canonical_query(
+        [_row("a", pnl=10.0), _row("b", pnl=5.0)],
+        CanonicalAnalyticsQuery(name="advanced", metrics=("profit_factor_proxy",)),
+    )
+
+    row = result.grouped_rows[0]
+    assert row["profit_factor_proxy"] is None
+    assert row["metric_data_quality_flags"]["profit_factor_no_losses"] == 1
+
+
+def test_advanced_payoff_ratio_normal_case() -> None:
+    result = run_canonical_query(
+        [_row("a", pnl=10.0), _row("b", pnl=20.0), _row("c", pnl=-5.0), _row("d", pnl=-15.0)],
+        CanonicalAnalyticsQuery(
+            name="advanced",
+            metrics=("average_winner_pnl_proxy", "average_loser_pnl_proxy", "payoff_ratio_proxy"),
+        ),
+    )
+
+    row = result.grouped_rows[0]
+    assert row["average_winner_pnl_proxy"] == 15.0
+    assert row["average_loser_pnl_proxy"] == -10.0
+    assert row["payoff_ratio_proxy"] == 1.5
+
+
+def test_advanced_percentile_metrics() -> None:
+    result = run_canonical_query(
+        [_row(str(i), pnl=float(i)) for i in range(1, 6)],
+        CanonicalAnalyticsQuery(name="advanced", metrics=("p10_pnl_proxy", "p25_pnl_proxy", "p75_pnl_proxy", "p90_pnl_proxy")),
+    )
+
+    row = result.grouped_rows[0]
+    assert row["p10_pnl_proxy"] == 1.4
+    assert row["p25_pnl_proxy"] == 2.0
+    assert row["p75_pnl_proxy"] == 4.0
+    assert row["p90_pnl_proxy"] == 4.6
+
+
+def test_advanced_tail_means_use_bounded_decile_subset() -> None:
+    values = [-10.0, -5.0, -2.0, 1.0, 3.0, 5.0, 8.0, 13.0, 21.0, 34.0]
+    result = run_canonical_query(
+        [_row(str(i), pnl=value) for i, value in enumerate(values)],
+        CanonicalAnalyticsQuery(name="advanced", metrics=("downside_tail_mean_proxy", "upside_tail_mean_proxy")),
+    )
+
+    row = result.grouped_rows[0]
+    assert row["downside_tail_mean_proxy"] == -10.0
+    assert row["upside_tail_mean_proxy"] == 34.0
+
+
+def test_advanced_streak_metrics_are_order_aware() -> None:
+    rows = [
+        _row("a", pnl=1.0, entry_time="2026-07-01T10:00:00Z", exit_time="2026-07-01T10:05:00Z"),
+        _row("b", pnl=2.0, entry_time="2026-07-01T10:01:00Z", exit_time="2026-07-01T10:06:00Z"),
+        _row("c", pnl=-1.0, entry_time="2026-07-01T10:02:00Z", exit_time="2026-07-01T10:07:00Z"),
+        _row("d", pnl=-2.0, entry_time="2026-07-01T10:03:00Z", exit_time="2026-07-01T10:08:00Z"),
+        _row("e", pnl=-3.0, entry_time="2026-07-01T10:04:00Z", exit_time="2026-07-01T10:09:00Z"),
+        _row("f", pnl=4.0, entry_time="2026-07-01T10:05:00Z", exit_time="2026-07-01T10:10:00Z"),
+    ]
+    result = run_canonical_query(
+        rows,
+        CanonicalAnalyticsQuery(name="advanced", metrics=("consecutive_win_streak_max", "consecutive_loss_streak_max")),
+    )
+
+    row = result.grouped_rows[0]
+    assert row["consecutive_win_streak_max"] == 2
+    assert row["consecutive_loss_streak_max"] == 3
+
+
+def test_advanced_missing_pnl_proxy_handled_safely() -> None:
+    result = run_canonical_query(
+        [_row("a", pnl=None), _row("b", pnl=None)],
+        CanonicalAnalyticsQuery(name="advanced", metrics=("profit_factor_proxy", "p10_pnl_proxy", "downside_tail_mean_proxy")),
+    )
+
+    row = result.grouped_rows[0]
+    assert row["profit_factor_proxy"] is None
+    assert row["p10_pnl_proxy"] is None
+    assert row["downside_tail_mean_proxy"] is None
+    assert row["metric_data_quality_flags"]["missing_pnl_proxy_for_profit_factor"] == 1
+
+
+def test_advanced_sample_confidence_label() -> None:
+    result = run_canonical_query(
+        [_row(str(i), pnl=1.0) for i in range(10)],
+        CanonicalAnalyticsQuery(name="advanced", metrics=("sample_confidence_label",)),
+    )
+
+    assert result.grouped_rows[0]["sample_confidence_label"] == "PRELIMINARY_SAMPLE_LOW_CONFIDENCE"
+
+
 def _row(
     trade_id: str,
     *,
-    pnl: float,
+    pnl: float | None,
     strategy: str = "strategy_a",
     side: str = "LONG",
     gre_validity: str = "VALID",
     entry_time: str = "2026-07-01T10:00:00Z",
+    exit_time: str | None = None,
 ) -> dict:
     return {
         "trade_outcome_id": trade_id,
@@ -180,6 +284,7 @@ def _row(
         "contract": "GCQ6",
         "side": side,
         "entry_time": entry_time,
+        "exit_time": exit_time,
         "realized_points": pnl,
         "realized_pnl_proxy": pnl,
         "hold_seconds": 120.0,

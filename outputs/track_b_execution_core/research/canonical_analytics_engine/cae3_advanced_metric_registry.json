@@ -1,0 +1,52 @@
+{
+  "schema_version": "cae3_advanced_metric_registry_v1",
+  "generated_at": "2026-07-03T00:00:00-04:00",
+  "diagnostic_only": true,
+  "production_recommendation": false,
+  "trading_gate": false,
+  "pnl_proxy_only": true,
+  "advanced_metrics": [
+    "profit_factor_proxy",
+    "average_winner_pnl_proxy",
+    "average_loser_pnl_proxy",
+    "payoff_ratio_proxy",
+    "max_win_pnl_proxy",
+    "max_loss_pnl_proxy",
+    "median_winner_pnl_proxy",
+    "median_loser_pnl_proxy",
+    "p10_pnl_proxy",
+    "p25_pnl_proxy",
+    "p75_pnl_proxy",
+    "p90_pnl_proxy",
+    "downside_tail_mean_proxy",
+    "upside_tail_mean_proxy",
+    "consecutive_win_streak_max",
+    "consecutive_loss_streak_max",
+    "loss_rate",
+    "breakeven_rate",
+    "sample_confidence_label"
+  ],
+  "data_quality_contract": {
+    "no_losses_profit_factor": "return null and metric_data_quality_flags.profit_factor_no_losses",
+    "no_winners_profit_factor": "return null and metric_data_quality_flags.profit_factor_no_winners",
+    "missing_pnl_proxy": "return null and explicit metric_data_quality_flags where applicable",
+    "no_infinity": true
+  },
+  "tail_mean_method": "Mean of lowest/highest decile using at least one observation.",
+  "streak_ordering": [
+    "exit_time",
+    "entry_time",
+    "trade_outcome_id"
+  ],
+  "safety_contract": {
+    "broker_actions": false,
+    "order_actions": false,
+    "position_changes": false,
+    "global_cancel": false,
+    "runtime_restart": false,
+    "managed_exit_restart": false,
+    "strategy_changes": false,
+    "trading_gates": false,
+    "production_behavior_changes": false
+  }
+}
