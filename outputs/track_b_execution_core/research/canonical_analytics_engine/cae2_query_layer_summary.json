@@ -1,0 +1,65 @@
+{
+  "schema_version": "cae2_query_layer_summary_v1",
+  "generated_at": "2026-07-03T00:00:00-04:00",
+  "diagnostic_only": true,
+  "production_recommendation": false,
+  "trading_gate": false,
+  "models": [
+    "CanonicalAnalyticsQuery",
+    "CanonicalAnalyticsResult",
+    "DimensionDefinition",
+    "FilterDefinition"
+  ],
+  "supported_dimensions": [
+    "strategy",
+    "lane",
+    "session",
+    "instrument",
+    "contract",
+    "side",
+    "vix_regime",
+    "vix_percentile_bucket",
+    "gre_label",
+    "gre_confidence_bucket",
+    "crfd_regime",
+    "exit_policy"
+  ],
+  "supported_metrics": [
+    "trade_count",
+    "win_rate",
+    "average_pnl_proxy",
+    "median_pnl_proxy",
+    "expectancy_proxy",
+    "average_duration",
+    "sample_class",
+    "average_realized_points",
+    "median_realized_points",
+    "pnl_percentiles",
+    "best_trade",
+    "worst_trade",
+    "average_hold_seconds",
+    "median_hold_seconds",
+    "data_quality_flags",
+    "enrichment_data_quality_flags"
+  ],
+  "supported_filters": [
+    "instrument",
+    "strategy",
+    "session",
+    "valid_gre_only",
+    "valid_vix_only",
+    "date_window",
+    "side"
+  ],
+  "first_migrated_client": "track_b_core_expectancy_analytics",
+  "safety_contract": {
+    "broker_actions": false,
+    "order_actions": false,
+    "position_changes": false,
+    "global_cancel": false,
+    "runtime_restart": false,
+    "managed_exit_restart": false,
+    "strategy_changes": false,
+    "trading_gates": false
+  }
+}

@@ -17,11 +17,11 @@ from typing import Any, Iterable, Mapping, Sequence
 from mgc_v05l.execution_core.bounded_snapshot import BoundedSnapshotConfig, write_bounded_snapshot_json
 from mgc_v05l.execution_core.track_b_canonical_analytics_engine import (
     AnalyticsFilter,
-    CanonicalAnalyticsRequest,
+    CanonicalAnalyticsQuery,
     ContextValidityRule,
     aggregate_metric_group as engine_aggregate_metric_group,
     percentile_distribution as engine_percentile_distribution,
-    run_canonical_analytics,
+    run_canonical_query,
     sample_class_for_count as engine_sample_class_for_count,
 )
 from mgc_v05l.execution_core.track_b_trade_outcome_enrichment import (
@@ -311,16 +311,16 @@ def aggregate_expectancy_groups(
         AnalyticsFilter(field, "exists")
         for field in required_fields
     )
-    result = run_canonical_analytics(
+    result = run_canonical_query(
         rows,
-        CanonicalAnalyticsRequest(
+        CanonicalAnalyticsQuery(
             name="core_expectancy_group",
             dimensions=tuple(key_fields),
             filters=filters,
             validity_rules=tuple(validity_rules),
         ),
     )
-    return list(result.get("groups") or [])
+    return list(result.grouped_rows)
 
 
 def aggregate_expectancy_group(key: str, rows: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
