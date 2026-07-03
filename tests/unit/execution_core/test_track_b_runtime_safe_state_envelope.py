@@ -6,6 +6,7 @@ import os
 from datetime import UTC, datetime
 from pathlib import Path
 
+from mgc_v05l.app.track_b_safe_state_refresh import main as safe_state_refresh_main
 from mgc_v05l.execution_core.track_b_runtime_safe_state_envelope import (
     SAFE_STATE_BROKER_MUTATION_LIMIT_HIT,
     SAFE_STATE_DUPLICATE_INTENT_RISK,
@@ -601,6 +602,24 @@ def test_safe_state_refresh_replaces_stale_envelope(tmp_path: Path) -> None:
 
     written = json.loads(stale_path.read_text(encoding="utf-8"))
     assert written["generated_at"] == NOW.isoformat()
+    assert written["classification"] == SAFE_STATE_NORMAL
+
+
+def test_safe_state_refresh_cli_writes_read_only_envelope(tmp_path: Path, capsys) -> None:
+    _seed_base(tmp_path)
+
+    exit_code = safe_state_refresh_main(["--repo-root", str(tmp_path), "--json"])
+
+    assert exit_code == 0
+    captured = json.loads(capsys.readouterr().out)
+    assert captured["safe_state_classification"] == SAFE_STATE_NORMAL
+    assert captured["read_only"] is True
+    assert captured["broker_mutation_execution_performed"] is False
+    written = json.loads(
+        (tmp_path / "outputs/track_b_execution_core/safe_state/latest_runtime_safe_state_envelope.json").read_text(
+            encoding="utf-8"
+        )
+    )
     assert written["classification"] == SAFE_STATE_NORMAL
 
 
