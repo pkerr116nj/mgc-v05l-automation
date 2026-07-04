@@ -12,6 +12,8 @@ from mgc_v05l.execution_core.track_b_canonical_analytics_saved_queries import (
     EXECUTION_LOG_JSONL,
     SAVED_QUERIES_JSONL,
     build_saved_query,
+    compare_execution_records,
+    compare_latest_execution_for_query,
     deterministic_query_fingerprint,
     deterministic_result_fingerprint,
     load_saved_queries,
@@ -169,6 +171,92 @@ def test_saved_query_run_includes_saved_query_id_and_hash(tmp_path: Path) -> Non
     assert run_result.execution_record["saved_query_hash"]
 
 
+def test_result_diff_unchanged_results() -> None:
+    previous = _execution("a", result_fingerprint="same")
+    current = _execution("b", result_fingerprint="same")
+    result = _result([_group("strategy_a", 10.0)])
+
+    diff = compare_execution_records(previous, current, previous_result=result, current_result=result, generated_at=NOW)
+
+    assert diff.status == "UNCHANGED"
+    assert diff.comparison_classification == "UNCHANGED"
+    assert diff.result_fingerprint_changed is False
+
+
+def test_result_diff_changed_matched_outcome_count() -> None:
+    previous = _execution("a", result_fingerprint="old", matched=2)
+    current = _execution("b", result_fingerprint="new", matched=3)
+
+    diff = compare_execution_records(previous, current, generated_at=NOW)
+
+    assert diff.status == "CHANGED"
+    assert diff.matched_outcome_count_delta == 1
+    assert diff.comparison_classification == "MIXED"
+
+
+def test_result_diff_new_and_removed_groups() -> None:
+    previous = _execution("a", result_fingerprint="old")
+    current = _execution("b", result_fingerprint="new")
+
+    diff = compare_execution_records(
+        previous,
+        current,
+        previous_result=_result([_group("removed", 1.0), _group("same", 2.0)]),
+        current_result=_result([_group("new", 1.0), _group("same", 2.0)]),
+        generated_at=NOW,
+    )
+
+    assert diff.new_groups == ("new",)
+    assert diff.removed_groups == ("removed",)
+
+
+def test_result_diff_changed_metric_values() -> None:
+    previous = _execution("a", result_fingerprint="old")
+    current = _execution("b", result_fingerprint="new")
+
+    diff = compare_execution_records(
+        previous,
+        current,
+        previous_result=_result([_group("strategy_a", 10.0)]),
+        current_result=_result([_group("strategy_a", 15.0)]),
+        generated_at=NOW,
+    )
+
+    assert diff.changed_metric_values
+    assert diff.changed_metric_values[0]["metric"] == "expectancy_proxy"
+    assert diff.changed_metric_values[0]["direction"] == "IMPROVED"
+
+
+def test_result_diff_query_fingerprint_mismatch() -> None:
+    previous = _execution("a", query_fingerprint="old")
+    current = _execution("b", query_fingerprint="new")
+
+    diff = compare_execution_records(previous, current, generated_at=NOW)
+
+    assert diff.status == "QUERY_CHANGED"
+    assert diff.comparison_classification == "QUERY_CHANGED"
+    assert diff.result_fingerprint_changed is None
+
+
+def test_result_diff_no_prior_execution_handled_safely(tmp_path: Path) -> None:
+    diff = compare_latest_execution_for_query(output_dir=tmp_path, saved_query_id="missing", generated_at=NOW)
+
+    assert diff.status == "NO_PRIOR_EXECUTION"
+    assert diff.comparison_classification == "NOT_COMPARABLE"
+
+
+def test_result_diff_guardrails_preserved() -> None:
+    previous = _execution("a", result_fingerprint="old")
+    current = _execution("b", result_fingerprint="new")
+
+    diff = compare_execution_records(previous, current, generated_at=NOW)
+    record = diff.to_record()
+
+    assert record["diagnostic_only"] is True
+    assert record["production_recommendation"] is False
+    assert record["trading_gate"] is False
+
+
 def test_saved_query_import_boundary() -> None:
     paths = [
         Path("src/mgc_v05l/execution_core/track_b_canonical_analytics_saved_queries.py"),
@@ -258,4 +346,50 @@ def _enrichment(trade_id: str) -> dict:
         "gre_validity_classification": "VALID",
         "crfd_validity_classification": "VALID",
         "data_quality_flags": [],
+    }
+
+
+def _execution(
+    execution_id: str,
+    *,
+    query_fingerprint: str = "query",
+    result_fingerprint: str = "result",
+    matched: int = 2,
+    groups: int = 1,
+) -> dict:
+    return {
+        "execution_id": execution_id,
+        "generated_at": NOW.isoformat(),
+        "query_id": "expectancy_by_strategy",
+        "query_fingerprint": query_fingerprint,
+        "result_fingerprint": result_fingerprint,
+        "catalog_version": "track_b_canonical_analytics_catalog_v1",
+        "outcome_count_matched": matched,
+        "group_count": groups,
+        "data_quality_flags": [],
+        "diagnostic_only": True,
+        "production_recommendation": False,
+        "trading_gate": False,
+    }
+
+
+def _result(groups: list[dict]) -> dict:
+    return {
+        "schema_version": "track_b_canonical_analytics_result_v1",
+        "grouped_rows": groups,
+        "summary": {"matched_count": 2, "group_count": len(groups)},
+        "diagnostic_only": True,
+        "production_recommendation": False,
+        "trading_gate": False,
+    }
+
+
+def _group(key: str, expectancy: float) -> dict:
+    return {
+        "key": key,
+        "dimensions": {"strategy_id": key},
+        "trade_count": 2,
+        "expectancy_proxy": expectancy,
+        "win_rate": 0.5,
+        "sample_class": "EXPLORATORY",
     }

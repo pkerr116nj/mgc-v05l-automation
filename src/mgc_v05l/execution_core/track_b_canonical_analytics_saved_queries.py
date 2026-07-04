@@ -41,11 +41,17 @@ EXECUTION_SUMMARY_JSON = "cae6_latest_execution_summary.json"
 EXECUTION_CONTRACT_MD = "cae6_execution_audit_contract.md"
 RESULT_MANIFEST_MD = "cae6_result_manifest.md"
 RESULT_PROVENANCE_REPORT_MD = "cae6_result_provenance_report.md"
+RESULT_SNAPSHOT_DIR = "result_snapshots"
+RESULT_DIFF_CONTRACT_MD = "cae7_result_diff_contract.md"
+RESULT_DIFF_JSON = "cae7_latest_result_diff.json"
+RESULT_DIFF_MD = "cae7_latest_result_diff.md"
+CHANGE_FEED_MD = "cae7_change_feed.md"
 
 SAVED_QUERY_SCHEMA_VERSION = "magic_saved_query_v1"
 SUMMARY_SCHEMA_VERSION = "cae5_saved_query_summary_v1"
 VALIDATION_SCHEMA_VERSION = "cae5_saved_query_validation_v1"
 EXECUTION_RECORD_SCHEMA_VERSION = "cae6_canonical_analytics_execution_record_v1"
+RESULT_DIFF_SCHEMA_VERSION = "cae7_canonical_analytics_result_diff_v1"
 
 SUPPORTED_SCOPE_BINDINGS = {"snapshot", "inherit"}
 SUPPORTED_FILTER_OPS = {"eq", "ne", "in", "not_in", "exists", "not_null", "missing", "gt", "gte", "lt", "lte", "date_gte", "date_lte"}
@@ -160,6 +166,57 @@ class CanonicalAnalyticsExecutionRecord:
             "data_quality_flags": list(self.data_quality_flags),
             "query_fingerprint": self.query_fingerprint,
             "result_fingerprint": self.result_fingerprint,
+            "diagnostic_only": self.diagnostic_only,
+            "production_recommendation": self.production_recommendation,
+            "trading_gate": self.trading_gate,
+        }
+
+
+@dataclass(frozen=True)
+class CanonicalAnalyticsResultDiff:
+    diff_id: str
+    generated_at: str
+    status: str
+    comparison_classification: str
+    previous_execution_id: str | None
+    current_execution_id: str | None
+    query_id: str | None
+    result_fingerprint_changed: bool | None
+    matched_outcome_count_delta: int | None
+    group_count_delta: int | None
+    new_groups: tuple[str, ...]
+    removed_groups: tuple[str, ...]
+    changed_metric_values: tuple[dict[str, Any], ...]
+    top_positive_movers: tuple[dict[str, Any], ...]
+    top_negative_movers: tuple[dict[str, Any], ...]
+    sample_class_changes: tuple[dict[str, Any], ...]
+    data_quality_flag_changes: dict[str, Any]
+    guardrail_notes: tuple[str, ...]
+    diagnostic_only: bool = True
+    production_recommendation: bool = False
+    trading_gate: bool = False
+
+    def to_record(self) -> dict[str, Any]:
+        return {
+            "schema_version": RESULT_DIFF_SCHEMA_VERSION,
+            "diff_id": self.diff_id,
+            "generated_at": self.generated_at,
+            "status": self.status,
+            "comparison_classification": self.comparison_classification,
+            "previous_execution_id": self.previous_execution_id,
+            "current_execution_id": self.current_execution_id,
+            "query_id": self.query_id,
+            "result_fingerprint_changed": self.result_fingerprint_changed,
+            "matched_outcome_count_delta": self.matched_outcome_count_delta,
+            "group_count_delta": self.group_count_delta,
+            "new_groups": list(self.new_groups),
+            "removed_groups": list(self.removed_groups),
+            "changed_metric_values": list(self.changed_metric_values),
+            "top_positive_movers": list(self.top_positive_movers),
+            "top_negative_movers": list(self.top_negative_movers),
+            "sample_class_changes": list(self.sample_class_changes),
+            "data_quality_flag_changes": self.data_quality_flag_changes,
+            "guardrail_notes": list(self.guardrail_notes),
             "diagnostic_only": self.diagnostic_only,
             "production_recommendation": self.production_recommendation,
             "trading_gate": self.trading_gate,
@@ -464,6 +521,7 @@ def run_saved_query(
     )
     if write_execution_audit:
         publish_execution_audit(output_dir=output_dir, execution_record=execution_record)
+        publish_execution_result_snapshot(output_dir=output_dir, execution_record=execution_record, result=result_record)
     return SavedQueryRunResult(saved_query=saved_query, validation=validation, result=result_record, execution_record=execution_record.to_record())
 
 
@@ -541,6 +599,14 @@ def publish_execution_audit(*, output_dir: Path, execution_record: CanonicalAnal
         "result_manifest_path": manifest_path,
         "result_provenance_report_path": provenance_path,
     }
+
+
+def publish_execution_result_snapshot(*, output_dir: Path, execution_record: CanonicalAnalyticsExecutionRecord, result: Mapping[str, Any]) -> Path:
+    snapshot_dir = output_dir / RESULT_SNAPSHOT_DIR
+    snapshot_dir.mkdir(parents=True, exist_ok=True)
+    path = snapshot_dir / f"{execution_record.execution_id}.json"
+    path.write_text(json.dumps(result, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    return path
 
 
 def build_execution_summary(execution_record: CanonicalAnalyticsExecutionRecord) -> dict[str, Any]:
@@ -655,6 +721,237 @@ def render_result_provenance_report(execution_record: CanonicalAnalyticsExecutio
     return "\n".join(lines)
 
 
+def load_execution_records(path: Path | None = None) -> list[dict[str, Any]]:
+    resolved = path or DEFAULT_OUTPUT_DIR / EXECUTION_LOG_JSONL
+    if not resolved.exists():
+        return []
+    rows: list[dict[str, Any]] = []
+    for line in resolved.read_text(encoding="utf-8").splitlines():
+        if not line.strip():
+            continue
+        rows.append(json.loads(line))
+    return rows
+
+
+def load_result_snapshot(output_dir: Path, execution_id: str | None) -> dict[str, Any] | None:
+    if not execution_id:
+        return None
+    path = output_dir / RESULT_SNAPSHOT_DIR / f"{execution_id}.json"
+    if not path.exists():
+        return None
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+def compare_latest_execution_for_query(
+    *,
+    output_dir: Path = DEFAULT_OUTPUT_DIR,
+    saved_query_id: str,
+    generated_at: datetime | str | None = None,
+) -> CanonicalAnalyticsResultDiff:
+    records = [record for record in load_execution_records(output_dir / EXECUTION_LOG_JSONL) if record.get("query_id") == saved_query_id]
+    if len(records) < 2:
+        current = records[-1] if records else None
+        return no_prior_execution_diff(current_execution=current, generated_at=generated_at)
+    return compare_execution_records(
+        records[-2],
+        records[-1],
+        previous_result=load_result_snapshot(output_dir, records[-2].get("execution_id")),
+        current_result=load_result_snapshot(output_dir, records[-1].get("execution_id")),
+        generated_at=generated_at,
+    )
+
+
+def compare_execution_ids(
+    *,
+    output_dir: Path = DEFAULT_OUTPUT_DIR,
+    previous_execution_id: str,
+    current_execution_id: str,
+    generated_at: datetime | str | None = None,
+) -> CanonicalAnalyticsResultDiff:
+    records = {record.get("execution_id"): record for record in load_execution_records(output_dir / EXECUTION_LOG_JSONL)}
+    previous = records.get(previous_execution_id)
+    current = records.get(current_execution_id)
+    if previous is None or current is None:
+        return CanonicalAnalyticsResultDiff(
+            diff_id=stable_hash({"previous": previous_execution_id, "current": current_execution_id, "status": "EXECUTION_NOT_FOUND"})[:24],
+            generated_at=coerce_datetime(generated_at).isoformat(),
+            status="EXECUTION_NOT_FOUND",
+            comparison_classification="NOT_COMPARABLE",
+            previous_execution_id=previous_execution_id,
+            current_execution_id=current_execution_id,
+            query_id=None,
+            result_fingerprint_changed=None,
+            matched_outcome_count_delta=None,
+            group_count_delta=None,
+            new_groups=(),
+            removed_groups=(),
+            changed_metric_values=(),
+            top_positive_movers=(),
+            top_negative_movers=(),
+            sample_class_changes=(),
+            data_quality_flag_changes={},
+            guardrail_notes=("execution_id_not_found",),
+        )
+    return compare_execution_records(
+        previous,
+        current,
+        previous_result=load_result_snapshot(output_dir, previous_execution_id),
+        current_result=load_result_snapshot(output_dir, current_execution_id),
+        generated_at=generated_at,
+    )
+
+
+def no_prior_execution_diff(*, current_execution: Mapping[str, Any] | None, generated_at: datetime | str | None = None) -> CanonicalAnalyticsResultDiff:
+    current_id = str(current_execution.get("execution_id")) if current_execution else None
+    query_id = str(current_execution.get("query_id")) if current_execution else None
+    return CanonicalAnalyticsResultDiff(
+        diff_id=stable_hash({"current_execution_id": current_id, "status": "NO_PRIOR_EXECUTION"})[:24],
+        generated_at=coerce_datetime(generated_at).isoformat(),
+        status="NO_PRIOR_EXECUTION",
+        comparison_classification="NOT_COMPARABLE",
+        previous_execution_id=None,
+        current_execution_id=current_id,
+        query_id=query_id,
+        result_fingerprint_changed=None,
+        matched_outcome_count_delta=None,
+        group_count_delta=None,
+        new_groups=(),
+        removed_groups=(),
+        changed_metric_values=(),
+        top_positive_movers=(),
+        top_negative_movers=(),
+        sample_class_changes=(),
+        data_quality_flag_changes={},
+        guardrail_notes=("no_prior_execution_available",),
+    )
+
+
+def compare_execution_records(
+    previous_execution: Mapping[str, Any],
+    current_execution: Mapping[str, Any],
+    *,
+    previous_result: Mapping[str, Any] | None = None,
+    current_result: Mapping[str, Any] | None = None,
+    generated_at: datetime | str | None = None,
+) -> CanonicalAnalyticsResultDiff:
+    guardrails = ["diagnostic_only=true", "production_recommendation=false", "trading_gate=false"]
+    if previous_execution.get("query_fingerprint") != current_execution.get("query_fingerprint"):
+        return _not_comparable_diff(previous_execution, current_execution, "QUERY_CHANGED", guardrails, generated_at=generated_at)
+    if previous_execution.get("catalog_version") != current_execution.get("catalog_version"):
+        return _not_comparable_diff(previous_execution, current_execution, "CATALOG_CHANGED", guardrails, generated_at=generated_at)
+    result_changed = previous_execution.get("result_fingerprint") != current_execution.get("result_fingerprint")
+    matched_delta = int(current_execution.get("outcome_count_matched") or 0) - int(previous_execution.get("outcome_count_matched") or 0)
+    group_delta = int(current_execution.get("group_count") or 0) - int(previous_execution.get("group_count") or 0)
+    previous_groups = _groups_by_key(previous_result)
+    current_groups = _groups_by_key(current_result)
+    new_groups = tuple(sorted(set(current_groups) - set(previous_groups)))
+    removed_groups = tuple(sorted(set(previous_groups) - set(current_groups)))
+    metric_changes = _metric_changes(previous_groups, current_groups)
+    sample_class_changes = _sample_class_changes_between(previous_groups, current_groups)
+    data_quality_flag_changes = _flag_changes(previous_execution.get("data_quality_flags") or (), current_execution.get("data_quality_flags") or ())
+    top_positive = tuple(sorted((item for item in metric_changes if item.get("direction") == "IMPROVED"), key=lambda row: abs(float(row.get("absolute_delta") or 0)), reverse=True)[:10])
+    top_negative = tuple(sorted((item for item in metric_changes if item.get("direction") == "DETERIORATED"), key=lambda row: abs(float(row.get("absolute_delta") or 0)), reverse=True)[:10])
+    classification = _comparison_classification(result_changed=result_changed, matched_delta=matched_delta, group_delta=group_delta, metric_changes=metric_changes)
+    status = "CHANGED" if result_changed else "UNCHANGED"
+    diff_id = stable_hash({
+        "previous": previous_execution.get("execution_id"),
+        "current": current_execution.get("execution_id"),
+        "classification": classification,
+        "result_changed": result_changed,
+    })[:24]
+    return CanonicalAnalyticsResultDiff(
+        diff_id=diff_id,
+        generated_at=coerce_datetime(generated_at).isoformat(),
+        status=status,
+        comparison_classification=classification,
+        previous_execution_id=str(previous_execution.get("execution_id")),
+        current_execution_id=str(current_execution.get("execution_id")),
+        query_id=str(current_execution.get("query_id") or previous_execution.get("query_id") or ""),
+        result_fingerprint_changed=result_changed,
+        matched_outcome_count_delta=matched_delta,
+        group_count_delta=group_delta,
+        new_groups=new_groups,
+        removed_groups=removed_groups,
+        changed_metric_values=tuple(metric_changes),
+        top_positive_movers=top_positive,
+        top_negative_movers=top_negative,
+        sample_class_changes=tuple(sample_class_changes),
+        data_quality_flag_changes=data_quality_flag_changes,
+        guardrail_notes=tuple(guardrails),
+    )
+
+
+def publish_result_diff(*, output_dir: Path, diff: CanonicalAnalyticsResultDiff) -> dict[str, Path]:
+    output_dir.mkdir(parents=True, exist_ok=True)
+    json_path = output_dir / RESULT_DIFF_JSON
+    json_path.write_text(json.dumps(diff.to_record(), indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    contract_path = output_dir / RESULT_DIFF_CONTRACT_MD
+    contract_path.write_text(render_result_diff_contract(), encoding="utf-8")
+    md_path = output_dir / RESULT_DIFF_MD
+    md_path.write_text(render_result_diff_markdown(diff), encoding="utf-8")
+    change_feed_path = output_dir / CHANGE_FEED_MD
+    change_feed_path.write_text(render_change_feed(diff), encoding="utf-8")
+    return {
+        "result_diff_json_path": json_path,
+        "result_diff_contract_path": contract_path,
+        "result_diff_md_path": md_path,
+        "change_feed_path": change_feed_path,
+    }
+
+
+def render_result_diff_contract() -> str:
+    return "\n".join([
+        "# CAE7 Result Diff Contract",
+        "",
+        f"- Schema version: `{RESULT_DIFF_SCHEMA_VERSION}`",
+        "- Compares compatible CAE execution records and result snapshots.",
+        "- `QUERY_CHANGED` and `CATALOG_CHANGED` are not comparable guardrail classifications.",
+        "- Deltas are diagnostic only and never imply production action, strategy changes, or gates.",
+        "",
+    ])
+
+
+def render_result_diff_markdown(diff: CanonicalAnalyticsResultDiff) -> str:
+    record = diff.to_record()
+    lines = [
+        "# CAE7 Latest Result Diff",
+        "",
+        f"- Status: `{record['status']}`",
+        f"- Classification: `{record['comparison_classification']}`",
+        f"- Query: `{record['query_id']}`",
+        f"- Previous execution: `{record['previous_execution_id']}`",
+        f"- Current execution: `{record['current_execution_id']}`",
+        f"- Matched outcome delta: `{record['matched_outcome_count_delta']}`",
+        f"- Group count delta: `{record['group_count_delta']}`",
+        f"- New groups: `{len(record['new_groups'])}`",
+        f"- Removed groups: `{len(record['removed_groups'])}`",
+        f"- Changed metrics: `{len(record['changed_metric_values'])}`",
+        "",
+        "Diagnostic/research only. No production recommendation or trading gate is produced.",
+        "",
+    ]
+    return "\n".join(lines)
+
+
+def render_change_feed(diff: CanonicalAnalyticsResultDiff) -> str:
+    record = diff.to_record()
+    lines = [
+        "# CAE7 Change Feed",
+        "",
+        f"- `{record['query_id']}`: `{record['status']}` / `{record['comparison_classification']}`",
+    ]
+    if record["top_positive_movers"]:
+        lines.extend(["", "## Top Positive Movers", ""])
+        for item in record["top_positive_movers"][:5]:
+            lines.append(f"- `{item['group_key']}` `{item['metric']}`: `{item['previous_value']}` -> `{item['current_value']}`")
+    if record["top_negative_movers"]:
+        lines.extend(["", "## Top Negative Movers", ""])
+        for item in record["top_negative_movers"][:5]:
+            lines.append(f"- `{item['group_key']}` `{item['metric']}`: `{item['previous_value']}` -> `{item['current_value']}`")
+    lines.append("")
+    return "\n".join(lines)
+
+
 def render_validation_report(validations: Sequence[SavedQueryValidation], *, generated_at: str) -> str:
     lines = [
         "# Saved Query Validation Report",
@@ -707,6 +1004,124 @@ def _data_quality_flags(grouped_rows: Sequence[Mapping[str, Any]]) -> tuple[str,
         for flag in row.get("data_quality_flags") or ():
             flags.add(str(flag))
     return tuple(sorted(flags))
+
+
+def _not_comparable_diff(
+    previous_execution: Mapping[str, Any],
+    current_execution: Mapping[str, Any],
+    reason: str,
+    guardrails: Sequence[str],
+    *,
+    generated_at: datetime | str | None = None,
+) -> CanonicalAnalyticsResultDiff:
+    return CanonicalAnalyticsResultDiff(
+        diff_id=stable_hash({"previous": previous_execution.get("execution_id"), "current": current_execution.get("execution_id"), "reason": reason})[:24],
+        generated_at=coerce_datetime(generated_at).isoformat(),
+        status=reason,
+        comparison_classification=reason,
+        previous_execution_id=str(previous_execution.get("execution_id")),
+        current_execution_id=str(current_execution.get("execution_id")),
+        query_id=str(current_execution.get("query_id") or previous_execution.get("query_id") or ""),
+        result_fingerprint_changed=None,
+        matched_outcome_count_delta=None,
+        group_count_delta=None,
+        new_groups=(),
+        removed_groups=(),
+        changed_metric_values=(),
+        top_positive_movers=(),
+        top_negative_movers=(),
+        sample_class_changes=(),
+        data_quality_flag_changes={},
+        guardrail_notes=tuple(guardrails),
+    )
+
+
+def _groups_by_key(result: Mapping[str, Any] | None) -> dict[str, Mapping[str, Any]]:
+    if not result:
+        return {}
+    groups: dict[str, Mapping[str, Any]] = {}
+    for row in result.get("grouped_rows") or ():
+        key = str(row.get("key") or json.dumps(row.get("dimensions") or {}, sort_keys=True))
+        groups[key] = row
+    return groups
+
+
+def _metric_changes(previous_groups: Mapping[str, Mapping[str, Any]], current_groups: Mapping[str, Mapping[str, Any]]) -> list[dict[str, Any]]:
+    changes: list[dict[str, Any]] = []
+    comparable_keys = sorted(set(previous_groups) & set(current_groups))
+    ignored = {"key", "dimensions", "metric_data_quality_flags", "sample_class"}
+    for key in comparable_keys:
+        previous = previous_groups[key]
+        current = current_groups[key]
+        metric_names = sorted((set(previous) | set(current)) - ignored)
+        for metric in metric_names:
+            previous_value = previous.get(metric)
+            current_value = current.get(metric)
+            if previous_value == current_value:
+                continue
+            if not _is_number(previous_value) or not _is_number(current_value):
+                continue
+            absolute_delta = float(current_value) - float(previous_value)
+            changes.append({
+                "group_key": key,
+                "metric": metric,
+                "previous_value": previous_value,
+                "current_value": current_value,
+                "absolute_delta": round(absolute_delta, 6),
+                "percent_delta": _percent_delta(float(previous_value), absolute_delta),
+                "direction": _delta_direction(metric, absolute_delta),
+            })
+    return changes
+
+
+def _sample_class_changes_between(previous_groups: Mapping[str, Mapping[str, Any]], current_groups: Mapping[str, Mapping[str, Any]]) -> list[dict[str, Any]]:
+    changes: list[dict[str, Any]] = []
+    for key in sorted(set(previous_groups) & set(current_groups)):
+        previous_class = previous_groups[key].get("sample_class")
+        current_class = current_groups[key].get("sample_class")
+        if previous_class != current_class:
+            changes.append({"group_key": key, "previous_sample_class": previous_class, "current_sample_class": current_class})
+    return changes
+
+
+def _flag_changes(previous_flags: Sequence[Any], current_flags: Sequence[Any]) -> dict[str, Any]:
+    previous = {str(flag) for flag in previous_flags}
+    current = {str(flag) for flag in current_flags}
+    return {"added": sorted(current - previous), "removed": sorted(previous - current), "unchanged": sorted(previous & current)}
+
+
+def _comparison_classification(*, result_changed: bool, matched_delta: int, group_delta: int, metric_changes: Sequence[Mapping[str, Any]]) -> str:
+    if not result_changed:
+        return "UNCHANGED"
+    directions = {str(item.get("direction")) for item in metric_changes}
+    if matched_delta or group_delta:
+        return "MIXED"
+    if directions == {"IMPROVED"}:
+        return "IMPROVED"
+    if directions == {"DETERIORATED"}:
+        return "DETERIORATED"
+    if directions:
+        return "MIXED"
+    return "MIXED"
+
+
+def _delta_direction(metric: str, absolute_delta: float) -> str:
+    if absolute_delta == 0:
+        return "UNCHANGED"
+    lower_is_better = {"loss_rate", "average_loser_pnl_proxy", "median_loser_pnl_proxy", "max_loss_pnl_proxy"}
+    if metric in lower_is_better:
+        return "IMPROVED" if absolute_delta < 0 else "DETERIORATED"
+    return "IMPROVED" if absolute_delta > 0 else "DETERIORATED"
+
+
+def _percent_delta(previous_value: float, absolute_delta: float) -> float | None:
+    if previous_value == 0:
+        return None
+    return round(absolute_delta / abs(previous_value), 6)
+
+
+def _is_number(value: Any) -> bool:
+    return isinstance(value, int | float) and not isinstance(value, bool)
 
 
 def _write_saved_queries(path: Path, saved_queries: Sequence[SavedAnalyticsQuery]) -> None:

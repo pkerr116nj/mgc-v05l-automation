@@ -12,7 +12,10 @@ from mgc_v05l.execution_core.track_b_canonical_analytics_saved_queries import (
     DEFAULT_ENRICHMENTS_PATH,
     DEFAULT_OUTCOMES_PATH,
     DEFAULT_OUTPUT_DIR,
+    compare_execution_ids,
+    compare_latest_execution_for_query,
     load_saved_queries,
+    publish_result_diff,
     preset_saved_queries,
     publish_saved_query_artifacts,
     run_saved_query,
@@ -25,8 +28,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--output-dir", type=Path, default=DEFAULT_OUTPUT_DIR)
     parser.add_argument("--outcomes-path", type=Path, default=DEFAULT_OUTCOMES_PATH)
     parser.add_argument("--enrichments-path", type=Path, default=DEFAULT_ENRICHMENTS_PATH)
-    parser.add_argument("--action", choices=("export-summary", "list-presets", "validate", "run"), default="export-summary")
+    parser.add_argument("--action", choices=("export-summary", "list-presets", "validate", "run", "compare"), default="export-summary")
     parser.add_argument("--saved-query-id", help="Saved query id for --action run.")
+    parser.add_argument("--previous-execution-id", help="Previous execution id for --action compare.")
+    parser.add_argument("--current-execution-id", help="Current execution id for --action compare.")
     parser.add_argument("--now", help="Optional ISO timestamp for deterministic preset/report generation.")
     return parser
 
@@ -66,6 +71,37 @@ def main(argv: Sequence[str] | None = None) -> int:
             "diagnostic_only": (run_result.result or {}).get("diagnostic_only"),
             "production_recommendation": (run_result.result or {}).get("production_recommendation"),
             "trading_gate": (run_result.result or {}).get("trading_gate"),
+        }, sort_keys=True))
+        return 0
+    if args.action == "compare":
+        if args.previous_execution_id and args.current_execution_id:
+            diff = compare_execution_ids(
+                output_dir=args.output_dir,
+                previous_execution_id=args.previous_execution_id,
+                current_execution_id=args.current_execution_id,
+                generated_at=args.now,
+            )
+        else:
+            if not args.saved_query_id:
+                print(json.dumps({"error": "saved_query_id_required_for_latest_compare"}, sort_keys=True))
+                return 2
+            diff = compare_latest_execution_for_query(output_dir=args.output_dir, saved_query_id=args.saved_query_id, generated_at=args.now)
+        publish_result_diff(output_dir=args.output_dir, diff=diff)
+        record = diff.to_record()
+        print(json.dumps({
+            "query_id": record["query_id"],
+            "status": record["status"],
+            "comparison_classification": record["comparison_classification"],
+            "previous_execution_id": record["previous_execution_id"],
+            "current_execution_id": record["current_execution_id"],
+            "matched_outcome_count_delta": record["matched_outcome_count_delta"],
+            "group_count_delta": record["group_count_delta"],
+            "new_group_count": len(record["new_groups"]),
+            "removed_group_count": len(record["removed_groups"]),
+            "changed_metric_count": len(record["changed_metric_values"]),
+            "diagnostic_only": record["diagnostic_only"],
+            "production_recommendation": record["production_recommendation"],
+            "trading_gate": record["trading_gate"],
         }, sort_keys=True))
         return 0
     print(json.dumps({
