@@ -11,6 +11,7 @@ from mgc_v05l.execution_core.track_b_canonical_analytics_engine import Canonical
 from mgc_v05l.execution_core.track_b_canonical_analytics_saved_queries import (
     EXECUTION_LOG_JSONL,
     SAVED_QUERIES_JSONL,
+    CanonicalAnalyticsInsightEngine,
     build_saved_query,
     compare_execution_records,
     compare_latest_execution_for_query,
@@ -257,6 +258,92 @@ def test_result_diff_guardrails_preserved() -> None:
     assert record["trading_gate"] is False
 
 
+def test_insight_no_meaningful_changes() -> None:
+    diff = compare_execution_records(_execution("a", result_fingerprint="same"), _execution("b", result_fingerprint="same"), generated_at=NOW)
+
+    insights = CanonicalAnalyticsInsightEngine().evaluate(diff, generated_at=NOW)
+
+    assert [insight.title for insight in insights] == ["No meaningful analytics changes"]
+    assert insights[0].significance == "NO_ACTION"
+
+
+def test_insight_strategy_improvement() -> None:
+    insights = _insights_for_metric_change(previous=10.0, current=15.0)
+
+    assert any(insight.title == "Metric materially improved" for insight in insights)
+    assert any(insight.significance == "RESEARCH_POSITIVE" for insight in insights)
+
+
+def test_insight_strategy_deterioration() -> None:
+    insights = _insights_for_metric_change(previous=15.0, current=10.0)
+
+    assert any(insight.title == "Metric materially deteriorated" for insight in insights)
+    assert any(insight.significance == "RESEARCH_RISK" for insight in insights)
+
+
+def test_insight_sample_class_promotion() -> None:
+    diff = _diff_with_sample_class_change("EXPLORATORY", "PRELIMINARY")
+
+    insights = CanonicalAnalyticsInsightEngine().evaluate(diff, generated_at=NOW)
+
+    assert any(insight.title == "Sample class promoted" for insight in insights)
+
+
+def test_insight_sample_class_demotion() -> None:
+    diff = _diff_with_sample_class_change("DEVELOPING", "PRELIMINARY")
+
+    insights = CanonicalAnalyticsInsightEngine().evaluate(diff, generated_at=NOW)
+
+    assert any(insight.title == "Sample class demoted" for insight in insights)
+
+
+def test_insight_data_quality_improvement_and_deterioration() -> None:
+    diff = compare_execution_records(
+        {**_execution("a", result_fingerprint="old"), "data_quality_flags": ["old_flag"]},
+        {**_execution("b", result_fingerprint="new"), "data_quality_flags": ["new_flag"]},
+        generated_at=NOW,
+    )
+
+    insights = CanonicalAnalyticsInsightEngine().evaluate(diff, generated_at=NOW)
+
+    assert any(insight.title == "Data quality improved" for insight in insights)
+    assert any(insight.title == "Data quality deteriorated" for insight in insights)
+
+
+def test_insight_new_group_and_group_removed() -> None:
+    diff = compare_execution_records(
+        _execution("a", result_fingerprint="old"),
+        _execution("b", result_fingerprint="new"),
+        previous_result=_result([_group("removed", 1.0)]),
+        current_result=_result([_group("new", 1.0)]),
+        generated_at=NOW,
+    )
+
+    insights = CanonicalAnalyticsInsightEngine().evaluate(diff, generated_at=NOW)
+
+    assert any(insight.title == "New analytics group detected" for insight in insights)
+    assert any(insight.title == "Analytics group removed" for insight in insights)
+
+
+def test_insight_deterministic_output() -> None:
+    diff = compare_execution_records(_execution("a", result_fingerprint="same"), _execution("b", result_fingerprint="same"), generated_at=NOW)
+
+    first = [insight.to_record() for insight in CanonicalAnalyticsInsightEngine().evaluate(diff, generated_at=NOW)]
+    second = [insight.to_record() for insight in CanonicalAnalyticsInsightEngine().evaluate(diff, generated_at=NOW)]
+
+    assert first == second
+
+
+def test_insight_guardrails_preserved() -> None:
+    diff = compare_execution_records(_execution("a", result_fingerprint="same"), _execution("b", result_fingerprint="same"), generated_at=NOW)
+
+    record = CanonicalAnalyticsInsightEngine().evaluate(diff, generated_at=NOW)[0].to_record()
+
+    assert record["diagnostic_only"] is True
+    assert record["production_recommendation"] is False
+    assert record["trading_gate"] is False
+
+
 def test_saved_query_import_boundary() -> None:
     paths = [
         Path("src/mgc_v05l/execution_core/track_b_canonical_analytics_saved_queries.py"),
@@ -393,3 +480,26 @@ def _group(key: str, expectancy: float) -> dict:
         "win_rate": 0.5,
         "sample_class": "EXPLORATORY",
     }
+
+
+def _insights_for_metric_change(*, previous: float, current: float):
+    diff = compare_execution_records(
+        _execution("a", result_fingerprint="old"),
+        _execution("b", result_fingerprint="new"),
+        previous_result=_result([_group("strategy_a", previous)]),
+        current_result=_result([_group("strategy_a", current)]),
+        generated_at=NOW,
+    )
+    return CanonicalAnalyticsInsightEngine().evaluate(diff, generated_at=NOW)
+
+
+def _diff_with_sample_class_change(previous_class: str, current_class: str):
+    previous_group = {**_group("strategy_a", 1.0), "sample_class": previous_class}
+    current_group = {**_group("strategy_a", 1.0), "sample_class": current_class}
+    return compare_execution_records(
+        _execution("a", result_fingerprint="old"),
+        _execution("b", result_fingerprint="new"),
+        previous_result=_result([previous_group]),
+        current_result=_result([current_group]),
+        generated_at=NOW,
+    )

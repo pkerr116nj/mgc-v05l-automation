@@ -9,6 +9,8 @@ from pathlib import Path
 from typing import Sequence
 
 from mgc_v05l.execution_core.track_b_canonical_analytics_saved_queries import (
+    RESULT_DIFF_JSON,
+    CanonicalAnalyticsInsightEngine,
     DEFAULT_ENRICHMENTS_PATH,
     DEFAULT_OUTCOMES_PATH,
     DEFAULT_OUTPUT_DIR,
@@ -16,6 +18,7 @@ from mgc_v05l.execution_core.track_b_canonical_analytics_saved_queries import (
     compare_latest_execution_for_query,
     load_saved_queries,
     publish_result_diff,
+    publish_insights,
     preset_saved_queries,
     publish_saved_query_artifacts,
     run_saved_query,
@@ -28,7 +31,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--output-dir", type=Path, default=DEFAULT_OUTPUT_DIR)
     parser.add_argument("--outcomes-path", type=Path, default=DEFAULT_OUTCOMES_PATH)
     parser.add_argument("--enrichments-path", type=Path, default=DEFAULT_ENRICHMENTS_PATH)
-    parser.add_argument("--action", choices=("export-summary", "list-presets", "validate", "run", "compare"), default="export-summary")
+    parser.add_argument("--action", choices=("export-summary", "list-presets", "validate", "run", "compare", "insights"), default="export-summary")
     parser.add_argument("--saved-query-id", help="Saved query id for --action run.")
     parser.add_argument("--previous-execution-id", help="Previous execution id for --action compare.")
     parser.add_argument("--current-execution-id", help="Current execution id for --action compare.")
@@ -102,6 +105,22 @@ def main(argv: Sequence[str] | None = None) -> int:
             "diagnostic_only": record["diagnostic_only"],
             "production_recommendation": record["production_recommendation"],
             "trading_gate": record["trading_gate"],
+        }, sort_keys=True))
+        return 0
+    if args.action == "insights":
+        diff_path = args.output_dir / RESULT_DIFF_JSON
+        if not diff_path.exists():
+            print(json.dumps({"error": "result_diff_not_found", "path": str(diff_path)}, sort_keys=True))
+            return 2
+        diff_record = json.loads(diff_path.read_text(encoding="utf-8"))
+        insights = CanonicalAnalyticsInsightEngine().evaluate(diff_record, generated_at=args.now)
+        publish_insights(output_dir=args.output_dir, insights=insights)
+        print(json.dumps({
+            "insight_count": len(insights),
+            "titles": [insight.title for insight in insights],
+            "diagnostic_only": all(insight.diagnostic_only for insight in insights),
+            "production_recommendation": any(insight.production_recommendation for insight in insights),
+            "trading_gate": any(insight.trading_gate for insight in insights),
         }, sort_keys=True))
         return 0
     print(json.dumps({

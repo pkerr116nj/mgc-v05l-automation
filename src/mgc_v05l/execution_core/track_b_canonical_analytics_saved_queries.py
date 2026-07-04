@@ -46,12 +46,20 @@ RESULT_DIFF_CONTRACT_MD = "cae7_result_diff_contract.md"
 RESULT_DIFF_JSON = "cae7_latest_result_diff.json"
 RESULT_DIFF_MD = "cae7_latest_result_diff.md"
 CHANGE_FEED_MD = "cae7_change_feed.md"
+INSIGHT_CONTRACT_MD = "cae8_insight_contract.md"
+LATEST_INSIGHTS_JSON = "cae8_latest_insights.json"
+LATEST_INSIGHTS_MD = "cae8_latest_insights.md"
+SIGNIFICANCE_MATRIX_MD = "cae8_significance_matrix.md"
+RULE_CATALOG_MD = "cae8_rule_catalog.md"
 
 SAVED_QUERY_SCHEMA_VERSION = "magic_saved_query_v1"
 SUMMARY_SCHEMA_VERSION = "cae5_saved_query_summary_v1"
 VALIDATION_SCHEMA_VERSION = "cae5_saved_query_validation_v1"
 EXECUTION_RECORD_SCHEMA_VERSION = "cae6_canonical_analytics_execution_record_v1"
 RESULT_DIFF_SCHEMA_VERSION = "cae7_canonical_analytics_result_diff_v1"
+INSIGHT_SCHEMA_VERSION = "cae8_canonical_analytics_insight_v1"
+
+SAMPLE_CLASS_RANK = {"EXPLORATORY": 1, "PRELIMINARY": 2, "DEVELOPING": 3, "RESEARCH_GRADE": 4}
 
 SUPPORTED_SCOPE_BINDINGS = {"snapshot", "inherit"}
 SUPPORTED_FILTER_OPS = {"eq", "ne", "in", "not_in", "exists", "not_null", "missing", "gt", "gte", "lt", "lte", "date_gte", "date_lte"}
@@ -221,6 +229,264 @@ class CanonicalAnalyticsResultDiff:
             "production_recommendation": self.production_recommendation,
             "trading_gate": self.trading_gate,
         }
+
+
+@dataclass(frozen=True)
+class CanonicalAnalyticsInsight:
+    insight_id: str
+    generated_at: str
+    source_query: str | None
+    execution_id: str | None
+    diff_execution_id: str | None
+    title: str
+    summary: str
+    evidence: tuple[str, ...]
+    affected_groups: tuple[str, ...]
+    confidence: str
+    severity: str
+    significance: str
+    supporting_metrics: dict[str, Any]
+    supporting_fingerprints: dict[str, Any]
+    diagnostic_only: bool = True
+    production_recommendation: bool = False
+    trading_gate: bool = False
+
+    def to_record(self) -> dict[str, Any]:
+        return {
+            "schema_version": INSIGHT_SCHEMA_VERSION,
+            "insight_id": self.insight_id,
+            "generated_at": self.generated_at,
+            "source_query": self.source_query,
+            "execution_id": self.execution_id,
+            "diff_execution_id": self.diff_execution_id,
+            "title": self.title,
+            "summary": self.summary,
+            "evidence": list(self.evidence),
+            "affected_groups": list(self.affected_groups),
+            "confidence": self.confidence,
+            "severity": self.severity,
+            "significance": self.significance,
+            "supporting_metrics": self.supporting_metrics,
+            "supporting_fingerprints": self.supporting_fingerprints,
+            "diagnostic_only": self.diagnostic_only,
+            "production_recommendation": self.production_recommendation,
+            "trading_gate": self.trading_gate,
+        }
+
+
+class CanonicalAnalyticsInsightEngine:
+    def evaluate(self, diff: CanonicalAnalyticsResultDiff | Mapping[str, Any], *, generated_at: datetime | str | None = None) -> list[CanonicalAnalyticsInsight]:
+        record = diff.to_record() if isinstance(diff, CanonicalAnalyticsResultDiff) else dict(diff)
+        generated = coerce_datetime(generated_at or record.get("generated_at")).isoformat()
+        insights: list[CanonicalAnalyticsInsight] = []
+        insights.extend(self._no_meaningful_changes(record, generated_at=generated))
+        insights.extend(self._new_groups(record, generated_at=generated))
+        insights.extend(self._removed_groups(record, generated_at=generated))
+        insights.extend(self._metric_changes(record, generated_at=generated))
+        insights.extend(self._sample_class_changes(record, generated_at=generated))
+        insights.extend(self._data_quality_changes(record, generated_at=generated))
+        return sorted(insights, key=lambda insight: (insight.severity, insight.title, insight.insight_id))
+
+    def _base(
+        self,
+        record: Mapping[str, Any],
+        *,
+        generated_at: str,
+        rule: str,
+        title: str,
+        summary: str,
+        evidence: Sequence[str],
+        affected_groups: Sequence[str] = (),
+        confidence: str = "MEDIUM",
+        severity: str = "INFO",
+        significance: str = "OBSERVE",
+        supporting_metrics: Mapping[str, Any] | None = None,
+    ) -> CanonicalAnalyticsInsight:
+        fingerprints = {
+            "diff_id": record.get("diff_id"),
+            "previous_execution_id": record.get("previous_execution_id"),
+            "current_execution_id": record.get("current_execution_id"),
+            "result_fingerprint_changed": record.get("result_fingerprint_changed"),
+        }
+        return CanonicalAnalyticsInsight(
+            insight_id=stable_hash({"rule": rule, "diff_id": record.get("diff_id"), "groups": list(affected_groups), "metrics": supporting_metrics or {}})[:24],
+            generated_at=generated_at,
+            source_query=record.get("query_id"),
+            execution_id=record.get("current_execution_id"),
+            diff_execution_id=record.get("diff_id"),
+            title=title,
+            summary=summary,
+            evidence=tuple(evidence),
+            affected_groups=tuple(str(group) for group in affected_groups),
+            confidence=confidence,
+            severity=severity,
+            significance=significance,
+            supporting_metrics=dict(supporting_metrics or {}),
+            supporting_fingerprints=fingerprints,
+        )
+
+    def _no_meaningful_changes(self, record: Mapping[str, Any], *, generated_at: str) -> list[CanonicalAnalyticsInsight]:
+        if record.get("status") != "UNCHANGED":
+            return []
+        return [
+            self._base(
+                record,
+                generated_at=generated_at,
+                rule="no_meaningful_changes",
+                title="No meaningful analytics changes",
+                summary=f"{record.get('query_id')} is unchanged versus the prior comparable execution.",
+                evidence=(
+                    f"matched_outcome_delta={record.get('matched_outcome_count_delta')}",
+                    f"group_count_delta={record.get('group_count_delta')}",
+                    f"changed_metrics={len(record.get('changed_metric_values') or [])}",
+                ),
+                confidence="HIGH",
+                severity="INFO",
+                significance="NO_ACTION",
+            )
+        ]
+
+    def _new_groups(self, record: Mapping[str, Any], *, generated_at: str) -> list[CanonicalAnalyticsInsight]:
+        groups = tuple(str(group) for group in record.get("new_groups") or ())
+        if not groups:
+            return []
+        return [
+            self._base(
+                record,
+                generated_at=generated_at,
+                rule="new_group_detected",
+                title="New analytics group detected",
+                summary=f"{len(groups)} new group(s) appeared in {record.get('query_id')}.",
+                evidence=(f"new_groups={len(groups)}",),
+                affected_groups=groups,
+                confidence="HIGH",
+                severity="NOTICE",
+                significance="REVIEW",
+                supporting_metrics={"new_group_count": len(groups)},
+            )
+        ]
+
+    def _removed_groups(self, record: Mapping[str, Any], *, generated_at: str) -> list[CanonicalAnalyticsInsight]:
+        groups = tuple(str(group) for group in record.get("removed_groups") or ())
+        if not groups:
+            return []
+        return [
+            self._base(
+                record,
+                generated_at=generated_at,
+                rule="group_removed",
+                title="Analytics group removed",
+                summary=f"{len(groups)} group(s) disappeared from {record.get('query_id')}.",
+                evidence=(f"removed_groups={len(groups)}",),
+                affected_groups=groups,
+                confidence="HIGH",
+                severity="NOTICE",
+                significance="REVIEW",
+                supporting_metrics={"removed_group_count": len(groups)},
+            )
+        ]
+
+    def _metric_changes(self, record: Mapping[str, Any], *, generated_at: str) -> list[CanonicalAnalyticsInsight]:
+        insights: list[CanonicalAnalyticsInsight] = []
+        for change in record.get("changed_metric_values") or ():
+            direction = str(change.get("direction"))
+            if direction not in {"IMPROVED", "DETERIORATED"}:
+                continue
+            metric = str(change.get("metric"))
+            group = str(change.get("group_key"))
+            if direction == "IMPROVED":
+                rule = "strategy_improvement" if "strategy" in str(record.get("query_id")) else "metric_materially_improved"
+                title = "Metric materially improved"
+                severity = "INFO"
+                significance = "RESEARCH_POSITIVE"
+            else:
+                rule = "strategy_deterioration" if "strategy" in str(record.get("query_id")) else "metric_materially_deteriorated"
+                title = "Metric materially deteriorated"
+                severity = "WARNING"
+                significance = "RESEARCH_RISK"
+            insights.append(
+                self._base(
+                    record,
+                    generated_at=generated_at,
+                    rule=rule,
+                    title=title,
+                    summary=f"{metric} for {group} moved {direction.lower()} from {change.get('previous_value')} to {change.get('current_value')}.",
+                    evidence=(
+                        f"metric={metric}",
+                        f"absolute_delta={change.get('absolute_delta')}",
+                        f"percent_delta={change.get('percent_delta')}",
+                    ),
+                    affected_groups=(group,),
+                    confidence="MEDIUM",
+                    severity=severity,
+                    significance=significance,
+                    supporting_metrics=dict(change),
+                )
+            )
+        return insights
+
+    def _sample_class_changes(self, record: Mapping[str, Any], *, generated_at: str) -> list[CanonicalAnalyticsInsight]:
+        insights: list[CanonicalAnalyticsInsight] = []
+        for change in record.get("sample_class_changes") or ():
+            previous = str(change.get("previous_sample_class"))
+            current = str(change.get("current_sample_class"))
+            group = str(change.get("group_key"))
+            previous_rank = SAMPLE_CLASS_RANK.get(previous, 0)
+            current_rank = SAMPLE_CLASS_RANK.get(current, 0)
+            promoted = current_rank > previous_rank
+            insights.append(
+                self._base(
+                    record,
+                    generated_at=generated_at,
+                    rule="sample_class_promotion" if promoted else "sample_class_demotion",
+                    title="Sample class promoted" if promoted else "Sample class demoted",
+                    summary=f"{group} moved from {previous} to {current}.",
+                    evidence=(f"previous_sample_class={previous}", f"current_sample_class={current}"),
+                    affected_groups=(group,),
+                    confidence="HIGH",
+                    severity="INFO" if promoted else "WARNING",
+                    significance="REVIEW",
+                    supporting_metrics={"previous_sample_class": previous, "current_sample_class": current},
+                )
+            )
+        return insights
+
+    def _data_quality_changes(self, record: Mapping[str, Any], *, generated_at: str) -> list[CanonicalAnalyticsInsight]:
+        changes = dict(record.get("data_quality_flag_changes") or {})
+        insights: list[CanonicalAnalyticsInsight] = []
+        removed = tuple(str(flag) for flag in changes.get("removed") or ())
+        added = tuple(str(flag) for flag in changes.get("added") or ())
+        if removed:
+            insights.append(
+                self._base(
+                    record,
+                    generated_at=generated_at,
+                    rule="data_quality_improvement",
+                    title="Data quality improved",
+                    summary=f"{len(removed)} data-quality flag(s) cleared.",
+                    evidence=tuple(f"removed_flag={flag}" for flag in removed),
+                    confidence="HIGH",
+                    severity="INFO",
+                    significance="RESEARCH_POSITIVE",
+                    supporting_metrics={"removed_flags": list(removed)},
+                )
+            )
+        if added:
+            insights.append(
+                self._base(
+                    record,
+                    generated_at=generated_at,
+                    rule="data_quality_deterioration",
+                    title="Data quality deteriorated",
+                    summary=f"{len(added)} data-quality flag(s) appeared.",
+                    evidence=tuple(f"added_flag={flag}" for flag in added),
+                    confidence="HIGH",
+                    severity="WARNING",
+                    significance="RESEARCH_RISK",
+                    supporting_metrics={"added_flags": list(added)},
+                )
+            )
+        return insights
 
 
 def build_saved_query(
@@ -899,6 +1165,27 @@ def publish_result_diff(*, output_dir: Path, diff: CanonicalAnalyticsResultDiff)
     }
 
 
+def publish_insights(*, output_dir: Path, insights: Sequence[CanonicalAnalyticsInsight]) -> dict[str, Path]:
+    output_dir.mkdir(parents=True, exist_ok=True)
+    json_path = output_dir / LATEST_INSIGHTS_JSON
+    json_path.write_text(json.dumps([insight.to_record() for insight in insights], indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    md_path = output_dir / LATEST_INSIGHTS_MD
+    md_path.write_text(render_insights_markdown(insights), encoding="utf-8")
+    contract_path = output_dir / INSIGHT_CONTRACT_MD
+    contract_path.write_text(render_insight_contract(), encoding="utf-8")
+    significance_path = output_dir / SIGNIFICANCE_MATRIX_MD
+    significance_path.write_text(render_significance_matrix(), encoding="utf-8")
+    rule_catalog_path = output_dir / RULE_CATALOG_MD
+    rule_catalog_path.write_text(render_rule_catalog(), encoding="utf-8")
+    return {
+        "latest_insights_json_path": json_path,
+        "latest_insights_md_path": md_path,
+        "insight_contract_path": contract_path,
+        "significance_matrix_path": significance_path,
+        "rule_catalog_path": rule_catalog_path,
+    }
+
+
 def render_result_diff_contract() -> str:
     return "\n".join([
         "# CAE7 Result Diff Contract",
@@ -948,6 +1235,77 @@ def render_change_feed(diff: CanonicalAnalyticsResultDiff) -> str:
         lines.extend(["", "## Top Negative Movers", ""])
         for item in record["top_negative_movers"][:5]:
             lines.append(f"- `{item['group_key']}` `{item['metric']}`: `{item['previous_value']}` -> `{item['current_value']}`")
+    lines.append("")
+    return "\n".join(lines)
+
+
+def render_insight_contract() -> str:
+    return "\n".join([
+        "# CAE8 Insight Contract",
+        "",
+        f"- Schema version: `{INSIGHT_SCHEMA_VERSION}`",
+        "- Insights are deterministic interpretations of CAE7 diff records.",
+        "- No natural-language model is used.",
+        "- Insights are diagnostic/research only and never produce production recommendations, strategy changes, or trading gates.",
+        "",
+    ])
+
+
+def render_rule_catalog() -> str:
+    rows = [
+        ("no_meaningful_changes", "Emits when CAE7 status is UNCHANGED."),
+        ("strategy_improvement", "Emits when a strategy-scoped numeric metric improves."),
+        ("strategy_deterioration", "Emits when a strategy-scoped numeric metric deteriorates."),
+        ("sample_class_promotion", "Emits when a group's sample class rank increases."),
+        ("sample_class_demotion", "Emits when a group's sample class rank decreases."),
+        ("data_quality_improvement", "Emits when data-quality flags are removed."),
+        ("data_quality_deterioration", "Emits when data-quality flags are added."),
+        ("new_group_detected", "Emits when CAE7 reports new groups."),
+        ("group_removed", "Emits when CAE7 reports removed groups."),
+        ("metric_materially_improved", "Emits for non-strategy metric improvements."),
+        ("metric_materially_deteriorated", "Emits for non-strategy metric deterioration."),
+    ]
+    lines = ["# CAE8 Rule Catalog", "", "| Rule | Deterministic trigger |", "|---|---|"]
+    lines.extend(f"| `{rule}` | {description} |" for rule, description in rows)
+    lines.append("")
+    return "\n".join(lines)
+
+
+def render_significance_matrix() -> str:
+    return "\n".join([
+        "# CAE8 Significance Matrix",
+        "",
+        "| Significance | Meaning |",
+        "|---|---|",
+        "| `NO_ACTION` | No meaningful analytics change detected. |",
+        "| `OBSERVE` | Worth watching in future comparison runs. |",
+        "| `REVIEW` | Human research review may be useful. |",
+        "| `RESEARCH_POSITIVE` | Directionally favorable research signal, not a production recommendation. |",
+        "| `RESEARCH_RISK` | Directionally unfavorable research signal, not a gate or trading instruction. |",
+        "",
+    ])
+
+
+def render_insights_markdown(insights: Sequence[CanonicalAnalyticsInsight]) -> str:
+    lines = ["# CAE8 Latest Insights", ""]
+    if not insights:
+        lines.extend(["No insights generated.", ""])
+        return "\n".join(lines)
+    for insight in insights:
+        record = insight.to_record()
+        lines.extend([
+            f"## {record['title']}",
+            "",
+            f"- Insight id: `{record['insight_id']}`",
+            f"- Query: `{record['source_query']}`",
+            f"- Severity: `{record['severity']}`",
+            f"- Significance: `{record['significance']}`",
+            f"- Confidence: `{record['confidence']}`",
+            f"- Summary: {record['summary']}",
+            f"- Affected groups: `{', '.join(record['affected_groups'])}`",
+            "",
+        ])
+    lines.append("Diagnostic/research only. No production recommendation or trading gate is produced.")
     lines.append("")
     return "\n".join(lines)
 
