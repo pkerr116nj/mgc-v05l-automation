@@ -8,6 +8,7 @@ They have no runtime, broker, strategy, order, or trading-gate authority.
 from __future__ import annotations
 
 import json
+import hashlib
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -35,10 +36,16 @@ PRESETS_JSON = "saved_analytics_query_presets.json"
 VALIDATION_REPORT_MD = "saved_query_validation_report.md"
 CONTRACT_MD = "saved_query_contract.md"
 SUMMARY_JSON = "cae5_saved_query_summary.json"
+EXECUTION_LOG_JSONL = "cae6_execution_log.jsonl"
+EXECUTION_SUMMARY_JSON = "cae6_latest_execution_summary.json"
+EXECUTION_CONTRACT_MD = "cae6_execution_audit_contract.md"
+RESULT_MANIFEST_MD = "cae6_result_manifest.md"
+RESULT_PROVENANCE_REPORT_MD = "cae6_result_provenance_report.md"
 
 SAVED_QUERY_SCHEMA_VERSION = "magic_saved_query_v1"
 SUMMARY_SCHEMA_VERSION = "cae5_saved_query_summary_v1"
 VALIDATION_SCHEMA_VERSION = "cae5_saved_query_validation_v1"
+EXECUTION_RECORD_SCHEMA_VERSION = "cae6_canonical_analytics_execution_record_v1"
 
 SUPPORTED_SCOPE_BINDINGS = {"snapshot", "inherit"}
 SUPPORTED_FILTER_OPS = {"eq", "ne", "in", "not_in", "exists", "not_null", "missing", "gt", "gte", "lt", "lte", "date_gte", "date_lte"}
@@ -103,6 +110,60 @@ class SavedQueryRunResult:
     saved_query: SavedAnalyticsQuery
     validation: SavedQueryValidation
     result: dict[str, Any] | None
+    execution_record: dict[str, Any] | None = None
+
+
+@dataclass(frozen=True)
+class CanonicalAnalyticsExecutionRecord:
+    execution_id: str
+    generated_at: str
+    query_id: str
+    saved_query_hash: str
+    catalog_version: str
+    engine_version: str
+    input_artifact_refs: dict[str, str]
+    input_artifact_hashes: dict[str, str | None]
+    outcome_count_total: int
+    outcome_count_matched: int
+    group_count: int
+    filters_applied: tuple[dict[str, Any], ...]
+    dimensions: tuple[str, ...]
+    metrics: tuple[str, ...]
+    context_validity_rules: tuple[str, ...]
+    sample_class_counts: dict[str, int]
+    data_quality_flags: tuple[str, ...]
+    query_fingerprint: str
+    result_fingerprint: str
+    diagnostic_only: bool = True
+    production_recommendation: bool = False
+    trading_gate: bool = False
+
+    def to_record(self) -> dict[str, Any]:
+        return {
+            "schema_version": EXECUTION_RECORD_SCHEMA_VERSION,
+            "execution_id": self.execution_id,
+            "generated_at": self.generated_at,
+            "query_id": self.query_id,
+            "saved_query_hash": self.saved_query_hash,
+            "catalog_version": self.catalog_version,
+            "engine_version": self.engine_version,
+            "input_artifact_refs": self.input_artifact_refs,
+            "input_artifact_hashes": self.input_artifact_hashes,
+            "outcome_count_total": self.outcome_count_total,
+            "outcome_count_matched": self.outcome_count_matched,
+            "group_count": self.group_count,
+            "filters_applied": list(self.filters_applied),
+            "dimensions": list(self.dimensions),
+            "metrics": list(self.metrics),
+            "context_validity_rules": list(self.context_validity_rules),
+            "sample_class_counts": self.sample_class_counts,
+            "data_quality_flags": list(self.data_quality_flags),
+            "query_fingerprint": self.query_fingerprint,
+            "result_fingerprint": self.result_fingerprint,
+            "diagnostic_only": self.diagnostic_only,
+            "production_recommendation": self.production_recommendation,
+            "trading_gate": self.trading_gate,
+        }
 
 
 def build_saved_query(
@@ -373,6 +434,9 @@ def run_saved_query(
     *,
     outcomes_path: Path = DEFAULT_OUTCOMES_PATH,
     enrichments_path: Path = DEFAULT_ENRICHMENTS_PATH,
+    output_dir: Path = DEFAULT_OUTPUT_DIR,
+    write_execution_audit: bool = False,
+    generated_at: datetime | str | None = None,
 ) -> SavedQueryRunResult:
     validation = validate_saved_query(saved_query)
     if validation.status != "VALID":
@@ -380,12 +444,215 @@ def run_saved_query(
     outcomes = _read_jsonl(outcomes_path)
     enrichments = _read_jsonl(enrichments_path)
     rows = [_with_query_buckets(row) for row in merge_outcomes_with_enrichment(outcomes, enrichments)]
+    generated = coerce_datetime(generated_at)
+    query = query_from_payload(saved_query.query_payload)
     result = CanonicalAnalyticsEngine().run(
         rows,
-        query_from_payload(saved_query.query_payload),
+        query,
+        generated_at=generated,
         provenance={"canonical_trade_outcomes": str(outcomes_path), "trade_outcome_enrichment": str(enrichments_path)},
     )
-    return SavedQueryRunResult(saved_query=saved_query, validation=validation, result=result.to_dict())
+    result_record = result.to_dict()
+    execution_record = build_execution_record(
+        saved_query=saved_query,
+        query=query,
+        result=result_record,
+        generated_at=generated,
+        outcomes_path=outcomes_path,
+        enrichments_path=enrichments_path,
+        outcome_count_total=len(outcomes),
+    )
+    if write_execution_audit:
+        publish_execution_audit(output_dir=output_dir, execution_record=execution_record)
+    return SavedQueryRunResult(saved_query=saved_query, validation=validation, result=result_record, execution_record=execution_record.to_record())
+
+
+def build_execution_record(
+    *,
+    saved_query: SavedAnalyticsQuery,
+    query: CanonicalAnalyticsQuery,
+    result: Mapping[str, Any],
+    generated_at: datetime | str,
+    outcomes_path: Path,
+    enrichments_path: Path,
+    outcome_count_total: int,
+) -> CanonicalAnalyticsExecutionRecord:
+    catalog_version = str(CanonicalAnalyticsEngine().catalog().get("schema_version"))
+    summary = dict(result.get("summary") or {})
+    grouped_rows = list(result.get("grouped_rows") or [])
+    validity_metadata = dict(result.get("validity_metadata") or {})
+    sample_class_counts = _sample_class_counts(grouped_rows)
+    data_quality_flags = _data_quality_flags(grouped_rows)
+    query_fingerprint = deterministic_query_fingerprint(saved_query.query_payload, catalog_version=catalog_version)
+    result_fingerprint = deterministic_result_fingerprint(result)
+    saved_query_hash = stable_hash(saved_query.to_record())
+    execution_id = stable_hash(
+        {
+            "query_id": saved_query.saved_query_id,
+            "saved_query_hash": saved_query_hash,
+            "query_fingerprint": query_fingerprint,
+            "result_fingerprint": result_fingerprint,
+            "input_artifact_hashes": {
+                "canonical_trade_outcomes": file_sha256(outcomes_path),
+                "trade_outcome_enrichment": file_sha256(enrichments_path),
+            },
+        }
+    )[:24]
+    return CanonicalAnalyticsExecutionRecord(
+        execution_id=execution_id,
+        generated_at=coerce_datetime(generated_at).isoformat(),
+        query_id=saved_query.saved_query_id,
+        saved_query_hash=saved_query_hash,
+        catalog_version=catalog_version,
+        engine_version="track_b_canonical_analytics_engine_v1",
+        input_artifact_refs={"canonical_trade_outcomes": str(outcomes_path), "trade_outcome_enrichment": str(enrichments_path)},
+        input_artifact_hashes={"canonical_trade_outcomes": file_sha256(outcomes_path), "trade_outcome_enrichment": file_sha256(enrichments_path)},
+        outcome_count_total=outcome_count_total,
+        outcome_count_matched=int(summary.get("matched_count") or 0),
+        group_count=int(summary.get("group_count") or 0),
+        filters_applied=tuple(dict(item) for item in validity_metadata.get("filters") or ()),
+        dimensions=tuple(query.dimensions),
+        metrics=tuple(query.metrics),
+        context_validity_rules=tuple(query.validity_requirements),
+        sample_class_counts=sample_class_counts,
+        data_quality_flags=data_quality_flags,
+        query_fingerprint=query_fingerprint,
+        result_fingerprint=result_fingerprint,
+    )
+
+
+def publish_execution_audit(*, output_dir: Path, execution_record: CanonicalAnalyticsExecutionRecord) -> dict[str, Path]:
+    output_dir.mkdir(parents=True, exist_ok=True)
+    log_path = output_dir / EXECUTION_LOG_JSONL
+    with log_path.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(execution_record.to_record(), sort_keys=True) + "\n")
+    summary_path = output_dir / EXECUTION_SUMMARY_JSON
+    summary_path.write_text(json.dumps(build_execution_summary(execution_record), indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    contract_path = output_dir / EXECUTION_CONTRACT_MD
+    contract_path.write_text(render_execution_audit_contract(), encoding="utf-8")
+    manifest_path = output_dir / RESULT_MANIFEST_MD
+    manifest_path.write_text(render_result_manifest(execution_record), encoding="utf-8")
+    provenance_path = output_dir / RESULT_PROVENANCE_REPORT_MD
+    provenance_path.write_text(render_result_provenance_report(execution_record), encoding="utf-8")
+    return {
+        "execution_log_path": log_path,
+        "execution_summary_path": summary_path,
+        "execution_contract_path": contract_path,
+        "result_manifest_path": manifest_path,
+        "result_provenance_report_path": provenance_path,
+    }
+
+
+def build_execution_summary(execution_record: CanonicalAnalyticsExecutionRecord) -> dict[str, Any]:
+    record = execution_record.to_record()
+    return {
+        "schema_version": "cae6_latest_execution_summary_v1",
+        "generated_at": record["generated_at"],
+        "latest_execution_id": record["execution_id"],
+        "query_id": record["query_id"],
+        "outcome_count_total": record["outcome_count_total"],
+        "outcome_count_matched": record["outcome_count_matched"],
+        "group_count": record["group_count"],
+        "query_fingerprint": record["query_fingerprint"],
+        "result_fingerprint": record["result_fingerprint"],
+        "diagnostic_only": True,
+        "production_recommendation": False,
+        "trading_gate": False,
+    }
+
+
+def deterministic_query_fingerprint(query_payload: Mapping[str, Any], *, catalog_version: str | None = None) -> str:
+    return stable_hash({"catalog_version": catalog_version, "query_payload": query_payload})
+
+
+def deterministic_result_fingerprint(result: Mapping[str, Any]) -> str:
+    return stable_hash({
+        "schema_version": result.get("schema_version"),
+        "query": result.get("query"),
+        "grouped_rows": result.get("grouped_rows"),
+        "summary": result.get("summary"),
+        "validity_metadata": result.get("validity_metadata"),
+        "diagnostic_only": result.get("diagnostic_only"),
+        "production_recommendation": result.get("production_recommendation"),
+        "trading_gate": result.get("trading_gate"),
+    })
+
+
+def stable_hash(payload: Mapping[str, Any] | Sequence[Any]) -> str:
+    encoded = json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def file_sha256(path: Path) -> str | None:
+    if not path.exists():
+        return None
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def render_execution_audit_contract() -> str:
+    return "\n".join(
+        [
+            "# CAE6 Execution Audit Contract",
+            "",
+            f"- Schema version: `{EXECUTION_RECORD_SCHEMA_VERSION}`",
+            "- Execution logs are diagnostic JSONL records.",
+            "- Fingerprints exclude generation timestamps so equivalent query/result payloads are reproducible.",
+            "- Execution records preserve input artifact refs, input hashes, dimensions, metrics, filters, validity rules, sample classes, and guardrails.",
+            "- Guardrails remain `diagnostic_only=true`, `production_recommendation=false`, `trading_gate=false`.",
+            "",
+        ]
+    )
+
+
+def render_result_manifest(execution_record: CanonicalAnalyticsExecutionRecord) -> str:
+    record = execution_record.to_record()
+    lines = [
+        "# CAE6 Result Manifest",
+        "",
+        f"- Execution id: `{record['execution_id']}`",
+        f"- Query id: `{record['query_id']}`",
+        f"- Generated at: `{record['generated_at']}`",
+        f"- Catalog version: `{record['catalog_version']}`",
+        f"- Query fingerprint: `{record['query_fingerprint']}`",
+        f"- Result fingerprint: `{record['result_fingerprint']}`",
+        f"- Matched outcomes: `{record['outcome_count_matched']}`",
+        f"- Groups: `{record['group_count']}`",
+        "",
+        "Diagnostic/research only. This manifest has no runtime, broker, strategy, or trading-gate authority.",
+        "",
+    ]
+    return "\n".join(lines)
+
+
+def render_result_provenance_report(execution_record: CanonicalAnalyticsExecutionRecord) -> str:
+    record = execution_record.to_record()
+    lines = [
+        "# CAE6 Result Provenance Report",
+        "",
+        f"- Query id: `{record['query_id']}`",
+        f"- Saved query hash: `{record['saved_query_hash']}`",
+        f"- Engine version: `{record['engine_version']}`",
+        "",
+        "## Inputs",
+        "",
+    ]
+    for key, ref in record["input_artifact_refs"].items():
+        lines.append(f"- `{key}`: `{ref}`")
+        lines.append(f"  - sha256: `{record['input_artifact_hashes'].get(key)}`")
+    lines.extend([
+        "",
+        "## Query Shape",
+        "",
+        f"- Dimensions: `{', '.join(record['dimensions'])}`",
+        f"- Metrics: `{', '.join(record['metrics'])}`",
+        f"- Context validity rules: `{', '.join(record['context_validity_rules'])}`",
+        "",
+    ])
+    return "\n".join(lines)
 
 
 def render_validation_report(validations: Sequence[SavedQueryValidation], *, generated_at: str) -> str:
@@ -424,6 +691,22 @@ def render_saved_query_contract() -> str:
             "",
         ]
     )
+
+
+def _sample_class_counts(grouped_rows: Sequence[Mapping[str, Any]]) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for row in grouped_rows:
+        sample_class = str(row.get("sample_class") or "UNKNOWN")
+        counts[sample_class] = counts.get(sample_class, 0) + 1
+    return dict(sorted(counts.items()))
+
+
+def _data_quality_flags(grouped_rows: Sequence[Mapping[str, Any]]) -> tuple[str, ...]:
+    flags: set[str] = set()
+    for row in grouped_rows:
+        for flag in row.get("data_quality_flags") or ():
+            flags.add(str(flag))
+    return tuple(sorted(flags))
 
 
 def _write_saved_queries(path: Path, saved_queries: Sequence[SavedAnalyticsQuery]) -> None:

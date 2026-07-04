@@ -1,0 +1,14 @@
+{
+  "diagnostic_only": true,
+  "generated_at": "2026-07-04T12:00:00+00:00",
+  "group_count": 55,
+  "latest_execution_id": "1c57c005439e8737eae26159",
+  "outcome_count_matched": 431,
+  "outcome_count_total": 431,
+  "production_recommendation": false,
+  "query_fingerprint": "59a7feb5b48cc94c1086e9afafacd6907efab0c895d8f1c80342f3efdac16571",
+  "query_id": "expectancy_by_strategy",
+  "result_fingerprint": "67467131d8bc3c60983558a9ba23290cc42ef303a8b71a7bb7a37ceb3217d252",
+  "schema_version": "cae6_latest_execution_summary_v1",
+  "trading_gate": false
+}

@@ -9,8 +9,11 @@ import pytest
 
 from mgc_v05l.execution_core.track_b_canonical_analytics_engine import CanonicalAnalyticsQuery
 from mgc_v05l.execution_core.track_b_canonical_analytics_saved_queries import (
+    EXECUTION_LOG_JSONL,
     SAVED_QUERIES_JSONL,
     build_saved_query,
+    deterministic_query_fingerprint,
+    deterministic_result_fingerprint,
     load_saved_queries,
     preset_saved_queries,
     publish_saved_query_artifacts,
@@ -97,6 +100,75 @@ def test_publish_artifacts_and_run_saved_query(tmp_path: Path) -> None:
     assert run_result.result["diagnostic_only"] is True
 
 
+def test_execution_record_created_for_query_run(tmp_path: Path) -> None:
+    saved, outcomes, enrichments = _saved_query_with_inputs(tmp_path)
+
+    run_result = run_saved_query(
+        saved,
+        outcomes_path=outcomes,
+        enrichments_path=enrichments,
+        output_dir=tmp_path,
+        write_execution_audit=True,
+        generated_at=NOW,
+    )
+
+    assert run_result.execution_record is not None
+    assert run_result.execution_record["query_id"] == "expectancy_by_strategy"
+    assert run_result.execution_record["outcome_count_total"] == 2
+    assert run_result.execution_record["outcome_count_matched"] == 2
+    assert (tmp_path / EXECUTION_LOG_JSONL).exists()
+
+
+def test_deterministic_query_fingerprint_stable() -> None:
+    query = CanonicalAnalyticsQuery(name="q", dimensions=("strategy",), metrics=("trade_count",))
+    saved = _saved_query("stable", query)
+
+    first = deterministic_query_fingerprint(saved.query_payload, catalog_version=saved.catalog_version)
+    second = deterministic_query_fingerprint(saved.query_payload, catalog_version=saved.catalog_version)
+
+    assert first == second
+
+
+def test_result_fingerprint_changes_when_result_rows_change(tmp_path: Path) -> None:
+    saved, outcomes, enrichments = _saved_query_with_inputs(tmp_path)
+    first = run_saved_query(saved, outcomes_path=outcomes, enrichments_path=enrichments, generated_at=NOW)
+    outcomes.write_text(json.dumps(_outcome("a", 10.0)) + "\n" + json.dumps(_outcome("b", 12.0)) + "\n", encoding="utf-8")
+    second = run_saved_query(saved, outcomes_path=outcomes, enrichments_path=enrichments, generated_at=NOW)
+
+    assert first.result is not None
+    assert second.result is not None
+    assert deterministic_result_fingerprint(first.result) != deterministic_result_fingerprint(second.result)
+
+
+def test_guardrails_preserved_in_execution_record(tmp_path: Path) -> None:
+    saved, outcomes, enrichments = _saved_query_with_inputs(tmp_path)
+
+    run_result = run_saved_query(saved, outcomes_path=outcomes, enrichments_path=enrichments, generated_at=NOW)
+
+    assert run_result.execution_record is not None
+    assert run_result.execution_record["diagnostic_only"] is True
+    assert run_result.execution_record["production_recommendation"] is False
+    assert run_result.execution_record["trading_gate"] is False
+
+
+def test_validation_only_does_not_write_execution_record(tmp_path: Path) -> None:
+    publish_saved_query_artifacts(output_dir=tmp_path, now=NOW)
+    rows = [validate_saved_query(query).to_record() for query in load_saved_queries(tmp_path / SAVED_QUERIES_JSONL)]
+
+    assert rows
+    assert not (tmp_path / EXECUTION_LOG_JSONL).exists()
+
+
+def test_saved_query_run_includes_saved_query_id_and_hash(tmp_path: Path) -> None:
+    saved, outcomes, enrichments = _saved_query_with_inputs(tmp_path)
+
+    run_result = run_saved_query(saved, outcomes_path=outcomes, enrichments_path=enrichments, generated_at=NOW)
+
+    assert run_result.execution_record is not None
+    assert run_result.execution_record["query_id"] == saved.saved_query_id
+    assert run_result.execution_record["saved_query_hash"]
+
+
 def test_saved_query_import_boundary() -> None:
     paths = [
         Path("src/mgc_v05l/execution_core/track_b_canonical_analytics_saved_queries.py"),
@@ -146,6 +218,16 @@ def _saved_query(saved_query_id: str, query: CanonicalAnalyticsQuery, *, scope_b
         created_at=NOW,
         updated_at=NOW,
     )
+
+
+def _saved_query_with_inputs(tmp_path: Path):
+    published = publish_saved_query_artifacts(output_dir=tmp_path, now=NOW)
+    outcomes = tmp_path / "outcomes.jsonl"
+    enrichments = tmp_path / "enrichments.jsonl"
+    outcomes.write_text(json.dumps(_outcome("a", 10.0)) + "\n" + json.dumps(_outcome("b", -4.0)) + "\n", encoding="utf-8")
+    enrichments.write_text(json.dumps(_enrichment("a")) + "\n" + json.dumps(_enrichment("b")) + "\n", encoding="utf-8")
+    saved = {query.saved_query_id: query for query in load_saved_queries(published["saved_queries_path"])}["expectancy_by_strategy"]
+    return saved, outcomes, enrichments
 
 
 def _outcome(trade_id: str, pnl: float) -> dict:

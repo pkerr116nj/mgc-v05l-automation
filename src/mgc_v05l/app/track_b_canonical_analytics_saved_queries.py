@@ -47,12 +47,22 @@ def main(argv: Sequence[str] | None = None) -> int:
         if not args.saved_query_id or args.saved_query_id not in queries:
             print(json.dumps({"error": "saved_query_id_not_found", "saved_query_id": args.saved_query_id}, sort_keys=True))
             return 2
-        run_result = run_saved_query(queries[args.saved_query_id], outcomes_path=args.outcomes_path, enrichments_path=args.enrichments_path)
+        run_result = run_saved_query(
+            queries[args.saved_query_id],
+            outcomes_path=args.outcomes_path,
+            enrichments_path=args.enrichments_path,
+            output_dir=args.output_dir,
+            write_execution_audit=True,
+            generated_at=args.now,
+        )
         print(json.dumps({
             "saved_query_id": run_result.saved_query.saved_query_id,
             "validation": run_result.validation.to_record(),
             "group_count": (run_result.result or {}).get("summary", {}).get("group_count"),
             "matched_count": (run_result.result or {}).get("summary", {}).get("matched_count"),
+            "execution_id": (run_result.execution_record or {}).get("execution_id"),
+            "query_fingerprint": (run_result.execution_record or {}).get("query_fingerprint"),
+            "result_fingerprint": (run_result.execution_record or {}).get("result_fingerprint"),
             "diagnostic_only": (run_result.result or {}).get("diagnostic_only"),
             "production_recommendation": (run_result.result or {}).get("production_recommendation"),
             "trading_gate": (run_result.result or {}).get("trading_gate"),
