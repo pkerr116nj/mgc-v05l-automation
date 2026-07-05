@@ -31,6 +31,7 @@ TIMELINE_CONTRACT_MD = "ie1_timeline_contract.md"
 VALID_STATUSES = {"OPEN", "ACTIVE", "PAUSED", "COMPLETE", "ARCHIVED"}
 VALID_REFERENCE_TYPES = {
     "claim",
+    "conclusion",
     "evidence",
     "saved_query",
     "execution_record",
@@ -51,6 +52,11 @@ VALID_EVENT_TYPES = {
     "CLAIM_SUPERSEDED",
     "CLAIM_INVALIDATED",
     "CLAIM_ARCHIVED",
+    "CONCLUSION_CREATED",
+    "CONCLUSION_VALIDATED",
+    "CONCLUSION_SUPERSEDED",
+    "CONCLUSION_INVALIDATED",
+    "CONCLUSION_ARCHIVED",
     "EVIDENCE_ATTACHED",
     "EVIDENCE_SUPERSEDED",
     "EVIDENCE_ARCHIVED",
@@ -226,6 +232,30 @@ def attach_claim_reference(
     )
 
 
+def attach_conclusion_reference(
+    investigation: Mapping[str, Any],
+    *,
+    conclusion_id: str,
+    artifact_path: str | None = None,
+    status_event: str = "CONCLUSION_CREATED",
+    label: str | None = None,
+    provenance: Mapping[str, Any] | None = None,
+    now: datetime | str | None = None,
+) -> dict[str, Any]:
+    if status_event not in {"CONCLUSION_CREATED", "CONCLUSION_VALIDATED", "CONCLUSION_SUPERSEDED", "CONCLUSION_INVALIDATED", "CONCLUSION_ARCHIVED"}:
+        raise ValueError(f"Unsupported conclusion timeline event: {status_event}")
+    return attach_reference(
+        investigation,
+        reference_type="conclusion",
+        reference_id=conclusion_id,
+        artifact_path=artifact_path,
+        label=label,
+        event_type=status_event,
+        provenance=provenance or {"source": "canonical_investigation_engine", "operation": "attach_conclusion"},
+        now=now,
+    )
+
+
 def write_investigation(investigation: Mapping[str, Any], *, output_dir: Path = DEFAULT_OUTPUT_DIR) -> CanonicalInvestigationResult:
     validate_investigation(investigation)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -309,6 +339,7 @@ def summarize_investigation(investigation: Mapping[str, Any]) -> dict[str, Any]:
         "hypothesis": investigation.get("hypothesis"),
         "current_status": investigation.get("status"),
         "attached_claims": by_type.get("claim", []),
+        "attached_conclusions": by_type.get("conclusion", []),
         "attached_queries": by_type.get("saved_query", []),
         "attached_evidence": by_type.get("evidence", []),
         "attached_insights": by_type.get("insight", []),
@@ -471,6 +502,7 @@ def _event_type_for_reference(reference_type: str) -> str:
     return {
         "saved_query": "QUERY_EXECUTED",
         "claim": "CLAIM_CREATED",
+        "conclusion": "CONCLUSION_CREATED",
         "evidence": "EVIDENCE_ATTACHED",
         "execution_record": "QUERY_EXECUTED",
         "diff_result": "DIFF_ATTACHED",
