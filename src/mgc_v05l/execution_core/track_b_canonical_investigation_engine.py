@@ -30,6 +30,7 @@ TIMELINE_CONTRACT_MD = "ie1_timeline_contract.md"
 
 VALID_STATUSES = {"OPEN", "ACTIVE", "PAUSED", "COMPLETE", "ARCHIVED"}
 VALID_REFERENCE_TYPES = {
+    "evidence",
     "saved_query",
     "execution_record",
     "diff_result",
@@ -43,6 +44,10 @@ VALID_REFERENCE_TYPES = {
 }
 VALID_EVENT_TYPES = {
     "INVESTIGATION_CREATED",
+    "EVIDENCE_ATTACHED",
+    "EVIDENCE_SUPERSEDED",
+    "EVIDENCE_ARCHIVED",
+    "EVIDENCE_INVALIDATED",
     "QUERY_EXECUTED",
     "INSIGHT_ATTACHED",
     "DIFF_ATTACHED",
@@ -166,6 +171,30 @@ def complete_investigation(
     return updated
 
 
+def attach_evidence_reference(
+    investigation: Mapping[str, Any],
+    *,
+    evidence_id: str,
+    artifact_path: str | None = None,
+    status_event: str = "EVIDENCE_ATTACHED",
+    label: str | None = None,
+    provenance: Mapping[str, Any] | None = None,
+    now: datetime | str | None = None,
+) -> dict[str, Any]:
+    if status_event not in {"EVIDENCE_ATTACHED", "EVIDENCE_SUPERSEDED", "EVIDENCE_ARCHIVED", "EVIDENCE_INVALIDATED"}:
+        raise ValueError(f"Unsupported evidence timeline event: {status_event}")
+    return attach_reference(
+        investigation,
+        reference_type="evidence",
+        reference_id=evidence_id,
+        artifact_path=artifact_path,
+        label=label,
+        event_type=status_event,
+        provenance=provenance or {"source": "canonical_investigation_engine", "operation": "attach_evidence"},
+        now=now,
+    )
+
+
 def write_investigation(investigation: Mapping[str, Any], *, output_dir: Path = DEFAULT_OUTPUT_DIR) -> CanonicalInvestigationResult:
     validate_investigation(investigation)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -249,6 +278,7 @@ def summarize_investigation(investigation: Mapping[str, Any]) -> dict[str, Any]:
         "hypothesis": investigation.get("hypothesis"),
         "current_status": investigation.get("status"),
         "attached_queries": by_type.get("saved_query", []),
+        "attached_evidence": by_type.get("evidence", []),
         "attached_insights": by_type.get("insight", []),
         "attached_candidates": by_type.get("research_discovery_candidate", []),
         "attached_artifacts": by_type.get("artifact", []) + by_type.get("context_snapshot", []) + by_type.get("bookmark", []),
@@ -310,7 +340,7 @@ def render_investigation_contract() -> str:
         "",
         f"- Schema version: `{INVESTIGATION_SCHEMA_VERSION}`",
         "- Investigations are durable diagnostic research workspaces.",
-        "- They can reference saved queries, executions, diffs, insights, Morning Briefs, research candidates, context snapshots, artifacts, and bookmarks.",
+        "- They can reference Evidence, saved queries, executions, diffs, insights, Morning Briefs, research candidates, context snapshots, artifacts, and bookmarks.",
         "- IE1 does not implement notebooks, free-form notes, AI, UI, runtime behavior, broker integration, recommendations, or gates.",
         "- Guardrails: `diagnostic_only=true`, `production_recommendation=false`, `trading_gate=false`.",
         "",
@@ -337,7 +367,7 @@ def render_timeline_contract() -> str:
         "",
         f"- Event schema version: `{TIMELINE_EVENT_SCHEMA_VERSION}`",
         "- Timeline events are sorted by timestamp and then event type.",
-        "- Supported events: `INVESTIGATION_CREATED`, `QUERY_EXECUTED`, `INSIGHT_ATTACHED`, `DIFF_ATTACHED`, `MORNING_BRIEF_REFERENCED`, `CANDIDATE_BOOKMARKED`, `ARTIFACT_ATTACHED`, `INVESTIGATION_COMPLETED`.",
+        "- Supported events: `INVESTIGATION_CREATED`, `EVIDENCE_ATTACHED`, `EVIDENCE_SUPERSEDED`, `EVIDENCE_ARCHIVED`, `EVIDENCE_INVALIDATED`, `QUERY_EXECUTED`, `INSIGHT_ATTACHED`, `DIFF_ATTACHED`, `MORNING_BRIEF_REFERENCED`, `CANDIDATE_BOOKMARKED`, `ARTIFACT_ATTACHED`, `INVESTIGATION_COMPLETED`.",
         "- Each event includes timestamp, event type, artifact reference, provenance, and diagnostic guardrails.",
         "",
     ])
@@ -408,6 +438,7 @@ def _timeline_event(
 def _event_type_for_reference(reference_type: str) -> str:
     return {
         "saved_query": "QUERY_EXECUTED",
+        "evidence": "EVIDENCE_ATTACHED",
         "execution_record": "QUERY_EXECUTED",
         "diff_result": "DIFF_ATTACHED",
         "insight": "INSIGHT_ATTACHED",
