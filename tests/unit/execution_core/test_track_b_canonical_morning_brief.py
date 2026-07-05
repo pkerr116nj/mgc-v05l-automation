@@ -9,6 +9,7 @@ from mgc_v05l.execution_core.track_b_canonical_morning_brief import (
     build_canonical_morning_brief,
     compare_morning_brief_archive_records,
     create_morning_brief_archive_record,
+    explain_morning_brief_changes,
     morning_brief_fingerprint,
     run_canonical_morning_brief,
 )
@@ -174,6 +175,75 @@ def test_compare_archive_records_unchanged() -> None:
     assert diff["changes"] == []
 
 
+def test_no_meaningful_change_when_only_timestamp_or_fingerprint_changes() -> None:
+    prior = _archive_record()
+    current = dict(prior)
+    current["brief_id"] = "brief_new"
+    current["generated_at"] = "2026-07-05T12:00:00+00:00"
+    current["brief_fingerprint"] = "different"
+
+    explanation = explain_morning_brief_changes(current, prior)
+
+    assert explanation["classification"] == "NO_MEANINGFUL_CHANGE"
+    assert explanation["changes"] == []
+
+
+def test_platform_classification_change_explained() -> None:
+    prior = _archive_record(platform_classification="PLATFORM_CERTIFIED_WITH_WARNINGS")
+    current = _archive_record(platform_classification="PLATFORM_NOT_CERTIFIED")
+
+    explanation = explain_morning_brief_changes(current, prior)
+
+    assert explanation["classification"] == "CHANGED"
+    change = explanation["changes"][0]
+    assert change["domain"] == "PLATFORM"
+    assert change["severity"] == "CRITICAL"
+    assert change["production_recommendation"] is False
+
+
+def test_runtime_status_change_explained() -> None:
+    prior = _archive_record(runtime_status="PASS")
+    current = _archive_record(runtime_status="WARN")
+
+    explanation = explain_morning_brief_changes(current, prior)
+
+    assert any(change["domain"] == "RUNTIME" and change["severity"] == "WARNING" for change in explanation["changes"])
+
+
+def test_insight_count_change_explained() -> None:
+    prior = _archive_record(insight_count=1)
+    current = _archive_record(insight_count=3)
+
+    explanation = explain_morning_brief_changes(current, prior)
+
+    assert any(change["domain"] == "ANALYTICS" and change["after"] == 3 for change in explanation["changes"])
+
+
+def test_manual_review_count_change_explained() -> None:
+    prior = _archive_record(research_manual_review_count=65)
+    current = _archive_record(research_manual_review_count=66)
+
+    explanation = explain_morning_brief_changes(current, prior)
+
+    assert any(change["domain"] == "RESEARCH_DISCOVERY" and change["after"] == 66 for change in explanation["changes"])
+
+
+def test_guardrail_change_is_high_severity() -> None:
+    prior = _archive_record(guardrails={"diagnostic_only": True, "production_recommendation": False, "trading_gate": False})
+    current = _archive_record(guardrails={"diagnostic_only": True, "production_recommendation": True, "trading_gate": False})
+
+    explanation = explain_morning_brief_changes(current, prior)
+
+    assert any(change["domain"] == "GUARDRAILS" and change["severity"] == "HIGH" for change in explanation["changes"])
+
+
+def test_first_run_change_explanation_safe() -> None:
+    explanation = explain_morning_brief_changes(_archive_record(), None)
+
+    assert explanation["classification"] == "NO_PRIOR_BRIEF"
+    assert explanation["changes"] == []
+
+
 def test_build_from_loaded_artifacts_directly() -> None:
     loaded = {
         "operational_certification": {"path": "cert.json", "present": True, "loaded": True, "artifact_type": "json", "sha256": "abc", "payload": {"classification": "OK"}},
@@ -251,3 +321,23 @@ def _seed_artifacts(tmp_path: Path) -> dict[str, Path]:
 
 def _write_json(path: Path, payload: dict) -> None:
     path.write_text(json.dumps(payload, sort_keys=True) + "\n", encoding="utf-8")
+
+
+def _archive_record(**overrides: object) -> dict[str, object]:
+    record: dict[str, object] = {
+        "brief_id": "brief",
+        "generated_at": NOW.isoformat(),
+        "platform_classification": "PLATFORM_CERTIFIED_WITH_WARNINGS",
+        "runtime_status": "WARN",
+        "managed_exit_status": "NO_ELIGIBLE_EXITS",
+        "safe_state_classification": "SAFE_STATE_NORMAL",
+        "guardian_classification": "BROKER_POSITION_GUARDIAN_READY",
+        "insight_count": 1,
+        "research_manual_review_count": 65,
+        "market_context_status": "READY",
+        "guardrails": {"diagnostic_only": True, "production_recommendation": False, "trading_gate": False},
+        "source_artifact_refs": ["cert.json"],
+        "brief_fingerprint": "fingerprint",
+    }
+    record.update(overrides)
+    return record

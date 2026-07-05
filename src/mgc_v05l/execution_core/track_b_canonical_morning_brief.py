@@ -30,10 +30,16 @@ DIFF_JSON = "mb2_latest_brief_diff.json"
 DIFF_MD = "mb2_latest_brief_diff.md"
 ARCHIVE_CONTRACT_MD = "mb2_brief_archive_contract.md"
 HISTORY_REPORT_MD = "mb2_brief_history_report.md"
+CHANGE_EXPLANATION_JSON = "mb3_latest_change_explanation.json"
+CHANGE_EXPLANATION_MD = "mb3_latest_change_explanation.md"
+CHANGE_EXPLANATION_CONTRACT_MD = "mb3_change_explanation_contract.md"
+CHANGE_RULE_CATALOG_MD = "mb3_change_rule_catalog.md"
+OPERATOR_RELEVANCE_MATRIX_MD = "mb3_operator_relevance_matrix.md"
 
 SCHEMA_VERSION = "cae9_canonical_morning_brief_v1"
 ARCHIVE_SCHEMA_VERSION = "mb2_canonical_morning_brief_archive_record_v1"
 DIFF_SCHEMA_VERSION = "mb2_canonical_morning_brief_diff_v1"
+CHANGE_EXPLANATION_SCHEMA_VERSION = "mb3_morning_brief_change_explanation_v1"
 
 DEFAULT_ARTIFACT_PATHS = {
     "operational_certification": DEFAULT_OUTPUT_ROOT / "operations_maintenance" / "operational_certification" / "latest_operational_certification.json",
@@ -66,6 +72,11 @@ class CanonicalMorningBrief:
     diff_markdown_path: Path
     archive_contract_path: Path
     history_report_path: Path
+    change_explanation_path: Path
+    change_explanation_markdown_path: Path
+    change_explanation_contract_path: Path
+    change_rule_catalog_path: Path
+    operator_relevance_matrix_path: Path
 
 
 def run_canonical_morning_brief(
@@ -106,6 +117,17 @@ def run_canonical_morning_brief(
     archive_contract_path.write_text(render_brief_archive_contract(), encoding="utf-8")
     history_report_path = output_dir / HISTORY_REPORT_MD
     history_report_path.write_text(render_brief_history_report(archive_record, diff), encoding="utf-8")
+    change_explanation = explain_morning_brief_changes(archive_record, prior_record)
+    change_explanation_path = output_dir / CHANGE_EXPLANATION_JSON
+    change_explanation_path.write_text(json.dumps(change_explanation, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    change_explanation_markdown_path = output_dir / CHANGE_EXPLANATION_MD
+    change_explanation_markdown_path.write_text(render_change_explanation_markdown(change_explanation), encoding="utf-8")
+    change_explanation_contract_path = output_dir / CHANGE_EXPLANATION_CONTRACT_MD
+    change_explanation_contract_path.write_text(render_change_explanation_contract(), encoding="utf-8")
+    change_rule_catalog_path = output_dir / CHANGE_RULE_CATALOG_MD
+    change_rule_catalog_path.write_text(render_change_rule_catalog(), encoding="utf-8")
+    operator_relevance_matrix_path = output_dir / OPERATOR_RELEVANCE_MATRIX_MD
+    operator_relevance_matrix_path.write_text(render_operator_relevance_matrix(), encoding="utf-8")
     return CanonicalMorningBrief(
         brief=brief,
         json_path=json_path,
@@ -119,6 +141,11 @@ def run_canonical_morning_brief(
         diff_markdown_path=diff_markdown_path,
         archive_contract_path=archive_contract_path,
         history_report_path=history_report_path,
+        change_explanation_path=change_explanation_path,
+        change_explanation_markdown_path=change_explanation_markdown_path,
+        change_explanation_contract_path=change_explanation_contract_path,
+        change_rule_catalog_path=change_rule_catalog_path,
+        operator_relevance_matrix_path=operator_relevance_matrix_path,
     )
 
 
@@ -342,6 +369,121 @@ def render_brief_history_report(record: Mapping[str, Any], diff: Mapping[str, An
     ])
 
 
+def explain_morning_brief_changes(
+    current: Mapping[str, Any],
+    prior: Mapping[str, Any] | None,
+) -> dict[str, Any]:
+    guardrails = current.get("guardrails") or {}
+    if prior is None:
+        return {
+            "schema_version": CHANGE_EXPLANATION_SCHEMA_VERSION,
+            "classification": "NO_PRIOR_BRIEF",
+            "current_brief_id": current.get("brief_id"),
+            "prior_brief_id": None,
+            "change_count": 0,
+            "changes": [],
+            "summary": "No prior Morning Brief archive record exists yet, so no change explanation is available.",
+            "guardrails": guardrails,
+        }
+    changes = _explain_field_changes(current, prior)
+    guardrail_change = _explain_guardrail_change(current, prior)
+    if guardrail_change:
+        changes.append(guardrail_change)
+    classification = "CHANGED" if changes else "NO_MEANINGFUL_CHANGE"
+    summary = (
+        f"{len(changes)} meaningful Morning Brief change(s) detected."
+        if changes
+        else "No meaningful Morning Brief changes were detected beyond archive timing/fingerprint churn."
+    )
+    return {
+        "schema_version": CHANGE_EXPLANATION_SCHEMA_VERSION,
+        "classification": classification,
+        "current_brief_id": current.get("brief_id"),
+        "prior_brief_id": prior.get("brief_id"),
+        "current_generated_at": current.get("generated_at"),
+        "prior_generated_at": prior.get("generated_at"),
+        "change_count": len(changes),
+        "changes": changes,
+        "summary": summary,
+        "guardrails": guardrails,
+    }
+
+
+def render_change_explanation_markdown(explanation: Mapping[str, Any]) -> str:
+    lines = [
+        "# MB3 Morning Brief Change Explanation",
+        "",
+        f"- Classification: `{explanation.get('classification')}`",
+        f"- Change count: `{explanation.get('change_count')}`",
+        f"- Current brief: `{explanation.get('current_brief_id')}`",
+        f"- Prior brief: `{explanation.get('prior_brief_id')}`",
+        f"- Summary: {explanation.get('summary')}",
+        "",
+    ]
+    changes = explanation.get("changes") or []
+    if not changes:
+        lines.append("No deterministic domain-level changes were detected.")
+    else:
+        lines.extend(["| Domain | Severity | Headline | Before | After |", "|---|---|---|---|---|"])
+        for change in changes:
+            lines.append(
+                f"| `{change.get('domain')}` | `{change.get('severity')}` | {change.get('headline')} | `{change.get('before')}` | `{change.get('after')}` |"
+            )
+    lines.extend(["", "Diagnostic explanation only. No production recommendations or trading gates are produced.", ""])
+    return "\n".join(lines)
+
+
+def render_change_explanation_contract() -> str:
+    return "\n".join([
+        "# MB3 Change Explanation Contract",
+        "",
+        f"- Schema version: `{CHANGE_EXPLANATION_SCHEMA_VERSION}`",
+        "- Compares the latest Morning Brief archive record to the prior archive record.",
+        "- Emits deterministic domain-level explanations only.",
+        "- If no domain-level field changes occur, the result is `NO_MEANINGFUL_CHANGE` even if archive timestamps or fingerprints differ.",
+        "- Guardrails: `diagnostic_only=true`, `production_recommendation=false`, `trading_gate=false`.",
+        "",
+    ])
+
+
+def render_change_rule_catalog() -> str:
+    return "\n".join([
+        "# MB3 Change Rule Catalog",
+        "",
+        "| Rule | Domain | Severity |",
+        "|---|---|---|",
+        "| Critical operational downgrade | PLATFORM / SAFE_STATE / GUARDIAN | CRITICAL |",
+        "| Operational warning changed | RUNTIME / MANAGED_EXIT | WARNING |",
+        "| Certification improved | PLATFORM | INFO |",
+        "| Certification deteriorated | PLATFORM | CRITICAL/WARNING |",
+        "| Insight count changed | ANALYTICS | INFO |",
+        "| Manual-review candidate count changed | RESEARCH_DISCOVERY | INFO |",
+        "| Market context status changed | MARKET_CONTEXT | NOTICE |",
+        "| Guardrail status changed | GUARDRAILS | HIGH |",
+        "| No meaningful change | ALL | INFO |",
+        "",
+    ])
+
+
+def render_operator_relevance_matrix() -> str:
+    return "\n".join([
+        "# MB3 Operator Relevance Matrix",
+        "",
+        "| Domain | Operator relevance |",
+        "|---|---|",
+        "| PLATFORM | Certification state changed; review operational readiness context. |",
+        "| RUNTIME | Runtime warning/pass/fail label changed; inspect status artifacts if unexpected. |",
+        "| MANAGED_EXIT | Managed Exit service status changed; inspect service artifact if unexpected. |",
+        "| SAFE_STATE | Safe-State classification changed; this may indicate safety posture drift. |",
+        "| GUARDIAN | Guardian classification changed; inspect guardian evidence before further operations. |",
+        "| ANALYTICS | Deterministic insight count changed; review CAE8 insights. |",
+        "| RESEARCH_DISCOVERY | Manual-review research queue changed. |",
+        "| MARKET_CONTEXT | Market-context readiness changed. |",
+        "| GUARDRAILS | Diagnostic guardrails changed; treat as high severity. |",
+        "",
+    ])
+
+
 def _build_platform(loaded: Mapping[str, Mapping[str, Any]]) -> dict[str, Any]:
     cert = _payload(loaded, "operational_certification")
     safe_state = _payload(loaded, "safe_state")
@@ -560,6 +702,98 @@ def _latest_archive_record(path: Path) -> dict[str, Any] | None:
     for row in _read_jsonl(path):
         latest = row
     return latest
+
+
+def _explain_field_changes(current: Mapping[str, Any], prior: Mapping[str, Any]) -> list[dict[str, Any]]:
+    changes: list[dict[str, Any]] = []
+    field_specs = {
+        "platform_classification": ("PLATFORM", "Platform certification changed"),
+        "runtime_status": ("RUNTIME", "Runtime status changed"),
+        "managed_exit_status": ("MANAGED_EXIT", "Managed Exit status changed"),
+        "safe_state_classification": ("SAFE_STATE", "Safe-State classification changed"),
+        "guardian_classification": ("GUARDIAN", "Guardian classification changed"),
+        "market_context_status": ("MARKET_CONTEXT", "Market context status changed"),
+        "insight_count": ("ANALYTICS", "Analytics insight count changed"),
+        "research_manual_review_count": ("RESEARCH_DISCOVERY", "Research manual-review count changed"),
+    }
+    for field, (domain, headline) in field_specs.items():
+        before = prior.get(field)
+        after = current.get(field)
+        if before == after:
+            continue
+        changes.append({
+            "change_id": f"mb3_{domain.lower()}_{field}",
+            "domain": domain,
+            "severity": _change_severity(domain, before, after),
+            "headline": headline,
+            "before": before,
+            "after": after,
+            "evidence_refs": current.get("source_artifact_refs") or [],
+            "operator_relevance": _operator_relevance(domain, before, after),
+            "diagnostic_only": True,
+            "production_recommendation": False,
+            "trading_gate": False,
+        })
+    return changes
+
+
+def _explain_guardrail_change(current: Mapping[str, Any], prior: Mapping[str, Any]) -> dict[str, Any] | None:
+    before = prior.get("guardrails") or {}
+    after = current.get("guardrails") or {}
+    if before == after:
+        return None
+    return {
+        "change_id": "mb3_guardrails_status",
+        "domain": "GUARDRAILS",
+        "severity": "HIGH",
+        "headline": "Morning Brief diagnostic guardrails changed",
+        "before": before,
+        "after": after,
+        "evidence_refs": current.get("source_artifact_refs") or [],
+        "operator_relevance": "Diagnostic guardrail changes affect whether downstream consumers can safely treat the brief as non-authoritative.",
+        "diagnostic_only": True,
+        "production_recommendation": False,
+        "trading_gate": False,
+    }
+
+
+def _change_severity(domain: str, before: Any, after: Any) -> str:
+    after_text = str(after or "").upper()
+    before_text = str(before or "").upper()
+    if domain in {"SAFE_STATE", "GUARDIAN"} and any(token in after_text for token in ("FAIL", "BLOCK", "HARD_STOP", "NOT_READY")):
+        return "CRITICAL"
+    if domain == "PLATFORM":
+        if "NOT_CERTIFIED" in after_text or "FAIL" in after_text:
+            return "CRITICAL"
+        if "WARNING" in after_text:
+            return "WARNING"
+        if "NOT_CERTIFIED" in before_text and "CERTIFIED" in after_text:
+            return "INFO"
+    if domain in {"RUNTIME", "MANAGED_EXIT"}:
+        return "WARNING" if any(token in after_text for token in ("WARN", "FAIL", "STALE", "ERROR")) else "INFO"
+    if domain == "MARKET_CONTEXT":
+        return "NOTICE"
+    return "INFO"
+
+
+def _operator_relevance(domain: str, before: Any, after: Any) -> str:
+    if domain == "PLATFORM":
+        return "Certification state changed; review the operational certification artifact before relying on the brief."
+    if domain == "RUNTIME":
+        return "Runtime status changed; this is operational context only and does not imply a restart."
+    if domain == "MANAGED_EXIT":
+        return "Managed Exit status changed; this is service context only and does not imply intervention."
+    if domain == "SAFE_STATE":
+        return "Safe-State classification changed; inspect the Safe-State artifact if the shift is unexpected."
+    if domain == "GUARDIAN":
+        return "Guardian classification changed; inspect guardian evidence if the shift is unexpected."
+    if domain == "ANALYTICS":
+        return "Deterministic analytics insight count changed; review CAE8 insight details."
+    if domain == "RESEARCH_DISCOVERY":
+        return "Manual-review research queue changed; review research discovery candidates."
+    if domain == "MARKET_CONTEXT":
+        return "Market-context readiness changed; review CMC and enrichment context validity artifacts."
+    return f"{domain} changed from {before} to {after}."
 
 
 def _append_jsonl(path: Path, payload: Mapping[str, Any]) -> None:

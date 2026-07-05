@@ -25,6 +25,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     result = run_canonical_morning_brief(output_dir=args.output_dir, now=args.now)
     brief = result.brief
+    change_explanation = json.loads(result.change_explanation_path.read_text(encoding="utf-8"))
     print(
         json.dumps(
             {
@@ -38,6 +39,9 @@ def main(argv: Sequence[str] | None = None) -> int:
                 "archive_path": str(result.archive_path),
                 "archive_summary_path": str(result.archive_summary_path),
                 "diff_path": str(result.diff_path),
+                "change_explanation_path": str(result.change_explanation_path),
+                "change_explanation_classification": change_explanation.get("classification"),
+                "change_explanation_count": change_explanation.get("change_count"),
                 "diagnostic_only": brief.get("diagnostic_only"),
                 "production_recommendation": brief.get("production_recommendation"),
                 "trading_gate": brief.get("trading_gate"),
