@@ -13,6 +13,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Mapping, Sequence
+from zoneinfo import ZoneInfo
 
 
 DEFAULT_OUTPUT_ROOT = Path("outputs") / "track_b_execution_core"
@@ -23,8 +24,16 @@ BRIEF_MD = "cae9_morning_brief.md"
 CONTRACT_MD = "cae9_brief_contract.md"
 COMPONENT_INVENTORY_MD = "cae9_component_inventory.md"
 DATA_PROVENANCE_MD = "cae9_data_provenance.md"
+ARCHIVE_JSONL = "mb2_morning_brief_archive.jsonl"
+ARCHIVE_SUMMARY_JSON = "mb2_latest_brief_archive_summary.json"
+DIFF_JSON = "mb2_latest_brief_diff.json"
+DIFF_MD = "mb2_latest_brief_diff.md"
+ARCHIVE_CONTRACT_MD = "mb2_brief_archive_contract.md"
+HISTORY_REPORT_MD = "mb2_brief_history_report.md"
 
 SCHEMA_VERSION = "cae9_canonical_morning_brief_v1"
+ARCHIVE_SCHEMA_VERSION = "mb2_canonical_morning_brief_archive_record_v1"
+DIFF_SCHEMA_VERSION = "mb2_canonical_morning_brief_diff_v1"
 
 DEFAULT_ARTIFACT_PATHS = {
     "operational_certification": DEFAULT_OUTPUT_ROOT / "operations_maintenance" / "operational_certification" / "latest_operational_certification.json",
@@ -51,6 +60,12 @@ class CanonicalMorningBrief:
     contract_path: Path
     component_inventory_path: Path
     data_provenance_path: Path
+    archive_path: Path
+    archive_summary_path: Path
+    diff_path: Path
+    diff_markdown_path: Path
+    archive_contract_path: Path
+    history_report_path: Path
 
 
 def run_canonical_morning_brief(
@@ -76,6 +91,21 @@ def run_canonical_morning_brief(
     component_inventory_path.write_text(render_component_inventory(brief), encoding="utf-8")
     data_provenance_path = output_dir / DATA_PROVENANCE_MD
     data_provenance_path.write_text(render_data_provenance(brief), encoding="utf-8")
+    archive_path = output_dir / ARCHIVE_JSONL
+    prior_record = _latest_archive_record(archive_path)
+    archive_record = create_morning_brief_archive_record(brief)
+    diff = compare_morning_brief_archive_records(archive_record, prior_record)
+    _append_jsonl(archive_path, archive_record)
+    archive_summary_path = output_dir / ARCHIVE_SUMMARY_JSON
+    archive_summary_path.write_text(json.dumps(_archive_summary(archive_path, archive_record, diff), indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    diff_path = output_dir / DIFF_JSON
+    diff_path.write_text(json.dumps(diff, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    diff_markdown_path = output_dir / DIFF_MD
+    diff_markdown_path.write_text(render_brief_diff_markdown(diff), encoding="utf-8")
+    archive_contract_path = output_dir / ARCHIVE_CONTRACT_MD
+    archive_contract_path.write_text(render_brief_archive_contract(), encoding="utf-8")
+    history_report_path = output_dir / HISTORY_REPORT_MD
+    history_report_path.write_text(render_brief_history_report(archive_record, diff), encoding="utf-8")
     return CanonicalMorningBrief(
         brief=brief,
         json_path=json_path,
@@ -83,6 +113,12 @@ def run_canonical_morning_brief(
         contract_path=contract_path,
         component_inventory_path=component_inventory_path,
         data_provenance_path=data_provenance_path,
+        archive_path=archive_path,
+        archive_summary_path=archive_summary_path,
+        diff_path=diff_path,
+        diff_markdown_path=diff_markdown_path,
+        archive_contract_path=archive_contract_path,
+        history_report_path=history_report_path,
     )
 
 
@@ -159,6 +195,151 @@ def render_data_provenance(brief: Mapping[str, Any]) -> str:
         lines.append(f"| `{item.get('component')}` | `{item.get('loaded')}` | `{item.get('artifact_type')}` | `{item.get('path')}` |")
     lines.append("")
     return "\n".join(lines)
+
+
+def create_morning_brief_archive_record(brief: Mapping[str, Any]) -> dict[str, Any]:
+    platform = brief.get("platform") or {}
+    analytics = brief.get("analytics") or {}
+    research = brief.get("research") or {}
+    market_context = brief.get("market_context") or {}
+    generated_at = str(brief.get("generated_at") or "")
+    fingerprint = morning_brief_fingerprint(brief)
+    return {
+        "schema_version": ARCHIVE_SCHEMA_VERSION,
+        "brief_id": f"morning_brief_{fingerprint[:16]}",
+        "generated_at": generated_at,
+        "session_label": _session_label(generated_at),
+        "platform_classification": platform.get("certification_classification"),
+        "runtime_status": platform.get("runtime_status"),
+        "managed_exit_status": platform.get("managed_exit_status"),
+        "safe_state_classification": platform.get("safe_state_classification"),
+        "guardian_classification": platform.get("guardian_classification"),
+        "insight_count": analytics.get("latest_insight_count") or 0,
+        "research_manual_review_count": research.get("manual_review_count") or 0,
+        "market_context_status": market_context.get("current_market_context_status"),
+        "guardrails": {
+            "diagnostic_only": brief.get("diagnostic_only") is True,
+            "production_recommendation": brief.get("production_recommendation") is True,
+            "trading_gate": brief.get("trading_gate") is True,
+        },
+        "source_artifact_refs": sorted(_all_source_refs(brief)),
+        "brief_fingerprint": fingerprint,
+    }
+
+
+def morning_brief_fingerprint(brief: Mapping[str, Any]) -> str:
+    payload = _strip_generated_at(brief)
+    return hashlib.sha256(json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()
+
+
+def compare_morning_brief_archive_records(
+    current: Mapping[str, Any],
+    prior: Mapping[str, Any] | None,
+) -> dict[str, Any]:
+    if prior is None:
+        return {
+            "schema_version": DIFF_SCHEMA_VERSION,
+            "classification": "NO_PRIOR_BRIEF",
+            "current_brief_id": current.get("brief_id"),
+            "prior_brief_id": None,
+            "fingerprint_changed": None,
+            "changes": [],
+            "deltas": {},
+            "guardrails": current.get("guardrails") or {},
+        }
+    changes = []
+    for key in (
+        "platform_classification",
+        "runtime_status",
+        "managed_exit_status",
+        "safe_state_classification",
+        "guardian_classification",
+        "market_context_status",
+    ):
+        if current.get(key) != prior.get(key):
+            changes.append({
+                "field": key,
+                "prior": prior.get(key),
+                "current": current.get(key),
+                "change_type": "VALUE_CHANGED",
+            })
+    deltas = {
+        "insight_count_delta": int(current.get("insight_count") or 0) - int(prior.get("insight_count") or 0),
+        "research_manual_review_count_delta": int(current.get("research_manual_review_count") or 0) - int(prior.get("research_manual_review_count") or 0),
+    }
+    for field, delta in deltas.items():
+        if delta:
+            changes.append({
+                "field": field.replace("_delta", ""),
+                "prior": prior.get(field.replace("_delta", "")),
+                "current": current.get(field.replace("_delta", "")),
+                "delta": delta,
+                "change_type": "COUNT_CHANGED",
+            })
+    fingerprint_changed = current.get("brief_fingerprint") != prior.get("brief_fingerprint")
+    classification = "CHANGED" if changes or fingerprint_changed else "UNCHANGED"
+    return {
+        "schema_version": DIFF_SCHEMA_VERSION,
+        "classification": classification,
+        "current_brief_id": current.get("brief_id"),
+        "prior_brief_id": prior.get("brief_id"),
+        "current_generated_at": current.get("generated_at"),
+        "prior_generated_at": prior.get("generated_at"),
+        "fingerprint_changed": fingerprint_changed,
+        "changes": changes,
+        "deltas": deltas,
+        "guardrails": current.get("guardrails") or {},
+    }
+
+
+def render_brief_diff_markdown(diff: Mapping[str, Any]) -> str:
+    lines = [
+        "# MB2 Latest Morning Brief Diff",
+        "",
+        f"- Classification: `{diff.get('classification')}`",
+        f"- Current brief: `{diff.get('current_brief_id')}`",
+        f"- Prior brief: `{diff.get('prior_brief_id')}`",
+        f"- Fingerprint changed: `{diff.get('fingerprint_changed')}`",
+        "",
+    ]
+    changes = diff.get("changes") or []
+    if not changes:
+        lines.append("No field-level changes were detected.")
+    else:
+        lines.extend(["| Field | Prior | Current | Delta |", "|---|---|---|---:|"])
+        for change in changes:
+            lines.append(f"| `{change.get('field')}` | `{change.get('prior')}` | `{change.get('current')}` | `{change.get('delta', '')}` |")
+    lines.extend(["", "Diagnostic archive comparison only. No production recommendations or trading gates are produced.", ""])
+    return "\n".join(lines)
+
+
+def render_brief_archive_contract() -> str:
+    return "\n".join([
+        "# MB2 Morning Brief Archive Contract",
+        "",
+        f"- Archive schema version: `{ARCHIVE_SCHEMA_VERSION}`",
+        f"- Diff schema version: `{DIFF_SCHEMA_VERSION}`",
+        "- Archive storage: append-only JSONL under the Morning Brief output directory.",
+        "- Fingerprint excludes `generated_at` recursively so identical content across runs remains stable.",
+        "- Comparison is latest brief versus previous archive record.",
+        "- Guardrails: `diagnostic_only=true`, `production_recommendation=false`, `trading_gate=false`.",
+        "",
+    ])
+
+
+def render_brief_history_report(record: Mapping[str, Any], diff: Mapping[str, Any]) -> str:
+    return "\n".join([
+        "# MB2 Morning Brief History Report",
+        "",
+        f"- Latest brief id: `{record.get('brief_id')}`",
+        f"- Latest generated at: `{record.get('generated_at')}`",
+        f"- Session label: `{record.get('session_label')}`",
+        f"- Diff classification: `{diff.get('classification')}`",
+        f"- Insight count: `{record.get('insight_count')}`",
+        f"- Research manual-review count: `{record.get('research_manual_review_count')}`",
+        f"- Market context status: `{record.get('market_context_status')}`",
+        "",
+    ])
 
 
 def _build_platform(loaded: Mapping[str, Mapping[str, Any]]) -> dict[str, Any]:
@@ -370,3 +551,66 @@ def _coerce_now(value: datetime | str | None) -> datetime:
     else:
         dt = datetime.fromisoformat(value.replace("Z", "+00:00"))
     return dt if dt.tzinfo else dt.replace(tzinfo=UTC)
+
+
+def _latest_archive_record(path: Path) -> dict[str, Any] | None:
+    if not path.exists():
+        return None
+    latest: dict[str, Any] | None = None
+    for row in _read_jsonl(path):
+        latest = row
+    return latest
+
+
+def _append_jsonl(path: Path, payload: Mapping[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(payload, sort_keys=True) + "\n")
+
+
+def _archive_summary(path: Path, record: Mapping[str, Any], diff: Mapping[str, Any]) -> dict[str, Any]:
+    archive_count = len(_read_jsonl(path)) if path.exists() else 0
+    return {
+        "schema_version": "mb2_morning_brief_archive_summary_v1",
+        "archive_path": str(path),
+        "archive_record_count": archive_count,
+        "latest_brief_id": record.get("brief_id"),
+        "latest_generated_at": record.get("generated_at"),
+        "latest_fingerprint": record.get("brief_fingerprint"),
+        "diff_classification": diff.get("classification"),
+        "fingerprint_changed": diff.get("fingerprint_changed"),
+        "guardrails": record.get("guardrails") or {},
+    }
+
+
+def _strip_generated_at(value: Any) -> Any:
+    if isinstance(value, Mapping):
+        return {key: _strip_generated_at(item) for key, item in sorted(value.items()) if key != "generated_at"}
+    if isinstance(value, list):
+        return [_strip_generated_at(item) for item in value]
+    return value
+
+
+def _all_source_refs(brief: Mapping[str, Any]) -> list[str]:
+    refs: list[str] = []
+    for key in ("platform", "analytics", "research", "market_context"):
+        refs.extend((brief.get(key) or {}).get("source_refs") or [])
+    return refs
+
+
+def _session_label(generated_at: str) -> str | None:
+    if not generated_at:
+        return None
+    try:
+        dt = datetime.fromisoformat(generated_at.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    local = dt.astimezone(ZoneInfo("America/New_York"))
+    hour = local.hour
+    if 5 <= hour < 12:
+        return "MORNING"
+    if 12 <= hour < 17:
+        return "AFTERNOON"
+    if 17 <= hour < 21:
+        return "EVENING"
+    return "OVERNIGHT"
