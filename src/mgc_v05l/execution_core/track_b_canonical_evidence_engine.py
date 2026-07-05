@@ -9,6 +9,8 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Iterable, Mapping
 
+from mgc_v05l.execution_core.track_b_canonical_reference_envelope import build_reference
+
 
 DEFAULT_OUTPUT_ROOT = Path("outputs") / "track_b_execution_core"
 DEFAULT_OUTPUT_DIR = DEFAULT_OUTPUT_ROOT / "research" / "investigation_engine" / "evidence"
@@ -109,14 +111,19 @@ def attach_evidence_reference(
     timestamp = _coerce_now(now)
     updated = dict(evidence)
     attachments = [dict(item) for item in updated.get("attachments") or []]
-    attachments.append({
-        "attachment_type": attachment_type,
-        "reference_id": reference_id,
-        "artifact_path": artifact_path,
-        "label": label,
-        "attached_at": timestamp.isoformat(),
-        "provenance": dict(provenance or {"source": "canonical_evidence_engine", "operation": "attach_reference"}),
-    })
+    ref = build_reference(
+        reference_type=attachment_type,
+        target_id=reference_id,
+        target_kind=_attachment_target_kind(attachment_type),
+        target_path=artifact_path,
+        relationship="attached_to",
+        source_component="canonical_evidence_engine",
+        provenance=provenance,
+        metadata={"label": label, "legacy_attachment_type": attachment_type},
+        created_at=timestamp,
+    )
+    ref.update({"attachment_type": attachment_type, "legacy_reference_id": reference_id, "artifact_path": artifact_path, "label": label, "attached_at": timestamp.isoformat()})
+    attachments.append(ref)
     updated["attachments"] = sorted(attachments, key=lambda row: (str(row.get("attachment_type")), str(row.get("reference_id")), str(row.get("attached_at"))))
     updated["updated_at"] = timestamp.isoformat()
     updated["deterministic_fingerprint"] = evidence_fingerprint(updated)
@@ -135,12 +142,17 @@ def add_evidence_relationship(
     timestamp = _coerce_now(now)
     updated = dict(evidence)
     relationships = [dict(item) for item in updated.get("relationships") or []]
-    relationships.append({
-        "relationship_type": relationship_type,
-        "target_evidence_id": target_evidence_id,
-        "created_at": timestamp.isoformat(),
-        "provenance": dict(provenance or {"source": "canonical_evidence_engine", "operation": "add_relationship"}),
-    })
+    ref = build_reference(
+        reference_type="evidence_relationship",
+        target_id=target_evidence_id,
+        target_kind="EVIDENCE",
+        relationship=relationship_type,
+        source_component="canonical_evidence_engine",
+        provenance=provenance,
+        created_at=timestamp,
+    )
+    ref.update({"relationship_type": relationship_type, "target_evidence_id": target_evidence_id})
+    relationships.append(ref)
     updated["relationships"] = sorted(relationships, key=lambda row: (str(row.get("relationship_type")), str(row.get("target_evidence_id")), str(row.get("created_at"))))
     updated["updated_at"] = timestamp.isoformat()
     updated["deterministic_fingerprint"] = evidence_fingerprint(updated)
@@ -422,6 +434,26 @@ def _validate_attachment_type(value: str) -> None:
 def _validate_relationship_type(value: str) -> None:
     if value not in VALID_RELATIONSHIP_TYPES:
         raise ValueError(f"Unsupported evidence relationship type: {value}")
+
+
+def _attachment_target_kind(value: str) -> str:
+    return {
+        "saved_query": "SAVED_QUERY",
+        "execution_record": "EXECUTION_RECORD",
+        "analytics_result": "ANALYTICS_RESULT",
+        "analytics_diff": "ANALYTICS_DIFF",
+        "insight": "ANALYTICS_INSIGHT",
+        "morning_brief": "MORNING_BRIEF",
+        "research_discovery_candidate": "RESEARCH_DISCOVERY_CANDIDATE",
+        "candidate_review": "CANDIDATE_REVIEW",
+        "context_snapshot": "CONTEXT_SNAPSHOT",
+        "operational_certification": "OPERATIONAL_CERTIFICATION",
+        "safe_state": "SAFE_STATE",
+        "guardian": "GUARDIAN",
+        "runtime_health": "RUNTIME_HEALTH",
+        "artifact": "ARTIFACT",
+        "bookmark": "BOOKMARK",
+    }[value]
 
 
 def _evidence_id(investigation_id: str, title: str, timestamp: datetime) -> str:

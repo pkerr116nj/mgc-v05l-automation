@@ -9,6 +9,8 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Mapping
 
+from mgc_v05l.execution_core.track_b_canonical_reference_envelope import build_reference
+
 
 DEFAULT_OUTPUT_ROOT = Path("outputs") / "track_b_execution_core"
 DEFAULT_OUTPUT_DIR = DEFAULT_OUTPUT_ROOT / "research" / "investigation_engine" / "conclusions"
@@ -369,7 +371,7 @@ def conclusion_schema() -> dict[str, Any]:
 
 
 def _attach_claim(conclusion: Mapping[str, Any], claim: Mapping[str, Any], *, bucket: str, now: datetime | str | None) -> dict[str, Any]:
-    ref = _claim_reference(claim, attached_at=_coerce_now(now))
+    ref = _claim_reference(claim, attached_at=_coerce_now(now), bucket=bucket)
     updated = dict(conclusion)
     rows = [dict(item) for item in updated.get(bucket) or []]
     rows.append(ref)
@@ -383,7 +385,7 @@ def _attach_claim(conclusion: Mapping[str, Any], claim: Mapping[str, Any], *, bu
     return updated
 
 
-def _claim_reference(claim: Mapping[str, Any], *, attached_at: datetime) -> dict[str, Any]:
+def _claim_reference(claim: Mapping[str, Any], *, attached_at: datetime, bucket: str) -> dict[str, Any]:
     if claim.get("schema_version") != CLAIM_SCHEMA_VERSION:
         raise ValueError("Conclusion claim references must come from CanonicalClaim")
     if not claim.get("claim_id"):
@@ -391,7 +393,18 @@ def _claim_reference(claim: Mapping[str, Any], *, attached_at: datetime) -> dict
     if not claim.get("deterministic_fingerprint"):
         raise ValueError("CanonicalClaim reference missing deterministic_fingerprint")
     validation = claim.get("validation") or {}
+    relationship = {"supporting_claims": "supports", "contradicting_claims": "contradicts", "related_claims": "related_to"}[bucket]
     return {
+        **build_reference(
+            reference_type="conclusion_claim",
+            target_id=str(claim.get("claim_id")),
+            target_kind="CLAIM",
+            target_schema_version=str(claim.get("schema_version")),
+            target_fingerprint=str(claim.get("deterministic_fingerprint")),
+            relationship=relationship,
+            source_component="canonical_conclusions_engine",
+            created_at=attached_at,
+        ),
         "claim_schema_version": claim.get("schema_version"),
         "claim_id": claim.get("claim_id"),
         "claim_status": claim.get("status"),
@@ -399,13 +412,17 @@ def _claim_reference(claim: Mapping[str, Any], *, attached_at: datetime) -> dict
         "claim_confidence": claim.get("confidence"),
         "claim_fingerprint": claim.get("deterministic_fingerprint"),
         "claim_title": claim.get("title"),
-        "provenance": claim.get("provenance") or {},
+        "source_provenance": claim.get("provenance") or {},
         "attached_at": attached_at.isoformat(),
     }
 
 
 def _canonical_claim_ref_valid(ref: Mapping[str, Any]) -> bool:
-    return bool(ref.get("claim_schema_version") == CLAIM_SCHEMA_VERSION and ref.get("claim_id") and ref.get("claim_fingerprint"))
+    return bool(
+        (ref.get("claim_schema_version") == CLAIM_SCHEMA_VERSION or ref.get("target_schema_version") == CLAIM_SCHEMA_VERSION)
+        and (ref.get("claim_id") or ref.get("target_id"))
+        and (ref.get("claim_fingerprint") or ref.get("target_fingerprint"))
+    )
 
 
 def _claim_quality(ref: Mapping[str, Any]) -> str:

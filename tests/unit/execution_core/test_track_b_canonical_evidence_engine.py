@@ -47,7 +47,7 @@ def test_attach_evidence_reference(tmp_path: Path) -> None:
     summary = summarize_evidence(updated)
 
     assert summary["attachment_count"] == 1
-    assert updated["attachments"][0]["reference_id"] == "expectancy_by_strategy"
+    assert updated["attachments"][0]["target_id"] == "expectancy_by_strategy"
 
 
 def test_relationship_creation_and_traversal(tmp_path: Path) -> None:

@@ -14,6 +14,8 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Iterable, Mapping, Sequence
 
+from mgc_v05l.execution_core.track_b_canonical_reference_envelope import build_reference
+
 
 DEFAULT_OUTPUT_ROOT = Path("outputs") / "track_b_execution_core"
 DEFAULT_OUTPUT_DIR = DEFAULT_OUTPUT_ROOT / "research" / "investigation_engine"
@@ -138,13 +140,17 @@ def attach_reference(
     timestamp = _coerce_now(now)
     updated = dict(investigation)
     references = [dict(item) for item in updated.get("references") or []]
-    reference = {
-        "reference_type": reference_type,
-        "reference_id": reference_id,
-        "artifact_path": artifact_path,
-        "label": label,
-        "attached_at": timestamp.isoformat(),
-    }
+    reference = build_reference(
+        reference_type=reference_type,
+        target_id=reference_id,
+        target_kind=_reference_target_kind(reference_type),
+        target_path=artifact_path,
+        relationship="attached_to",
+        source_component="canonical_investigation_engine",
+        metadata={"label": label, "legacy_reference_type": reference_type},
+        created_at=timestamp,
+    )
+    reference.update({"legacy_reference_id": reference_id, "artifact_path": artifact_path, "label": label, "attached_at": timestamp.isoformat()})
     references.append(reference)
     updated["references"] = sorted(references, key=lambda row: (str(row.get("reference_type")), str(row.get("reference_id")), str(row.get("attached_at"))))
     updated["updated_at"] = timestamp.isoformat()
@@ -527,6 +533,24 @@ def _validate_status(status: str) -> str:
 def _validate_reference_type(reference_type: str) -> None:
     if reference_type not in VALID_REFERENCE_TYPES:
         raise ValueError(f"Unsupported investigation reference type: {reference_type}")
+
+
+def _reference_target_kind(reference_type: str) -> str:
+    return {
+        "claim": "CLAIM",
+        "conclusion": "CONCLUSION",
+        "evidence": "EVIDENCE",
+        "saved_query": "SAVED_QUERY",
+        "execution_record": "EXECUTION_RECORD",
+        "diff_result": "ANALYTICS_DIFF",
+        "insight": "ANALYTICS_INSIGHT",
+        "morning_brief": "MORNING_BRIEF",
+        "research_discovery_candidate": "RESEARCH_DISCOVERY_CANDIDATE",
+        "candidate_review": "CANDIDATE_REVIEW",
+        "context_snapshot": "CONTEXT_SNAPSHOT",
+        "artifact": "ARTIFACT",
+        "bookmark": "BOOKMARK",
+    }[reference_type]
 
 
 def _investigation_id(title: str, hypothesis: str, generated_at: datetime) -> str:

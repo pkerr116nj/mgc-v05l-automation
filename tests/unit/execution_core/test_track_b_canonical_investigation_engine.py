@@ -42,7 +42,7 @@ def test_attach_saved_query(tmp_path: Path) -> None:
     summary = summarize_investigation(updated)
 
     assert summary["reference_count"] == 1
-    assert summary["attached_queries"][0]["reference_id"] == "expectancy_by_strategy"
+    assert summary["attached_queries"][0]["target_id"] == "expectancy_by_strategy"
     assert summary["latest_timeline_event"]["event_type"] == "QUERY_EXECUTED"
 
 
@@ -52,7 +52,7 @@ def test_attach_insight(tmp_path: Path) -> None:
     updated = attach_reference(result.investigation, reference_type="insight", reference_id="insight_1", now="2026-07-05T12:01:00Z")
     summary = summarize_investigation(updated)
 
-    assert summary["attached_insights"][0]["reference_id"] == "insight_1"
+    assert summary["attached_insights"][0]["target_id"] == "insight_1"
     assert summary["latest_timeline_event"]["event_type"] == "INSIGHT_ATTACHED"
 
 

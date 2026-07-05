@@ -9,6 +9,8 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Mapping
 
+from mgc_v05l.execution_core.track_b_canonical_reference_envelope import build_reference
+
 
 DEFAULT_OUTPUT_ROOT = Path("outputs") / "track_b_execution_core"
 DEFAULT_OUTPUT_DIR = DEFAULT_OUTPUT_ROOT / "research" / "investigation_engine" / "claims"
@@ -382,7 +384,7 @@ def claim_schema() -> dict[str, Any]:
 
 
 def _attach_evidence(claim: Mapping[str, Any], evidence: Mapping[str, Any], *, bucket: str, now: datetime | str | None) -> dict[str, Any]:
-    ref = _evidence_reference(evidence, attached_at=_coerce_now(now))
+    ref = _evidence_reference(evidence, attached_at=_coerce_now(now), bucket=bucket)
     updated = dict(claim)
     rows = [dict(item) for item in updated.get(bucket) or []]
     rows.append(ref)
@@ -393,7 +395,7 @@ def _attach_evidence(claim: Mapping[str, Any], evidence: Mapping[str, Any], *, b
     return updated
 
 
-def _evidence_reference(evidence: Mapping[str, Any], *, attached_at: datetime) -> dict[str, Any]:
+def _evidence_reference(evidence: Mapping[str, Any], *, attached_at: datetime, bucket: str) -> dict[str, Any]:
     if evidence.get("schema_version") != EVIDENCE_SCHEMA_VERSION:
         raise ValueError("Claim evidence references must come from CanonicalEvidence")
     evidence_id = evidence.get("evidence_id")
@@ -402,23 +404,34 @@ def _evidence_reference(evidence: Mapping[str, Any], *, attached_at: datetime) -
     fingerprint = evidence.get("deterministic_fingerprint")
     if not fingerprint:
         raise ValueError("CanonicalEvidence reference missing deterministic_fingerprint")
+    relationship = {"supporting_evidence": "supports", "contradicting_evidence": "contradicts", "related_evidence": "related_to"}[bucket]
     return {
+        **build_reference(
+            reference_type="claim_evidence",
+            target_id=str(evidence_id),
+            target_kind="EVIDENCE",
+            target_schema_version=str(evidence.get("schema_version")),
+            target_fingerprint=str(fingerprint),
+            relationship=relationship,
+            source_component="canonical_claims_engine",
+            created_at=attached_at,
+        ),
         "evidence_schema_version": evidence.get("schema_version"),
         "evidence_id": evidence_id,
         "evidence_status": evidence.get("status"),
         "evidence_fingerprint": fingerprint,
         "evidence_title": evidence.get("title"),
         "source_component": evidence.get("source_component"),
-        "provenance": evidence.get("provenance") or {},
+        "source_provenance": evidence.get("provenance") or {},
         "attached_at": attached_at.isoformat(),
     }
 
 
 def _canonical_evidence_ref_valid(ref: Mapping[str, Any]) -> bool:
     return bool(
-        ref.get("evidence_schema_version") == EVIDENCE_SCHEMA_VERSION
-        and ref.get("evidence_id")
-        and ref.get("evidence_fingerprint")
+        (ref.get("evidence_schema_version") == EVIDENCE_SCHEMA_VERSION or ref.get("target_schema_version") == EVIDENCE_SCHEMA_VERSION)
+        and (ref.get("evidence_id") or ref.get("target_id"))
+        and (ref.get("evidence_fingerprint") or ref.get("target_fingerprint"))
     )
 
 
