@@ -17,7 +17,10 @@ from typing import Any, Mapping, Sequence
 from mgc_v05l.execution_core.track_b_canonical_analytics_saved_queries import (
     CanonicalAnalyticsInsightEngine,
     DEFAULT_OUTPUT_DIR as DEFAULT_SAVED_QUERY_OUTPUT_DIR,
+    EXECUTION_SUMMARY_JSON,
+    LATEST_INSIGHTS_JSON,
     RESULT_DIFF_JSON,
+    RESULT_SNAPSHOT_DIR,
     compare_latest_execution_for_query,
     load_saved_queries,
     publish_insights,
@@ -25,8 +28,26 @@ from mgc_v05l.execution_core.track_b_canonical_analytics_saved_queries import (
     publish_saved_query_artifacts,
     run_saved_query,
 )
+from mgc_v05l.execution_core.track_b_canonical_evidence_engine import (
+    DEFAULT_OUTPUT_DIR as DEFAULT_EVIDENCE_OUTPUT_DIR,
+    attach_evidence_reference,
+    create_evidence,
+    load_evidence,
+    write_evidence,
+)
+from mgc_v05l.execution_core.track_b_canonical_investigation_engine import (
+    DEFAULT_OUTPUT_DIR as DEFAULT_INVESTIGATION_OUTPUT_DIR,
+    append_investigation_event,
+    attach_evidence_reference as attach_investigation_evidence_reference,
+    create_investigation,
+    list_investigations,
+    load_investigation,
+    summarize_investigation,
+    write_investigation,
+)
 from mgc_v05l.execution_core.track_b_canonical_morning_brief import DEFAULT_OUTPUT_DIR as DEFAULT_MORNING_BRIEF_OUTPUT_DIR
 from mgc_v05l.execution_core.track_b_canonical_morning_brief import run_canonical_morning_brief
+from mgc_v05l.execution_core.track_b_canonical_reference_envelope import build_provenance_envelope
 
 
 DEFAULT_OUTPUT_ROOT = Path("outputs") / "track_b_execution_core"
@@ -42,6 +63,11 @@ SAMPLE_WORKFLOW_JSON = "rwf1_sample_morning_gold_review.json"
 SAMPLE_RUN_JSON = "rwf1_sample_workflow_run.json"
 SUMMARY_MD = "rwf1_workflow_summary.md"
 RUNNER_CONTRACT_MD = "rwf1_runner_contract.md"
+RWF2_POPULATION_CONTRACT_MD = "rwf2_population_contract.md"
+RWF2_POPULATION_SCHEMA_JSON = "rwf2_population_schema.json"
+RWF2_SAMPLE_POPULATION_JSON = "rwf2_sample_population.json"
+RWF2_SAMPLE_INVESTIGATION_JSON = "rwf2_sample_updated_investigation.json"
+RWF2_POPULATION_SUMMARY_MD = "rwf2_population_summary.md"
 
 VALID_WORKFLOW_STATUSES = {"DRAFT", "ACTIVE", "PAUSED", "COMPLETE", "ARCHIVED"}
 VALID_WORKFLOW_TYPES = {"MORNING_REVIEW", "INVESTIGATION_REFRESH", "CANDIDATE_REVIEW", "STRATEGY_REVIEW", "PLATFORM_REVIEW", "CUSTOM"}
@@ -50,7 +76,15 @@ VALID_STEP_TYPES = {
     "COMPARE_QUERY_RESULT",
     "GENERATE_INSIGHT",
     "CREATE_INVESTIGATION",
+    "CREATE_OR_LOCATE_INVESTIGATION",
+    "ATTACH_QUERY_EXECUTION",
+    "ATTACH_QUERY_RESULT",
+    "ATTACH_ANALYTICS_DIFF",
+    "ATTACH_ANALYTICS_INSIGHT",
+    "ATTACH_MORNING_BRIEF",
+    "ATTACH_BRIEF_CHANGE",
     "ATTACH_EVIDENCE",
+    "EXPORT_INVESTIGATION_SUMMARY",
     "VALIDATE_CLAIMS",
     "UPDATE_CONCLUSION",
     "GENERATE_MORNING_BRIEF",
@@ -71,6 +105,20 @@ class CanonicalResearchWorkflowResult:
     summary: dict[str, Any]
     summary_path: Path
     output_dir: Path
+
+
+@dataclass(frozen=True)
+class InvestigationPopulationResult:
+    workflow_run_id: str
+    investigation_id: str
+    created_new_investigation: bool
+    evidence_attached_count: int
+    references_created: int
+    timeline_events_added: int
+    skipped_items: list[dict[str, Any]]
+    deterministic_fingerprint: str
+    provenance: dict[str, Any]
+    guardrails: dict[str, bool]
 
 
 def create_workflow(
@@ -178,6 +226,8 @@ def run_workflow(
     output_dir: Path = DEFAULT_OUTPUT_DIR,
     saved_query_output_dir: Path = DEFAULT_SAVED_QUERY_OUTPUT_DIR,
     morning_brief_output_dir: Path = DEFAULT_MORNING_BRIEF_OUTPUT_DIR,
+    investigation_output_dir: Path | None = None,
+    evidence_output_dir: Path | None = None,
     now: datetime | str | None = None,
 ) -> dict[str, Any]:
     started_at = _coerce_now(now)
@@ -189,17 +239,22 @@ def run_workflow(
         status = "FAILED"
         step_results.append(_step_result(step_id="validation", order=0, status="FAILED", reason="workflow_validation_failed", details=validation, now=started_at))
     else:
-        context: dict[str, Any] = {}
+        context: dict[str, Any] = {"artifact_refs": []}
         for step in sorted(workflow.get("steps") or [], key=lambda row: int(row.get("order") or 0)):
             result = _run_step(
                 step,
+                workflow=workflow,
+                output_dir=output_dir,
                 saved_query_output_dir=saved_query_output_dir,
                 morning_brief_output_dir=morning_brief_output_dir,
+                investigation_output_dir=investigation_output_dir or output_dir / "investigations",
+                evidence_output_dir=evidence_output_dir or output_dir / "evidence",
                 context=context,
                 now=started_at,
             )
             step_results.append(result)
             artifact_refs.extend(result.get("artifact_refs") or [])
+            context.setdefault("artifact_refs", []).extend(result.get("artifact_refs") or [])
             if result["status"] == "FAILED":
                 status = "FAILED"
                 break
@@ -229,8 +284,12 @@ def run_workflow(
 def _run_step(
     step: Mapping[str, Any],
     *,
+    workflow: Mapping[str, Any],
+    output_dir: Path,
     saved_query_output_dir: Path,
     morning_brief_output_dir: Path,
+    investigation_output_dir: Path,
+    evidence_output_dir: Path,
     context: dict[str, Any],
     now: datetime,
 ) -> dict[str, Any]:
@@ -248,12 +307,16 @@ def _run_step(
             execution_id = (run_result.execution_record or {}).get("execution_id")
             context["saved_query_id"] = query_id
             context["execution_id"] = execution_id
+            context["analytics_result_id"] = execution_id
             return _step_result(
                 step=step,
                 status="COMPLETE",
                 reason="saved_query_executed",
                 details={"saved_query_id": query_id, "execution_id": execution_id, "validation": run_result.validation.status},
-                artifact_refs=[_artifact_ref("EXECUTION_RECORD", execution_id, saved_query_output_dir / "cae6_latest_execution_summary.json")],
+                artifact_refs=[
+                    _artifact_ref("EXECUTION_RECORD", execution_id, saved_query_output_dir / EXECUTION_SUMMARY_JSON),
+                    _artifact_ref("ANALYTICS_RESULT", execution_id, saved_query_output_dir / RESULT_SNAPSHOT_DIR / f"{execution_id}.json"),
+                ],
                 now=now,
             )
         if step_type == "COMPARE_QUERY_RESULT":
@@ -301,7 +364,106 @@ def _run_step(
             return _existing_artifact_step(step, path=path, target_kind="ARTIFACT", reason="brief_archive_recorded", now=now)
         if step_type == "EXPLAIN_BRIEF_CHANGE":
             path = morning_brief_output_dir / "mb3_latest_change_explanation.json"
-            return _existing_artifact_step(step, path=path, target_kind="ARTIFACT", reason="brief_change_explained", now=now)
+            return _existing_artifact_step(step, path=path, target_kind="MORNING_BRIEF", reason="brief_change_explained", now=now)
+        if step_type == "CREATE_OR_LOCATE_INVESTIGATION":
+            investigation, created = create_or_locate_investigation(
+                workflow,
+                inputs=inputs,
+                output_dir=investigation_output_dir,
+                now=now,
+            )
+            investigation = append_investigation_event(
+                investigation,
+                event_type="WORKFLOW_STARTED",
+                artifact_reference=_artifact_ref("ARTIFACT", workflow.get("workflow_id"), output_dir / f"{workflow.get('workflow_id')}.json"),
+                provenance={"source": "canonical_research_workflow", "operation": "workflow_population_started", "workflow_id": workflow.get("workflow_id")},
+                now=now,
+            )
+            if not created:
+                investigation = append_investigation_event(
+                    investigation,
+                    event_type="INVESTIGATION_LOCATED",
+                    artifact_reference=_artifact_ref("INVESTIGATION", investigation.get("investigation_id"), investigation_output_dir / f"{investigation.get('investigation_id')}.json"),
+                    provenance={"source": "canonical_research_workflow", "operation": "investigation_located"},
+                    now=now,
+                )
+            write_investigation(investigation, output_dir=investigation_output_dir)
+            context["investigation_id"] = investigation.get("investigation_id")
+            context["created_new_investigation"] = created
+            return _step_result(
+                step=step,
+                status="COMPLETE",
+                reason="investigation_created" if created else "investigation_located",
+                details={"investigation_id": investigation.get("investigation_id"), "created_new_investigation": created},
+                artifact_refs=[_artifact_ref("INVESTIGATION", investigation.get("investigation_id"), investigation_output_dir / f"{investigation.get('investigation_id')}.json")],
+                now=now,
+            )
+        if step_type in {
+            "ATTACH_QUERY_EXECUTION",
+            "ATTACH_QUERY_RESULT",
+            "ATTACH_ANALYTICS_DIFF",
+            "ATTACH_ANALYTICS_INSIGHT",
+            "ATTACH_MORNING_BRIEF",
+            "ATTACH_BRIEF_CHANGE",
+            "ATTACH_EVIDENCE",
+        }:
+            result = populate_investigation_evidence(
+                workflow_run_id=str(context.get("workflow_run_id") or "active_workflow_run"),
+                investigation_id=str(inputs.get("investigation_id") or context.get("investigation_id") or ""),
+                artifact_refs=_artifact_refs_for_population_step(
+                    step_type,
+                    context_refs=list(context.get("artifact_refs") or []),
+                    saved_query_output_dir=saved_query_output_dir,
+                    morning_brief_output_dir=morning_brief_output_dir,
+                    execution_id=str(context.get("execution_id") or ""),
+                ),
+                investigation_output_dir=investigation_output_dir,
+                evidence_output_dir=evidence_output_dir,
+                now=now,
+            )
+            context["last_population_result"] = result.__dict__
+            if not result.investigation_id:
+                return _step_result(step=step, status="SKIPPED", reason="investigation_not_available", details=result.__dict__, now=now)
+            duplicate_only = result.evidence_attached_count == 0 and bool(result.skipped_items) and all(item.get("reason") == "duplicate_evidence" for item in result.skipped_items)
+            status_for_step = "COMPLETE" if result.evidence_attached_count > 0 or duplicate_only else "SKIPPED"
+            reason = "evidence_already_attached" if duplicate_only else "no_matching_artifacts_for_population_step" if status_for_step == "SKIPPED" else "evidence_attached"
+            return _step_result(
+                step=step,
+                status=status_for_step,
+                reason=reason,
+                details=result.__dict__,
+                artifact_refs=[_artifact_ref("INVESTIGATION", result.investigation_id, investigation_output_dir / f"{result.investigation_id}.json")],
+                now=now,
+            )
+        if step_type == "EXPORT_INVESTIGATION_SUMMARY":
+            investigation_id = str(inputs.get("investigation_id") or context.get("investigation_id") or "")
+            if not investigation_id:
+                return _step_result(step=step, status="SKIPPED", reason="investigation_not_available", now=now)
+            investigation = load_investigation(investigation_id, output_dir=investigation_output_dir)
+            investigation = append_investigation_event(
+                investigation,
+                event_type="INVESTIGATION_SUMMARY_EXPORTED",
+                artifact_reference=_artifact_ref("INVESTIGATION", investigation_id, investigation_output_dir / f"{investigation_id}.summary.json"),
+                provenance={"source": "canonical_research_workflow", "operation": "export_investigation_summary"},
+                now=now,
+            )
+            investigation = append_investigation_event(
+                investigation,
+                event_type="WORKFLOW_COMPLETED",
+                artifact_reference=_artifact_ref("ARTIFACT", context.get("workflow_run_id") or "active_workflow_run", output_dir / "latest_workflow_run_summary.json"),
+                provenance={"source": "canonical_research_workflow", "operation": "workflow_population_completed", "workflow_id": workflow.get("workflow_id")},
+                now=now,
+            )
+            result = write_investigation(investigation, output_dir=investigation_output_dir)
+            context["investigation_summary"] = result.summary
+            return _step_result(
+                step=step,
+                status="COMPLETE",
+                reason="investigation_summary_exported",
+                details={"investigation_id": investigation_id, "reference_count": result.summary.get("reference_count"), "timeline_event_count": result.summary.get("timeline_event_count")},
+                artifact_refs=[_artifact_ref("INVESTIGATION", investigation_id, result.summary_path)],
+                now=now,
+            )
         if step_type == "EXPORT_SUMMARY":
             return _step_result(step=step, status="COMPLETE", reason="workflow_summary_exported", now=now)
         return _step_result(step=step, status="SKIPPED", reason="unsupported_in_rwf1_minimal_runner", now=now)
@@ -319,6 +481,285 @@ def _existing_artifact_step(step: Mapping[str, Any], *, path: Path, target_kind:
             now=now,
         )
     return _step_result(step=step, status="SKIPPED", reason=f"{path.name}_not_available", now=now)
+
+
+def create_or_locate_investigation(
+    workflow: Mapping[str, Any],
+    *,
+    inputs: Mapping[str, Any] | None = None,
+    output_dir: Path = DEFAULT_INVESTIGATION_OUTPUT_DIR,
+    now: datetime | str | None = None,
+) -> tuple[dict[str, Any], bool]:
+    payload = dict(inputs or {})
+    investigation_id = str(payload.get("investigation_id") or (workflow.get("metadata") or {}).get("investigation_id") or "")
+    if investigation_id:
+        try:
+            return load_investigation(investigation_id, output_dir=output_dir), False
+        except FileNotFoundError:
+            pass
+    title = str(payload.get("title") or (workflow.get("metadata") or {}).get("investigation_title") or workflow.get("title") or "")
+    for row in list_investigations(output_dir=output_dir):
+        if investigation_id and row.get("investigation_id") == investigation_id:
+            return load_investigation(str(row["investigation_id"]), output_dir=output_dir), False
+        if title and row.get("title") == title:
+            return load_investigation(str(row["investigation_id"]), output_dir=output_dir), False
+    result = create_investigation(
+        investigation_id=investigation_id or str(payload.get("new_investigation_id") or _investigation_population_id(str(workflow.get("workflow_id") or "workflow"), title)),
+        title=title or "Workflow Investigation",
+        description=str(payload.get("description") or workflow.get("description") or "Investigation populated by Canonical Research Workflow."),
+        hypothesis=str(payload.get("hypothesis") or "Deterministic workflow artifacts can support repeatable research review."),
+        owner=str(payload.get("owner") or workflow.get("owner") or "operator"),
+        tags=tuple(payload.get("tags") or workflow.get("tags") or ()),
+        now=now,
+        output_dir=output_dir,
+    )
+    return result.investigation, True
+
+
+def populate_investigation_evidence(
+    *,
+    workflow_run_id: str,
+    investigation_id: str,
+    artifact_refs: Sequence[Mapping[str, Any]],
+    investigation_output_dir: Path = DEFAULT_INVESTIGATION_OUTPUT_DIR,
+    evidence_output_dir: Path = DEFAULT_EVIDENCE_OUTPUT_DIR,
+    now: datetime | str | None = None,
+) -> InvestigationPopulationResult:
+    timestamp = _coerce_now(now)
+    skipped: list[dict[str, Any]] = []
+    if not investigation_id:
+        return _population_result(workflow_run_id, "", False, 0, 0, 0, [{"reason": "missing_investigation_id"}], timestamp)
+    try:
+        investigation = load_investigation(investigation_id, output_dir=investigation_output_dir)
+        created_new = False
+    except FileNotFoundError:
+        return _population_result(workflow_run_id, investigation_id, False, 0, 0, 0, [{"reason": "investigation_not_found", "investigation_id": investigation_id}], timestamp)
+    evidence_attached = 0
+    refs_created = 0
+    timeline_before = len(investigation.get("timeline") or [])
+    existing_evidence_refs = {str(ref.get("target_id")) for ref in investigation.get("references") or [] if ref.get("reference_type") == "evidence"}
+    for artifact_ref in artifact_refs:
+        path = Path(str(artifact_ref.get("target_path") or ""))
+        if not path.exists():
+            skipped.append({"reason": "artifact_missing", "target_kind": artifact_ref.get("target_kind"), "target_path": str(path)})
+            continue
+        evidence_id = _evidence_id_for_artifact(investigation_id, artifact_ref)
+        if evidence_id in existing_evidence_refs:
+            skipped.append({"reason": "duplicate_evidence", "evidence_id": evidence_id})
+            continue
+        evidence = _load_or_create_population_evidence(
+            investigation_id=investigation_id,
+            evidence_id=evidence_id,
+            artifact_ref=artifact_ref,
+            evidence_output_dir=evidence_output_dir,
+            now=timestamp,
+        )
+        evidence = attach_evidence_reference(
+            evidence,
+            attachment_type=_attachment_type_for_target_kind(str(artifact_ref.get("target_kind") or "ARTIFACT")),
+            reference_id=str(artifact_ref.get("target_id") or path.stem),
+            artifact_path=str(path),
+            label=str(artifact_ref.get("target_kind") or "Artifact"),
+            provenance=build_provenance_envelope(
+                source_component="canonical_research_workflow",
+                source_artifact=str(path),
+                parent_fingerprint=evidence.get("deterministic_fingerprint"),
+                parent_schema_version=evidence.get("schema_version"),
+                transform_name="rwf2_attach_artifact_evidence",
+                created_at=timestamp,
+            ),
+            now=timestamp,
+        )
+        evidence_result = write_evidence(evidence, output_dir=evidence_output_dir)
+        investigation = attach_investigation_evidence_reference(
+            investigation,
+            evidence_id=evidence_id,
+            artifact_path=str(evidence_result.evidence_path),
+            label=evidence.get("title"),
+            provenance={"source": "canonical_research_workflow", "operation": "attach_population_evidence", "workflow_run_id": workflow_run_id},
+            now=timestamp,
+        )
+        evidence_attached += 1
+        refs_created += 2
+        existing_evidence_refs.add(evidence_id)
+    write_investigation(investigation, output_dir=investigation_output_dir)
+    return _population_result(
+        workflow_run_id,
+        investigation_id,
+        created_new,
+        evidence_attached,
+        refs_created,
+        len(investigation.get("timeline") or []) - timeline_before,
+        skipped,
+        timestamp,
+    )
+
+
+def _load_or_create_population_evidence(
+    *,
+    investigation_id: str,
+    evidence_id: str,
+    artifact_ref: Mapping[str, Any],
+    evidence_output_dir: Path,
+    now: datetime,
+) -> dict[str, Any]:
+    try:
+        return load_evidence(evidence_id, output_dir=evidence_output_dir)
+    except FileNotFoundError:
+        pass
+    target_kind = str(artifact_ref.get("target_kind") or "ARTIFACT")
+    result = create_evidence(
+        investigation_id=investigation_id,
+        evidence_id=evidence_id,
+        title=f"{target_kind.replace('_', ' ').title()} Evidence",
+        summary=f"Deterministic workflow evidence attached from {artifact_ref.get('target_path')}.",
+        evidence_classification=_evidence_classification_for_target_kind(target_kind),
+        evidence_type=_attachment_type_for_target_kind(target_kind),
+        source_component="canonical_research_workflow",
+        provenance=build_provenance_envelope(
+            source_component="canonical_research_workflow",
+            source_artifact=str(artifact_ref.get("target_path") or ""),
+            transform_name="rwf2_create_population_evidence",
+            created_at=now,
+        ),
+        now=now,
+        output_dir=evidence_output_dir,
+    )
+    return result.evidence
+
+
+def _artifact_refs_for_population_step(
+    step_type: str,
+    *,
+    context_refs: Sequence[Mapping[str, Any]],
+    saved_query_output_dir: Path,
+    morning_brief_output_dir: Path,
+    execution_id: str,
+) -> list[dict[str, Any]]:
+    desired = {
+        "ATTACH_QUERY_EXECUTION": {"EXECUTION_RECORD"},
+        "ATTACH_QUERY_RESULT": {"ANALYTICS_RESULT"},
+        "ATTACH_ANALYTICS_DIFF": {"ANALYTICS_DIFF"},
+        "ATTACH_ANALYTICS_INSIGHT": {"ANALYTICS_INSIGHT"},
+        "ATTACH_MORNING_BRIEF": {"MORNING_BRIEF"},
+        "ATTACH_BRIEF_CHANGE": {"MORNING_BRIEF"},
+    }.get(step_type)
+    if step_type == "ATTACH_EVIDENCE":
+        return _dedupe_artifact_refs([dict(ref) for ref in context_refs])
+    refs = [dict(ref) for ref in context_refs if ref.get("target_kind") in (desired or set())]
+    if step_type == "ATTACH_MORNING_BRIEF":
+        refs = [ref for ref in refs if Path(str(ref.get("target_path") or "")).name == "cae9_morning_brief.json"]
+    if step_type == "ATTACH_BRIEF_CHANGE":
+        refs = [ref for ref in refs if Path(str(ref.get("target_path") or "")).name == "mb3_latest_change_explanation.json"]
+    if step_type == "ATTACH_QUERY_EXECUTION" and not refs:
+        refs.append(_artifact_ref("EXECUTION_RECORD", execution_id or "latest", saved_query_output_dir / EXECUTION_SUMMARY_JSON))
+    if step_type == "ATTACH_QUERY_RESULT" and not refs and execution_id:
+        refs.append(_artifact_ref("ANALYTICS_RESULT", execution_id, saved_query_output_dir / RESULT_SNAPSHOT_DIR / f"{execution_id}.json"))
+    if step_type == "ATTACH_ANALYTICS_DIFF" and not refs:
+        refs.append(_artifact_ref("ANALYTICS_DIFF", "latest", saved_query_output_dir / RESULT_DIFF_JSON))
+    if step_type == "ATTACH_ANALYTICS_INSIGHT" and not refs:
+        refs.append(_artifact_ref("ANALYTICS_INSIGHT", "latest", saved_query_output_dir / LATEST_INSIGHTS_JSON))
+    if step_type == "ATTACH_MORNING_BRIEF" and not refs:
+        refs.append(_artifact_ref("MORNING_BRIEF", "latest", morning_brief_output_dir / "cae9_morning_brief.json"))
+    if step_type == "ATTACH_BRIEF_CHANGE" and not refs:
+        refs = [_artifact_ref("MORNING_BRIEF", "brief_change_explanation", morning_brief_output_dir / "mb3_latest_change_explanation.json")]
+    return _dedupe_artifact_refs(refs)
+
+
+def _dedupe_artifact_refs(refs: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
+    seen: set[tuple[str, str, str]] = set()
+    rows: list[dict[str, Any]] = []
+    for ref in refs:
+        key = (str(ref.get("target_kind")), str(ref.get("target_id")), str(ref.get("target_path")))
+        if key in seen:
+            continue
+        seen.add(key)
+        rows.append(dict(ref))
+    return rows
+
+
+def _population_result(
+    workflow_run_id: str,
+    investigation_id: str,
+    created_new: bool,
+    evidence_count: int,
+    reference_count: int,
+    timeline_count: int,
+    skipped: list[dict[str, Any]],
+    timestamp: datetime,
+) -> InvestigationPopulationResult:
+    provenance = {
+        "schema_version": "rwf2_investigation_population_provenance_v1",
+        "source_component": "canonical_research_workflow",
+        "workflow_run_id": workflow_run_id,
+        "generated_at": timestamp.isoformat(),
+    }
+    payload = {
+        "workflow_run_id": workflow_run_id,
+        "investigation_id": investigation_id,
+        "created_new_investigation": created_new,
+        "evidence_attached_count": evidence_count,
+        "references_created": reference_count,
+        "timeline_events_added": timeline_count,
+        "skipped_items": skipped,
+        "provenance": provenance,
+        "guardrails": _guardrails(),
+    }
+    return InvestigationPopulationResult(
+        workflow_run_id=workflow_run_id,
+        investigation_id=investigation_id,
+        created_new_investigation=created_new,
+        evidence_attached_count=evidence_count,
+        references_created=reference_count,
+        timeline_events_added=timeline_count,
+        skipped_items=skipped,
+        deterministic_fingerprint=stable_hash(payload),
+        provenance=provenance,
+        guardrails=_guardrails(),
+    )
+
+
+def _evidence_id_for_artifact(investigation_id: str, artifact_ref: Mapping[str, Any]) -> str:
+    return f"evidence_{stable_hash({'investigation_id': investigation_id, 'target_kind': artifact_ref.get('target_kind'), 'target_path': artifact_ref.get('target_path')})[:20]}"
+
+
+def _investigation_population_id(workflow_id: str, title: str) -> str:
+    return f"inv_{stable_hash({'workflow_id': workflow_id, 'title': title})[:16]}"
+
+
+def _attachment_type_for_target_kind(target_kind: str) -> str:
+    return {
+        "EXECUTION_RECORD": "execution_record",
+        "ANALYTICS_RESULT": "analytics_result",
+        "ANALYTICS_DIFF": "analytics_diff",
+        "ANALYTICS_INSIGHT": "insight",
+        "MORNING_BRIEF": "morning_brief",
+        "RESEARCH_DISCOVERY_CANDIDATE": "research_discovery_candidate",
+        "CANDIDATE_REVIEW": "candidate_review",
+        "CONTEXT_SNAPSHOT": "context_snapshot",
+        "OPERATIONAL_CERTIFICATION": "operational_certification",
+        "SAFE_STATE": "safe_state",
+        "GUARDIAN": "guardian",
+        "RUNTIME_HEALTH": "runtime_health",
+        "BOOKMARK": "bookmark",
+    }.get(target_kind, "artifact")
+
+
+def _evidence_classification_for_target_kind(target_kind: str) -> str:
+    return {
+        "EXECUTION_RECORD": "ANALYTICS",
+        "ANALYTICS_RESULT": "ANALYTICS",
+        "ANALYTICS_DIFF": "DIFF",
+        "ANALYTICS_INSIGHT": "INSIGHT",
+        "MORNING_BRIEF": "MORNING_BRIEF",
+        "RESEARCH_DISCOVERY_CANDIDATE": "DISCOVERY",
+        "CANDIDATE_REVIEW": "CANDIDATE",
+        "CONTEXT_SNAPSHOT": "CONTEXT",
+        "OPERATIONAL_CERTIFICATION": "OPERATIONAL",
+        "SAFE_STATE": "OPERATIONAL",
+        "GUARDIAN": "OPERATIONAL",
+        "RUNTIME_HEALTH": "OPERATIONAL",
+    }.get(target_kind, "ANALYTICS")
 
 
 def summarize_workflow(workflow: Mapping[str, Any]) -> dict[str, Any]:
@@ -393,13 +834,31 @@ def sample_morning_gold_review(*, now: datetime | str | None = None, output_dir:
         {"step_id": "generate_morning_brief", "order": 4, "title": "Generate Morning Brief", "step_type": "GENERATE_MORNING_BRIEF"},
         {"step_id": "archive_morning_brief", "order": 5, "title": "Archive Morning Brief", "step_type": "ARCHIVE_BRIEF"},
         {"step_id": "explain_brief_change", "order": 6, "title": "Explain Brief change", "step_type": "EXPLAIN_BRIEF_CHANGE"},
-        {"step_id": "investigation_placeholder", "order": 7, "title": "Reference Investigation placeholder", "step_type": "CREATE_INVESTIGATION", "inputs": {"mode": "placeholder_reference_only"}},
-        {"step_id": "export_workflow_summary", "order": 8, "title": "Export workflow summary", "step_type": "EXPORT_SUMMARY"},
+        {
+            "step_id": "locate_or_create_investigation",
+            "order": 7,
+            "title": "Locate or create Investigation",
+            "step_type": "CREATE_OR_LOCATE_INVESTIGATION",
+            "inputs": {
+                "investigation_id": "morning_gold_review_investigation",
+                "title": "Morning Gold Review",
+                "description": "Durable diagnostic workspace populated by the Morning Gold Review workflow.",
+                "hypothesis": "Gold strategy research context should be reviewed through deterministic analytics, brief, and evidence artifacts.",
+            },
+        },
+        {"step_id": "attach_query_execution", "order": 8, "title": "Attach query execution Evidence", "step_type": "ATTACH_QUERY_EXECUTION"},
+        {"step_id": "attach_query_result", "order": 9, "title": "Attach query result Evidence", "step_type": "ATTACH_QUERY_RESULT"},
+        {"step_id": "attach_analytics_diff", "order": 10, "title": "Attach analytics diff Evidence", "step_type": "ATTACH_ANALYTICS_DIFF"},
+        {"step_id": "attach_analytics_insight", "order": 11, "title": "Attach analytics insight Evidence", "step_type": "ATTACH_ANALYTICS_INSIGHT"},
+        {"step_id": "attach_morning_brief", "order": 12, "title": "Attach Morning Brief Evidence", "step_type": "ATTACH_MORNING_BRIEF"},
+        {"step_id": "attach_brief_change", "order": 13, "title": "Attach Brief change Evidence", "step_type": "ATTACH_BRIEF_CHANGE"},
+        {"step_id": "export_investigation_summary", "order": 14, "title": "Export Investigation summary", "step_type": "EXPORT_INVESTIGATION_SUMMARY"},
+        {"step_id": "export_workflow_summary", "order": 15, "title": "Export workflow summary", "step_type": "EXPORT_SUMMARY"},
     ]
     return create_workflow(
         workflow_id="morning_gold_review",
         title="Morning Gold Review",
-        description="Repeatable diagnostic review of Gold strategy analytics, brief state, and investigation placeholder.",
+        description="Repeatable diagnostic review of Gold strategy analytics, brief state, and deterministic Investigation evidence.",
         workflow_type="MORNING_REVIEW",
         owner="operator",
         tags=("gold", "morning_review", "diagnostic"),
@@ -429,6 +888,36 @@ def publish_rwf1_artifacts(*, output_dir: Path = DEFAULT_OUTPUT_DIR, now: dateti
     paths["sample_run"].write_text(json.dumps(run, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     paths["summary"].write_text(render_workflow_summary(workflow, run), encoding="utf-8")
     paths["runner_contract"].write_text(render_runner_contract(), encoding="utf-8")
+    return {key: str(path) for key, path in paths.items()}
+
+
+def publish_rwf2_artifacts(*, output_dir: Path = DEFAULT_OUTPUT_DIR, now: datetime | str | None = None) -> dict[str, str]:
+    timestamp = _coerce_now(now)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    sample_workspace = output_dir / "_rwf2_sample_workspace"
+    workflow = sample_morning_gold_review(now=timestamp, output_dir=sample_workspace)
+    run = run_workflow(
+        workflow,
+        output_dir=sample_workspace,
+        saved_query_output_dir=sample_workspace / "saved_queries",
+        morning_brief_output_dir=sample_workspace / "morning_brief",
+        now=timestamp,
+    )
+    investigation_id = _latest_investigation_id_from_run(run)
+    investigation = load_investigation(investigation_id, output_dir=sample_workspace / "investigations") if investigation_id else {}
+    population = _aggregate_population_results(run)
+    paths = {
+        "population_contract": output_dir / RWF2_POPULATION_CONTRACT_MD,
+        "population_schema": output_dir / RWF2_POPULATION_SCHEMA_JSON,
+        "sample_population": output_dir / RWF2_SAMPLE_POPULATION_JSON,
+        "sample_updated_investigation": output_dir / RWF2_SAMPLE_INVESTIGATION_JSON,
+        "population_summary": output_dir / RWF2_POPULATION_SUMMARY_MD,
+    }
+    paths["population_contract"].write_text(render_population_contract(), encoding="utf-8")
+    paths["population_schema"].write_text(json.dumps(population_schema(), indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    paths["sample_population"].write_text(json.dumps(population, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    paths["sample_updated_investigation"].write_text(json.dumps(investigation, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    paths["population_summary"].write_text(render_population_summary(population, summarize_investigation(investigation) if investigation else {}), encoding="utf-8")
     return {key: str(path) for key, path in paths.items()}
 
 
@@ -482,6 +971,37 @@ def render_workflow_summary(workflow: Mapping[str, Any], run: Mapping[str, Any])
     )
 
 
+def render_population_contract() -> str:
+    return """# RWF2 Investigation Population Contract
+
+RWF2 lets deterministic research workflows locate or create an Investigation, attach CanonicalEvidence for deterministic artifacts, update the Investigation timeline, and export an Investigation summary.
+
+RWF2 does not create Claims or Conclusions. It does not use AI, notebooks, UI, broker integration, runtime integration, trading recommendations, production recommendations, or gates.
+
+Each attachment is represented as CanonicalEvidence and carries CanonicalReference and CanonicalProvenanceEnvelope metadata.
+"""
+
+
+def render_population_summary(population: Mapping[str, Any], investigation_summary: Mapping[str, Any]) -> str:
+    return "\n".join(
+        [
+            "# RWF2 Investigation Population Summary",
+            "",
+            f"- Investigation: `{population.get('investigation_id')}`",
+            f"- Created new Investigation: `{population.get('created_new_investigation')}`",
+            f"- Evidence attached: `{population.get('evidence_attached_count')}`",
+            f"- References created: `{population.get('references_created')}`",
+            f"- Timeline events added: `{population.get('timeline_events_added')}`",
+            f"- Investigation references: `{investigation_summary.get('reference_count')}`",
+            f"- Investigation timeline events: `{investigation_summary.get('timeline_event_count')}`",
+            f"- Fingerprint: `{population.get('deterministic_fingerprint')}`",
+            "",
+            "Research orchestration only. No Claims, Conclusions, recommendations, or gates are produced.",
+            "",
+        ]
+    )
+
+
 def workflow_schema() -> dict[str, Any]:
     return {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -495,6 +1015,70 @@ def workflow_schema() -> dict[str, Any]:
             "steps": {"type": "array"},
         },
     }
+
+
+def population_schema() -> dict[str, Any]:
+    return {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "title": "InvestigationPopulationResult",
+        "type": "object",
+        "required": [
+            "workflow_run_id",
+            "investigation_id",
+            "created_new_investigation",
+            "evidence_attached_count",
+            "references_created",
+            "timeline_events_added",
+            "skipped_items",
+            "deterministic_fingerprint",
+            "provenance",
+            "guardrails",
+        ],
+        "properties": {
+            "workflow_run_id": {"type": "string"},
+            "investigation_id": {"type": "string"},
+            "created_new_investigation": {"type": "boolean"},
+            "evidence_attached_count": {"type": "integer"},
+            "references_created": {"type": "integer"},
+            "timeline_events_added": {"type": "integer"},
+            "skipped_items": {"type": "array"},
+            "deterministic_fingerprint": {"type": "string"},
+            "guardrails": {
+                "type": "object",
+                "properties": {
+                    "diagnostic_only": {"const": True},
+                    "production_recommendation": {"const": False},
+                    "trading_gate": {"const": False},
+                },
+            },
+        },
+    }
+
+
+def _aggregate_population_results(run: Mapping[str, Any]) -> dict[str, Any]:
+    population_details = [dict((step.get("details") or {})) for step in run.get("step_results") or [] if (step.get("details") or {}).get("investigation_id")]
+    investigation_id = _latest_investigation_id_from_run(run)
+    payload = {
+        "workflow_run_id": run.get("run_id"),
+        "investigation_id": investigation_id,
+        "created_new_investigation": any(row.get("created_new_investigation") for row in population_details),
+        "evidence_attached_count": sum(int(row.get("evidence_attached_count") or 0) for row in population_details),
+        "references_created": sum(int(row.get("references_created") or 0) for row in population_details),
+        "timeline_events_added": sum(int(row.get("timeline_events_added") or 0) for row in population_details),
+        "skipped_items": [item for row in population_details for item in (row.get("skipped_items") or [])],
+        "provenance": {"source_component": "canonical_research_workflow", "source_run_id": run.get("run_id")},
+        "guardrails": _guardrails(),
+    }
+    payload["deterministic_fingerprint"] = stable_hash(payload)
+    return payload
+
+
+def _latest_investigation_id_from_run(run: Mapping[str, Any]) -> str:
+    for step in reversed(list(run.get("step_results") or [])):
+        details = step.get("details") or {}
+        if details.get("investigation_id"):
+            return str(details["investigation_id"])
+    return ""
 
 
 def _step_result(

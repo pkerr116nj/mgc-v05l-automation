@@ -48,6 +48,10 @@ VALID_REFERENCE_TYPES = {
 }
 VALID_EVENT_TYPES = {
     "INVESTIGATION_CREATED",
+    "WORKFLOW_STARTED",
+    "INVESTIGATION_LOCATED",
+    "WORKFLOW_COMPLETED",
+    "INVESTIGATION_SUMMARY_EXPORTED",
     "CLAIM_CREATED",
     "CLAIM_UPDATED",
     "CLAIM_VALIDATED",
@@ -187,6 +191,30 @@ def complete_investigation(
         )
     )
     updated["timeline"] = _sort_timeline(timeline)
+    return updated
+
+
+def append_investigation_event(
+    investigation: Mapping[str, Any],
+    *,
+    event_type: str,
+    artifact_reference: Mapping[str, Any],
+    provenance: Mapping[str, Any] | None = None,
+    now: datetime | str | None = None,
+) -> dict[str, Any]:
+    timestamp = _coerce_now(now)
+    updated = dict(investigation)
+    timeline = [dict(item) for item in updated.get("timeline") or []]
+    timeline.append(
+        _timeline_event(
+            event_type=event_type,
+            timestamp=timestamp,
+            artifact_reference=artifact_reference,
+            provenance=dict(provenance or {"source": "canonical_investigation_engine", "operation": "append_event"}),
+        )
+    )
+    updated["timeline"] = _sort_timeline(timeline)
+    updated["updated_at"] = timestamp.isoformat()
     return updated
 
 
@@ -436,7 +464,7 @@ def render_timeline_contract() -> str:
         "",
         f"- Event schema version: `{TIMELINE_EVENT_SCHEMA_VERSION}`",
         "- Timeline events are sorted by timestamp and then event type.",
-        "- Supported events: `INVESTIGATION_CREATED`, `CLAIM_CREATED`, `CLAIM_UPDATED`, `CLAIM_VALIDATED`, `CLAIM_SUPERSEDED`, `CLAIM_INVALIDATED`, `CLAIM_ARCHIVED`, `EVIDENCE_ATTACHED`, `EVIDENCE_SUPERSEDED`, `EVIDENCE_ARCHIVED`, `EVIDENCE_INVALIDATED`, `QUERY_EXECUTED`, `INSIGHT_ATTACHED`, `DIFF_ATTACHED`, `MORNING_BRIEF_REFERENCED`, `CANDIDATE_BOOKMARKED`, `ARTIFACT_ATTACHED`, `INVESTIGATION_COMPLETED`.",
+        "- Supported events include investigation lifecycle, workflow population, evidence, claim, conclusion, query, insight, diff, Morning Brief, candidate, and artifact events.",
         "- Each event includes timestamp, event type, artifact reference, provenance, and diagnostic guardrails.",
         "",
     ])
