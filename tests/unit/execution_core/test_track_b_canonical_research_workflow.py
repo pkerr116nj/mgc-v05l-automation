@@ -6,19 +6,29 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from mgc_v05l.execution_core.track_b_canonical_research_workflow import (
+    accept_claim_draft,
     create_or_locate_investigation,
     create_workflow,
+    export_claim_draft_summary,
+    generate_claim_drafts,
+    load_claim_drafts,
     publish_rwf1_artifacts,
     publish_rwf2_artifacts,
+    publish_rwf3_artifacts,
     populate_investigation_evidence,
+    reject_claim_draft,
     run_workflow,
     sample_morning_gold_review,
     validate_workflow,
     workflow_run_fingerprint,
 )
+from mgc_v05l.execution_core.track_b_canonical_evidence_engine import attach_evidence_reference, create_evidence, write_evidence
 from mgc_v05l.execution_core.track_b_canonical_investigation_engine import (
+    attach_evidence_reference as attach_investigation_evidence_reference,
     load_investigation,
+    write_investigation,
 )
+from mgc_v05l.execution_core.track_b_canonical_claims_engine import list_claims
 
 
 NOW = datetime(2026, 7, 6, 12, 0, tzinfo=UTC)
@@ -76,9 +86,10 @@ def test_run_sample_workflow(tmp_path: Path) -> None:
 
     assert run["workflow_id"] == "morning_gold_review"
     assert run["status"] in {"COMPLETE", "COMPLETE_WITH_WARNINGS"}
-    assert len(run["step_results"]) == 15
+    assert len(run["step_results"]) == 17
     assert any(step["step_type"] == "RUN_SAVED_QUERY" and step["status"] == "COMPLETE" for step in run["step_results"])
     assert any(step["step_type"] == "CREATE_OR_LOCATE_INVESTIGATION" and step["status"] == "COMPLETE" for step in run["step_results"])
+    assert any(step["step_type"] == "GENERATE_CLAIM_DRAFTS" and step["status"] == "COMPLETE" for step in run["step_results"])
     assert any(step["step_type"] == "EXPORT_INVESTIGATION_SUMMARY" and step["status"] == "COMPLETE" for step in run["step_results"])
 
 
@@ -229,6 +240,92 @@ def test_publish_rwf2_artifacts(tmp_path: Path) -> None:
     json.loads(Path(paths["sample_updated_investigation"]).read_text(encoding="utf-8"))
 
 
+def test_rwf3_generate_draft_from_unchanged_analytics_insight(tmp_path: Path) -> None:
+    inv_id = _investigation_with_evidence(tmp_path, _evidence_with_source(tmp_path, "evidence_insight", "INSIGHT", "insight", [{"title": "No meaningful analytics changes"}]))
+
+    drafts = generate_claim_drafts(investigation_id=inv_id, investigation_output_dir=tmp_path / "investigations", evidence_output_dir=tmp_path / "evidence", draft_output_dir=tmp_path / "drafts", now=NOW)
+
+    assert len(drafts) == 1
+    assert drafts[0]["proposed_claim_type"] == "deterministic_evidence_review"
+    assert drafts[0]["validation_preview"] == "SUPPORTED"
+    assert drafts[0]["draft_status"] == "NEEDS_REVIEW"
+
+
+def test_rwf3_generate_draft_from_changed_analytics_diff(tmp_path: Path) -> None:
+    inv_id = _investigation_with_evidence(tmp_path, _evidence_with_source(tmp_path, "evidence_diff", "DIFF", "analytics_diff", {"classification": "CHANGED"}))
+
+    drafts = generate_claim_drafts(investigation_id=inv_id, investigation_output_dir=tmp_path / "investigations", evidence_output_dir=tmp_path / "evidence", draft_output_dir=tmp_path / "drafts", now=NOW)
+
+    assert len(drafts) == 1
+    assert "changed" in drafts[0]["proposed_statement"].lower()
+
+
+def test_rwf3_generate_draft_from_morning_brief_change(tmp_path: Path) -> None:
+    inv_id = _investigation_with_evidence(tmp_path, _evidence_with_source(tmp_path, "evidence_brief", "MORNING_BRIEF", "morning_brief_change", {"changes": [{"domain": "PLATFORM"}]}))
+
+    drafts = generate_claim_drafts(investigation_id=inv_id, investigation_output_dir=tmp_path / "investigations", evidence_output_dir=tmp_path / "evidence", draft_output_dir=tmp_path / "drafts", now=NOW)
+
+    assert len(drafts) == 1
+    assert drafts[0]["proposed_claim_classification"] == "OPERATIONAL"
+
+
+def test_rwf3_no_draft_for_unknown_evidence(tmp_path: Path) -> None:
+    inv_id = _investigation_with_evidence(tmp_path, _evidence_with_source(tmp_path, "evidence_unknown", "ANALYTICS", "unknown", {"ok": True}))
+
+    drafts = generate_claim_drafts(investigation_id=inv_id, investigation_output_dir=tmp_path / "investigations", evidence_output_dir=tmp_path / "evidence", draft_output_dir=tmp_path / "drafts", now=NOW)
+
+    assert drafts == []
+
+
+def test_rwf3_accept_draft_creates_draft_claim_only(tmp_path: Path) -> None:
+    inv_id = _investigation_with_evidence(tmp_path, _evidence_with_source(tmp_path, "evidence_insight", "INSIGHT", "insight", [{"title": "No meaningful analytics changes"}]))
+    draft = generate_claim_drafts(investigation_id=inv_id, investigation_output_dir=tmp_path / "investigations", evidence_output_dir=tmp_path / "evidence", draft_output_dir=tmp_path / "drafts", now=NOW)[0]
+
+    result = accept_claim_draft(draft["draft_id"], draft_output_dir=tmp_path / "drafts", evidence_output_dir=tmp_path / "evidence", claims_output_dir=tmp_path / "claims", investigation_output_dir=tmp_path / "investigations", now=NOW)
+
+    assert result["claim"]["status"] == "DRAFT"
+    assert result["claim"]["supporting_evidence"][0]["evidence_id"] == "evidence_insight"
+    assert result["draft"]["draft_status"] == "ACCEPTED"
+
+
+def test_rwf3_reject_draft_does_not_create_claim(tmp_path: Path) -> None:
+    inv_id = _investigation_with_evidence(tmp_path, _evidence_with_source(tmp_path, "evidence_insight", "INSIGHT", "insight", [{"title": "No meaningful analytics changes"}]))
+    draft = generate_claim_drafts(investigation_id=inv_id, investigation_output_dir=tmp_path / "investigations", evidence_output_dir=tmp_path / "evidence", draft_output_dir=tmp_path / "drafts", now=NOW)[0]
+
+    rejected = reject_claim_draft(draft["draft_id"], draft_output_dir=tmp_path / "drafts", investigation_output_dir=tmp_path / "investigations", now=NOW)
+
+    assert rejected["draft_status"] == "REJECTED"
+    assert list_claims(output_dir=tmp_path / "claims") == []
+
+
+def test_rwf3_no_duplicate_drafts_on_repeated_run(tmp_path: Path) -> None:
+    inv_id = _investigation_with_evidence(tmp_path, _evidence_with_source(tmp_path, "evidence_insight", "INSIGHT", "insight", [{"title": "No meaningful analytics changes"}]))
+    first = generate_claim_drafts(investigation_id=inv_id, investigation_output_dir=tmp_path / "investigations", evidence_output_dir=tmp_path / "evidence", draft_output_dir=tmp_path / "drafts", now=NOW)
+    second = generate_claim_drafts(investigation_id=inv_id, investigation_output_dir=tmp_path / "investigations", evidence_output_dir=tmp_path / "evidence", draft_output_dir=tmp_path / "drafts", now=NOW)
+
+    assert len(first) == len(second) == 1
+    assert first[0]["draft_id"] == second[0]["draft_id"]
+
+
+def test_rwf3_summary_and_guardrails(tmp_path: Path) -> None:
+    inv_id = _investigation_with_evidence(tmp_path, _evidence_with_source(tmp_path, "evidence_insight", "INSIGHT", "insight", [{"title": "No meaningful analytics changes"}]))
+    generate_claim_drafts(investigation_id=inv_id, investigation_output_dir=tmp_path / "investigations", evidence_output_dir=tmp_path / "evidence", draft_output_dir=tmp_path / "drafts", now=NOW)
+
+    summary = export_claim_draft_summary(investigation_id=inv_id, draft_output_dir=tmp_path / "drafts")
+
+    assert summary["draft_count"] == 1
+    assert summary["guardrails"] == {"diagnostic_only": True, "production_recommendation": False, "trading_gate": False}
+
+
+def test_publish_rwf3_artifacts(tmp_path: Path) -> None:
+    paths = publish_rwf3_artifacts(output_dir=tmp_path, now=NOW)
+
+    for path in paths.values():
+        assert Path(path).exists()
+    json.loads(Path(paths["draft_schema"]).read_text(encoding="utf-8"))
+    json.loads(Path(paths["sample_drafts"]).read_text(encoding="utf-8"))
+
+
 def test_research_workflow_import_boundary() -> None:
     paths = [
         Path("src/mgc_v05l/execution_core/track_b_canonical_research_workflow.py"),
@@ -252,3 +349,44 @@ def test_research_workflow_import_boundary() -> None:
                 if call_name in forbidden_call_names:
                     violations.append(f"{path}:{call_name}")
     assert violations == []
+
+
+def _evidence_with_source(tmp_path: Path, evidence_id: str, classification: str, evidence_type: str, source_payload):
+    source_path = tmp_path / f"{evidence_id}_source.json"
+    source_path.write_text(json.dumps(source_payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    result = create_evidence(
+        investigation_id="inv_rwf3",
+        evidence_id=evidence_id,
+        title=f"{classification} evidence",
+        summary="Synthetic source-backed evidence.",
+        evidence_classification=classification,
+        evidence_type=evidence_type,
+        source_component="test",
+        now=NOW,
+        output_dir=tmp_path / "evidence",
+    )
+    evidence = attach_evidence_reference(
+        result.evidence,
+        attachment_type="artifact" if evidence_type == "unknown" else evidence_type if evidence_type in {"analytics_diff", "insight", "morning_brief"} else "artifact",
+        reference_id=source_path.stem,
+        artifact_path=str(source_path),
+        now=NOW,
+    )
+    return write_evidence(evidence, output_dir=tmp_path / "evidence").evidence
+
+
+def _investigation_with_evidence(tmp_path: Path, evidence: dict) -> str:
+    investigation = create_or_locate_investigation(
+        {"workflow_id": "wf_rwf3", "title": "RWF3 Investigation", "description": "Test", "owner": "operator", "tags": []},
+        inputs={"investigation_id": "inv_rwf3", "title": "RWF3 Investigation"},
+        output_dir=tmp_path / "investigations",
+        now=NOW,
+    )[0]
+    investigation = attach_investigation_evidence_reference(
+        investigation,
+        evidence_id=str(evidence["evidence_id"]),
+        artifact_path=str(tmp_path / "evidence" / f"{evidence['evidence_id']}.json"),
+        now=NOW,
+    )
+    write_investigation(investigation, output_dir=tmp_path / "investigations")
+    return "inv_rwf3"

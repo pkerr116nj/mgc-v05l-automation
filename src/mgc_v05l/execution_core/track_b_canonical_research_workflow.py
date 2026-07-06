@@ -35,6 +35,14 @@ from mgc_v05l.execution_core.track_b_canonical_evidence_engine import (
     load_evidence,
     write_evidence,
 )
+from mgc_v05l.execution_core.track_b_canonical_claims_engine import (
+    DEFAULT_OUTPUT_DIR as DEFAULT_CLAIMS_OUTPUT_DIR,
+    attach_contradicting_evidence,
+    attach_related_evidence,
+    attach_supporting_evidence,
+    create_claim,
+    write_claim,
+)
 from mgc_v05l.execution_core.track_b_canonical_investigation_engine import (
     DEFAULT_OUTPUT_DIR as DEFAULT_INVESTIGATION_OUTPUT_DIR,
     append_investigation_event,
@@ -68,6 +76,14 @@ RWF2_POPULATION_SCHEMA_JSON = "rwf2_population_schema.json"
 RWF2_SAMPLE_POPULATION_JSON = "rwf2_sample_population.json"
 RWF2_SAMPLE_INVESTIGATION_JSON = "rwf2_sample_updated_investigation.json"
 RWF2_POPULATION_SUMMARY_MD = "rwf2_population_summary.md"
+RWF3_DRAFT_CONTRACT_MD = "rwf3_claim_draft_contract.md"
+RWF3_DRAFT_SCHEMA_JSON = "rwf3_claim_draft_schema.json"
+RWF3_SAMPLE_DRAFTS_JSON = "rwf3_sample_claim_drafts.json"
+RWF3_DRAFT_SUMMARY_MD = "rwf3_claim_draft_queue_summary.md"
+RWF3_MANUAL_REVIEW_CONTRACT_MD = "rwf3_manual_review_contract.md"
+
+CLAIM_DRAFT_SCHEMA_VERSION = "rwf3_claim_draft_v1"
+CLAIM_DRAFT_SUMMARY_SCHEMA_VERSION = "rwf3_claim_draft_queue_summary_v1"
 
 VALID_WORKFLOW_STATUSES = {"DRAFT", "ACTIVE", "PAUSED", "COMPLETE", "ARCHIVED"}
 VALID_WORKFLOW_TYPES = {"MORNING_REVIEW", "INVESTIGATION_REFRESH", "CANDIDATE_REVIEW", "STRATEGY_REVIEW", "PLATFORM_REVIEW", "CUSTOM"}
@@ -85,6 +101,8 @@ VALID_STEP_TYPES = {
     "ATTACH_BRIEF_CHANGE",
     "ATTACH_EVIDENCE",
     "EXPORT_INVESTIGATION_SUMMARY",
+    "GENERATE_CLAIM_DRAFTS",
+    "EXPORT_CLAIM_DRAFT_SUMMARY",
     "VALIDATE_CLAIMS",
     "UPDATE_CONCLUSION",
     "GENERATE_MORNING_BRIEF",
@@ -96,6 +114,9 @@ VALID_STEP_TYPES = {
 }
 VALID_STEP_STATUSES = {"PENDING", "RUNNING", "COMPLETE", "FAILED", "SKIPPED"}
 VALID_RUN_STATUSES = {"PLANNED", "RUNNING", "COMPLETE", "COMPLETE_WITH_WARNINGS", "FAILED"}
+VALID_DRAFT_STATUSES = {"PROPOSED", "NEEDS_REVIEW", "ACCEPTED", "REJECTED", "SUPERSEDED", "ARCHIVED"}
+VALID_DRAFT_CONFIDENCE = {"UNKNOWN", "LOW", "MEDIUM", "HIGH"}
+VALID_VALIDATION_PREVIEW = {"SUPPORTED", "PARTIALLY_SUPPORTED", "CONTRADICTED", "INSUFFICIENT_EVIDENCE", "INVALID"}
 
 
 @dataclass(frozen=True)
@@ -228,6 +249,8 @@ def run_workflow(
     morning_brief_output_dir: Path = DEFAULT_MORNING_BRIEF_OUTPUT_DIR,
     investigation_output_dir: Path | None = None,
     evidence_output_dir: Path | None = None,
+    claim_draft_output_dir: Path | None = None,
+    claims_output_dir: Path | None = None,
     now: datetime | str | None = None,
 ) -> dict[str, Any]:
     started_at = _coerce_now(now)
@@ -249,6 +272,8 @@ def run_workflow(
                 morning_brief_output_dir=morning_brief_output_dir,
                 investigation_output_dir=investigation_output_dir or output_dir / "investigations",
                 evidence_output_dir=evidence_output_dir or output_dir / "evidence",
+                claim_draft_output_dir=claim_draft_output_dir or output_dir / "claim_drafts",
+                claims_output_dir=claims_output_dir or output_dir / "claims",
                 context=context,
                 now=started_at,
             )
@@ -290,6 +315,8 @@ def _run_step(
     morning_brief_output_dir: Path,
     investigation_output_dir: Path,
     evidence_output_dir: Path,
+    claim_draft_output_dir: Path,
+    claims_output_dir: Path,
     context: dict[str, Any],
     now: datetime,
 ) -> dict[str, Any]:
@@ -464,6 +491,39 @@ def _run_step(
                 artifact_refs=[_artifact_ref("INVESTIGATION", investigation_id, result.summary_path)],
                 now=now,
             )
+        if step_type == "GENERATE_CLAIM_DRAFTS":
+            investigation_id = str(inputs.get("investigation_id") or context.get("investigation_id") or "")
+            if not investigation_id:
+                return _step_result(step=step, status="SKIPPED", reason="investigation_not_available", now=now)
+            drafts = generate_claim_drafts(
+                investigation_id=investigation_id,
+                investigation_output_dir=investigation_output_dir,
+                evidence_output_dir=evidence_output_dir,
+                draft_output_dir=claim_draft_output_dir,
+                now=now,
+            )
+            context["claim_draft_count"] = len(drafts)
+            return _step_result(
+                step=step,
+                status="COMPLETE",
+                reason="claim_drafts_generated",
+                details={"investigation_id": investigation_id, "draft_count": len(drafts)},
+                artifact_refs=[_artifact_ref("ARTIFACT", "claim_draft_queue", claim_draft_output_dir / f"{investigation_id}_claim_drafts.json")],
+                now=now,
+            )
+        if step_type == "EXPORT_CLAIM_DRAFT_SUMMARY":
+            investigation_id = str(inputs.get("investigation_id") or context.get("investigation_id") or "")
+            if not investigation_id:
+                return _step_result(step=step, status="SKIPPED", reason="investigation_not_available", now=now)
+            summary = export_claim_draft_summary(investigation_id=investigation_id, draft_output_dir=claim_draft_output_dir)
+            return _step_result(
+                step=step,
+                status="COMPLETE",
+                reason="claim_draft_summary_exported",
+                details=summary,
+                artifact_refs=[_artifact_ref("ARTIFACT", "claim_draft_summary", claim_draft_output_dir / f"{investigation_id}_claim_draft_summary.json")],
+                now=now,
+            )
         if step_type == "EXPORT_SUMMARY":
             return _step_result(step=step, status="COMPLETE", reason="workflow_summary_exported", now=now)
         return _step_result(step=step, status="SKIPPED", reason="unsupported_in_rwf1_minimal_runner", now=now)
@@ -595,6 +655,161 @@ def populate_investigation_evidence(
     )
 
 
+def generate_claim_drafts(
+    *,
+    investigation_id: str,
+    investigation_output_dir: Path = DEFAULT_INVESTIGATION_OUTPUT_DIR,
+    evidence_output_dir: Path = DEFAULT_EVIDENCE_OUTPUT_DIR,
+    draft_output_dir: Path = DEFAULT_OUTPUT_DIR / "claim_drafts",
+    now: datetime | str | None = None,
+) -> list[dict[str, Any]]:
+    timestamp = _coerce_now(now)
+    investigation = load_investigation(investigation_id, output_dir=investigation_output_dir)
+    evidence_refs = [ref for ref in investigation.get("references") or [] if ref.get("reference_type") == "evidence"]
+    drafts = load_claim_drafts(investigation_id=investigation_id, draft_output_dir=draft_output_dir)
+    by_id = {str(draft.get("draft_id")): dict(draft) for draft in drafts}
+    generated_ids: list[str] = []
+    for ref in evidence_refs:
+        evidence_id = str(ref.get("target_id") or ref.get("legacy_reference_id") or "")
+        if not evidence_id:
+            continue
+        try:
+            evidence = load_evidence(evidence_id, output_dir=evidence_output_dir)
+        except FileNotFoundError:
+            continue
+        draft = _draft_from_evidence(evidence, investigation_id=investigation_id, now=timestamp)
+        if draft is None:
+            continue
+        by_id.setdefault(str(draft["draft_id"]), draft)
+        generated_ids.append(str(draft["draft_id"]))
+    rows = sorted(by_id.values(), key=lambda row: str(row.get("draft_id")))
+    _write_claim_drafts(investigation_id, rows, draft_output_dir=draft_output_dir)
+    if generated_ids:
+        investigation = append_investigation_event(
+            investigation,
+            event_type="CLAIM_DRAFT_GENERATED",
+            artifact_reference=_artifact_ref("ARTIFACT", "claim_draft_queue", draft_output_dir / f"{investigation_id}_claim_drafts.json"),
+            provenance={"source": "canonical_research_workflow", "operation": "generate_claim_drafts", "draft_count": len(generated_ids)},
+            now=timestamp,
+        )
+        write_investigation(investigation, output_dir=investigation_output_dir)
+    export_claim_draft_summary(investigation_id=investigation_id, draft_output_dir=draft_output_dir)
+    return rows
+
+
+def accept_claim_draft(
+    draft_id: str,
+    *,
+    draft_output_dir: Path = DEFAULT_OUTPUT_DIR / "claim_drafts",
+    evidence_output_dir: Path = DEFAULT_EVIDENCE_OUTPUT_DIR,
+    claims_output_dir: Path = DEFAULT_CLAIMS_OUTPUT_DIR,
+    investigation_output_dir: Path = DEFAULT_INVESTIGATION_OUTPUT_DIR,
+    now: datetime | str | None = None,
+) -> dict[str, Any]:
+    timestamp = _coerce_now(now)
+    draft = load_claim_draft(draft_id, draft_output_dir=draft_output_dir)
+    investigation_id = str(draft["investigation_id"])
+    claim_id = f"claim_{stable_hash({'draft_id': draft_id, 'investigation_id': investigation_id})[:16]}"
+    result = create_claim(
+        investigation_id=investigation_id,
+        claim_id=claim_id,
+        title=str(draft["proposed_claim_title"]),
+        statement=str(draft["proposed_statement"]),
+        rationale=str(draft["rationale_template"]),
+        claim_classification=str(draft["proposed_claim_classification"]),
+        claim_type=str(draft["proposed_claim_type"]),
+        confidence=str(draft["confidence_suggestion"]),
+        status="DRAFT",
+        provenance=dict(draft.get("provenance") or {}),
+        now=timestamp,
+        output_dir=claims_output_dir,
+    )
+    claim = result.claim
+    for bucket, attach_fn in (
+        ("supporting_evidence_refs", attach_supporting_evidence),
+        ("contradicting_evidence_refs", attach_contradicting_evidence),
+        ("related_evidence_refs", attach_related_evidence),
+    ):
+        for ref in draft.get(bucket) or []:
+            evidence_id = str(ref.get("target_id") or ref.get("evidence_id") or "")
+            if not evidence_id:
+                continue
+            claim = attach_fn(claim, load_evidence(evidence_id, output_dir=evidence_output_dir), now=timestamp)
+    result = write_claim(claim, output_dir=claims_output_dir)
+    draft = _update_draft_status(draft, status="ACCEPTED", now=timestamp)
+    _upsert_claim_draft(draft, draft_output_dir=draft_output_dir)
+    investigation = load_investigation(investigation_id, output_dir=investigation_output_dir)
+    investigation = append_investigation_event(
+        investigation,
+        event_type="CLAIM_DRAFT_ACCEPTED",
+        artifact_reference=_artifact_ref("CLAIM", claim_id, result.claim_path),
+        provenance={"source": "canonical_research_workflow", "operation": "accept_claim_draft", "draft_id": draft_id},
+        now=timestamp,
+    )
+    write_investigation(investigation, output_dir=investigation_output_dir)
+    return {"draft": draft, "claim": result.claim, "claim_path": str(result.claim_path), "summary": result.summary}
+
+
+def reject_claim_draft(
+    draft_id: str,
+    *,
+    draft_output_dir: Path = DEFAULT_OUTPUT_DIR / "claim_drafts",
+    investigation_output_dir: Path = DEFAULT_INVESTIGATION_OUTPUT_DIR,
+    now: datetime | str | None = None,
+) -> dict[str, Any]:
+    timestamp = _coerce_now(now)
+    draft = _update_draft_status(load_claim_draft(draft_id, draft_output_dir=draft_output_dir), status="REJECTED", now=timestamp)
+    _upsert_claim_draft(draft, draft_output_dir=draft_output_dir)
+    investigation_id = str(draft["investigation_id"])
+    investigation = load_investigation(investigation_id, output_dir=investigation_output_dir)
+    investigation = append_investigation_event(
+        investigation,
+        event_type="CLAIM_DRAFT_REJECTED",
+        artifact_reference=_artifact_ref("ARTIFACT", draft_id, draft_output_dir / f"{investigation_id}_claim_drafts.json"),
+        provenance={"source": "canonical_research_workflow", "operation": "reject_claim_draft", "draft_id": draft_id},
+        now=timestamp,
+    )
+    write_investigation(investigation, output_dir=investigation_output_dir)
+    return draft
+
+
+def load_claim_drafts(*, investigation_id: str | None = None, draft_output_dir: Path = DEFAULT_OUTPUT_DIR / "claim_drafts") -> list[dict[str, Any]]:
+    if investigation_id:
+        path = draft_output_dir / f"{investigation_id}_claim_drafts.json"
+        if not path.exists():
+            return []
+        return list(json.loads(path.read_text(encoding="utf-8")).get("drafts") or [])
+    rows: list[dict[str, Any]] = []
+    if not draft_output_dir.exists():
+        return rows
+    for path in sorted(draft_output_dir.glob("*_claim_drafts.json")):
+        rows.extend(json.loads(path.read_text(encoding="utf-8")).get("drafts") or [])
+    return rows
+
+
+def load_claim_draft(draft_id: str, *, draft_output_dir: Path = DEFAULT_OUTPUT_DIR / "claim_drafts") -> dict[str, Any]:
+    for draft in load_claim_drafts(draft_output_dir=draft_output_dir):
+        if draft.get("draft_id") == draft_id:
+            return dict(draft)
+    raise FileNotFoundError(draft_id)
+
+
+def export_claim_draft_summary(*, investigation_id: str, draft_output_dir: Path = DEFAULT_OUTPUT_DIR / "claim_drafts") -> dict[str, Any]:
+    drafts = load_claim_drafts(investigation_id=investigation_id, draft_output_dir=draft_output_dir)
+    summary = {
+        "schema_version": CLAIM_DRAFT_SUMMARY_SCHEMA_VERSION,
+        "investigation_id": investigation_id,
+        "draft_count": len(drafts),
+        "status_counts": _counts(draft.get("draft_status") for draft in drafts),
+        "validation_preview_counts": _counts(draft.get("validation_preview") for draft in drafts),
+        "guardrails": _guardrails(),
+        "deterministic_fingerprint": stable_hash({"investigation_id": investigation_id, "drafts": drafts}),
+    }
+    draft_output_dir.mkdir(parents=True, exist_ok=True)
+    (draft_output_dir / f"{investigation_id}_claim_draft_summary.json").write_text(json.dumps(summary, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    return summary
+
+
 def _load_or_create_population_evidence(
     *,
     investigation_id: str,
@@ -626,6 +841,180 @@ def _load_or_create_population_evidence(
         output_dir=evidence_output_dir,
     )
     return result.evidence
+
+
+def _draft_from_evidence(evidence: Mapping[str, Any], *, investigation_id: str, now: datetime) -> dict[str, Any] | None:
+    source = _source_payload_from_evidence(evidence)
+    classification = str(evidence.get("evidence_classification") or "")
+    evidence_type = str(evidence.get("evidence_type") or "")
+    family = ""
+    title = ""
+    statement = ""
+    claim_classification = "ANALYTICS"
+    claim_type = "deterministic_evidence_review"
+    confidence = "LOW"
+    preview = "PARTIALLY_SUPPORTED"
+    if classification == "INSIGHT":
+        insights = source if isinstance(source, list) else source.get("insights", []) if isinstance(source, Mapping) else []
+        first = insights[0] if insights else {}
+        insight_title = str(first.get("title") or evidence.get("title") or "")
+        if "No meaningful analytics changes" in insight_title:
+            family = "analytics_unchanged"
+            title = "Analytics unchanged over compared window"
+            statement = "Current saved-query analytics are stable over the compared window represented by the attached analytics insight."
+            preview = "SUPPORTED"
+        else:
+            family = "analytics_changed"
+            title = "Analytics changed over compared window"
+            statement = "A deterministic analytics insight indicates a material analytics change over the compared window."
+    elif classification == "DIFF":
+        status = str(source.get("classification") or source.get("status") or "") if isinstance(source, Mapping) else ""
+        if status and status not in {"UNCHANGED", "NO_PRIOR_EXECUTION"}:
+            family = "analytics_changed"
+            title = "Analytics result changed"
+            statement = "A deterministic analytics diff reports changed metrics or groups for the compared query result."
+        elif status == "UNCHANGED":
+            family = "analytics_unchanged"
+            title = "Analytics result unchanged"
+            statement = "A deterministic analytics diff reports no meaningful result change for the compared query result."
+            preview = "SUPPORTED"
+    elif classification == "MORNING_BRIEF" and "change" in evidence_type:
+        change_count = len(source.get("changes") or []) if isinstance(source, Mapping) else 0
+        if change_count:
+            family = "morning_brief_changed"
+            title = "Morning Brief domain changed"
+            statement = "The Morning Brief change explanation reports at least one deterministic domain change."
+            claim_classification = "OPERATIONAL"
+            claim_type = "brief_change_review"
+        else:
+            family = "morning_brief_no_meaningful_change"
+            title = "Morning Brief has no meaningful change"
+            statement = "The Morning Brief change explanation reports no meaningful change beyond generated timestamps or fingerprints."
+            claim_classification = "OPERATIONAL"
+            claim_type = "brief_change_review"
+            preview = "SUPPORTED"
+    elif classification in {"DISCOVERY", "CANDIDATE"}:
+        family = "research_candidate_review"
+        title = "Research candidate merits manual review"
+        statement = "A deterministic research discovery or candidate-review artifact identifies a candidate for manual research review."
+        claim_classification = "DISCOVERY"
+        claim_type = "manual_research_candidate"
+    elif classification == "OPERATIONAL":
+        family = "operational_state_stable"
+        title = "Operational evidence is stable for research review"
+        statement = "Attached operational evidence indicates platform state can be treated as coherent for research review purposes only."
+        claim_classification = "OPERATIONAL"
+        claim_type = "operational_research_context"
+        preview = "SUPPORTED"
+    if not family:
+        return None
+    evidence_ref = _draft_evidence_ref(evidence, relationship="supports", now=now)
+    draft = {
+        "schema_version": CLAIM_DRAFT_SCHEMA_VERSION,
+        "draft_id": _claim_draft_id(investigation_id, family, [str(evidence.get("evidence_id"))], statement),
+        "investigation_id": investigation_id,
+        "created_at": now.isoformat(),
+        "updated_at": now.isoformat(),
+        "source_evidence_ids": [str(evidence.get("evidence_id"))],
+        "proposed_claim_title": title,
+        "proposed_statement": statement,
+        "proposed_claim_classification": claim_classification,
+        "proposed_claim_type": claim_type,
+        "rationale_template": f"Deterministic draft generated from `{family}` evidence. Manual review is required before activation.",
+        "supporting_evidence_refs": [evidence_ref],
+        "contradicting_evidence_refs": [],
+        "related_evidence_refs": [],
+        "draft_status": "NEEDS_REVIEW",
+        "confidence_suggestion": confidence,
+        "validation_preview": preview,
+        "provenance": build_provenance_envelope(
+            source_component="canonical_research_workflow",
+            source_artifact=str((evidence.get("attachments") or [{}])[0].get("target_path") or ""),
+            parent_fingerprint=str(evidence.get("deterministic_fingerprint") or ""),
+            parent_schema_version=str(evidence.get("schema_version") or ""),
+            transform_name=f"rwf3_claim_draft_{family}",
+            created_at=now,
+        ),
+        "guardrails": _guardrails(),
+    }
+    draft["deterministic_fingerprint"] = stable_hash(draft)
+    return draft
+
+
+def _source_payload_from_evidence(evidence: Mapping[str, Any]) -> Any:
+    attachments = list(evidence.get("attachments") or [])
+    if not attachments:
+        return {}
+    path = Path(str(attachments[0].get("target_path") or attachments[0].get("artifact_path") or ""))
+    if not path.exists() or path.suffix.lower() not in {".json", ".jsonl"}:
+        return {}
+    try:
+        if path.suffix.lower() == ".jsonl":
+            return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+
+
+def _draft_evidence_ref(evidence: Mapping[str, Any], *, relationship: str, now: datetime) -> dict[str, Any]:
+    return {
+        **build_provenance_reference(
+            reference_type="claim_draft_evidence",
+            target_id=str(evidence.get("evidence_id")),
+            target_kind="EVIDENCE",
+            target_schema_version=str(evidence.get("schema_version")),
+            target_fingerprint=str(evidence.get("deterministic_fingerprint")),
+            relationship=relationship,
+            source_component="canonical_research_workflow",
+            created_at=now,
+        ),
+        "evidence_id": evidence.get("evidence_id"),
+        "evidence_fingerprint": evidence.get("deterministic_fingerprint"),
+        "evidence_status": evidence.get("status"),
+        "evidence_title": evidence.get("title"),
+    }
+
+
+def build_provenance_reference(**kwargs: Any) -> dict[str, Any]:
+    from mgc_v05l.execution_core.track_b_canonical_reference_envelope import build_reference
+
+    return build_reference(**kwargs)
+
+
+def _write_claim_drafts(investigation_id: str, drafts: Sequence[Mapping[str, Any]], *, draft_output_dir: Path) -> None:
+    draft_output_dir.mkdir(parents=True, exist_ok=True)
+    payload = {"schema_version": "rwf3_claim_draft_queue_v1", "investigation_id": investigation_id, "drafts": [dict(draft) for draft in drafts], "guardrails": _guardrails()}
+    (draft_output_dir / f"{investigation_id}_claim_drafts.json").write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+
+def _upsert_claim_draft(draft: Mapping[str, Any], *, draft_output_dir: Path) -> None:
+    investigation_id = str(draft["investigation_id"])
+    rows = {str(item.get("draft_id")): dict(item) for item in load_claim_drafts(investigation_id=investigation_id, draft_output_dir=draft_output_dir)}
+    rows[str(draft["draft_id"])] = dict(draft)
+    _write_claim_drafts(investigation_id, sorted(rows.values(), key=lambda row: str(row.get("draft_id"))), draft_output_dir=draft_output_dir)
+    export_claim_draft_summary(investigation_id=investigation_id, draft_output_dir=draft_output_dir)
+
+
+def _update_draft_status(draft: Mapping[str, Any], *, status: str, now: datetime) -> dict[str, Any]:
+    if status not in VALID_DRAFT_STATUSES:
+        raise ValueError(f"Unsupported draft status: {status}")
+    updated = dict(draft)
+    updated["draft_status"] = status
+    updated["updated_at"] = now.isoformat()
+    updated["deterministic_fingerprint"] = stable_hash(updated)
+    return updated
+
+
+def _claim_draft_id(investigation_id: str, family: str, evidence_ids: Sequence[str], statement: str) -> str:
+    return f"draft_{stable_hash({'investigation_id': investigation_id, 'family': family, 'evidence_ids': sorted(evidence_ids), 'statement': statement})[:18]}"
+
+
+def _counts(values: Any) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for value in values:
+        key = str(value or "UNKNOWN")
+        counts[key] = counts.get(key, 0) + 1
+    return dict(sorted(counts.items()))
 
 
 def _artifact_refs_for_population_step(
@@ -852,8 +1241,10 @@ def sample_morning_gold_review(*, now: datetime | str | None = None, output_dir:
         {"step_id": "attach_analytics_insight", "order": 11, "title": "Attach analytics insight Evidence", "step_type": "ATTACH_ANALYTICS_INSIGHT"},
         {"step_id": "attach_morning_brief", "order": 12, "title": "Attach Morning Brief Evidence", "step_type": "ATTACH_MORNING_BRIEF"},
         {"step_id": "attach_brief_change", "order": 13, "title": "Attach Brief change Evidence", "step_type": "ATTACH_BRIEF_CHANGE"},
-        {"step_id": "export_investigation_summary", "order": 14, "title": "Export Investigation summary", "step_type": "EXPORT_INVESTIGATION_SUMMARY"},
-        {"step_id": "export_workflow_summary", "order": 15, "title": "Export workflow summary", "step_type": "EXPORT_SUMMARY"},
+        {"step_id": "generate_claim_drafts", "order": 14, "title": "Generate Claim Drafts", "step_type": "GENERATE_CLAIM_DRAFTS"},
+        {"step_id": "export_claim_draft_summary", "order": 15, "title": "Export Claim Draft summary", "step_type": "EXPORT_CLAIM_DRAFT_SUMMARY"},
+        {"step_id": "export_investigation_summary", "order": 16, "title": "Export Investigation summary", "step_type": "EXPORT_INVESTIGATION_SUMMARY"},
+        {"step_id": "export_workflow_summary", "order": 17, "title": "Export workflow summary", "step_type": "EXPORT_SUMMARY"},
     ]
     return create_workflow(
         workflow_id="morning_gold_review",
@@ -918,6 +1309,41 @@ def publish_rwf2_artifacts(*, output_dir: Path = DEFAULT_OUTPUT_DIR, now: dateti
     paths["sample_population"].write_text(json.dumps(population, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     paths["sample_updated_investigation"].write_text(json.dumps(investigation, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     paths["population_summary"].write_text(render_population_summary(population, summarize_investigation(investigation) if investigation else {}), encoding="utf-8")
+    return {key: str(path) for key, path in paths.items()}
+
+
+def publish_rwf3_artifacts(*, output_dir: Path = DEFAULT_OUTPUT_DIR, now: datetime | str | None = None) -> dict[str, str]:
+    timestamp = _coerce_now(now)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    sample_workspace = output_dir / "_rwf3_sample_workspace"
+    workflow = sample_morning_gold_review(now=timestamp, output_dir=sample_workspace)
+    run_workflow(
+        workflow,
+        output_dir=sample_workspace,
+        saved_query_output_dir=sample_workspace / "saved_queries",
+        morning_brief_output_dir=sample_workspace / "morning_brief",
+        now=timestamp,
+    )
+    investigation_id = "morning_gold_review_investigation"
+    drafts_payload = {
+        "schema_version": "rwf3_sample_claim_drafts_v1",
+        "investigation_id": investigation_id,
+        "drafts": load_claim_drafts(investigation_id=investigation_id, draft_output_dir=sample_workspace / "claim_drafts"),
+        "guardrails": _guardrails(),
+    }
+    summary = export_claim_draft_summary(investigation_id=investigation_id, draft_output_dir=sample_workspace / "claim_drafts")
+    paths = {
+        "draft_contract": output_dir / RWF3_DRAFT_CONTRACT_MD,
+        "draft_schema": output_dir / RWF3_DRAFT_SCHEMA_JSON,
+        "sample_drafts": output_dir / RWF3_SAMPLE_DRAFTS_JSON,
+        "draft_summary": output_dir / RWF3_DRAFT_SUMMARY_MD,
+        "manual_review_contract": output_dir / RWF3_MANUAL_REVIEW_CONTRACT_MD,
+    }
+    paths["draft_contract"].write_text(render_claim_draft_contract(), encoding="utf-8")
+    paths["draft_schema"].write_text(json.dumps(claim_draft_schema(), indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    paths["sample_drafts"].write_text(json.dumps(drafts_payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    paths["draft_summary"].write_text(render_claim_draft_summary(summary), encoding="utf-8")
+    paths["manual_review_contract"].write_text(render_manual_review_contract(), encoding="utf-8")
     return {key: str(path) for key, path in paths.items()}
 
 
@@ -1053,6 +1479,75 @@ def population_schema() -> dict[str, Any]:
             },
         },
     }
+
+
+def claim_draft_schema() -> dict[str, Any]:
+    return {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "title": "ClaimDraft",
+        "type": "object",
+        "required": [
+            "schema_version",
+            "draft_id",
+            "investigation_id",
+            "source_evidence_ids",
+            "proposed_claim_title",
+            "proposed_statement",
+            "draft_status",
+            "confidence_suggestion",
+            "validation_preview",
+            "provenance",
+            "deterministic_fingerprint",
+            "guardrails",
+        ],
+        "properties": {
+            "schema_version": {"const": CLAIM_DRAFT_SCHEMA_VERSION},
+            "draft_status": {"enum": sorted(VALID_DRAFT_STATUSES)},
+            "confidence_suggestion": {"enum": sorted(VALID_DRAFT_CONFIDENCE)},
+            "validation_preview": {"enum": sorted(VALID_VALIDATION_PREVIEW)},
+            "guardrails": {
+                "type": "object",
+                "properties": {
+                    "diagnostic_only": {"const": True},
+                    "production_recommendation": {"const": False},
+                    "trading_gate": {"const": False},
+                },
+            },
+        },
+    }
+
+
+def render_claim_draft_contract() -> str:
+    return """# RWF3 Claim Draft Contract
+
+ClaimDraft records are deterministic proposals derived from CanonicalEvidence. They are queue items for manual research review, not active Claims.
+
+Accepting a draft may create a CanonicalClaim with `status=DRAFT` only. RWF3 never creates ACTIVE Claims, Conclusions, trading recommendations, production recommendations, or gates.
+"""
+
+
+def render_manual_review_contract() -> str:
+    return """# RWF3 Manual Review Contract
+
+Claim drafts require manual review before they can become CanonicalClaim records. `accept-draft` creates a DRAFT claim and preserves evidence references/provenance. `reject-draft` records rejection and creates no Claim.
+
+No draft acceptance can activate a Claim or create a Conclusion.
+"""
+
+
+def render_claim_draft_summary(summary: Mapping[str, Any]) -> str:
+    return "\n".join(
+        [
+            "# RWF3 Claim Draft Queue Summary",
+            "",
+            f"- Investigation: `{summary.get('investigation_id')}`",
+            f"- Drafts: `{summary.get('draft_count')}`",
+            f"- Status counts: `{summary.get('status_counts')}`",
+            f"- Validation preview counts: `{summary.get('validation_preview_counts')}`",
+            "- Guardrails: `diagnostic_only=true`, `production_recommendation=false`, `trading_gate=false`.",
+            "",
+        ]
+    )
 
 
 def _aggregate_population_results(run: Mapping[str, Any]) -> dict[str, Any]:

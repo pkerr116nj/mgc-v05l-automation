@@ -12,9 +12,16 @@ from mgc_v05l.execution_core.track_b_canonical_research_workflow import (
     DEFAULT_OUTPUT_DIR,
     create_workflow,
     list_workflows,
+    accept_claim_draft,
+    export_claim_draft_summary,
+    generate_claim_drafts,
+    load_claim_draft,
+    load_claim_drafts,
     load_workflow,
     publish_rwf1_artifacts,
     publish_rwf2_artifacts,
+    publish_rwf3_artifacts,
+    reject_claim_draft,
     run_workflow,
     sample_morning_gold_review,
     summarize_workflow,
@@ -69,6 +76,25 @@ def build_parser() -> argparse.ArgumentParser:
 
     subparsers.add_parser("publish-rwf1-artifacts")
     subparsers.add_parser("publish-rwf2-artifacts")
+    generate_drafts = subparsers.add_parser("generate-drafts")
+    generate_drafts.add_argument("--investigation-id", required=True)
+
+    list_drafts = subparsers.add_parser("list-drafts")
+    list_drafts.add_argument("--investigation-id")
+
+    show_draft = subparsers.add_parser("show-draft")
+    show_draft.add_argument("--draft-id", required=True)
+
+    accept_draft = subparsers.add_parser("accept-draft")
+    accept_draft.add_argument("--draft-id", required=True)
+
+    reject_draft = subparsers.add_parser("reject-draft")
+    reject_draft.add_argument("--draft-id", required=True)
+
+    export_drafts = subparsers.add_parser("export-draft-summary")
+    export_drafts.add_argument("--investigation-id", required=True)
+
+    subparsers.add_parser("publish-rwf3-artifacts")
     return parser
 
 
@@ -144,6 +170,30 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 0
     if args.command == "publish-rwf2-artifacts":
         _print(publish_rwf2_artifacts(output_dir=args.output_dir, now=args.now))
+        return 0
+    if args.command == "generate-drafts":
+        drafts = generate_claim_drafts(investigation_id=args.investigation_id, investigation_output_dir=args.output_dir / "investigations", evidence_output_dir=args.output_dir / "evidence", draft_output_dir=args.output_dir / "claim_drafts", now=args.now)
+        _print({"investigation_id": args.investigation_id, "draft_count": len(drafts), "guardrails": {"diagnostic_only": True, "production_recommendation": False, "trading_gate": False}})
+        return 0
+    if args.command == "list-drafts":
+        _print({"drafts": load_claim_drafts(investigation_id=args.investigation_id, draft_output_dir=args.output_dir / "claim_drafts")})
+        return 0
+    if args.command == "show-draft":
+        _print(load_claim_draft(args.draft_id, draft_output_dir=args.output_dir / "claim_drafts"))
+        return 0
+    if args.command == "accept-draft":
+        result = accept_claim_draft(args.draft_id, draft_output_dir=args.output_dir / "claim_drafts", evidence_output_dir=args.output_dir / "evidence", claims_output_dir=args.output_dir / "claims", investigation_output_dir=args.output_dir / "investigations", now=args.now)
+        _print({"draft_id": args.draft_id, "draft_status": result["draft"]["draft_status"], "claim_id": result["claim"]["claim_id"], "claim_status": result["claim"]["status"], "guardrails": {"diagnostic_only": True, "production_recommendation": False, "trading_gate": False}})
+        return 0
+    if args.command == "reject-draft":
+        draft = reject_claim_draft(args.draft_id, draft_output_dir=args.output_dir / "claim_drafts", investigation_output_dir=args.output_dir / "investigations", now=args.now)
+        _print({"draft_id": args.draft_id, "draft_status": draft["draft_status"], "guardrails": draft["guardrails"]})
+        return 0
+    if args.command == "export-draft-summary":
+        _print(export_claim_draft_summary(investigation_id=args.investigation_id, draft_output_dir=args.output_dir / "claim_drafts"))
+        return 0
+    if args.command == "publish-rwf3-artifacts":
+        _print(publish_rwf3_artifacts(output_dir=args.output_dir, now=args.now))
         return 0
     raise AssertionError(f"Unhandled command: {args.command}")
 
