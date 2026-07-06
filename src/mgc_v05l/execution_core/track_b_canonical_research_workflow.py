@@ -46,6 +46,16 @@ from mgc_v05l.execution_core.track_b_canonical_claims_engine import (
     refresh_claim_validation,
     write_claim,
 )
+from mgc_v05l.execution_core.track_b_canonical_conclusions_engine import (
+    DEFAULT_OUTPUT_DIR as DEFAULT_CONCLUSIONS_OUTPUT_DIR,
+    attach_supporting_claim,
+    create_conclusion,
+    list_conclusions,
+    load_conclusion,
+    refresh_conclusion_validation,
+    validate_conclusion_outcome,
+    write_conclusion,
+)
 from mgc_v05l.execution_core.track_b_canonical_investigation_engine import (
     DEFAULT_OUTPUT_DIR as DEFAULT_INVESTIGATION_OUTPUT_DIR,
     append_investigation_event,
@@ -89,11 +99,19 @@ RWF4_REVIEW_SCHEMA_JSON = "rwf4_claim_review_schema.json"
 RWF4_SAMPLE_REVIEW_QUEUE_JSON = "rwf4_sample_review_queue.json"
 RWF4_REVIEW_SUMMARY_MD = "rwf4_claim_review_summary.md"
 RWF4_MANUAL_ACTIVATION_CONTRACT_MD = "rwf4_manual_activation_contract.md"
+RWF5_REVIEW_ENGINE_CONTRACT_MD = "rwf5_review_engine_contract.md"
+RWF5_CONCLUSION_REVIEW_CONTRACT_MD = "rwf5_conclusion_review_contract.md"
+RWF5_REVIEW_SCHEMA_JSON = "rwf5_review_schema.json"
+RWF5_SAMPLE_REVIEW_JSON = "rwf5_sample_review.json"
+RWF5_SAMPLE_CONCLUSION_REVIEW_JSON = "rwf5_sample_conclusion_review.json"
+RWF5_REVIEW_SUMMARY_MD = "rwf5_review_summary.md"
 
 CLAIM_DRAFT_SCHEMA_VERSION = "rwf3_claim_draft_v1"
 CLAIM_DRAFT_SUMMARY_SCHEMA_VERSION = "rwf3_claim_draft_queue_summary_v1"
 CLAIM_REVIEW_SCHEMA_VERSION = "rwf4_claim_review_record_v1"
 CLAIM_REVIEW_SUMMARY_SCHEMA_VERSION = "rwf4_claim_review_summary_v1"
+CANONICAL_REVIEW_SCHEMA_VERSION = "rwf5_canonical_review_record_v1"
+CANONICAL_REVIEW_SUMMARY_SCHEMA_VERSION = "rwf5_review_summary_v1"
 
 VALID_WORKFLOW_STATUSES = {"DRAFT", "ACTIVE", "PAUSED", "COMPLETE", "ARCHIVED"}
 VALID_WORKFLOW_TYPES = {"MORNING_REVIEW", "INVESTIGATION_REFRESH", "CANDIDATE_REVIEW", "STRATEGY_REVIEW", "PLATFORM_REVIEW", "CUSTOM"}
@@ -117,6 +135,11 @@ VALID_STEP_TYPES = {
     "ACTIVATE_APPROVED_CLAIM",
     "REJECT_DRAFT_CLAIM",
     "EXPORT_CLAIM_REVIEW_SUMMARY",
+    "GENERATE_CONCLUSION_REVIEW",
+    "VALIDATE_CONCLUSION",
+    "ACTIVATE_CONCLUSION",
+    "REJECT_CONCLUSION",
+    "EXPORT_CONCLUSION_REVIEW",
     "VALIDATE_CLAIMS",
     "UPDATE_CONCLUSION",
     "GENERATE_MORNING_BRIEF",
@@ -133,6 +156,9 @@ VALID_DRAFT_CONFIDENCE = {"UNKNOWN", "LOW", "MEDIUM", "HIGH"}
 VALID_VALIDATION_PREVIEW = {"SUPPORTED", "PARTIALLY_SUPPORTED", "CONTRADICTED", "INSUFFICIENT_EVIDENCE", "INVALID"}
 VALID_REVIEW_STATUSES = {"PENDING_REVIEW", "APPROVED_FOR_ACTIVATION", "REJECTED", "NEEDS_MORE_EVIDENCE", "SUPERSEDED", "ARCHIVED"}
 VALID_REVIEW_READINESS = {"READY_FOR_OPERATOR_REVIEW", "NEEDS_EVIDENCE", "CONTRADICTED", "INVALID_REFERENCES", "ALREADY_ACTIVE", "NOT_APPLICABLE"}
+VALID_CANONICAL_REVIEW_KINDS = {"CLAIM", "CONCLUSION"}
+VALID_CANONICAL_REVIEW_LIFECYCLE = {"PENDING_REVIEW", "APPROVED", "REJECTED", "NEEDS_MORE_EVIDENCE", "SUPERSEDED", "ARCHIVED"}
+VALID_CONCLUSION_REVIEW_READINESS = {"READY_FOR_REVIEW", "NEEDS_ACTIVE_CLAIMS", "CONTRADICTED", "INVALID_REFERENCES", "CHAIN_INCOMPLETE", "ALREADY_ACTIVE", "NOT_APPLICABLE"}
 
 
 @dataclass(frozen=True)
@@ -268,6 +294,8 @@ def run_workflow(
     claim_draft_output_dir: Path | None = None,
     claims_output_dir: Path | None = None,
     claim_review_output_dir: Path | None = None,
+    conclusions_output_dir: Path | None = None,
+    review_output_dir: Path | None = None,
     now: datetime | str | None = None,
 ) -> dict[str, Any]:
     started_at = _coerce_now(now)
@@ -292,6 +320,8 @@ def run_workflow(
                 claim_draft_output_dir=claim_draft_output_dir or output_dir / "claim_drafts",
                 claims_output_dir=claims_output_dir or output_dir / "claims",
                 claim_review_output_dir=claim_review_output_dir or output_dir / "claim_reviews",
+                conclusions_output_dir=conclusions_output_dir or output_dir / "conclusions",
+                review_output_dir=review_output_dir or output_dir / "reviews",
                 context=context,
                 now=started_at,
             )
@@ -336,6 +366,8 @@ def _run_step(
     claim_draft_output_dir: Path,
     claims_output_dir: Path,
     claim_review_output_dir: Path,
+    conclusions_output_dir: Path,
+    review_output_dir: Path,
     context: dict[str, Any],
     now: datetime,
 ) -> dict[str, Any]:
@@ -602,6 +634,74 @@ def _run_step(
                 reason="claim_review_summary_exported",
                 details=summary,
                 artifact_refs=[_artifact_ref("ARTIFACT", "claim_review_summary", claim_review_output_dir / f"{investigation_id}_claim_review_summary.json")],
+                now=now,
+            )
+        if step_type == "GENERATE_CONCLUSION_REVIEW":
+            investigation_id = str(inputs.get("investigation_id") or context.get("investigation_id") or "")
+            if not investigation_id:
+                return _step_result(step=step, status="SKIPPED", reason="investigation_not_available", now=now)
+            reviews = generate_conclusion_reviews(
+                investigation_id=investigation_id,
+                conclusions_output_dir=conclusions_output_dir,
+                review_output_dir=review_output_dir,
+                investigation_output_dir=investigation_output_dir,
+                now=now,
+            )
+            return _step_result(
+                step=step,
+                status="COMPLETE",
+                reason="conclusion_review_generated",
+                details={"investigation_id": investigation_id, "review_count": len(reviews)},
+                artifact_refs=[_artifact_ref("ARTIFACT", "conclusion_review_queue", review_output_dir / f"{investigation_id}_reviews.json")],
+                now=now,
+            )
+        if step_type == "VALIDATE_CONCLUSION":
+            conclusion_id = str(inputs.get("conclusion_id") or "")
+            if not conclusion_id:
+                return _step_result(step=step, status="SKIPPED", reason="conclusion_id_not_available", now=now)
+            conclusion = refresh_conclusion_validation(load_conclusion(conclusion_id, output_dir=conclusions_output_dir), now=now)
+            result = write_conclusion(conclusion, output_dir=conclusions_output_dir)
+            return _step_result(step=step, status="COMPLETE", reason="conclusion_validated", details={"conclusion_id": conclusion_id, "outcome": result.summary.get("outcome"), "confidence": result.summary.get("confidence")}, now=now)
+        if step_type == "ACTIVATE_CONCLUSION":
+            conclusion_id = str(inputs.get("conclusion_id") or "")
+            if not conclusion_id:
+                return _step_result(step=step, status="SKIPPED", reason="conclusion_id_not_available", now=now)
+            if not inputs.get("operator_approved"):
+                return _step_result(step=step, status="SKIPPED", reason="operator_approval_required", now=now)
+            result = activate_conclusion(
+                conclusion_id,
+                operator_approved=True,
+                reviewer=str(inputs.get("reviewer") or "operator"),
+                conclusions_output_dir=conclusions_output_dir,
+                review_output_dir=review_output_dir,
+                investigation_output_dir=investigation_output_dir,
+                now=now,
+            )
+            return _step_result(step=step, status="COMPLETE", reason="conclusion_activated", details={"conclusion_id": conclusion_id, "status": result["conclusion"]["status"], "review_status": result["review"]["review_status"]}, now=now)
+        if step_type == "REJECT_CONCLUSION":
+            conclusion_id = str(inputs.get("conclusion_id") or "")
+            if not conclusion_id:
+                return _step_result(step=step, status="SKIPPED", reason="conclusion_id_not_available", now=now)
+            review = reject_conclusion(
+                conclusion_id,
+                reviewer=str(inputs.get("reviewer") or "operator"),
+                conclusions_output_dir=conclusions_output_dir,
+                review_output_dir=review_output_dir,
+                investigation_output_dir=investigation_output_dir,
+                now=now,
+            )
+            return _step_result(step=step, status="COMPLETE", reason="conclusion_rejected", details={"conclusion_id": conclusion_id, "review_status": review["review_status"]}, now=now)
+        if step_type == "EXPORT_CONCLUSION_REVIEW":
+            investigation_id = str(inputs.get("investigation_id") or context.get("investigation_id") or "")
+            if not investigation_id:
+                return _step_result(step=step, status="SKIPPED", reason="investigation_not_available", now=now)
+            summary = export_review_summary(investigation_id=investigation_id, review_output_dir=review_output_dir)
+            return _step_result(
+                step=step,
+                status="COMPLETE",
+                reason="conclusion_review_exported",
+                details=summary,
+                artifact_refs=[_artifact_ref("ARTIFACT", "review_summary", review_output_dir / f"{investigation_id}_review_summary.json")],
                 now=now,
             )
         if step_type == "EXPORT_SUMMARY":
@@ -1024,6 +1124,252 @@ def reject_claim(
     return record
 
 
+def create_review_record(
+    *,
+    review_kind: str,
+    target_type: str,
+    target_id: str,
+    investigation_id: str,
+    reviewer: str,
+    review_status: str,
+    readiness: str,
+    validation_summary: Mapping[str, Any],
+    rationale_template: str,
+    supporting_reference_count: int,
+    contradicting_reference_count: int,
+    related_reference_count: int,
+    provenance: Mapping[str, Any] | None = None,
+    now: datetime | str | None = None,
+) -> dict[str, Any]:
+    timestamp = _coerce_now(now)
+    if review_kind not in VALID_CANONICAL_REVIEW_KINDS:
+        raise ValueError(f"Unsupported review kind: {review_kind}")
+    if review_status not in VALID_CANONICAL_REVIEW_LIFECYCLE:
+        raise ValueError(f"Unsupported review status: {review_status}")
+    record = {
+        "schema_version": CANONICAL_REVIEW_SCHEMA_VERSION,
+        "review_id": _canonical_review_id(review_kind, target_type, target_id, investigation_id),
+        "review_kind": review_kind,
+        "target_type": target_type,
+        "target_id": target_id,
+        "investigation_id": investigation_id,
+        "reviewer": reviewer,
+        "created_at": timestamp.isoformat(),
+        "updated_at": timestamp.isoformat(),
+        "review_status": review_status,
+        "readiness": readiness,
+        "validation_summary": dict(validation_summary),
+        "rationale_template": rationale_template,
+        "supporting_reference_count": supporting_reference_count,
+        "contradicting_reference_count": contradicting_reference_count,
+        "related_reference_count": related_reference_count,
+        "provenance": dict(
+            provenance
+            or build_provenance_envelope(
+                source_component="canonical_research_workflow",
+                source_artifact=f"{target_type.lower()}:{target_id}",
+                transform_name="rwf5_canonical_review_record",
+                created_at=timestamp,
+            )
+        ),
+        "guardrails": _guardrails(),
+    }
+    record["deterministic_fingerprint"] = stable_hash(record)
+    return record
+
+
+def conclusion_review_readiness(conclusion: Mapping[str, Any]) -> str:
+    if conclusion.get("schema_version") != "ie4_canonical_conclusion_v1":
+        return "NOT_APPLICABLE"
+    if conclusion.get("status") == "ACTIVE":
+        return "ALREADY_ACTIVE"
+    if conclusion.get("status") != "DRAFT":
+        return "NOT_APPLICABLE"
+    validation = validate_conclusion_outcome(conclusion)
+    outcome = validation.get("outcome")
+    refs = list(conclusion.get("supporting_claims") or []) + list(conclusion.get("contradicting_claims") or []) + list(conclusion.get("related_claims") or [])
+    if any(not (ref.get("claim_id") or ref.get("target_id")) or not (ref.get("claim_fingerprint") or ref.get("target_fingerprint")) for ref in refs):
+        return "INVALID_REFERENCES"
+    if not refs:
+        return "NEEDS_ACTIVE_CLAIMS"
+    if outcome == "CONTRADICTED":
+        return "CONTRADICTED"
+    if outcome in {"NO_CONCLUSION", "NEEDS_MORE_EVIDENCE"}:
+        return "NEEDS_ACTIVE_CLAIMS"
+    if outcome == "INCONCLUSIVE":
+        return "CHAIN_INCOMPLETE"
+    if outcome in {"SUPPORTED", "PARTIALLY_SUPPORTED"}:
+        return "READY_FOR_REVIEW"
+    return "NOT_APPLICABLE"
+
+
+def create_conclusion_review_record(conclusion: Mapping[str, Any], *, reviewer: str = "operator", review_status: str = "PENDING_REVIEW", now: datetime | str | None = None) -> dict[str, Any]:
+    validation = validate_conclusion_outcome(conclusion)
+    return create_review_record(
+        review_kind="CONCLUSION",
+        target_type="CONCLUSION",
+        target_id=str(conclusion.get("conclusion_id")),
+        investigation_id=str(conclusion.get("investigation_id")),
+        reviewer=reviewer,
+        review_status=review_status,
+        readiness=conclusion_review_readiness(conclusion),
+        validation_summary=validation,
+        rationale_template="Deterministic conclusion review generated from attached CanonicalClaim references.",
+        supporting_reference_count=len(conclusion.get("supporting_claims") or []),
+        contradicting_reference_count=len(conclusion.get("contradicting_claims") or []),
+        related_reference_count=len(conclusion.get("related_claims") or []),
+        provenance=build_provenance_envelope(
+            source_component="canonical_research_workflow",
+            source_artifact=f"conclusion:{conclusion.get('conclusion_id')}",
+            parent_fingerprint=str(conclusion.get("deterministic_fingerprint") or ""),
+            parent_schema_version=str(conclusion.get("schema_version") or ""),
+            transform_name="rwf5_conclusion_review",
+            created_at=now,
+        ),
+        now=now,
+    )
+
+
+def generate_conclusion_reviews(
+    *,
+    investigation_id: str,
+    conclusions_output_dir: Path = DEFAULT_CONCLUSIONS_OUTPUT_DIR,
+    review_output_dir: Path = DEFAULT_OUTPUT_DIR / "reviews",
+    investigation_output_dir: Path = DEFAULT_INVESTIGATION_OUTPUT_DIR,
+    now: datetime | str | None = None,
+) -> list[dict[str, Any]]:
+    timestamp = _coerce_now(now)
+    reviews = {str(review.get("review_id")): dict(review) for review in load_reviews(investigation_id=investigation_id, review_output_dir=review_output_dir) if review.get("review_kind") == "CONCLUSION"}
+    for summary in list_conclusions(output_dir=conclusions_output_dir, investigation_id=investigation_id):
+        conclusion_id = str(summary.get("conclusion_id") or "")
+        if not conclusion_id:
+            continue
+        conclusion = load_conclusion(conclusion_id, output_dir=conclusions_output_dir)
+        if conclusion.get("status") not in {"DRAFT", "ACTIVE"}:
+            continue
+        record = create_conclusion_review_record(conclusion, reviewer="operator", review_status="PENDING_REVIEW", now=timestamp)
+        reviews.setdefault(str(record["review_id"]), record)
+    rows = sorted(reviews.values(), key=lambda row: str(row.get("review_id")))
+    _write_reviews(investigation_id, rows, review_output_dir=review_output_dir)
+    if rows:
+        investigation = load_investigation(investigation_id, output_dir=investigation_output_dir)
+        investigation = append_investigation_event(
+            investigation,
+            event_type="CONCLUSION_REVIEW_CREATED",
+            artifact_reference=_artifact_ref("ARTIFACT", "conclusion_review_queue", review_output_dir / f"{investigation_id}_reviews.json"),
+            provenance={"source": "canonical_research_workflow", "operation": "generate_conclusion_reviews", "review_count": len(rows)},
+            now=timestamp,
+        )
+        write_investigation(investigation, output_dir=investigation_output_dir)
+    export_review_summary(investigation_id=investigation_id, review_output_dir=review_output_dir)
+    return rows
+
+
+def activate_conclusion(
+    conclusion_id: str,
+    *,
+    operator_approved: bool = False,
+    reviewer: str = "operator",
+    conclusions_output_dir: Path = DEFAULT_CONCLUSIONS_OUTPUT_DIR,
+    review_output_dir: Path = DEFAULT_OUTPUT_DIR / "reviews",
+    investigation_output_dir: Path = DEFAULT_INVESTIGATION_OUTPUT_DIR,
+    now: datetime | str | None = None,
+) -> dict[str, Any]:
+    timestamp = _coerce_now(now)
+    if not operator_approved:
+        raise PermissionError("operator_approval_required")
+    conclusion = load_conclusion(conclusion_id, output_dir=conclusions_output_dir)
+    readiness = conclusion_review_readiness(conclusion)
+    if readiness != "READY_FOR_REVIEW":
+        raise ValueError(f"conclusion_not_ready_for_activation:{readiness}")
+    updated = dict(conclusion)
+    updated["status"] = "ACTIVE"
+    updated["updated_at"] = timestamp.isoformat()
+    updated["provenance"] = dict(updated.get("provenance") or {})
+    updated["provenance"]["activation"] = {"source": "canonical_research_workflow", "reviewer": reviewer, "operator_approved": True, "activated_at": timestamp.isoformat()}
+    result = write_conclusion(updated, output_dir=conclusions_output_dir)
+    record = create_conclusion_review_record(result.conclusion, reviewer=reviewer, review_status="APPROVED", now=timestamp)
+    _upsert_review(record, review_output_dir=review_output_dir)
+    investigation_id = str(result.conclusion["investigation_id"])
+    investigation = load_investigation(investigation_id, output_dir=investigation_output_dir)
+    investigation = append_investigation_event(
+        investigation,
+        event_type="CONCLUSION_ACTIVATED",
+        artifact_reference=_artifact_ref("CONCLUSION", conclusion_id, result.conclusion_path),
+        provenance={"source": "canonical_research_workflow", "operation": "activate_conclusion", "review_id": record["review_id"]},
+        now=timestamp,
+    )
+    write_investigation(investigation, output_dir=investigation_output_dir)
+    return {"conclusion": result.conclusion, "review": record}
+
+
+def reject_conclusion(
+    conclusion_id: str,
+    *,
+    reviewer: str = "operator",
+    conclusions_output_dir: Path = DEFAULT_CONCLUSIONS_OUTPUT_DIR,
+    review_output_dir: Path = DEFAULT_OUTPUT_DIR / "reviews",
+    investigation_output_dir: Path = DEFAULT_INVESTIGATION_OUTPUT_DIR,
+    now: datetime | str | None = None,
+) -> dict[str, Any]:
+    timestamp = _coerce_now(now)
+    conclusion = load_conclusion(conclusion_id, output_dir=conclusions_output_dir)
+    record = create_conclusion_review_record(conclusion, reviewer=reviewer, review_status="REJECTED", now=timestamp)
+    _upsert_review(record, review_output_dir=review_output_dir)
+    investigation_id = str(conclusion["investigation_id"])
+    investigation = load_investigation(investigation_id, output_dir=investigation_output_dir)
+    investigation = append_investigation_event(
+        investigation,
+        event_type="CONCLUSION_REJECTED",
+        artifact_reference=_artifact_ref("CONCLUSION", conclusion_id, conclusions_output_dir / f"{conclusion_id}.json"),
+        provenance={"source": "canonical_research_workflow", "operation": "reject_conclusion", "review_id": record["review_id"]},
+        now=timestamp,
+    )
+    write_investigation(investigation, output_dir=investigation_output_dir)
+    return record
+
+
+def load_reviews(*, investigation_id: str | None = None, review_output_dir: Path = DEFAULT_OUTPUT_DIR / "reviews") -> list[dict[str, Any]]:
+    if investigation_id:
+        path = review_output_dir / f"{investigation_id}_reviews.json"
+        if not path.exists():
+            return []
+        return list(json.loads(path.read_text(encoding="utf-8")).get("reviews") or [])
+    rows: list[dict[str, Any]] = []
+    if not review_output_dir.exists():
+        return rows
+    for path in sorted(review_output_dir.glob("*_reviews.json")):
+        rows.extend(json.loads(path.read_text(encoding="utf-8")).get("reviews") or [])
+    return rows
+
+
+def load_review(review_id: str, *, review_output_dir: Path = DEFAULT_OUTPUT_DIR / "reviews") -> dict[str, Any]:
+    for review in load_reviews(review_output_dir=review_output_dir):
+        if review.get("review_id") == review_id:
+            return dict(review)
+    raise FileNotFoundError(review_id)
+
+
+def export_review_summary(*, investigation_id: str, review_output_dir: Path = DEFAULT_OUTPUT_DIR / "reviews") -> dict[str, Any]:
+    reviews = load_reviews(investigation_id=investigation_id, review_output_dir=review_output_dir)
+    summary = {
+        "schema_version": CANONICAL_REVIEW_SUMMARY_SCHEMA_VERSION,
+        "investigation_id": investigation_id,
+        "review_count": len(reviews),
+        "review_kind_counts": _counts(review.get("review_kind") for review in reviews),
+        "review_status_counts": _counts(review.get("review_status") for review in reviews),
+        "readiness_counts": _counts(review.get("readiness") for review in reviews),
+        "supporting_reference_count": sum(int(review.get("supporting_reference_count") or 0) for review in reviews),
+        "contradicting_reference_count": sum(int(review.get("contradicting_reference_count") or 0) for review in reviews),
+        "related_reference_count": sum(int(review.get("related_reference_count") or 0) for review in reviews),
+        "guardrails": _guardrails(),
+        "deterministic_fingerprint": stable_hash({"investigation_id": investigation_id, "reviews": reviews}),
+    }
+    review_output_dir.mkdir(parents=True, exist_ok=True)
+    (review_output_dir / f"{investigation_id}_review_summary.json").write_text(json.dumps(summary, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    return summary
+
+
 def load_claim_reviews(*, investigation_id: str | None = None, review_output_dir: Path = DEFAULT_OUTPUT_DIR / "claim_reviews") -> list[dict[str, Any]]:
     if investigation_id:
         path = review_output_dir / f"{investigation_id}_claim_reviews.json"
@@ -1311,6 +1657,20 @@ def _write_claim_reviews(investigation_id: str, reviews: Sequence[Mapping[str, A
     (review_output_dir / f"{investigation_id}_claim_reviews.json").write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
 
+def _write_reviews(investigation_id: str, reviews: Sequence[Mapping[str, Any]], *, review_output_dir: Path) -> None:
+    review_output_dir.mkdir(parents=True, exist_ok=True)
+    payload = {"schema_version": "rwf5_review_queue_v1", "investigation_id": investigation_id, "reviews": [dict(review) for review in reviews], "guardrails": _guardrails()}
+    (review_output_dir / f"{investigation_id}_reviews.json").write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+
+def _upsert_review(review: Mapping[str, Any], *, review_output_dir: Path) -> None:
+    investigation_id = str(review["investigation_id"])
+    rows = {str(item.get("review_id")): dict(item) for item in load_reviews(investigation_id=investigation_id, review_output_dir=review_output_dir)}
+    rows[str(review["review_id"])] = dict(review)
+    _write_reviews(investigation_id, sorted(rows.values(), key=lambda row: str(row.get("review_id"))), review_output_dir=review_output_dir)
+    export_review_summary(investigation_id=investigation_id, review_output_dir=review_output_dir)
+
+
 def _upsert_claim_review(review: Mapping[str, Any], *, review_output_dir: Path) -> None:
     investigation_id = str(review["investigation_id"])
     rows = {str(item.get("review_id")): dict(item) for item in load_claim_reviews(investigation_id=investigation_id, review_output_dir=review_output_dir)}
@@ -1321,6 +1681,10 @@ def _upsert_claim_review(review: Mapping[str, Any], *, review_output_dir: Path) 
 
 def _claim_review_id(investigation_id: str, claim_id: str) -> str:
     return f"review_{stable_hash({'investigation_id': investigation_id, 'claim_id': claim_id})[:18]}"
+
+
+def _canonical_review_id(review_kind: str, target_type: str, target_id: str, investigation_id: str) -> str:
+    return f"review_{stable_hash({'review_kind': review_kind, 'target_type': target_type, 'target_id': target_id, 'investigation_id': investigation_id})[:18]}"
 
 
 def _artifact_refs_for_population_step(
@@ -1701,6 +2065,52 @@ def publish_rwf4_artifacts(*, output_dir: Path = DEFAULT_OUTPUT_DIR, now: dateti
     return {key: str(path) for key, path in paths.items()}
 
 
+def publish_rwf5_artifacts(*, output_dir: Path = DEFAULT_OUTPUT_DIR, now: datetime | str | None = None) -> dict[str, str]:
+    timestamp = _coerce_now(now)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    sample_workspace = output_dir / "_rwf5_sample_workspace"
+    investigation_id = "morning_gold_review_investigation"
+    _sample_review_ready_conclusion(sample_workspace=sample_workspace, investigation_id=investigation_id, now=timestamp)
+    reviews = generate_conclusion_reviews(
+        investigation_id=investigation_id,
+        conclusions_output_dir=sample_workspace / "conclusions",
+        review_output_dir=sample_workspace / "reviews",
+        investigation_output_dir=sample_workspace / "investigations",
+        now=timestamp,
+    )
+    summary = export_review_summary(investigation_id=investigation_id, review_output_dir=sample_workspace / "reviews")
+    sample_review = reviews[0] if reviews else create_review_record(
+        review_kind="CONCLUSION",
+        target_type="CONCLUSION",
+        target_id="sample_conclusion",
+        investigation_id=investigation_id,
+        reviewer="operator",
+        review_status="PENDING_REVIEW",
+        readiness="NEEDS_ACTIVE_CLAIMS",
+        validation_summary={"outcome": "NO_CONCLUSION", "confidence": "UNKNOWN", "reasons": ["no_claims_attached"]},
+        rationale_template="Fallback sample review when no conclusion is available.",
+        supporting_reference_count=0,
+        contradicting_reference_count=0,
+        related_reference_count=0,
+        now=timestamp,
+    )
+    paths = {
+        "review_engine_contract": output_dir / RWF5_REVIEW_ENGINE_CONTRACT_MD,
+        "conclusion_review_contract": output_dir / RWF5_CONCLUSION_REVIEW_CONTRACT_MD,
+        "review_schema": output_dir / RWF5_REVIEW_SCHEMA_JSON,
+        "sample_review": output_dir / RWF5_SAMPLE_REVIEW_JSON,
+        "sample_conclusion_review": output_dir / RWF5_SAMPLE_CONCLUSION_REVIEW_JSON,
+        "review_summary": output_dir / RWF5_REVIEW_SUMMARY_MD,
+    }
+    paths["review_engine_contract"].write_text(render_review_engine_contract(), encoding="utf-8")
+    paths["conclusion_review_contract"].write_text(render_conclusion_review_contract(), encoding="utf-8")
+    paths["review_schema"].write_text(json.dumps(canonical_review_schema(), indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    paths["sample_review"].write_text(json.dumps(sample_review, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    paths["sample_conclusion_review"].write_text(json.dumps({"schema_version": "rwf5_sample_conclusion_review_v1", "investigation_id": investigation_id, "reviews": reviews, "guardrails": _guardrails()}, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    paths["review_summary"].write_text(render_review_summary(summary), encoding="utf-8")
+    return {key: str(path) for key, path in paths.items()}
+
+
 def workflow_fingerprint(workflow: Mapping[str, Any]) -> str:
     return stable_hash(_strip_volatile(workflow))
 
@@ -1906,6 +2316,43 @@ def claim_review_schema() -> dict[str, Any]:
     }
 
 
+def canonical_review_schema() -> dict[str, Any]:
+    return {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "title": "CanonicalReviewRecord",
+        "type": "object",
+        "required": [
+            "schema_version",
+            "review_id",
+            "review_kind",
+            "target_type",
+            "target_id",
+            "investigation_id",
+            "reviewer",
+            "review_status",
+            "readiness",
+            "validation_summary",
+            "provenance",
+            "deterministic_fingerprint",
+            "guardrails",
+        ],
+        "properties": {
+            "schema_version": {"const": CANONICAL_REVIEW_SCHEMA_VERSION},
+            "review_kind": {"enum": sorted(VALID_CANONICAL_REVIEW_KINDS)},
+            "review_status": {"enum": sorted(VALID_CANONICAL_REVIEW_LIFECYCLE)},
+            "readiness": {"enum": sorted(VALID_CONCLUSION_REVIEW_READINESS)},
+            "guardrails": {
+                "type": "object",
+                "properties": {
+                    "diagnostic_only": {"const": True},
+                    "production_recommendation": {"const": False},
+                    "trading_gate": {"const": False},
+                },
+            },
+        },
+    }
+
+
 def render_claim_draft_contract() -> str:
     return """# RWF3 Claim Draft Contract
 
@@ -1957,6 +2404,45 @@ def render_claim_review_summary(summary: Mapping[str, Any]) -> str:
     )
 
 
+def render_review_engine_contract() -> str:
+    return """# RWF5 Canonical Review Engine Contract
+
+CanonicalReviewRecord is the shared deterministic review envelope for research objects. RWF5 enables `review_kind=CONCLUSION` only; `CLAIM` remains served by the existing RWF4 ClaimReviewRecord path for backward compatibility.
+
+Review records are diagnostic orchestration artifacts. They never activate targets automatically, never recommend trades, never create gates, and never touch runtime, broker, Managed Exit, or strategy state.
+"""
+
+
+def render_conclusion_review_contract() -> str:
+    return """# RWF5 Conclusion Review Contract
+
+Conclusion Review V1 evaluates CanonicalConclusion readiness from attached CanonicalClaim references.
+
+Readiness values are `READY_FOR_REVIEW`, `NEEDS_ACTIVE_CLAIMS`, `CONTRADICTED`, `INVALID_REFERENCES`, `CHAIN_INCOMPLETE`, `ALREADY_ACTIVE`, and `NOT_APPLICABLE`.
+
+`activate-conclusion` requires explicit `--operator-approved` and only succeeds when readiness is `READY_FOR_REVIEW`. Rejection writes a review record and leaves the Conclusion inactive.
+"""
+
+
+def render_review_summary(summary: Mapping[str, Any]) -> str:
+    return "\n".join(
+        [
+            "# RWF5 Review Summary",
+            "",
+            f"- Investigation: `{summary.get('investigation_id')}`",
+            f"- Reviews: `{summary.get('review_count')}`",
+            f"- Review kind counts: `{summary.get('review_kind_counts')}`",
+            f"- Review status counts: `{summary.get('review_status_counts')}`",
+            f"- Readiness counts: `{summary.get('readiness_counts')}`",
+            f"- Supporting references: `{summary.get('supporting_reference_count')}`",
+            f"- Contradicting references: `{summary.get('contradicting_reference_count')}`",
+            f"- Related references: `{summary.get('related_reference_count')}`",
+            "- Guardrails: `diagnostic_only=true`, `production_recommendation=false`, `trading_gate=false`.",
+            "",
+        ]
+    )
+
+
 def render_claim_draft_summary(summary: Mapping[str, Any]) -> str:
     return "\n".join(
         [
@@ -1970,6 +2456,67 @@ def render_claim_draft_summary(summary: Mapping[str, Any]) -> str:
             "",
         ]
     )
+
+
+def _sample_review_ready_conclusion(*, sample_workspace: Path, investigation_id: str, now: datetime) -> dict[str, Any]:
+    investigation = create_investigation(
+        investigation_id=investigation_id,
+        title="Morning Gold Review",
+        description="Sample Investigation for deterministic Conclusion Review.",
+        hypothesis="Deterministic research review can produce a supported conclusion candidate.",
+        now=now,
+        output_dir=sample_workspace / "investigations",
+    ).investigation
+    evidence = create_evidence(
+        investigation_id=investigation_id,
+        evidence_id="rwf5_sample_evidence",
+        title="Sample supported evidence",
+        summary="Sample deterministic evidence for Conclusion Review.",
+        evidence_classification="ANALYTICS",
+        evidence_type="sample",
+        source_component="canonical_research_workflow",
+        now=now,
+        output_dir=sample_workspace / "evidence",
+    ).evidence
+    claim = create_claim(
+        investigation_id=investigation_id,
+        claim_id="rwf5_sample_active_claim",
+        title="Sample active claim",
+        statement="Sample analytics evidence supports a deterministic research conclusion.",
+        rationale="Generated for RWF5 Conclusion Review sample artifacts.",
+        claim_classification="ANALYTICS",
+        claim_type="sample_conclusion_review",
+        confidence="MEDIUM",
+        status="ACTIVE",
+        now=now,
+        output_dir=sample_workspace / "claims",
+    ).claim
+    claim = attach_supporting_evidence(claim, evidence, now=now)
+    claim["status"] = "ACTIVE"
+    claim = write_claim(claim, output_dir=sample_workspace / "claims").claim
+    conclusion = create_conclusion(
+        investigation_id=investigation_id,
+        conclusion_id="rwf5_sample_conclusion",
+        title="Sample conclusion for review",
+        hypothesis="Sample analytics evidence supports deterministic research review.",
+        conclusion="The sample conclusion is ready for operator review because it is supported by an ACTIVE claim.",
+        rationale="Generated for RWF5 sample artifacts.",
+        conclusion_classification="ANALYTICS",
+        status="DRAFT",
+        now=now,
+        output_dir=sample_workspace / "conclusions",
+    ).conclusion
+    conclusion = attach_supporting_claim(conclusion, claim, now=now)
+    conclusion = write_conclusion(conclusion, output_dir=sample_workspace / "conclusions").conclusion
+    investigation = append_investigation_event(
+        investigation,
+        event_type="CONCLUSION_CREATED",
+        artifact_reference=_artifact_ref("CONCLUSION", conclusion["conclusion_id"], sample_workspace / "conclusions" / "rwf5_sample_conclusion.json"),
+        provenance={"source": "canonical_research_workflow", "operation": "rwf5_sample_review_ready_conclusion"},
+        now=now,
+    )
+    write_investigation(investigation, output_dir=sample_workspace / "investigations")
+    return conclusion
 
 
 def _aggregate_population_results(run: Mapping[str, Any]) -> dict[str, Any]:

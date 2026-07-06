@@ -10,26 +10,34 @@ from typing import Sequence
 
 from mgc_v05l.execution_core.track_b_canonical_research_workflow import (
     DEFAULT_OUTPUT_DIR,
+    activate_conclusion,
     create_workflow,
+    conclusion_review_readiness,
     list_workflows,
     accept_claim_draft,
     activate_claim,
     claim_review_readiness,
     export_claim_draft_summary,
     export_claim_review_summary,
+    export_review_summary,
     generate_claim_drafts,
     generate_claim_review_queue,
+    generate_conclusion_reviews,
     load_claim_draft,
     load_claim_drafts,
     load_claim_review,
     load_claim_reviews,
+    load_review,
+    load_reviews,
     load_workflow,
     publish_rwf1_artifacts,
     publish_rwf2_artifacts,
     publish_rwf3_artifacts,
     publish_rwf4_artifacts,
+    publish_rwf5_artifacts,
     reject_claim,
     reject_claim_draft,
+    reject_conclusion,
     run_workflow,
     sample_morning_gold_review,
     summarize_workflow,
@@ -125,6 +133,37 @@ def build_parser() -> argparse.ArgumentParser:
     review_summary.add_argument("--investigation-id", required=True)
 
     subparsers.add_parser("publish-rwf4-artifacts")
+    list_reviews = subparsers.add_parser("list-reviews")
+    list_reviews.add_argument("--investigation-id")
+
+    list_conclusion_review = subparsers.add_parser("list-conclusion-review")
+    list_conclusion_review.add_argument("--investigation-id", required=True)
+
+    show_conclusion_review = subparsers.add_parser("show-conclusion-review")
+    show_conclusion_review.add_argument("--review-id", required=True)
+
+    activate_conclusion_cmd = subparsers.add_parser("activate-conclusion")
+    activate_conclusion_cmd.add_argument("--conclusion-id", required=True)
+    activate_conclusion_cmd.add_argument("--reviewer", default="operator")
+    activate_conclusion_cmd.add_argument("--operator-approved", action="store_true")
+
+    reject_conclusion_cmd = subparsers.add_parser("reject-conclusion")
+    reject_conclusion_cmd.add_argument("--conclusion-id", required=True)
+    reject_conclusion_cmd.add_argument("--reviewer", default="operator")
+
+    conclusion_review_summary = subparsers.add_parser("export-conclusion-review")
+    conclusion_review_summary.add_argument("--investigation-id", required=True)
+
+    conclusion_review_summary_alias = subparsers.add_parser("export-conclusion-review-summary")
+    conclusion_review_summary_alias.add_argument("--investigation-id", required=True)
+
+    validate_conclusion = subparsers.add_parser("validate-conclusion")
+    validate_conclusion.add_argument("--conclusion-id", required=True)
+
+    validate_investigation_for_conclusion = subparsers.add_parser("validate-investigation-for-conclusion")
+    validate_investigation_for_conclusion.add_argument("--investigation-id", required=True)
+
+    subparsers.add_parser("publish-rwf5-artifacts")
     return parser
 
 
@@ -231,7 +270,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         _print({"reviews": load_claim_reviews(investigation_id=args.investigation_id, review_output_dir=args.output_dir / "claim_reviews")})
         return 0
     if args.command == "show-review":
-        _print(load_claim_review(args.review_id, review_output_dir=args.output_dir / "claim_reviews"))
+        try:
+            _print(load_review(args.review_id, review_output_dir=args.output_dir / "reviews"))
+        except FileNotFoundError:
+            _print(load_claim_review(args.review_id, review_output_dir=args.output_dir / "claim_reviews"))
         return 0
     if args.command == "validate-claim-for-review":
         from mgc_v05l.execution_core.track_b_canonical_claims_engine import load_claim
@@ -255,6 +297,44 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 0
     if args.command == "publish-rwf4-artifacts":
         _print(publish_rwf4_artifacts(output_dir=args.output_dir, now=args.now))
+        return 0
+    if args.command == "list-reviews":
+        _print({"reviews": load_reviews(investigation_id=args.investigation_id, review_output_dir=args.output_dir / "reviews")})
+        return 0
+    if args.command == "list-conclusion-review":
+        generate_conclusion_reviews(investigation_id=args.investigation_id, conclusions_output_dir=args.output_dir / "conclusions", review_output_dir=args.output_dir / "reviews", investigation_output_dir=args.output_dir / "investigations", now=args.now)
+        _print({"reviews": load_reviews(investigation_id=args.investigation_id, review_output_dir=args.output_dir / "reviews")})
+        return 0
+    if args.command == "show-conclusion-review":
+        _print(load_review(args.review_id, review_output_dir=args.output_dir / "reviews"))
+        return 0
+    if args.command == "validate-conclusion":
+        from mgc_v05l.execution_core.track_b_canonical_conclusions_engine import load_conclusion
+
+        conclusion = load_conclusion(args.conclusion_id, output_dir=args.output_dir / "conclusions")
+        _print({"conclusion_id": args.conclusion_id, "readiness": conclusion_review_readiness(conclusion), "guardrails": {"diagnostic_only": True, "production_recommendation": False, "trading_gate": False}})
+        return 0
+    if args.command == "validate-investigation-for-conclusion":
+        reviews = generate_conclusion_reviews(investigation_id=args.investigation_id, conclusions_output_dir=args.output_dir / "conclusions", review_output_dir=args.output_dir / "reviews", investigation_output_dir=args.output_dir / "investigations", now=args.now)
+        summary = export_review_summary(investigation_id=args.investigation_id, review_output_dir=args.output_dir / "reviews")
+        _print({"investigation_id": args.investigation_id, "review_count": len(reviews), "readiness_counts": summary["readiness_counts"], "guardrails": summary["guardrails"]})
+        return 0
+    if args.command == "activate-conclusion":
+        if not args.operator_approved:
+            _print({"conclusion_id": args.conclusion_id, "status": "FAILED_SAFE", "reason": "operator_approval_required", "guardrails": {"diagnostic_only": True, "production_recommendation": False, "trading_gate": False}})
+            return 2
+        result = activate_conclusion(args.conclusion_id, operator_approved=True, reviewer=args.reviewer, conclusions_output_dir=args.output_dir / "conclusions", review_output_dir=args.output_dir / "reviews", investigation_output_dir=args.output_dir / "investigations", now=args.now)
+        _print({"conclusion_id": args.conclusion_id, "conclusion_status": result["conclusion"]["status"], "review_status": result["review"]["review_status"], "guardrails": result["review"]["guardrails"]})
+        return 0
+    if args.command == "reject-conclusion":
+        record = reject_conclusion(args.conclusion_id, reviewer=args.reviewer, conclusions_output_dir=args.output_dir / "conclusions", review_output_dir=args.output_dir / "reviews", investigation_output_dir=args.output_dir / "investigations", now=args.now)
+        _print({"conclusion_id": args.conclusion_id, "review_status": record["review_status"], "guardrails": record["guardrails"]})
+        return 0
+    if args.command in {"export-conclusion-review", "export-conclusion-review-summary"}:
+        _print(export_review_summary(investigation_id=args.investigation_id, review_output_dir=args.output_dir / "reviews"))
+        return 0
+    if args.command == "publish-rwf5-artifacts":
+        _print(publish_rwf5_artifacts(output_dir=args.output_dir, now=args.now))
         return 0
     raise AssertionError(f"Unhandled command: {args.command}")
 

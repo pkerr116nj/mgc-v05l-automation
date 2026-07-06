@@ -8,22 +8,30 @@ from pathlib import Path
 from mgc_v05l.execution_core.track_b_canonical_research_workflow import (
     accept_claim_draft,
     activate_claim,
+    activate_conclusion,
     claim_review_readiness,
+    conclusion_review_readiness,
     create_or_locate_investigation,
+    create_review_record,
     create_workflow,
     export_claim_draft_summary,
     export_claim_review_summary,
+    export_review_summary,
     generate_claim_drafts,
     generate_claim_review_queue,
+    generate_conclusion_reviews,
     load_claim_drafts,
     load_claim_reviews,
+    load_reviews,
     publish_rwf1_artifacts,
     publish_rwf2_artifacts,
     publish_rwf3_artifacts,
     publish_rwf4_artifacts,
+    publish_rwf5_artifacts,
     populate_investigation_evidence,
     reject_claim,
     reject_claim_draft,
+    reject_conclusion,
     run_workflow,
     sample_morning_gold_review,
     validate_workflow,
@@ -36,6 +44,7 @@ from mgc_v05l.execution_core.track_b_canonical_investigation_engine import (
     write_investigation,
 )
 from mgc_v05l.execution_core.track_b_canonical_claims_engine import create_claim, list_claims, load_claim
+from mgc_v05l.execution_core.track_b_canonical_conclusions_engine import attach_supporting_claim, create_conclusion, load_conclusion, write_conclusion
 
 
 NOW = datetime(2026, 7, 6, 12, 0, tzinfo=UTC)
@@ -429,6 +438,96 @@ def test_publish_rwf4_artifacts(tmp_path: Path) -> None:
     json.loads(Path(paths["sample_review_queue"]).read_text(encoding="utf-8"))
 
 
+def test_rwf5_create_reusable_review_record(tmp_path: Path) -> None:
+    record = create_review_record(
+        review_kind="CONCLUSION",
+        target_type="CONCLUSION",
+        target_id="conclusion_1",
+        investigation_id="inv_1",
+        reviewer="operator",
+        review_status="PENDING_REVIEW",
+        readiness="READY_FOR_REVIEW",
+        validation_summary={"outcome": "SUPPORTED", "confidence": "MEDIUM"},
+        rationale_template="Deterministic conclusion review.",
+        supporting_reference_count=1,
+        contradicting_reference_count=0,
+        related_reference_count=0,
+        now=NOW,
+    )
+
+    assert record["schema_version"] == "rwf5_canonical_review_record_v1"
+    assert record["review_kind"] == "CONCLUSION"
+    assert record["guardrails"] == {"diagnostic_only": True, "production_recommendation": False, "trading_gate": False}
+    assert record["deterministic_fingerprint"]
+
+
+def test_rwf5_conclusion_review_creation_ready(tmp_path: Path) -> None:
+    conclusion = _review_ready_conclusion(tmp_path)
+
+    reviews = generate_conclusion_reviews(investigation_id=conclusion["investigation_id"], conclusions_output_dir=tmp_path / "conclusions", review_output_dir=tmp_path / "reviews", investigation_output_dir=tmp_path / "investigations", now=NOW)
+
+    assert len(reviews) == 1
+    assert reviews[0]["review_kind"] == "CONCLUSION"
+    assert reviews[0]["readiness"] == "READY_FOR_REVIEW"
+    assert reviews[0]["supporting_reference_count"] == 1
+
+
+def test_rwf5_activation_without_explicit_approval_fails_safely(tmp_path: Path) -> None:
+    conclusion = _review_ready_conclusion(tmp_path)
+
+    try:
+        activate_conclusion(conclusion["conclusion_id"], operator_approved=False, conclusions_output_dir=tmp_path / "conclusions", review_output_dir=tmp_path / "reviews", investigation_output_dir=tmp_path / "investigations", now=NOW)
+    except PermissionError as exc:
+        assert "operator_approval_required" in str(exc)
+    else:  # pragma: no cover
+        raise AssertionError("activation should require operator approval")
+    assert load_conclusion(conclusion["conclusion_id"], output_dir=tmp_path / "conclusions")["status"] == "DRAFT"
+
+
+def test_rwf5_activation_with_approval_changes_draft_to_active(tmp_path: Path) -> None:
+    conclusion = _review_ready_conclusion(tmp_path)
+
+    result = activate_conclusion(conclusion["conclusion_id"], operator_approved=True, conclusions_output_dir=tmp_path / "conclusions", review_output_dir=tmp_path / "reviews", investigation_output_dir=tmp_path / "investigations", now=NOW)
+
+    assert result["conclusion"]["status"] == "ACTIVE"
+    assert result["review"]["review_status"] == "APPROVED"
+    assert result["review"]["readiness"] == "ALREADY_ACTIVE"
+    investigation = load_investigation(conclusion["investigation_id"], output_dir=tmp_path / "investigations")
+    assert any(event["event_type"] == "CONCLUSION_ACTIVATED" for event in investigation["timeline"])
+
+
+def test_rwf5_rejection_leaves_conclusion_inactive(tmp_path: Path) -> None:
+    conclusion = _review_ready_conclusion(tmp_path)
+
+    review = reject_conclusion(conclusion["conclusion_id"], conclusions_output_dir=tmp_path / "conclusions", review_output_dir=tmp_path / "reviews", investigation_output_dir=tmp_path / "investigations", now=NOW)
+
+    assert review["review_status"] == "REJECTED"
+    assert load_conclusion(conclusion["conclusion_id"], output_dir=tmp_path / "conclusions")["status"] == "DRAFT"
+    investigation = load_investigation(conclusion["investigation_id"], output_dir=tmp_path / "investigations")
+    assert any(event["event_type"] == "CONCLUSION_REJECTED" for event in investigation["timeline"])
+
+
+def test_rwf5_review_summary_guardrails(tmp_path: Path) -> None:
+    conclusion = _review_ready_conclusion(tmp_path)
+    generate_conclusion_reviews(investigation_id=conclusion["investigation_id"], conclusions_output_dir=tmp_path / "conclusions", review_output_dir=tmp_path / "reviews", investigation_output_dir=tmp_path / "investigations", now=NOW)
+
+    summary = export_review_summary(investigation_id=conclusion["investigation_id"], review_output_dir=tmp_path / "reviews")
+
+    assert summary["review_count"] == 1
+    assert summary["review_kind_counts"] == {"CONCLUSION": 1}
+    assert summary["guardrails"] == {"diagnostic_only": True, "production_recommendation": False, "trading_gate": False}
+
+
+def test_publish_rwf5_artifacts(tmp_path: Path) -> None:
+    paths = publish_rwf5_artifacts(output_dir=tmp_path, now=NOW)
+
+    for path in paths.values():
+        assert Path(path).exists()
+    json.loads(Path(paths["review_schema"]).read_text(encoding="utf-8"))
+    sample = json.loads(Path(paths["sample_conclusion_review"]).read_text(encoding="utf-8"))
+    assert sample["reviews"][0]["readiness"] == "READY_FOR_REVIEW"
+
+
 def test_research_workflow_import_boundary() -> None:
     paths = [
         Path("src/mgc_v05l/execution_core/track_b_canonical_research_workflow.py"),
@@ -500,3 +599,24 @@ def _draft_claim_from_accepted_draft(tmp_path: Path, evidence_id: str = "evidenc
     draft = generate_claim_drafts(investigation_id=inv_id, investigation_output_dir=tmp_path / "investigations", evidence_output_dir=tmp_path / "evidence", draft_output_dir=tmp_path / "drafts", now=NOW)[0]
     result = accept_claim_draft(draft["draft_id"], draft_output_dir=tmp_path / "drafts", evidence_output_dir=tmp_path / "evidence", claims_output_dir=tmp_path / "claims", investigation_output_dir=tmp_path / "investigations", now=NOW)
     return result["claim"]
+
+
+def _review_ready_conclusion(tmp_path: Path) -> dict:
+    claim = _draft_claim_from_accepted_draft(tmp_path)
+    active = activate_claim(claim["claim_id"], operator_approved=True, claims_output_dir=tmp_path / "claims", review_output_dir=tmp_path / "claim_reviews", investigation_output_dir=tmp_path / "investigations", now=NOW)["claim"]
+    result = create_conclusion(
+        investigation_id=active["investigation_id"],
+        conclusion_id="conclusion_review_ready",
+        title="Review-ready conclusion",
+        hypothesis="Supported active claims can prepare a conclusion for review.",
+        conclusion="The conclusion is ready for manual review.",
+        rationale="Test conclusion.",
+        conclusion_classification="ANALYTICS",
+        status="DRAFT",
+        now=NOW,
+        output_dir=tmp_path / "conclusions",
+    )
+    conclusion = attach_supporting_claim(result.conclusion, active, now=NOW)
+    write_conclusion(conclusion, output_dir=tmp_path / "conclusions")
+    assert conclusion_review_readiness(load_conclusion("conclusion_review_ready", output_dir=tmp_path / "conclusions")) == "READY_FOR_REVIEW"
+    return load_conclusion("conclusion_review_ready", output_dir=tmp_path / "conclusions")
