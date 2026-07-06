@@ -68,7 +68,7 @@ from mgc_v05l.execution_core.track_b_canonical_investigation_engine import (
 )
 from mgc_v05l.execution_core.track_b_canonical_morning_brief import DEFAULT_OUTPUT_DIR as DEFAULT_MORNING_BRIEF_OUTPUT_DIR
 from mgc_v05l.execution_core.track_b_canonical_morning_brief import run_canonical_morning_brief
-from mgc_v05l.execution_core.track_b_canonical_reference_envelope import build_provenance_envelope
+from mgc_v05l.execution_core.track_b_canonical_reference_envelope import build_provenance_envelope, build_reference
 
 
 DEFAULT_OUTPUT_ROOT = Path("outputs") / "track_b_execution_core"
@@ -105,6 +105,12 @@ RWF5_REVIEW_SCHEMA_JSON = "rwf5_review_schema.json"
 RWF5_SAMPLE_REVIEW_JSON = "rwf5_sample_review.json"
 RWF5_SAMPLE_CONCLUSION_REVIEW_JSON = "rwf5_sample_conclusion_review.json"
 RWF5_REVIEW_SUMMARY_MD = "rwf5_review_summary.md"
+RWF6_SESSION_CONTRACT_MD = "rwf6_research_session_contract.md"
+RWF6_SESSION_SCHEMA_JSON = "rwf6_research_session_schema.json"
+RWF6_SAMPLE_SESSION_JSON = "rwf6_sample_morning_gold_session.json"
+RWF6_SESSION_SUMMARY_MD = "rwf6_research_session_summary.md"
+RWF6_SESSION_LIFECYCLE_CONTRACT_MD = "rwf6_session_lifecycle_contract.md"
+RWF6_SESSION_TIMELINE_CONTRACT_MD = "rwf6_session_timeline_contract.md"
 
 CLAIM_DRAFT_SCHEMA_VERSION = "rwf3_claim_draft_v1"
 CLAIM_DRAFT_SUMMARY_SCHEMA_VERSION = "rwf3_claim_draft_queue_summary_v1"
@@ -112,6 +118,8 @@ CLAIM_REVIEW_SCHEMA_VERSION = "rwf4_claim_review_record_v1"
 CLAIM_REVIEW_SUMMARY_SCHEMA_VERSION = "rwf4_claim_review_summary_v1"
 CANONICAL_REVIEW_SCHEMA_VERSION = "rwf5_canonical_review_record_v1"
 CANONICAL_REVIEW_SUMMARY_SCHEMA_VERSION = "rwf5_review_summary_v1"
+RESEARCH_SESSION_SCHEMA_VERSION = "rwf6_canonical_research_session_v1"
+RESEARCH_SESSION_SUMMARY_SCHEMA_VERSION = "rwf6_research_session_summary_v1"
 
 VALID_WORKFLOW_STATUSES = {"DRAFT", "ACTIVE", "PAUSED", "COMPLETE", "ARCHIVED"}
 VALID_WORKFLOW_TYPES = {"MORNING_REVIEW", "INVESTIGATION_REFRESH", "CANDIDATE_REVIEW", "STRATEGY_REVIEW", "PLATFORM_REVIEW", "CUSTOM"}
@@ -159,6 +167,17 @@ VALID_REVIEW_READINESS = {"READY_FOR_OPERATOR_REVIEW", "NEEDS_EVIDENCE", "CONTRA
 VALID_CANONICAL_REVIEW_KINDS = {"CLAIM", "CONCLUSION"}
 VALID_CANONICAL_REVIEW_LIFECYCLE = {"PENDING_REVIEW", "APPROVED", "REJECTED", "NEEDS_MORE_EVIDENCE", "SUPERSEDED", "ARCHIVED"}
 VALID_CONCLUSION_REVIEW_READINESS = {"READY_FOR_REVIEW", "NEEDS_ACTIVE_CLAIMS", "CONTRADICTED", "INVALID_REFERENCES", "CHAIN_INCOMPLETE", "ALREADY_ACTIVE", "NOT_APPLICABLE"}
+VALID_SESSION_STATUSES = {"PLANNED", "RUNNING", "COMPLETE", "COMPLETE_WITH_WARNINGS", "FAILED", "ARCHIVED"}
+VALID_SESSION_TYPES = {"MORNING_RESEARCH", "OVERNIGHT_REVIEW", "WEEKLY_STRATEGY_REVIEW", "POST_MARKET_INVESTIGATION", "CUSTOM"}
+VALID_SESSION_TRANSITIONS = {
+    ("PLANNED", "RUNNING"),
+    ("RUNNING", "COMPLETE"),
+    ("RUNNING", "COMPLETE_WITH_WARNINGS"),
+    ("RUNNING", "FAILED"),
+    ("COMPLETE", "ARCHIVED"),
+    ("COMPLETE_WITH_WARNINGS", "ARCHIVED"),
+    ("FAILED", "ARCHIVED"),
+}
 
 
 @dataclass(frozen=True)
@@ -182,6 +201,15 @@ class InvestigationPopulationResult:
     deterministic_fingerprint: str
     provenance: dict[str, Any]
     guardrails: dict[str, bool]
+
+
+@dataclass(frozen=True)
+class CanonicalResearchSessionResult:
+    session: dict[str, Any]
+    session_path: Path
+    summary: dict[str, Any]
+    summary_path: Path
+    output_dir: Path
 
 
 def create_workflow(
@@ -217,6 +245,149 @@ def create_workflow(
         "steps": [normalize_workflow_step(step, now=generated_at) for step in (steps or [])],
     }
     return write_workflow(workflow, output_dir=output_dir)
+
+
+def create_session(
+    *,
+    title: str,
+    description: str,
+    session_type: str,
+    owner: str = "operator",
+    tags: Sequence[str] | None = None,
+    session_id: str | None = None,
+    now: datetime | str | None = None,
+    output_dir: Path = DEFAULT_OUTPUT_DIR / "sessions",
+) -> CanonicalResearchSessionResult:
+    timestamp = _coerce_now(now)
+    session = {
+        "schema_version": RESEARCH_SESSION_SCHEMA_VERSION,
+        "session_id": session_id or _id("session", title, timestamp),
+        "title": title,
+        "description": description,
+        "session_type": _validate(session_type, VALID_SESSION_TYPES, "session_type"),
+        "owner": owner,
+        "tags": sorted(set(tags or [])),
+        "created_at": timestamp.isoformat(),
+        "started_at": None,
+        "completed_at": None,
+        "archived_at": None,
+        "updated_at": timestamp.isoformat(),
+        "status": "PLANNED",
+        "references": [],
+        "timeline": [
+            _session_event(
+                event_type="SESSION_CREATED",
+                artifact_reference=None,
+                provenance={"source": "canonical_research_workflow", "operation": "create_session"},
+                now=timestamp,
+            )
+        ],
+        "warnings": [],
+        "errors": [],
+        "provenance": build_provenance_envelope(
+            source_component="canonical_research_workflow",
+            source_artifact=f"session:{session_id or title}",
+            transform_name="rwf6_create_research_session",
+            created_at=timestamp,
+        ),
+        "guardrails": _guardrails(),
+    }
+    session["deterministic_fingerprint"] = session_fingerprint(session)
+    return write_session(session, output_dir=output_dir)
+
+
+def transition_session(
+    session: Mapping[str, Any],
+    *,
+    target_status: str,
+    now: datetime | str | None = None,
+    reason: str | None = None,
+) -> dict[str, Any]:
+    timestamp = _coerce_now(now)
+    source_status = str(session.get("status") or "")
+    target_status = _validate(target_status, VALID_SESSION_STATUSES, "session_status")
+    if (source_status, target_status) not in VALID_SESSION_TRANSITIONS:
+        raise ValueError(f"Invalid session transition: {source_status}->{target_status}")
+    updated = dict(session)
+    updated["status"] = target_status
+    updated["updated_at"] = timestamp.isoformat()
+    if target_status == "RUNNING":
+        updated["started_at"] = updated.get("started_at") or timestamp.isoformat()
+        event_type = "SESSION_STARTED"
+    elif target_status in {"COMPLETE", "COMPLETE_WITH_WARNINGS", "FAILED"}:
+        updated["completed_at"] = timestamp.isoformat()
+        event_type = "SESSION_COMPLETED" if target_status != "FAILED" else "SESSION_FAILED"
+    else:
+        updated["archived_at"] = timestamp.isoformat()
+        event_type = "SESSION_ARCHIVED"
+    timeline = list(updated.get("timeline") or [])
+    timeline.append(_session_event(event_type=event_type, artifact_reference=None, provenance={"source": "canonical_research_workflow", "operation": "transition_session", "reason": reason}, now=timestamp))
+    updated["timeline"] = _sorted_timeline(timeline)
+    updated["deterministic_fingerprint"] = session_fingerprint(updated)
+    return updated
+
+
+def start_session(session_id: str, *, output_dir: Path = DEFAULT_OUTPUT_DIR / "sessions", now: datetime | str | None = None) -> dict[str, Any]:
+    return write_session(transition_session(load_session(session_id, output_dir=output_dir), target_status="RUNNING", now=now), output_dir=output_dir).session
+
+
+def complete_session(session_id: str, *, output_dir: Path = DEFAULT_OUTPUT_DIR / "sessions", now: datetime | str | None = None, with_warnings: bool = False) -> dict[str, Any]:
+    target = "COMPLETE_WITH_WARNINGS" if with_warnings else "COMPLETE"
+    return write_session(transition_session(load_session(session_id, output_dir=output_dir), target_status=target, now=now), output_dir=output_dir).session
+
+
+def fail_session(session_id: str, *, output_dir: Path = DEFAULT_OUTPUT_DIR / "sessions", now: datetime | str | None = None, reason: str | None = None) -> dict[str, Any]:
+    return write_session(transition_session(load_session(session_id, output_dir=output_dir), target_status="FAILED", now=now, reason=reason), output_dir=output_dir).session
+
+
+def archive_session(session_id: str, *, output_dir: Path = DEFAULT_OUTPUT_DIR / "sessions", now: datetime | str | None = None) -> dict[str, Any]:
+    return write_session(transition_session(load_session(session_id, output_dir=output_dir), target_status="ARCHIVED", now=now), output_dir=output_dir).session
+
+
+def attach_session_reference(
+    session: Mapping[str, Any],
+    *,
+    reference_type: str,
+    target_id: str,
+    target_kind: str,
+    relationship: str = "contains",
+    target_path: str | None = None,
+    target_schema_version: str | None = None,
+    target_fingerprint: str | None = None,
+    metadata: Mapping[str, Any] | None = None,
+    now: datetime | str | None = None,
+) -> dict[str, Any]:
+    timestamp = _coerce_now(now)
+    canonical_target_kind = _session_reference_target_kind(target_kind)
+    ref = build_reference(
+        reference_type=reference_type,
+        target_id=target_id,
+        target_kind=canonical_target_kind,
+        relationship=relationship,
+        target_path=target_path,
+        target_schema_version=target_schema_version,
+        target_fingerprint=target_fingerprint,
+        source_component="canonical_research_workflow",
+        metadata={"logical_target_kind": target_kind, **dict(metadata or {})},
+        created_at=timestamp,
+    )
+    updated = dict(session)
+    refs = {str(item.get("reference_id")): dict(item) for item in updated.get("references") or []}
+    refs[str(ref["reference_id"])] = ref
+    updated["references"] = sorted(refs.values(), key=lambda row: (str(row.get("target_kind")), str(row.get("target_id")), str(row.get("reference_id"))))
+    timeline = list(updated.get("timeline") or [])
+    timeline.append(
+        _session_event(
+            event_type=_session_event_for_target_kind(target_kind),
+            artifact_reference=ref,
+            provenance={"source": "canonical_research_workflow", "operation": "attach_session_reference", "target_kind": target_kind},
+            now=timestamp,
+        )
+    )
+    updated["timeline"] = _sorted_timeline(timeline)
+    updated["updated_at"] = timestamp.isoformat()
+    updated["deterministic_fingerprint"] = session_fingerprint(updated)
+    return updated
 
 
 def normalize_workflow_step(step: Mapping[str, Any], *, now: datetime | str | None = None) -> dict[str, Any]:
@@ -1884,6 +2055,71 @@ def list_workflows(*, output_dir: Path = DEFAULT_OUTPUT_DIR) -> list[dict[str, A
     return rows
 
 
+def write_session(session: Mapping[str, Any], *, output_dir: Path = DEFAULT_OUTPUT_DIR / "sessions") -> CanonicalResearchSessionResult:
+    output_dir.mkdir(parents=True, exist_ok=True)
+    record = dict(session)
+    record["references"] = [dict(ref) for ref in record.get("references") or []]
+    record["timeline"] = _sorted_timeline(record.get("timeline") or [])
+    record["deterministic_fingerprint"] = session_fingerprint(record)
+    session_path = output_dir / f"{record['session_id']}.json"
+    session_path.write_text(json.dumps(record, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    summary = summarize_session(record)
+    summary_path = output_dir / f"{record['session_id']}_summary.json"
+    summary_path.write_text(json.dumps(summary, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    return CanonicalResearchSessionResult(session=record, session_path=session_path, summary=summary, summary_path=summary_path, output_dir=output_dir)
+
+
+def load_session(session_id: str, *, output_dir: Path = DEFAULT_OUTPUT_DIR / "sessions") -> dict[str, Any]:
+    return json.loads((output_dir / f"{session_id}.json").read_text(encoding="utf-8"))
+
+
+def list_sessions(*, output_dir: Path = DEFAULT_OUTPUT_DIR / "sessions") -> list[dict[str, Any]]:
+    if not output_dir.exists():
+        return []
+    rows: list[dict[str, Any]] = []
+    for path in sorted(output_dir.glob("*.json")):
+        if path.name.endswith("_summary.json"):
+            continue
+        try:
+            session = json.loads(path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError:
+            continue
+        if session.get("schema_version") == RESEARCH_SESSION_SCHEMA_VERSION:
+            rows.append({"session_id": session.get("session_id"), "title": session.get("title"), "status": session.get("status"), "session_type": session.get("session_type")})
+    return rows
+
+
+def summarize_session(session: Mapping[str, Any]) -> dict[str, Any]:
+    refs = list(session.get("references") or [])
+    started = _parse_optional_ts(session.get("started_at"))
+    ended = _parse_optional_ts(session.get("completed_at")) or _parse_optional_ts(session.get("archived_at"))
+    duration = None if not started or not ended else max((ended - started).total_seconds(), 0.0)
+    return {
+        "schema_version": RESEARCH_SESSION_SUMMARY_SCHEMA_VERSION,
+        "session_id": session.get("session_id"),
+        "status": session.get("status"),
+        "duration_seconds": duration,
+        "workflow_count": _session_ref_count(refs, "WORKFLOW_RUN"),
+        "investigation_count": _session_ref_count(refs, "INVESTIGATION"),
+        "evidence_count": _session_ref_count(refs, "EVIDENCE"),
+        "draft_count": _session_ref_count(refs, "CLAIM_DRAFT"),
+        "review_count": _session_ref_count(refs, "CLAIM_REVIEW"),
+        "active_claim_count": _session_ref_count(refs, "ACTIVE_CLAIM"),
+        "conclusion_review_count": _session_ref_count(refs, "CONCLUSION_REVIEW"),
+        "active_conclusion_count": _session_ref_count(refs, "ACTIVE_CONCLUSION"),
+        "artifact_count": sum(1 for ref in refs if _logical_target_kind(ref) == "ARTIFACT"),
+        "warning_count": len(session.get("warnings") or []),
+        "error_count": len(session.get("errors") or []),
+        "fingerprint": session_fingerprint(session),
+        "guardrails": _guardrails(),
+    }
+
+
+def export_session_summary(session_id: str, *, output_dir: Path = DEFAULT_OUTPUT_DIR / "sessions") -> dict[str, Any]:
+    result = write_session(load_session(session_id, output_dir=output_dir), output_dir=output_dir)
+    return result.summary
+
+
 def sample_morning_gold_review(*, now: datetime | str | None = None, output_dir: Path = DEFAULT_OUTPUT_DIR) -> dict[str, Any]:
     timestamp = _coerce_now(now)
     steps = [
@@ -2111,12 +2347,75 @@ def publish_rwf5_artifacts(*, output_dir: Path = DEFAULT_OUTPUT_DIR, now: dateti
     return {key: str(path) for key, path in paths.items()}
 
 
+def create_sample_morning_gold_session(*, output_dir: Path = DEFAULT_OUTPUT_DIR, now: datetime | str | None = None) -> dict[str, Any]:
+    timestamp = _coerce_now(now)
+    session_dir = output_dir / "sessions"
+    session = create_session(
+        session_id="morning_gold_research_session",
+        title="Morning Gold Research Session",
+        description="Bounded deterministic Morning Gold research activity.",
+        session_type="MORNING_RESEARCH",
+        owner="operator",
+        tags=("gold", "morning_research", "diagnostic"),
+        now=timestamp,
+        output_dir=session_dir,
+    ).session
+    session = transition_session(session, target_status="RUNNING", now=timestamp)
+    workflow = sample_morning_gold_review(now=timestamp, output_dir=output_dir)
+    run = run_workflow(workflow, output_dir=output_dir, saved_query_output_dir=output_dir / "saved_queries", morning_brief_output_dir=output_dir / "morning_brief", now=timestamp)
+    session = _attach_if_available(session, reference_type="workflow_run", target_kind="WORKFLOW_RUN", target_id=str(run.get("run_id")), path=output_dir / f"{run.get('run_id')}.json", now=timestamp)
+    session = _attach_if_available(session, reference_type="workflow", target_kind="ARTIFACT", target_id=str(workflow.get("workflow_id")), path=output_dir / f"{workflow.get('workflow_id')}.json", now=timestamp)
+    investigation_id = "morning_gold_review_investigation"
+    session = _attach_if_available(session, reference_type="investigation", target_kind="INVESTIGATION", target_id=investigation_id, path=output_dir / "investigations" / f"{investigation_id}.json", now=timestamp)
+    session = _attach_matching_files(session, reference_type="evidence", target_kind="EVIDENCE", directory=output_dir / "evidence", pattern="*.json", now=timestamp)
+    session = _attach_matching_files(session, reference_type="claim_draft", target_kind="CLAIM_DRAFT", directory=output_dir / "claim_drafts", pattern="*.json", now=timestamp)
+    session = _attach_matching_files(session, reference_type="claim_review", target_kind="CLAIM_REVIEW", directory=output_dir / "claim_reviews", pattern="*.json", now=timestamp)
+    session = _attach_matching_files(session, reference_type="conclusion_review", target_kind="CONCLUSION_REVIEW", directory=output_dir / "reviews", pattern="*.json", now=timestamp)
+    session = _attach_matching_active_objects(session, reference_type="active_claim", target_kind="ACTIVE_CLAIM", directory=output_dir / "claims", id_key="claim_id", now=timestamp)
+    session = _attach_matching_active_objects(session, reference_type="active_conclusion", target_kind="ACTIVE_CONCLUSION", directory=output_dir / "conclusions", id_key="conclusion_id", now=timestamp)
+    session = _attach_if_available(session, reference_type="morning_brief", target_kind="MORNING_BRIEF", target_id="latest_morning_brief", path=output_dir / "morning_brief" / "cae9_morning_brief.json", now=timestamp)
+    session = _attach_if_available(session, reference_type="operational_certification", target_kind="OPERATIONAL_CERTIFICATION", target_id="latest_operational_certification", path=DEFAULT_OUTPUT_ROOT / "operations_maintenance" / "operational_certification" / "latest_operational_certification.json", now=timestamp)
+    if not any(_logical_target_kind(ref) == "CONCLUSION_REVIEW" for ref in session.get("references") or []):
+        session = _add_session_warning(session, "optional_conclusion_review_missing", "No conclusion review artifact was available for the sample session.", now=timestamp)
+    if not any(_logical_target_kind(ref) == "ACTIVE_CONCLUSION" for ref in session.get("references") or []):
+        session = _add_session_warning(session, "optional_active_conclusion_missing", "No ACTIVE conclusion was available for the sample session.", now=timestamp)
+    final_status = "COMPLETE_WITH_WARNINGS" if session.get("warnings") else "COMPLETE"
+    session = transition_session(session, target_status=final_status, now=timestamp)
+    return write_session(session, output_dir=session_dir).session
+
+
+def publish_rwf6_artifacts(*, output_dir: Path = DEFAULT_OUTPUT_DIR, now: datetime | str | None = None) -> dict[str, str]:
+    timestamp = _coerce_now(now)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    session = create_sample_morning_gold_session(output_dir=output_dir, now=timestamp)
+    summary = summarize_session(session)
+    paths = {
+        "session_contract": output_dir / RWF6_SESSION_CONTRACT_MD,
+        "session_schema": output_dir / RWF6_SESSION_SCHEMA_JSON,
+        "sample_session": output_dir / RWF6_SAMPLE_SESSION_JSON,
+        "session_summary": output_dir / RWF6_SESSION_SUMMARY_MD,
+        "lifecycle_contract": output_dir / RWF6_SESSION_LIFECYCLE_CONTRACT_MD,
+        "timeline_contract": output_dir / RWF6_SESSION_TIMELINE_CONTRACT_MD,
+    }
+    paths["session_contract"].write_text(render_session_contract(), encoding="utf-8")
+    paths["session_schema"].write_text(json.dumps(research_session_schema(), indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    paths["sample_session"].write_text(json.dumps(session, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    paths["session_summary"].write_text(render_session_summary(summary), encoding="utf-8")
+    paths["lifecycle_contract"].write_text(render_session_lifecycle_contract(), encoding="utf-8")
+    paths["timeline_contract"].write_text(render_session_timeline_contract(), encoding="utf-8")
+    return {key: str(path) for key, path in paths.items()}
+
+
 def workflow_fingerprint(workflow: Mapping[str, Any]) -> str:
     return stable_hash(_strip_volatile(workflow))
 
 
 def workflow_run_fingerprint(run: Mapping[str, Any]) -> str:
     return stable_hash(_strip_volatile(run))
+
+
+def session_fingerprint(session: Mapping[str, Any]) -> str:
+    return stable_hash(_strip_volatile(session))
 
 
 def stable_hash(payload: Any) -> str:
@@ -2353,6 +2652,41 @@ def canonical_review_schema() -> dict[str, Any]:
     }
 
 
+def research_session_schema() -> dict[str, Any]:
+    return {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "title": "CanonicalResearchSession",
+        "type": "object",
+        "required": [
+            "schema_version",
+            "session_id",
+            "title",
+            "session_type",
+            "status",
+            "references",
+            "timeline",
+            "provenance",
+            "deterministic_fingerprint",
+            "guardrails",
+        ],
+        "properties": {
+            "schema_version": {"const": RESEARCH_SESSION_SCHEMA_VERSION},
+            "session_type": {"enum": sorted(VALID_SESSION_TYPES)},
+            "status": {"enum": sorted(VALID_SESSION_STATUSES)},
+            "references": {"type": "array"},
+            "timeline": {"type": "array"},
+            "guardrails": {
+                "type": "object",
+                "properties": {
+                    "diagnostic_only": {"const": True},
+                    "production_recommendation": {"const": False},
+                    "trading_gate": {"const": False},
+                },
+            },
+        },
+    }
+
+
 def render_claim_draft_contract() -> str:
     return """# RWF3 Claim Draft Contract
 
@@ -2443,6 +2777,64 @@ def render_review_summary(summary: Mapping[str, Any]) -> str:
     )
 
 
+def render_session_contract() -> str:
+    return """# RWF6 Canonical Research Session Contract
+
+CanonicalResearchSession is the top-level deterministic container for one bounded research activity. Workflows are reusable recipes; sessions are concrete executions and collections of produced research artifacts.
+
+Sessions store CanonicalReference attachments, CanonicalProvenanceEnvelope metadata, deterministic timeline events, summaries, and guardrails. They do not schedule work, call brokers, restart runtime services, mutate operational state, recommend trades, or create gates.
+"""
+
+
+def render_session_lifecycle_contract() -> str:
+    return """# RWF6 Session Lifecycle Contract
+
+Allowed transitions:
+
+- PLANNED -> RUNNING
+- RUNNING -> COMPLETE
+- RUNNING -> COMPLETE_WITH_WARNINGS
+- RUNNING -> FAILED
+- COMPLETE -> ARCHIVED
+- COMPLETE_WITH_WARNINGS -> ARCHIVED
+- FAILED -> ARCHIVED
+
+All other transitions are rejected deterministically.
+"""
+
+
+def render_session_timeline_contract() -> str:
+    return """# RWF6 Session Timeline Contract
+
+Session timeline events are deterministic, timestamped, sorted, and provenance-bearing. Supported event families include session created, started, completed, archived, workflow attached, investigation attached, evidence attached, claim draft attached, claim review attached, active claim attached, conclusion review attached, active conclusion attached, artifact attached, and warning recorded.
+"""
+
+
+def render_session_summary(summary: Mapping[str, Any]) -> str:
+    return "\n".join(
+        [
+            "# RWF6 Research Session Summary",
+            "",
+            f"- Session: `{summary.get('session_id')}`",
+            f"- Status: `{summary.get('status')}`",
+            f"- Duration seconds: `{summary.get('duration_seconds')}`",
+            f"- Workflows: `{summary.get('workflow_count')}`",
+            f"- Investigations: `{summary.get('investigation_count')}`",
+            f"- Evidence: `{summary.get('evidence_count')}`",
+            f"- Drafts: `{summary.get('draft_count')}`",
+            f"- Reviews: `{summary.get('review_count')}`",
+            f"- Active Claims: `{summary.get('active_claim_count')}`",
+            f"- Conclusion Reviews: `{summary.get('conclusion_review_count')}`",
+            f"- Active Conclusions: `{summary.get('active_conclusion_count')}`",
+            f"- Artifacts: `{summary.get('artifact_count')}`",
+            f"- Warnings: `{summary.get('warning_count')}`",
+            f"- Errors: `{summary.get('error_count')}`",
+            "- Guardrails: `diagnostic_only=true`, `production_recommendation=false`, `trading_gate=false`.",
+            "",
+        ]
+    )
+
+
 def render_claim_draft_summary(summary: Mapping[str, Any]) -> str:
     return "\n".join(
         [
@@ -2517,6 +2909,146 @@ def _sample_review_ready_conclusion(*, sample_workspace: Path, investigation_id:
     )
     write_investigation(investigation, output_dir=sample_workspace / "investigations")
     return conclusion
+
+
+def _attach_if_available(session: Mapping[str, Any], *, reference_type: str, target_kind: str, target_id: str, path: Path, now: datetime) -> dict[str, Any]:
+    if not path.exists():
+        return _add_session_warning(dict(session), f"missing_{reference_type}", f"Optional session artifact missing: {path}", now=now)
+    payload = _read_json_if_possible(path)
+    return attach_session_reference(
+        session,
+        reference_type=reference_type,
+        target_kind=target_kind,
+        target_id=target_id,
+        target_path=str(path),
+        target_schema_version=str(payload.get("schema_version") or "") if isinstance(payload, Mapping) else None,
+        target_fingerprint=str(payload.get("deterministic_fingerprint") or payload.get("fingerprint") or "") if isinstance(payload, Mapping) else None,
+        now=now,
+    )
+
+
+def _attach_matching_files(session: Mapping[str, Any], *, reference_type: str, target_kind: str, directory: Path, pattern: str, now: datetime) -> dict[str, Any]:
+    updated = dict(session)
+    if not directory.exists():
+        return _add_session_warning(updated, f"missing_{reference_type}_directory", f"Optional session directory missing: {directory}", now=now)
+    for path in sorted(directory.glob(pattern)):
+        if path.name.endswith("_summary.json") or path.name.endswith(".summary.json"):
+            continue
+        payload = _read_json_if_possible(path)
+        target_id = str(payload.get("evidence_id") or payload.get("draft_id") or payload.get("review_id") or path.stem) if isinstance(payload, Mapping) else path.stem
+        updated = attach_session_reference(
+            updated,
+            reference_type=reference_type,
+            target_kind=target_kind,
+            target_id=target_id,
+            target_path=str(path),
+            target_schema_version=str(payload.get("schema_version") or "") if isinstance(payload, Mapping) else None,
+            target_fingerprint=str(payload.get("deterministic_fingerprint") or "") if isinstance(payload, Mapping) else None,
+            now=now,
+        )
+    return updated
+
+
+def _attach_matching_active_objects(session: Mapping[str, Any], *, reference_type: str, target_kind: str, directory: Path, id_key: str, now: datetime) -> dict[str, Any]:
+    updated = dict(session)
+    if not directory.exists():
+        return _add_session_warning(updated, f"missing_{reference_type}_directory", f"Optional session directory missing: {directory}", now=now)
+    for path in sorted(directory.glob("*.json")):
+        if path.name.endswith("_summary.json") or path.name.endswith(".summary.json"):
+            continue
+        payload = _read_json_if_possible(path)
+        if not isinstance(payload, Mapping) or payload.get("status") != "ACTIVE":
+            continue
+        updated = attach_session_reference(
+            updated,
+            reference_type=reference_type,
+            target_kind=target_kind,
+            target_id=str(payload.get(id_key) or path.stem),
+            target_path=str(path),
+            target_schema_version=str(payload.get("schema_version") or ""),
+            target_fingerprint=str(payload.get("deterministic_fingerprint") or ""),
+            now=now,
+        )
+    return updated
+
+
+def _add_session_warning(session: Mapping[str, Any], code: str, message: str, *, now: datetime) -> dict[str, Any]:
+    updated = dict(session)
+    warnings = list(updated.get("warnings") or [])
+    if not any(item.get("code") == code and item.get("message") == message for item in warnings):
+        warnings.append({"code": code, "message": message, "generated_at": now.isoformat()})
+    updated["warnings"] = warnings
+    timeline = list(updated.get("timeline") or [])
+    timeline.append(_session_event(event_type="SESSION_WARNING_RECORDED", artifact_reference=None, provenance={"source": "canonical_research_workflow", "operation": "add_session_warning", "code": code}, now=now))
+    updated["timeline"] = _sorted_timeline(timeline)
+    updated["updated_at"] = now.isoformat()
+    updated["deterministic_fingerprint"] = session_fingerprint(updated)
+    return updated
+
+
+def _session_event(*, event_type: str, artifact_reference: Mapping[str, Any] | None, provenance: Mapping[str, Any], now: datetime) -> dict[str, Any]:
+    payload = {
+        "timestamp": now.isoformat(),
+        "event_type": event_type,
+        "artifact_reference": dict(artifact_reference) if artifact_reference else None,
+        "provenance": dict(provenance),
+        "guardrails": _guardrails(),
+    }
+    payload["event_id"] = f"session_event_{stable_hash(payload)[:18]}"
+    return payload
+
+
+def _sorted_timeline(timeline: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
+    return sorted((dict(event) for event in timeline), key=lambda event: (str(event.get("timestamp")), str(event.get("event_type")), str(event.get("event_id"))))
+
+
+def _session_reference_target_kind(target_kind: str) -> str:
+    return {
+        "WORKFLOW_RUN": "ARTIFACT",
+        "CLAIM_DRAFT": "ARTIFACT",
+        "CLAIM_REVIEW": "ARTIFACT",
+        "CONCLUSION_REVIEW": "ARTIFACT",
+        "ACTIVE_CLAIM": "CLAIM",
+        "ACTIVE_CONCLUSION": "CONCLUSION",
+    }.get(target_kind, target_kind)
+
+
+def _session_event_for_target_kind(target_kind: str) -> str:
+    return {
+        "WORKFLOW_RUN": "WORKFLOW_ATTACHED",
+        "INVESTIGATION": "INVESTIGATION_ATTACHED",
+        "EVIDENCE": "EVIDENCE_ATTACHED",
+        "CLAIM_DRAFT": "CLAIM_DRAFT_ATTACHED",
+        "CLAIM_REVIEW": "CLAIM_REVIEW_ATTACHED",
+        "ACTIVE_CLAIM": "ACTIVE_CLAIM_ATTACHED",
+        "CONCLUSION_REVIEW": "CONCLUSION_REVIEW_ATTACHED",
+        "ACTIVE_CONCLUSION": "ACTIVE_CONCLUSION_ATTACHED",
+    }.get(target_kind, "ARTIFACT_ATTACHED")
+
+
+def _logical_target_kind(reference: Mapping[str, Any]) -> str:
+    metadata = reference.get("metadata") or {}
+    return str(metadata.get("logical_target_kind") or reference.get("target_kind") or "")
+
+
+def _session_ref_count(references: Sequence[Mapping[str, Any]], logical_kind: str) -> int:
+    return sum(1 for ref in references if _logical_target_kind(ref) == logical_kind)
+
+
+def _read_json_if_possible(path: Path) -> Any:
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+
+
+def _parse_optional_ts(value: Any) -> datetime | None:
+    if not value:
+        return None
+    try:
+        return _coerce_now(str(value))
+    except ValueError:
+        return None
 
 
 def _aggregate_population_results(run: Mapping[str, Any]) -> dict[str, Any]:

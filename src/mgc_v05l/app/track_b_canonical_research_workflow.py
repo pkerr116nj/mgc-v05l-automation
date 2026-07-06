@@ -11,15 +11,22 @@ from typing import Sequence
 from mgc_v05l.execution_core.track_b_canonical_research_workflow import (
     DEFAULT_OUTPUT_DIR,
     activate_conclusion,
+    archive_session,
+    attach_session_reference,
+    complete_session,
+    create_sample_morning_gold_session,
+    create_session,
     create_workflow,
     conclusion_review_readiness,
     list_workflows,
     accept_claim_draft,
     activate_claim,
     claim_review_readiness,
+    export_session_summary,
     export_claim_draft_summary,
     export_claim_review_summary,
     export_review_summary,
+    fail_session,
     generate_claim_drafts,
     generate_claim_review_queue,
     generate_conclusion_reviews,
@@ -29,19 +36,24 @@ from mgc_v05l.execution_core.track_b_canonical_research_workflow import (
     load_claim_reviews,
     load_review,
     load_reviews,
+    load_session,
     load_workflow,
+    list_sessions,
     publish_rwf1_artifacts,
     publish_rwf2_artifacts,
     publish_rwf3_artifacts,
     publish_rwf4_artifacts,
     publish_rwf5_artifacts,
+    publish_rwf6_artifacts,
     reject_claim,
     reject_claim_draft,
     reject_conclusion,
     run_workflow,
     sample_morning_gold_review,
+    start_session,
     summarize_workflow,
     validate_workflow,
+    write_session,
     write_workflow,
 )
 from mgc_v05l.execution_core.track_b_canonical_investigation_engine import (
@@ -164,6 +176,46 @@ def build_parser() -> argparse.ArgumentParser:
     validate_investigation_for_conclusion.add_argument("--investigation-id", required=True)
 
     subparsers.add_parser("publish-rwf5-artifacts")
+    create_session_cmd = subparsers.add_parser("create-session")
+    create_session_cmd.add_argument("--title", required=True)
+    create_session_cmd.add_argument("--description", required=True)
+    create_session_cmd.add_argument("--session-type", default="CUSTOM")
+    create_session_cmd.add_argument("--owner", default="operator")
+    create_session_cmd.add_argument("--tag", action="append", default=[])
+    create_session_cmd.add_argument("--session-id")
+    create_session_cmd.add_argument("--sample-morning-gold-session", action="store_true")
+
+    start_session_cmd = subparsers.add_parser("start-session")
+    start_session_cmd.add_argument("--session-id", required=True)
+
+    attach_cmd = subparsers.add_parser("attach")
+    attach_cmd.add_argument("--session-id", required=True)
+    attach_cmd.add_argument("--reference-type", required=True)
+    attach_cmd.add_argument("--target-id", required=True)
+    attach_cmd.add_argument("--target-kind", required=True)
+    attach_cmd.add_argument("--target-path")
+    attach_cmd.add_argument("--relationship", default="contains")
+
+    complete_session_cmd = subparsers.add_parser("complete-session")
+    complete_session_cmd.add_argument("--session-id", required=True)
+    complete_session_cmd.add_argument("--with-warnings", action="store_true")
+
+    fail_session_cmd = subparsers.add_parser("fail-session")
+    fail_session_cmd.add_argument("--session-id", required=True)
+    fail_session_cmd.add_argument("--reason")
+
+    archive_session_cmd = subparsers.add_parser("archive-session")
+    archive_session_cmd.add_argument("--session-id", required=True)
+
+    subparsers.add_parser("list-sessions")
+
+    show_session = subparsers.add_parser("show-session")
+    show_session.add_argument("--session-id", required=True)
+
+    export_session = subparsers.add_parser("export-session-summary")
+    export_session.add_argument("--session-id", required=True)
+
+    subparsers.add_parser("publish-rwf6-artifacts")
     return parser
 
 
@@ -335,6 +387,55 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 0
     if args.command == "publish-rwf5-artifacts":
         _print(publish_rwf5_artifacts(output_dir=args.output_dir, now=args.now))
+        return 0
+    if args.command == "create-session":
+        if args.sample_morning_gold_session:
+            session = create_sample_morning_gold_session(output_dir=args.output_dir, now=args.now)
+        else:
+            session = create_session(title=args.title, description=args.description, session_type=args.session_type, owner=args.owner, tags=args.tag, session_id=args.session_id, output_dir=args.output_dir / "sessions", now=args.now).session
+        _print({"session_id": session["session_id"], "status": session["status"], "guardrails": session["guardrails"]})
+        return 0
+    if args.command == "start-session":
+        session = start_session(args.session_id, output_dir=args.output_dir / "sessions", now=args.now)
+        _print({"session_id": session["session_id"], "status": session["status"], "guardrails": session["guardrails"]})
+        return 0
+    if args.command == "attach":
+        session = load_session(args.session_id, output_dir=args.output_dir / "sessions")
+        session = attach_session_reference(
+            session,
+            reference_type=args.reference_type,
+            target_id=args.target_id,
+            target_kind=args.target_kind,
+            target_path=args.target_path,
+            relationship=args.relationship,
+            now=args.now,
+        )
+        result = write_session(session, output_dir=args.output_dir / "sessions")
+        _print({"session_id": result.session["session_id"], "reference_count": len(result.session["references"]), "guardrails": result.session["guardrails"]})
+        return 0
+    if args.command == "complete-session":
+        session = complete_session(args.session_id, output_dir=args.output_dir / "sessions", now=args.now, with_warnings=args.with_warnings)
+        _print({"session_id": session["session_id"], "status": session["status"], "guardrails": session["guardrails"]})
+        return 0
+    if args.command == "fail-session":
+        session = fail_session(args.session_id, output_dir=args.output_dir / "sessions", now=args.now, reason=args.reason)
+        _print({"session_id": session["session_id"], "status": session["status"], "guardrails": session["guardrails"]})
+        return 0
+    if args.command == "archive-session":
+        session = archive_session(args.session_id, output_dir=args.output_dir / "sessions", now=args.now)
+        _print({"session_id": session["session_id"], "status": session["status"], "guardrails": session["guardrails"]})
+        return 0
+    if args.command == "list-sessions":
+        _print({"sessions": list_sessions(output_dir=args.output_dir / "sessions")})
+        return 0
+    if args.command == "show-session":
+        _print(load_session(args.session_id, output_dir=args.output_dir / "sessions"))
+        return 0
+    if args.command == "export-session-summary":
+        _print(export_session_summary(args.session_id, output_dir=args.output_dir / "sessions"))
+        return 0
+    if args.command == "publish-rwf6-artifacts":
+        _print(publish_rwf6_artifacts(output_dir=args.output_dir, now=args.now))
         return 0
     raise AssertionError(f"Unhandled command: {args.command}")
 

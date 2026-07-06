@@ -9,17 +9,23 @@ from mgc_v05l.execution_core.track_b_canonical_research_workflow import (
     accept_claim_draft,
     activate_claim,
     activate_conclusion,
+    attach_session_reference,
+    complete_session,
     claim_review_readiness,
     conclusion_review_readiness,
+    create_sample_morning_gold_session,
     create_or_locate_investigation,
     create_review_record,
+    create_session,
     create_workflow,
+    export_session_summary,
     export_claim_draft_summary,
     export_claim_review_summary,
     export_review_summary,
     generate_claim_drafts,
     generate_claim_review_queue,
     generate_conclusion_reviews,
+    load_session,
     load_claim_drafts,
     load_claim_reviews,
     load_reviews,
@@ -28,14 +34,19 @@ from mgc_v05l.execution_core.track_b_canonical_research_workflow import (
     publish_rwf3_artifacts,
     publish_rwf4_artifacts,
     publish_rwf5_artifacts,
+    publish_rwf6_artifacts,
     populate_investigation_evidence,
     reject_claim,
     reject_claim_draft,
     reject_conclusion,
     run_workflow,
     sample_morning_gold_review,
+    session_fingerprint,
+    start_session,
+    transition_session,
     validate_workflow,
     workflow_run_fingerprint,
+    write_session,
 )
 from mgc_v05l.execution_core.track_b_canonical_evidence_engine import attach_evidence_reference, create_evidence, write_evidence
 from mgc_v05l.execution_core.track_b_canonical_investigation_engine import (
@@ -526,6 +537,94 @@ def test_publish_rwf5_artifacts(tmp_path: Path) -> None:
     json.loads(Path(paths["review_schema"]).read_text(encoding="utf-8"))
     sample = json.loads(Path(paths["sample_conclusion_review"]).read_text(encoding="utf-8"))
     assert sample["reviews"][0]["readiness"] == "READY_FOR_REVIEW"
+
+
+def test_rwf6_create_session(tmp_path: Path) -> None:
+    result = create_session(
+        session_id="session_test",
+        title="Session",
+        description="Diagnostic session",
+        session_type="CUSTOM",
+        now=NOW,
+        output_dir=tmp_path / "sessions",
+    )
+
+    assert result.session["session_id"] == "session_test"
+    assert result.session["status"] == "PLANNED"
+    assert result.session["guardrails"] == {"diagnostic_only": True, "production_recommendation": False, "trading_gate": False}
+    assert result.summary["workflow_count"] == 0
+
+
+def test_rwf6_lifecycle_transitions(tmp_path: Path) -> None:
+    session = create_session(session_id="session_life", title="Session", description="Diagnostic session", session_type="CUSTOM", now=NOW, output_dir=tmp_path / "sessions").session
+
+    running = transition_session(session, target_status="RUNNING", now=NOW)
+    complete = transition_session(running, target_status="COMPLETE", now=NOW)
+    archived = transition_session(complete, target_status="ARCHIVED", now=NOW)
+
+    assert running["status"] == "RUNNING"
+    assert complete["status"] == "COMPLETE"
+    assert archived["status"] == "ARCHIVED"
+
+
+def test_rwf6_invalid_transition_rejected(tmp_path: Path) -> None:
+    session = create_session(session_id="session_bad", title="Session", description="Diagnostic session", session_type="CUSTOM", now=NOW, output_dir=tmp_path / "sessions").session
+
+    try:
+        transition_session(session, target_status="COMPLETE", now=NOW)
+    except ValueError as exc:
+        assert "Invalid session transition" in str(exc)
+    else:  # pragma: no cover
+        raise AssertionError("invalid transition should fail")
+
+
+def test_rwf6_attach_workflow_and_investigation(tmp_path: Path) -> None:
+    session = create_session(session_id="session_attach", title="Session", description="Diagnostic session", session_type="CUSTOM", now=NOW, output_dir=tmp_path / "sessions").session
+    session = attach_session_reference(session, reference_type="workflow_run", target_kind="WORKFLOW_RUN", target_id="run_1", target_path=str(tmp_path / "run_1.json"), now=NOW)
+    session = attach_session_reference(session, reference_type="investigation", target_kind="INVESTIGATION", target_id="inv_1", target_path=str(tmp_path / "inv_1.json"), now=NOW)
+
+    refs = session["references"]
+    assert len(refs) == 2
+    assert any((ref.get("metadata") or {}).get("logical_target_kind") == "WORKFLOW_RUN" for ref in refs)
+    assert any(ref.get("target_kind") == "INVESTIGATION" for ref in refs)
+
+
+def test_rwf6_summary_counts(tmp_path: Path) -> None:
+    session = create_session(session_id="session_counts", title="Session", description="Diagnostic session", session_type="CUSTOM", now=NOW, output_dir=tmp_path / "sessions").session
+    session = attach_session_reference(session, reference_type="evidence", target_kind="EVIDENCE", target_id="evidence_1", now=NOW)
+    session = attach_session_reference(session, reference_type="claim_review", target_kind="CLAIM_REVIEW", target_id="review_1", now=NOW)
+    session = attach_session_reference(session, reference_type="conclusion_review", target_kind="CONCLUSION_REVIEW", target_id="review_2", now=NOW)
+    result = write_session(session, output_dir=tmp_path / "sessions")
+
+    assert result.summary["evidence_count"] == 1
+    assert result.summary["review_count"] == 1
+    assert result.summary["conclusion_review_count"] == 1
+
+
+def test_rwf6_fingerprint_stability(tmp_path: Path) -> None:
+    a = create_session(session_id="session_fp", title="Session", description="Diagnostic session", session_type="CUSTOM", now=NOW, output_dir=tmp_path / "a").session
+    b = create_session(session_id="session_fp", title="Session", description="Diagnostic session", session_type="CUSTOM", now=NOW, output_dir=tmp_path / "b").session
+
+    assert session_fingerprint(a) == session_fingerprint(b)
+
+
+def test_rwf6_sample_session_records_missing_optional_warnings(tmp_path: Path) -> None:
+    session = create_sample_morning_gold_session(output_dir=tmp_path, now=NOW)
+
+    assert session["session_id"] == "morning_gold_research_session"
+    assert session["status"] in {"COMPLETE", "COMPLETE_WITH_WARNINGS"}
+    assert session["guardrails"]["diagnostic_only"] is True
+    assert isinstance(session["warnings"], list)
+
+
+def test_publish_rwf6_artifacts(tmp_path: Path) -> None:
+    paths = publish_rwf6_artifacts(output_dir=tmp_path, now=NOW)
+
+    for path in paths.values():
+        assert Path(path).exists()
+    json.loads(Path(paths["session_schema"]).read_text(encoding="utf-8"))
+    sample = json.loads(Path(paths["sample_session"]).read_text(encoding="utf-8"))
+    assert sample["schema_version"] == "rwf6_canonical_research_session_v1"
 
 
 def test_research_workflow_import_boundary() -> None:
