@@ -7,15 +7,22 @@ from pathlib import Path
 
 from mgc_v05l.execution_core.track_b_canonical_research_workflow import (
     accept_claim_draft,
+    activate_claim,
+    claim_review_readiness,
     create_or_locate_investigation,
     create_workflow,
     export_claim_draft_summary,
+    export_claim_review_summary,
     generate_claim_drafts,
+    generate_claim_review_queue,
     load_claim_drafts,
+    load_claim_reviews,
     publish_rwf1_artifacts,
     publish_rwf2_artifacts,
     publish_rwf3_artifacts,
+    publish_rwf4_artifacts,
     populate_investigation_evidence,
+    reject_claim,
     reject_claim_draft,
     run_workflow,
     sample_morning_gold_review,
@@ -28,7 +35,7 @@ from mgc_v05l.execution_core.track_b_canonical_investigation_engine import (
     load_investigation,
     write_investigation,
 )
-from mgc_v05l.execution_core.track_b_canonical_claims_engine import list_claims
+from mgc_v05l.execution_core.track_b_canonical_claims_engine import create_claim, list_claims, load_claim
 
 
 NOW = datetime(2026, 7, 6, 12, 0, tzinfo=UTC)
@@ -86,7 +93,7 @@ def test_run_sample_workflow(tmp_path: Path) -> None:
 
     assert run["workflow_id"] == "morning_gold_review"
     assert run["status"] in {"COMPLETE", "COMPLETE_WITH_WARNINGS"}
-    assert len(run["step_results"]) == 17
+    assert len(run["step_results"]) == 19
     assert any(step["step_type"] == "RUN_SAVED_QUERY" and step["status"] == "COMPLETE" for step in run["step_results"])
     assert any(step["step_type"] == "CREATE_OR_LOCATE_INVESTIGATION" and step["status"] == "COMPLETE" for step in run["step_results"])
     assert any(step["step_type"] == "GENERATE_CLAIM_DRAFTS" and step["status"] == "COMPLETE" for step in run["step_results"])
@@ -326,6 +333,102 @@ def test_publish_rwf3_artifacts(tmp_path: Path) -> None:
     json.loads(Path(paths["sample_drafts"]).read_text(encoding="utf-8"))
 
 
+def test_rwf4_draft_claim_appears_in_review_queue(tmp_path: Path) -> None:
+    claim = _draft_claim_from_accepted_draft(tmp_path)
+
+    reviews = generate_claim_review_queue(investigation_id=claim["investigation_id"], claims_output_dir=tmp_path / "claims", review_output_dir=tmp_path / "reviews", investigation_output_dir=tmp_path / "investigations", now=NOW)
+
+    assert len(reviews) == 1
+    assert reviews[0]["claim_id"] == claim["claim_id"]
+    assert reviews[0]["review_status"] == "PENDING_REVIEW"
+
+
+def test_rwf4_claim_with_no_supporting_evidence_needs_evidence(tmp_path: Path) -> None:
+    create_or_locate_investigation({"workflow_id": "wf", "title": "Review"}, inputs={"investigation_id": "inv_review", "title": "Review"}, output_dir=tmp_path / "investigations", now=NOW)
+    claim = create_claim(
+        investigation_id="inv_review",
+        claim_id="claim_no_support",
+        title="No support",
+        statement="Needs evidence.",
+        rationale="Test.",
+        claim_classification="ANALYTICS",
+        claim_type="review",
+        now=NOW,
+        output_dir=tmp_path / "claims",
+    ).claim
+
+    assert claim_review_readiness(claim) == "NEEDS_EVIDENCE"
+
+
+def test_rwf4_claim_with_valid_supporting_evidence_ready(tmp_path: Path) -> None:
+    claim = _draft_claim_from_accepted_draft(tmp_path)
+
+    assert claim_review_readiness(claim) == "READY_FOR_OPERATOR_REVIEW"
+
+
+def test_rwf4_activation_without_explicit_approval_fails_safely(tmp_path: Path) -> None:
+    claim = _draft_claim_from_accepted_draft(tmp_path)
+
+    try:
+        activate_claim(claim["claim_id"], operator_approved=False, claims_output_dir=tmp_path / "claims", review_output_dir=tmp_path / "reviews", investigation_output_dir=tmp_path / "investigations", now=NOW)
+    except PermissionError as exc:
+        assert "operator_approval_required" in str(exc)
+    else:  # pragma: no cover
+        raise AssertionError("activation should require operator approval")
+    assert load_claim(claim["claim_id"], output_dir=tmp_path / "claims")["status"] == "DRAFT"
+
+
+def test_rwf4_activation_with_approval_changes_draft_to_active(tmp_path: Path) -> None:
+    claim = _draft_claim_from_accepted_draft(tmp_path)
+
+    result = activate_claim(claim["claim_id"], operator_approved=True, claims_output_dir=tmp_path / "claims", review_output_dir=tmp_path / "reviews", investigation_output_dir=tmp_path / "investigations", now=NOW)
+
+    assert result["claim"]["status"] == "ACTIVE"
+    assert result["review"]["review_status"] == "APPROVED_FOR_ACTIVATION"
+    assert not list((tmp_path / "conclusions").glob("*.json")) if (tmp_path / "conclusions").exists() else True
+
+
+def test_rwf4_rejection_does_not_activate_claim(tmp_path: Path) -> None:
+    claim = _draft_claim_from_accepted_draft(tmp_path)
+
+    record = reject_claim(claim["claim_id"], claims_output_dir=tmp_path / "claims", review_output_dir=tmp_path / "reviews", investigation_output_dir=tmp_path / "investigations", now=NOW)
+
+    assert record["review_status"] == "REJECTED"
+    assert load_claim(claim["claim_id"], output_dir=tmp_path / "claims")["status"] == "DRAFT"
+
+
+def test_rwf4_timeline_events_for_activation_and_rejection(tmp_path: Path) -> None:
+    claim = _draft_claim_from_accepted_draft(tmp_path)
+    activate_claim(claim["claim_id"], operator_approved=True, claims_output_dir=tmp_path / "claims", review_output_dir=tmp_path / "reviews", investigation_output_dir=tmp_path / "investigations", now=NOW)
+    investigation = load_investigation(claim["investigation_id"], output_dir=tmp_path / "investigations")
+
+    assert any(event["event_type"] == "CLAIM_ACTIVATED" for event in investigation["timeline"])
+
+    claim_two = _draft_claim_from_accepted_draft(tmp_path, evidence_id="evidence_insight_two")
+    reject_claim(claim_two["claim_id"], claims_output_dir=tmp_path / "claims", review_output_dir=tmp_path / "reviews", investigation_output_dir=tmp_path / "investigations", now=NOW)
+    investigation = load_investigation(claim_two["investigation_id"], output_dir=tmp_path / "investigations")
+    assert any(event["event_type"] == "CLAIM_REJECTED" for event in investigation["timeline"])
+
+
+def test_rwf4_review_summary_guardrails(tmp_path: Path) -> None:
+    claim = _draft_claim_from_accepted_draft(tmp_path)
+    generate_claim_review_queue(investigation_id=claim["investigation_id"], claims_output_dir=tmp_path / "claims", review_output_dir=tmp_path / "reviews", investigation_output_dir=tmp_path / "investigations", now=NOW)
+
+    summary = export_claim_review_summary(investigation_id=claim["investigation_id"], review_output_dir=tmp_path / "reviews")
+
+    assert summary["review_count"] == 1
+    assert summary["guardrails"] == {"diagnostic_only": True, "production_recommendation": False, "trading_gate": False}
+
+
+def test_publish_rwf4_artifacts(tmp_path: Path) -> None:
+    paths = publish_rwf4_artifacts(output_dir=tmp_path, now=NOW)
+
+    for path in paths.values():
+        assert Path(path).exists()
+    json.loads(Path(paths["review_schema"]).read_text(encoding="utf-8"))
+    json.loads(Path(paths["sample_review_queue"]).read_text(encoding="utf-8"))
+
+
 def test_research_workflow_import_boundary() -> None:
     paths = [
         Path("src/mgc_v05l/execution_core/track_b_canonical_research_workflow.py"),
@@ -390,3 +493,10 @@ def _investigation_with_evidence(tmp_path: Path, evidence: dict) -> str:
     )
     write_investigation(investigation, output_dir=tmp_path / "investigations")
     return "inv_rwf3"
+
+
+def _draft_claim_from_accepted_draft(tmp_path: Path, evidence_id: str = "evidence_insight") -> dict:
+    inv_id = _investigation_with_evidence(tmp_path, _evidence_with_source(tmp_path, evidence_id, "INSIGHT", "insight", [{"title": "No meaningful analytics changes"}]))
+    draft = generate_claim_drafts(investigation_id=inv_id, investigation_output_dir=tmp_path / "investigations", evidence_output_dir=tmp_path / "evidence", draft_output_dir=tmp_path / "drafts", now=NOW)[0]
+    result = accept_claim_draft(draft["draft_id"], draft_output_dir=tmp_path / "drafts", evidence_output_dir=tmp_path / "evidence", claims_output_dir=tmp_path / "claims", investigation_output_dir=tmp_path / "investigations", now=NOW)
+    return result["claim"]

@@ -13,14 +13,22 @@ from mgc_v05l.execution_core.track_b_canonical_research_workflow import (
     create_workflow,
     list_workflows,
     accept_claim_draft,
+    activate_claim,
+    claim_review_readiness,
     export_claim_draft_summary,
+    export_claim_review_summary,
     generate_claim_drafts,
+    generate_claim_review_queue,
     load_claim_draft,
     load_claim_drafts,
+    load_claim_review,
+    load_claim_reviews,
     load_workflow,
     publish_rwf1_artifacts,
     publish_rwf2_artifacts,
     publish_rwf3_artifacts,
+    publish_rwf4_artifacts,
+    reject_claim,
     reject_claim_draft,
     run_workflow,
     sample_morning_gold_review,
@@ -95,6 +103,28 @@ def build_parser() -> argparse.ArgumentParser:
     export_drafts.add_argument("--investigation-id", required=True)
 
     subparsers.add_parser("publish-rwf3-artifacts")
+    review_queue = subparsers.add_parser("list-review-queue")
+    review_queue.add_argument("--investigation-id")
+
+    show_review = subparsers.add_parser("show-review")
+    show_review.add_argument("--review-id", required=True)
+
+    validate_review = subparsers.add_parser("validate-claim-for-review")
+    validate_review.add_argument("--claim-id", required=True)
+
+    activate = subparsers.add_parser("activate-claim")
+    activate.add_argument("--claim-id", required=True)
+    activate.add_argument("--reviewer", default="operator")
+    activate.add_argument("--operator-approved", action="store_true")
+
+    reject_claim_cmd = subparsers.add_parser("reject-claim")
+    reject_claim_cmd.add_argument("--claim-id", required=True)
+    reject_claim_cmd.add_argument("--reviewer", default="operator")
+
+    review_summary = subparsers.add_parser("export-review-summary")
+    review_summary.add_argument("--investigation-id", required=True)
+
+    subparsers.add_parser("publish-rwf4-artifacts")
     return parser
 
 
@@ -194,6 +224,37 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 0
     if args.command == "publish-rwf3-artifacts":
         _print(publish_rwf3_artifacts(output_dir=args.output_dir, now=args.now))
+        return 0
+    if args.command == "list-review-queue":
+        if args.investigation_id:
+            generate_claim_review_queue(investigation_id=args.investigation_id, claims_output_dir=args.output_dir / "claims", review_output_dir=args.output_dir / "claim_reviews", investigation_output_dir=args.output_dir / "investigations", now=args.now)
+        _print({"reviews": load_claim_reviews(investigation_id=args.investigation_id, review_output_dir=args.output_dir / "claim_reviews")})
+        return 0
+    if args.command == "show-review":
+        _print(load_claim_review(args.review_id, review_output_dir=args.output_dir / "claim_reviews"))
+        return 0
+    if args.command == "validate-claim-for-review":
+        from mgc_v05l.execution_core.track_b_canonical_claims_engine import load_claim
+
+        claim = load_claim(args.claim_id, output_dir=args.output_dir / "claims")
+        _print({"claim_id": args.claim_id, "readiness": claim_review_readiness(claim), "guardrails": {"diagnostic_only": True, "production_recommendation": False, "trading_gate": False}})
+        return 0
+    if args.command == "activate-claim":
+        if not args.operator_approved:
+            _print({"claim_id": args.claim_id, "status": "FAILED_SAFE", "reason": "operator_approval_required", "guardrails": {"diagnostic_only": True, "production_recommendation": False, "trading_gate": False}})
+            return 2
+        result = activate_claim(args.claim_id, operator_approved=True, reviewer=args.reviewer, claims_output_dir=args.output_dir / "claims", review_output_dir=args.output_dir / "claim_reviews", investigation_output_dir=args.output_dir / "investigations", now=args.now)
+        _print({"claim_id": args.claim_id, "claim_status": result["claim"]["status"], "review_status": result["review"]["review_status"], "guardrails": result["review"]["guardrails"]})
+        return 0
+    if args.command == "reject-claim":
+        record = reject_claim(args.claim_id, reviewer=args.reviewer, claims_output_dir=args.output_dir / "claims", review_output_dir=args.output_dir / "claim_reviews", investigation_output_dir=args.output_dir / "investigations", now=args.now)
+        _print({"claim_id": args.claim_id, "review_status": record["review_status"], "guardrails": record["guardrails"]})
+        return 0
+    if args.command == "export-review-summary":
+        _print(export_claim_review_summary(investigation_id=args.investigation_id, review_output_dir=args.output_dir / "claim_reviews"))
+        return 0
+    if args.command == "publish-rwf4-artifacts":
+        _print(publish_rwf4_artifacts(output_dir=args.output_dir, now=args.now))
         return 0
     raise AssertionError(f"Unhandled command: {args.command}")
 
