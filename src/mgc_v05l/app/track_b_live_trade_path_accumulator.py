@@ -19,12 +19,16 @@ from mgc_v05l.execution_core.track_b_live_trade_path_accumulator import (
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Accumulate and finalize research-only live trade paths.")
-    parser.add_argument("command", choices=["accumulate-open-paths", "finalize-closed-paths", "status", "publish-ra8-artifacts"])
+    parser.add_argument(
+        "command",
+        choices=["accumulate-open-paths", "finalize-closed-paths", "repair-finalized-paths", "status", "publish-ra8-artifacts"],
+    )
     parser.add_argument("--managed-positions-path", type=Path, default=DEFAULT_MANAGED_POSITIONS)
     parser.add_argument("--canonical-records-path", type=Path, default=DEFAULT_CANONICAL_TRADE_RECORDS)
     parser.add_argument("--runtime-candle-root", type=Path, default=DEFAULT_RUNTIME_CANDLE_ROOT)
     parser.add_argument("--output-dir", type=Path, default=DEFAULT_OUTPUT_DIR)
     parser.add_argument("--repair-finalized", action="store_true")
+    parser.add_argument("--finalization-grace-seconds", type=int, default=120)
     parser.add_argument("--now", help="Optional ISO timestamp for deterministic report generation.")
     return parser
 
@@ -37,8 +41,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         runtime_candle_root=args.runtime_candle_root,
         output_dir=args.output_dir,
         accumulate_open_paths=args.command in {"accumulate-open-paths", "publish-ra8-artifacts"},
-        finalize_closed_paths=args.command in {"finalize-closed-paths", "publish-ra8-artifacts"},
-        repair_finalized=args.repair_finalized,
+        finalize_closed_paths=args.command in {"finalize-closed-paths", "repair-finalized-paths", "publish-ra8-artifacts"},
+        repair_finalized=args.repair_finalized or args.command == "repair-finalized-paths",
+        finalization_grace_seconds=args.finalization_grace_seconds,
         now=args.now,
     )
     status = result.status
@@ -52,6 +57,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                 "closed_canonical_record_count": status.get("closed_canonical_record_count"),
                 "accumulated_open_path_updates": status.get("accumulated_open_path_updates"),
                 "newly_finalized_path_count": status.get("newly_finalized_path_count"),
+                "deferred_finalization_count": status.get("deferred_finalization_count"),
+                "repaired_finalized_path_count": status.get("repaired_finalized_path_count"),
                 "complete_finalized_count": status.get("coverage", {}).get("complete_finalized_count"),
                 "partial_entry_missing_count": status.get("coverage", {}).get("partial_entry_missing_count"),
                 "partial_exit_missing_count": status.get("coverage", {}).get("partial_exit_missing_count"),

@@ -8,6 +8,7 @@ from pathlib import Path
 from mgc_v05l.execution_core.track_b_live_trade_path_accumulator import (
     accumulate_open_trade_paths,
     finalize_closed_trade_paths,
+    repair_finalized_trade_paths,
     run_live_trade_path_accumulator,
 )
 
@@ -55,7 +56,7 @@ def test_closed_trade_finalizes_complete_path_and_mfe_mae(tmp_path: Path) -> Non
     _write_candles(root, "GC", [_bar("2026-07-07T12:01:00Z", high=101, low=99), _bar("2026-07-07T12:02:00Z", high=104, low=98)])
     open_rows, _ = accumulate_open_trade_paths([], managed_positions=_managed_positions(), runtime_candle_root=root, generated_at=NOW)
 
-    finalized, count = finalize_closed_trade_paths(
+    finalized, count, deferred = finalize_closed_trade_paths(
         open_rows,
         previous_finalized=[],
         canonical_records=[_closed_record()],
@@ -63,6 +64,7 @@ def test_closed_trade_finalizes_complete_path_and_mfe_mae(tmp_path: Path) -> Non
     )
 
     assert count == 1
+    assert deferred == 0
     assert finalized[0]["path_coverage_status"] == "COMPLETE"
     assert finalized[0]["mfe"] == 4.0
     assert finalized[0]["mae"] == -2.0
@@ -79,11 +81,11 @@ def test_partial_classifications_are_reported() -> None:
             ]
         )
     ]
-    finalized, _ = finalize_closed_trade_paths(open_rows, previous_finalized=[], canonical_records=[_closed_record()], generated_at=NOW)
+    finalized, _, _ = finalize_closed_trade_paths(open_rows, previous_finalized=[], canonical_records=[_closed_record()], generated_at=NOW)
     assert finalized[0]["path_coverage_status"] == "PARTIAL_ENTRY_MISSING"
 
     open_rows = [_open_row([_sample("2026-07-07T12:01:00Z", high=102, low=99)])]
-    finalized, _ = finalize_closed_trade_paths(open_rows, previous_finalized=[], canonical_records=[_closed_record()], generated_at=NOW, repair_finalized=True)
+    finalized, _, _ = finalize_closed_trade_paths(open_rows, previous_finalized=[], canonical_records=[_closed_record()], generated_at=NOW, repair_finalized=True)
     assert finalized[0]["path_coverage_status"] == "PARTIAL_EXIT_MISSING"
 
     open_rows = [
@@ -94,8 +96,77 @@ def test_partial_classifications_are_reported() -> None:
             ]
         )
     ]
-    finalized, _ = finalize_closed_trade_paths(open_rows, previous_finalized=[], canonical_records=[_closed_record(exit_time="2026-07-07T12:05:00Z")], generated_at=NOW, repair_finalized=True)
+    finalized, _, _ = finalize_closed_trade_paths(open_rows, previous_finalized=[], canonical_records=[_closed_record(exit_time="2026-07-07T12:05:00Z")], generated_at=NOW, repair_finalized=True)
     assert finalized[0]["path_coverage_status"] == "PARTIAL_INTERNAL_GAP"
+
+
+def test_finalization_waits_when_exit_sample_missing_inside_grace_window() -> None:
+    open_rows = [_open_row([_sample("2026-07-07T12:01:00Z", high=102, low=99)])]
+    finalized, count, deferred = finalize_closed_trade_paths(
+        open_rows,
+        previous_finalized=[],
+        canonical_records=[_closed_record(exit_time="2026-07-07T12:02:00Z")],
+        generated_at=datetime(2026, 7, 7, 12, 2, 30, tzinfo=UTC),
+        finalization_grace_seconds=120,
+    )
+
+    assert finalized == []
+    assert count == 0
+    assert deferred == 1
+
+
+def test_finalizes_complete_when_exit_sample_arrives_after_grace_wait() -> None:
+    open_rows = [_open_row([_sample("2026-07-07T12:01:00Z", high=102, low=99), _sample("2026-07-07T12:02:00Z", high=104, low=98)])]
+    finalized, count, deferred = finalize_closed_trade_paths(
+        open_rows,
+        previous_finalized=[],
+        canonical_records=[_closed_record(exit_time="2026-07-07T12:02:00Z")],
+        generated_at=datetime(2026, 7, 7, 12, 2, 30, tzinfo=UTC),
+        finalization_grace_seconds=120,
+    )
+
+    assert count == 1
+    assert deferred == 0
+    assert finalized[0]["path_coverage_status"] == "COMPLETE"
+
+
+def test_finalizes_partial_exit_missing_after_grace_expires() -> None:
+    open_rows = [_open_row([_sample("2026-07-07T12:01:00Z", high=102, low=99)])]
+    finalized, count, deferred = finalize_closed_trade_paths(
+        open_rows,
+        previous_finalized=[],
+        canonical_records=[_closed_record(exit_time="2026-07-07T12:02:00Z")],
+        generated_at=datetime(2026, 7, 7, 12, 5, 0, tzinfo=UTC),
+        finalization_grace_seconds=120,
+    )
+
+    assert count == 1
+    assert deferred == 0
+    assert finalized[0]["path_coverage_status"] == "PARTIAL_EXIT_MISSING"
+
+
+def test_repair_mode_can_complete_recent_partial_path_when_sample_available(tmp_path: Path) -> None:
+    root = tmp_path / "candles"
+    _write_candles(root, "GC", [_bar("2026-07-07T12:01:00Z", high=102, low=99), _bar("2026-07-07T12:02:00Z", high=104, low=98)])
+    finalized = [
+        {
+            **_open_row([_sample("2026-07-07T12:01:00Z", high=102, low=99)]),
+            "schema_version": "ra8_finalized_trade_path_capture_v1",
+            "instrument": "GC",
+            "exit_time": "2026-07-07T12:02:00Z",
+            "path_coverage_status": "PARTIAL_EXIT_MISSING",
+            "path_sample_count": 1,
+            "path_start_timestamp": "2026-07-07T12:00:00+00:00",
+            "path_end_timestamp": "2026-07-07T12:01:00+00:00",
+        }
+    ]
+
+    repaired, repaired_count = repair_finalized_trade_paths(finalized, runtime_candle_root=root, generated_at=NOW)
+
+    assert repaired_count == 1
+    assert repaired[0]["path_coverage_status"] == "COMPLETE"
+    assert repaired[0]["path_sample_count"] == 2
+    assert repaired[0]["repair_status"] == "REPAIRED_WITH_RUNTIME_CANDLES"
 
 
 def test_run_writes_json_jsonl_and_reports(tmp_path: Path) -> None:

@@ -28,12 +28,16 @@ FINALIZED_CAPTURE_JSONL = "finalized_trade_path_capture.jsonl"
 STATUS_JSON = "ra8_path_accumulator_status.json"
 CONTRACT_MD = "ra8_path_accumulator_contract.md"
 FINALIZATION_MD = "ra8_path_finalization_report.md"
+GRACE_DIAGNOSIS_MD = "ra8b_finalization_grace_diagnosis.md"
+GRACE_CONTRACT_MD = "ra8b_finalization_grace_contract.md"
+REPAIR_REPORT_MD = "ra8b_repair_report.md"
 
 OPEN_SCHEMA_VERSION = "ra8_open_trade_path_accumulator_v1"
 FINALIZED_SCHEMA_VERSION = "ra8_finalized_trade_path_capture_v1"
 STATUS_SCHEMA_VERSION = "ra8_path_accumulator_status_v1"
 
 MAX_INTERNAL_GAP_SECONDS = 90
+DEFAULT_FINALIZATION_GRACE_SECONDS = 120
 
 
 @dataclass(frozen=True)
@@ -46,6 +50,9 @@ class LiveTradePathAccumulatorResult:
     status_path: Path
     contract_path: Path
     finalization_report_path: Path
+    grace_diagnosis_path: Path
+    grace_contract_path: Path
+    repair_report_path: Path
 
 
 def run_live_trade_path_accumulator(
@@ -57,6 +64,7 @@ def run_live_trade_path_accumulator(
     accumulate_open_paths: bool = True,
     finalize_closed_paths: bool = True,
     repair_finalized: bool = False,
+    finalization_grace_seconds: int = DEFAULT_FINALIZATION_GRACE_SECONDS,
     now: datetime | str | None = None,
 ) -> LiveTradePathAccumulatorResult:
     generated_at = _coerce_now(now)
@@ -66,6 +74,9 @@ def run_live_trade_path_accumulator(
     status_path = output_dir / STATUS_JSON
     contract_path = output_dir / CONTRACT_MD
     finalization_report_path = output_dir / FINALIZATION_MD
+    grace_diagnosis_path = output_dir / GRACE_DIAGNOSIS_MD
+    grace_contract_path = output_dir / GRACE_CONTRACT_MD
+    repair_report_path = output_dir / REPAIR_REPORT_MD
 
     previous_open = _read_jsonl(open_path)
     previous_finalized = _read_jsonl(finalized_path)
@@ -88,17 +99,26 @@ def run_live_trade_path_accumulator(
 
     finalized_rows = previous_finalized
     finalized_count = 0
+    deferred_count = 0
     if finalize_closed_paths:
-        finalized_rows, finalized_count = finalize_closed_trade_paths(
+        finalized_rows, finalized_count, deferred_count = finalize_closed_trade_paths(
             open_rows,
             previous_finalized=previous_finalized,
             canonical_records=canonical_records,
             generated_at=generated_at,
             repair_finalized=repair_finalized,
+            finalization_grace_seconds=finalization_grace_seconds,
             source_paths={
                 "canonical_trade_records": canonical_records_path,
                 "open_trade_path_accumulator": open_path,
             },
+        )
+    repaired_count = 0
+    if repair_finalized:
+        finalized_rows, repaired_count = repair_finalized_trade_paths(
+            finalized_rows,
+            runtime_candle_root=runtime_candle_root,
+            generated_at=generated_at,
         )
 
     status = build_path_accumulator_status(
@@ -108,6 +128,9 @@ def run_live_trade_path_accumulator(
         generated_at=generated_at,
         accumulated_count=accumulated_count,
         finalized_count=finalized_count,
+        deferred_count=deferred_count,
+        repaired_count=repaired_count,
+        finalization_grace_seconds=finalization_grace_seconds,
         source_paths={
             "managed_positions": managed_positions_path,
             "canonical_trade_records": canonical_records_path,
@@ -122,6 +145,9 @@ def run_live_trade_path_accumulator(
     _write_json(status_path, status)
     contract_path.write_text(render_contract_markdown(), encoding="utf-8")
     finalization_report_path.write_text(render_finalization_report(status), encoding="utf-8")
+    grace_diagnosis_path.write_text(render_grace_diagnosis(status, finalized_rows), encoding="utf-8")
+    grace_contract_path.write_text(render_grace_contract(finalization_grace_seconds), encoding="utf-8")
+    repair_report_path.write_text(render_repair_report(status), encoding="utf-8")
     return LiveTradePathAccumulatorResult(
         open_rows=open_rows,
         finalized_rows=finalized_rows,
@@ -131,6 +157,9 @@ def run_live_trade_path_accumulator(
         status_path=status_path,
         contract_path=contract_path,
         finalization_report_path=finalization_report_path,
+        grace_diagnosis_path=grace_diagnosis_path,
+        grace_contract_path=grace_contract_path,
+        repair_report_path=repair_report_path,
     )
 
 
@@ -183,8 +212,9 @@ def finalize_closed_trade_paths(
     canonical_records: Sequence[Mapping[str, Any]],
     generated_at: datetime,
     repair_finalized: bool = False,
+    finalization_grace_seconds: int = DEFAULT_FINALIZATION_GRACE_SECONDS,
     source_paths: Mapping[str, Path | str] | None = None,
-) -> tuple[list[dict[str, Any]], int]:
+) -> tuple[list[dict[str, Any]], int, int]:
     finalized_by_key = {
         str(row.get("accumulator_key") or row.get("source_trade_id") or row.get("canonical_trade_record_id")): dict(row)
         for row in previous_finalized
@@ -192,22 +222,86 @@ def finalize_closed_trade_paths(
     }
     open_index = _OpenAccumulatorIndex(open_rows)
     finalized_count = 0
+    deferred_count = 0
     for record in _closed_canonical_records(canonical_records):
         open_row = open_index.find(record)
         if not open_row:
             continue
         key = str(open_row.get("accumulator_key") or _closed_record_key(record))
-        if key in finalized_by_key and not repair_finalized:
+        was_existing = key in finalized_by_key
+        if was_existing and not repair_finalized:
             continue
-        finalized_by_key[key] = _finalized_from_open_and_record(
+        candidate = _finalized_from_open_and_record(
             open_row=open_row,
             record=record,
             generated_at=generated_at,
             source_paths=source_paths or {},
         )
-        finalized_count += 1
+        if (
+            candidate.get("path_coverage_status") == "PARTIAL_EXIT_MISSING"
+            and _within_finalization_grace(candidate, generated_at=generated_at, finalization_grace_seconds=finalization_grace_seconds)
+        ):
+            deferred_count += 1
+            continue
+        finalized_by_key[key] = candidate
+        if not was_existing:
+            finalized_count += 1
     rows = sorted(finalized_by_key.values(), key=lambda row: (str(row.get("exit_time") or ""), str(row.get("accumulator_key") or "")))
-    return rows, finalized_count
+    return rows, finalized_count, deferred_count
+
+
+def repair_finalized_trade_paths(
+    finalized_rows: Sequence[Mapping[str, Any]],
+    *,
+    runtime_candle_root: Path,
+    generated_at: datetime,
+) -> tuple[list[dict[str, Any]], int]:
+    rows: list[dict[str, Any]] = []
+    repaired_count = 0
+    for row in finalized_rows:
+        repaired = dict(row)
+        if row.get("path_coverage_status") == "PARTIAL_EXIT_MISSING":
+            instrument = str(row.get("instrument") or "").upper()
+            candle_payload = _read_json(runtime_candle_root / instrument / "1m" / "latest_runtime_candles.json")
+            trailing = _samples_for_closed_trade(candle_payload.get("bars") or [], row)
+            merged = _merge_samples(row.get("path_samples") or [], trailing)
+            if len(merged) > len(row.get("path_samples") or []):
+                repaired.update(
+                    {
+                        "path_samples": merged,
+                        "path_sample_count": len(merged),
+                        "path_start_timestamp": _sample_start(merged),
+                        "path_end_timestamp": _sample_end(merged),
+                        "path_coverage_status": _coverage_status(
+                            entry_time=row.get("entry_time"),
+                            exit_time=row.get("exit_time"),
+                            samples=merged,
+                        ),
+                        "repair_status": "REPAIRED_WITH_RUNTIME_CANDLES",
+                        "repaired_at": generated_at.isoformat(),
+                    }
+                )
+                metrics = _path_metrics(samples=merged, side=str(row.get("side") or ""), entry_price=_float_or_none(row.get("entry_price")))
+                repaired.update(
+                    {
+                        "mfe": metrics.get("mfe"),
+                        "mae": metrics.get("mae"),
+                        "mfe_timestamp": metrics.get("mfe_timestamp"),
+                        "mae_timestamp": metrics.get("mae_timestamp"),
+                        "counterfactual_ready": {
+                            "timebox": repaired.get("path_coverage_status") == "COMPLETE",
+                            "trailing": repaired.get("path_coverage_status") == "COMPLETE"
+                            and metrics.get("mfe") is not None
+                            and metrics.get("mae") is not None,
+                            "vwap_avwap": False,
+                            "atr": False,
+                        },
+                    }
+                )
+                repaired["deterministic_fingerprint"] = _fingerprint(_fingerprint_payload(repaired))
+                repaired_count += 1
+        rows.append(repaired)
+    return sorted(rows, key=lambda item: (str(item.get("exit_time") or ""), str(item.get("accumulator_key") or ""))), repaired_count
 
 
 def build_path_accumulator_status(
@@ -218,6 +312,9 @@ def build_path_accumulator_status(
     generated_at: datetime,
     accumulated_count: int = 0,
     finalized_count: int = 0,
+    deferred_count: int = 0,
+    repaired_count: int = 0,
+    finalization_grace_seconds: int = DEFAULT_FINALIZATION_GRACE_SECONDS,
     source_paths: Mapping[str, Path | str] | None = None,
 ) -> dict[str, Any]:
     closed_count = len(_closed_canonical_records(canonical_records))
@@ -234,6 +331,9 @@ def build_path_accumulator_status(
         "closed_canonical_record_count": closed_count,
         "accumulated_open_path_updates": accumulated_count,
         "newly_finalized_path_count": finalized_count,
+        "deferred_finalization_count": deferred_count,
+        "repaired_finalized_path_count": repaired_count,
+        "finalization_grace_seconds": finalization_grace_seconds,
         "coverage": {
             "complete_finalized_count": sum(1 for row in finalized_rows if row.get("path_coverage_status") == "COMPLETE"),
             "partial_entry_missing_count": sum(1 for row in finalized_rows if row.get("path_coverage_status") == "PARTIAL_ENTRY_MISSING"),
@@ -336,6 +436,38 @@ def _samples_for_trade(bars: Sequence[Any], trade: Mapping[str, Any]) -> list[di
         if end is None:
             continue
         if end < entry:
+            continue
+        samples.append(
+            {
+                "bar_start": start.isoformat() if start else None,
+                "bar_end": end.isoformat(),
+                "open": _float_or_none(bar.get("open")),
+                "high": _float_or_none(bar.get("high")),
+                "low": _float_or_none(bar.get("low")),
+                "close": _float_or_none(bar.get("close")),
+                "volume": _float_or_none(bar.get("volume")),
+                "completed": bool(bar.get("completed", True)),
+            }
+        )
+    return samples
+
+
+def _samples_for_closed_trade(bars: Sequence[Any], trade: Mapping[str, Any]) -> list[dict[str, Any]]:
+    entry = _parse_ts(trade.get("entry_time"))
+    exit_ts = _parse_ts(trade.get("exit_time"))
+    if entry is None or exit_ts is None:
+        return []
+    samples: list[dict[str, Any]] = []
+    for bar in bars:
+        if not isinstance(bar, Mapping):
+            continue
+        start = _parse_ts(bar.get("bar_start"))
+        end = _parse_ts(bar.get("bar_end"))
+        if end is None:
+            continue
+        if end < entry:
+            continue
+        if start is not None and start > exit_ts:
             continue
         samples.append(
             {
@@ -496,6 +628,18 @@ def _coverage_status(*, entry_time: Any, exit_time: Any, samples: Sequence[Mappi
     return "COMPLETE"
 
 
+def _within_finalization_grace(
+    row: Mapping[str, Any],
+    *,
+    generated_at: datetime,
+    finalization_grace_seconds: int,
+) -> bool:
+    exit_ts = _parse_ts(row.get("exit_time"))
+    if exit_ts is None:
+        return False
+    return (generated_at - exit_ts).total_seconds() < finalization_grace_seconds
+
+
 def _has_internal_gap(samples: Sequence[Mapping[str, Any]]) -> bool:
     previous_end: datetime | None = None
     for sample in samples:
@@ -571,6 +715,8 @@ def render_finalization_report(status: Mapping[str, Any]) -> str:
             f"- Open accumulator rows: `{status.get('open_accumulator_count')}`",
             f"- Finalized path rows: `{status.get('finalized_path_count')}`",
             f"- Newly finalized paths: `{status.get('newly_finalized_path_count')}`",
+            f"- Deferred finalizations: `{status.get('deferred_finalization_count')}`",
+            f"- Repaired finalized paths: `{status.get('repaired_finalized_path_count')}`",
             f"- Complete finalized paths: `{coverage.get('complete_finalized_count')}`",
             f"- Partial entry missing: `{coverage.get('partial_entry_missing_count')}`",
             f"- Partial exit missing: `{coverage.get('partial_exit_missing_count')}`",
@@ -579,6 +725,63 @@ def render_finalization_report(status: Mapping[str, Any]) -> str:
             f"- Trailing ready: `{readiness.get('trailing_ready_count')}`",
             "",
             "Diagnostic only. No production recommendation or trading gate is emitted.",
+        ]
+    ) + "\n"
+
+
+def render_grace_diagnosis(status: Mapping[str, Any], finalized_rows: Sequence[Mapping[str, Any]]) -> str:
+    partial_exit = [row for row in finalized_rows if row.get("path_coverage_status") == "PARTIAL_EXIT_MISSING"]
+    lines = [
+        "# RA8B Finalization Grace Diagnosis",
+        "",
+        f"- Finalization grace seconds: `{status.get('finalization_grace_seconds')}`",
+        f"- Deferred finalizations: `{status.get('deferred_finalization_count')}`",
+        f"- Existing partial-exit finalized paths: `{len(partial_exit)}`",
+        "",
+    ]
+    for row in partial_exit[:10]:
+        exit_ts = _parse_ts(row.get("exit_time"))
+        end = _parse_ts(row.get("path_end_timestamp"))
+        gap = (exit_ts - end).total_seconds() if exit_ts and end else None
+        lines.extend(
+            [
+                f"## {row.get('source_trade_id')}",
+                "",
+                f"- Instrument: `{row.get('instrument')}`",
+                f"- Entry: `{row.get('entry_time')}`",
+                f"- Exit: `{row.get('exit_time')}`",
+                f"- Last retained sample: `{row.get('path_end_timestamp')}`",
+                f"- Exit minus last sample seconds: `{gap}`",
+                "",
+            ]
+        )
+    return "\n".join(lines) + "\n"
+
+
+def render_grace_contract(finalization_grace_seconds: int) -> str:
+    return f"""# RA8B Finalization Grace Contract
+
+Closed trades whose accumulated path is missing only the exit candle are not
+finalized immediately. Finalization is deferred until either:
+
+- retained samples cover the exit timestamp, or
+- `{finalization_grace_seconds}` seconds have elapsed after the exit timestamp.
+
+Existing finalized records remain idempotent. Repair requires explicit
+`repair-finalized-paths` or `--repair-finalized`.
+"""
+
+
+def render_repair_report(status: Mapping[str, Any]) -> str:
+    return "\n".join(
+        [
+            "# RA8B Repair Report",
+            "",
+            f"- Repaired finalized paths: `{status.get('repaired_finalized_path_count')}`",
+            f"- Complete finalized paths: `{status.get('coverage', {}).get('complete_finalized_count')}`",
+            f"- Partial exit missing paths: `{status.get('coverage', {}).get('partial_exit_missing_count')}`",
+            "",
+            "Repair is explicit and diagnostic-only.",
         ]
     ) + "\n"
 
