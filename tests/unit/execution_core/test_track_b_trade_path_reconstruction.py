@@ -8,6 +8,7 @@ from pathlib import Path
 from mgc_v05l.execution_core.track_b_trade_path_reconstruction import (
     build_trade_path_reconstruction_summary,
     build_trade_path_reconstructions,
+    merge_retained_path_captures,
     run_trade_path_reconstruction,
 )
 
@@ -86,6 +87,35 @@ def test_summary_reports_coverage_and_lane_readiness() -> None:
     assert summary["lane_path_coverage"][0]["lane_id"] == "lane_a"
 
 
+def test_retained_path_capture_is_reused_when_current_replay_missing() -> None:
+    first = build_trade_path_reconstructions(
+        [_outcome("t1")],
+        replay_rows=[_replay("t1")],
+        generated_at=NOW,
+    )
+    retained = merge_retained_path_captures([], first, generated_at=NOW)
+    second = build_trade_path_reconstructions(
+        [_outcome("t1")],
+        retained_path_rows=retained,
+        generated_at=NOW,
+    )
+
+    assert len(retained) == 1
+    assert second[0]["entry_to_exit_path_status"] == "AVAILABLE"
+    assert second[0]["entry_to_exit_path_source"] == "RETAINED_CAPTURE"
+    assert second[0]["mfe_points"] == 5.0
+
+
+def test_retained_path_capture_is_idempotent() -> None:
+    rows = build_trade_path_reconstructions([_outcome("t1")], replay_rows=[_replay("t1")], generated_at=NOW)
+    first = merge_retained_path_captures([], rows, generated_at=NOW)
+    second = merge_retained_path_captures(first, rows, generated_at=NOW)
+
+    assert len(first) == 1
+    assert len(second) == 1
+    assert first[0]["deterministic_fingerprint"] == second[0]["deterministic_fingerprint"]
+
+
 def test_run_writes_json_and_jsonl(tmp_path: Path) -> None:
     outcomes = tmp_path / "outcomes.jsonl"
     replay = tmp_path / "replay.jsonl"
@@ -104,6 +134,7 @@ def test_run_writes_json_and_jsonl(tmp_path: Path) -> None:
 
     assert json.loads(result.summary_json_path.read_text())["schema_version"] == "trade_path_reconstruction_summary_v1"
     assert len([json.loads(line) for line in result.path_jsonl_path.read_text().splitlines() if line.strip()]) == 1
+    assert len([json.loads(line) for line in result.retained_path_capture_path.read_text().splitlines() if line.strip()]) == 1
 
 
 def test_import_boundary() -> None:

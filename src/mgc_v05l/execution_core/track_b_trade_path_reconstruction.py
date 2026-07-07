@@ -36,6 +36,7 @@ CONTRACT_MD = "trade_path_reconstruction_contract.md"
 EXCURSION_MD = "excursion_capture_coverage.md"
 FORWARD_MD = "post_exit_forward_path_report.md"
 READINESS_MD = "counterfactual_readiness_report.md"
+RETAINED_PATH_JSONL = "retained_trade_path_capture.jsonl"
 
 SCHEMA_VERSION = "canonical_trade_path_reconstruction_v1"
 SUMMARY_SCHEMA_VERSION = "trade_path_reconstruction_summary_v1"
@@ -53,6 +54,7 @@ class TradePathReconstructionResult:
     excursion_report_path: Path
     forward_report_path: Path
     readiness_report_path: Path
+    retained_path_capture_path: Path
 
 
 def run_trade_path_reconstruction(
@@ -64,30 +66,37 @@ def run_trade_path_reconstruction(
     now: datetime | str | None = None,
 ) -> TradePathReconstructionResult:
     generated_at = _coerce_now(now)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    retained_path_capture_path = output_dir / RETAINED_PATH_JSONL
     outcomes = _read_jsonl(outcomes_path)
     replay_rows = _read_jsonl(side_session_replay_path)
     forward_rows = _read_jsonl(forward_capture_path)
+    retained_rows = _read_jsonl(retained_path_capture_path)
     rows = build_trade_path_reconstructions(
         outcomes,
         replay_rows=replay_rows,
         forward_capture_rows=forward_rows,
+        retained_path_rows=retained_rows,
         generated_at=generated_at,
         source_paths={
             "ctol": outcomes_path,
             "side_session_replay": side_session_replay_path,
             "forward_path_capture": forward_capture_path,
+            "retained_trade_path_capture": retained_path_capture_path,
         },
     )
+    retained = merge_retained_path_captures(retained_rows, rows, generated_at=generated_at)
     summary = build_trade_path_reconstruction_summary(
         rows,
+        retained_path_rows=retained,
         generated_at=generated_at,
         source_paths={
             "ctol": outcomes_path,
             "side_session_replay": side_session_replay_path,
             "forward_path_capture": forward_capture_path,
+            "retained_trade_path_capture": retained_path_capture_path,
         },
     )
-    output_dir.mkdir(parents=True, exist_ok=True)
     path_jsonl_path = output_dir / PATH_JSONL
     summary_json_path = output_dir / SUMMARY_JSON
     summary_markdown_path = output_dir / SUMMARY_MD
@@ -96,6 +105,7 @@ def run_trade_path_reconstruction(
     forward_report_path = output_dir / FORWARD_MD
     readiness_report_path = output_dir / READINESS_MD
     _write_jsonl(path_jsonl_path, rows)
+    _write_jsonl(retained_path_capture_path, retained)
     _write_json(summary_json_path, summary)
     summary_markdown_path.write_text(render_summary_markdown(summary), encoding="utf-8")
     contract_path.write_text(render_contract_markdown(), encoding="utf-8")
@@ -112,6 +122,7 @@ def run_trade_path_reconstruction(
         excursion_report_path=excursion_report_path,
         forward_report_path=forward_report_path,
         readiness_report_path=readiness_report_path,
+        retained_path_capture_path=retained_path_capture_path,
     )
 
 
@@ -120,17 +131,25 @@ def build_trade_path_reconstructions(
     *,
     replay_rows: Sequence[Mapping[str, Any]] = (),
     forward_capture_rows: Sequence[Mapping[str, Any]] = (),
+    retained_path_rows: Sequence[Mapping[str, Any]] = (),
     generated_at: datetime,
     source_paths: Mapping[str, Path | str] | None = None,
 ) -> list[dict[str, Any]]:
     replay_index = _ReplayIndex(replay_rows)
     forward_index = _ForwardCaptureIndex(forward_capture_rows)
+    retained_index = _RetainedPathIndex(retained_path_rows)
     rows: list[dict[str, Any]] = []
     for outcome in outcomes:
         replay = replay_index.find(outcome)
-        entry_path = _normalized_entry_path(replay)
-        entry_metrics = _entry_path_metrics(outcome=outcome, entry_path=entry_path, replay=replay)
-        post_exit = _post_exit_windows(outcome=outcome, forward_index=forward_index)
+        retained = retained_index.find(outcome)
+        current_entry_path = _normalized_entry_path(replay)
+        retained_entry_path = _retained_entry_path(retained)
+        entry_path = current_entry_path or retained_entry_path
+        path_source = "CURRENT_REPLAY" if current_entry_path else "RETAINED_CAPTURE" if retained_entry_path else "MISSING"
+        entry_metrics = _entry_path_metrics(outcome=outcome, entry_path=entry_path, replay=replay, retained=retained)
+        current_post_exit = _post_exit_windows(outcome=outcome, forward_index=forward_index)
+        retained_post_exit = retained.get("post_exit_forward_windows") if isinstance(retained.get("post_exit_forward_windows"), Mapping) else {}
+        post_exit = _merge_post_exit_windows(current=current_post_exit, retained=retained_post_exit)
         readiness = _counterfactual_readiness(entry_path=entry_path, entry_metrics=entry_metrics, post_exit=post_exit)
         row = {
             "schema_version": SCHEMA_VERSION,
@@ -151,6 +170,7 @@ def build_trade_path_reconstructions(
             "realized_pnl_proxy": outcome.get("realized_pnl_proxy"),
             "realized_points": outcome.get("realized_points"),
             "entry_to_exit_path_status": "AVAILABLE" if entry_path else "MISSING",
+            "entry_to_exit_path_source": path_source,
             "entry_to_exit_path_bar_count": len(entry_path),
             "entry_to_exit_path": entry_path,
             "mfe_points": entry_metrics.get("mfe_points"),
@@ -167,6 +187,7 @@ def build_trade_path_reconstructions(
                 "ctol_trade_outcome_id": outcome.get("trade_outcome_id"),
                 "replay_trade_id": replay.get("trade_id") if replay else None,
                 "replay_candle_source": replay.get("candle_source") if replay else None,
+                "retained_capture_id": retained.get("retained_path_capture_id") if retained else None,
                 "source_paths": {key: str(value) for key, value in (source_paths or {}).items()},
             },
             "diagnostic_only": True,
@@ -182,6 +203,7 @@ def build_trade_path_reconstructions(
 def build_trade_path_reconstruction_summary(
     rows: Sequence[Mapping[str, Any]],
     *,
+    retained_path_rows: Sequence[Mapping[str, Any]] = (),
     generated_at: datetime,
     source_paths: Mapping[str, Path | str] | None = None,
 ) -> dict[str, Any]:
@@ -213,10 +235,14 @@ def build_trade_path_reconstruction_summary(
             "gave_back_count": sum(1 for row in rows if row.get("profitable_before_exit_but_gave_back") is True),
             "timebox_counterfactual_ready_count": sum(1 for row in rows if row.get("counterfactual_readiness", {}).get("timebox_grid") == "READY"),
             "trailing_exit_ready_count": sum(1 for row in rows if row.get("counterfactual_readiness", {}).get("trailing_exit") == "READY"),
+            "retained_path_capture_count": len(retained_path_rows),
+            "current_replay_path_count": sum(1 for row in rows if row.get("entry_to_exit_path_source") == "CURRENT_REPLAY"),
+            "retained_reused_path_count": sum(1 for row in rows if row.get("entry_to_exit_path_source") == "RETAINED_CAPTURE"),
             "post_exit_forward_coverage": {key: _rate(value, total) for key, value in forward_coverage.items()},
         },
         "distributions": {
             "entry_to_exit_path_status": _counts(row.get("entry_to_exit_path_status") for row in rows),
+            "entry_to_exit_path_source": _counts(row.get("entry_to_exit_path_source") for row in rows),
             "counterfactual_timebox_grid": _counts(row.get("counterfactual_readiness", {}).get("timebox_grid") for row in rows),
             "data_quality_flags": _counts(flag for row in rows for flag in row.get("data_quality_flags", [])),
             "instrument": _counts(row.get("instrument") for row in rows),
@@ -227,10 +253,61 @@ def build_trade_path_reconstruction_summary(
         "post_exit_forward_availability": forward_coverage,
         "next_steps": [
             "Populate timestamped in-trade candle paths for all closed trades from historical Parquet/backfill sources.",
-            "Persist post-exit forward windows by trade, not only symbol snapshots.",
+            "Run this retention layer after CTOL/CTOE refresh so currently available rolling candle paths are captured before overwrite.",
             "Feed this artifact into RA4 so timebox grids, trailing exits, ATR exits, and VWAP/AVWAP exits become testable.",
         ],
     }
+
+
+def merge_retained_path_captures(
+    existing_rows: Sequence[Mapping[str, Any]],
+    reconstructed_rows: Sequence[Mapping[str, Any]],
+    *,
+    generated_at: datetime,
+) -> list[dict[str, Any]]:
+    retained: dict[str, dict[str, Any]] = {}
+    for row in existing_rows:
+        key = str(row.get("source_trade_id") or row.get("trade_outcome_id") or "")
+        if key:
+            retained[key] = dict(row)
+    for row in reconstructed_rows:
+        if row.get("entry_to_exit_path_status") != "AVAILABLE":
+            continue
+        key = str(row.get("source_trade_id") or row.get("trade_outcome_id") or "")
+        if not key:
+            continue
+        retained[key] = _retained_capture_from_reconstruction(row, generated_at=generated_at)
+    return sorted(retained.values(), key=lambda row: (str(row.get("exit_time") or ""), str(row.get("source_trade_id") or row.get("trade_outcome_id") or "")))
+
+
+def _retained_capture_from_reconstruction(row: Mapping[str, Any], *, generated_at: datetime) -> dict[str, Any]:
+    payload = {
+        "schema_version": "retained_trade_path_capture_v1",
+        "retained_path_capture_id": _stable_id("retained_trade_path", row.get("source_trade_id"), row.get("trade_outcome_id"), row.get("entry_time"), row.get("exit_time")),
+        "captured_at": generated_at.isoformat(),
+        "trade_outcome_id": row.get("trade_outcome_id"),
+        "source_trade_id": row.get("source_trade_id"),
+        "lane_id": row.get("lane_id"),
+        "instrument": row.get("instrument"),
+        "contract": row.get("contract"),
+        "side": row.get("side"),
+        "entry_time": row.get("entry_time"),
+        "exit_time": row.get("exit_time"),
+        "entry_price": row.get("entry_price"),
+        "exit_price": row.get("exit_price"),
+        "entry_to_exit_path": row.get("entry_to_exit_path", []),
+        "mfe_points": row.get("mfe_points"),
+        "mae_points": row.get("mae_points"),
+        "time_to_mfe_seconds": row.get("time_to_mfe_seconds"),
+        "time_to_mae_seconds": row.get("time_to_mae_seconds"),
+        "post_exit_forward_windows": row.get("post_exit_forward_windows", {}),
+        "source_refs": row.get("source_refs", {}),
+        "diagnostic_only": True,
+        "production_recommendation": False,
+        "trading_gate": False,
+    }
+    payload["deterministic_fingerprint"] = _fingerprint({k: v for k, v in payload.items() if k not in {"captured_at", "deterministic_fingerprint"}})
+    return payload
 
 
 class _ReplayIndex:
@@ -260,6 +337,29 @@ class _ReplayIndex:
             str(outcome.get("lane_id") or ""),
         )
         return self._by_tuple.get(key, {})
+
+
+class _RetainedPathIndex:
+    def __init__(self, rows: Sequence[Mapping[str, Any]]) -> None:
+        self._by_source_trade_id = {
+            str(row.get("source_trade_id")): row
+            for row in rows
+            if row.get("source_trade_id")
+        }
+        self._by_outcome_id = {
+            str(row.get("trade_outcome_id")): row
+            for row in rows
+            if row.get("trade_outcome_id")
+        }
+
+    def find(self, outcome: Mapping[str, Any]) -> Mapping[str, Any]:
+        source_trade_id = _source_trade_id(outcome)
+        if source_trade_id and source_trade_id in self._by_source_trade_id:
+            return self._by_source_trade_id[source_trade_id]
+        outcome_id = str(outcome.get("trade_outcome_id") or "")
+        if outcome_id and outcome_id in self._by_outcome_id:
+            return self._by_outcome_id[outcome_id]
+        return {}
 
 
 class _ForwardCaptureIndex:
@@ -316,7 +416,13 @@ def _normalized_entry_path(replay: Mapping[str, Any]) -> list[dict[str, Any]]:
     return normalized
 
 
-def _entry_path_metrics(*, outcome: Mapping[str, Any], entry_path: Sequence[Mapping[str, Any]], replay: Mapping[str, Any]) -> dict[str, Any]:
+def _entry_path_metrics(
+    *,
+    outcome: Mapping[str, Any],
+    entry_path: Sequence[Mapping[str, Any]],
+    replay: Mapping[str, Any],
+    retained: Mapping[str, Any],
+) -> dict[str, Any]:
     if not entry_path:
         return {
             "mfe_points": None,
@@ -329,8 +435,8 @@ def _entry_path_metrics(*, outcome: Mapping[str, Any], entry_path: Sequence[Mapp
         }
     mfe = max((_float_or_none(row.get("favorable_excursion_points")) for row in entry_path), default=None)
     mae = min((_float_or_none(row.get("adverse_excursion_points")) for row in entry_path), default=None)
-    time_to_mfe = replay.get("time_to_mfe_seconds")
-    time_to_mae = replay.get("time_to_mae_seconds")
+    time_to_mfe = replay.get("time_to_mfe_seconds") if replay else retained.get("time_to_mfe_seconds")
+    time_to_mae = replay.get("time_to_mae_seconds") if replay else retained.get("time_to_mae_seconds")
     realized_points = _float_or_none(outcome.get("realized_points"))
     profitable_before = mfe is not None and mfe > 0
     gave_back = bool(profitable_before and realized_points is not None and (realized_points <= 0 or realized_points < mfe * 0.25))
@@ -346,6 +452,21 @@ def _entry_path_metrics(*, outcome: Mapping[str, Any], entry_path: Sequence[Mapp
         "profitable_before_exit_but_gave_back": gave_back,
         "exit_capture_ratio": capture_ratio,
     }
+
+
+def _retained_entry_path(retained: Mapping[str, Any]) -> list[dict[str, Any]]:
+    path = retained.get("entry_to_exit_path") if isinstance(retained.get("entry_to_exit_path"), list) else []
+    return [dict(row) for row in path if isinstance(row, Mapping)]
+
+
+def _merge_post_exit_windows(*, current: Mapping[str, Any], retained: Mapping[str, Any]) -> dict[str, Any]:
+    merged: dict[str, Any] = {}
+    for minutes in FORWARD_WINDOWS_MINUTES:
+        key = f"{minutes}m"
+        current_window = current.get(key) if isinstance(current.get(key), Mapping) else {}
+        retained_window = retained.get(key) if isinstance(retained.get(key), Mapping) else {}
+        merged[key] = current_window if current_window.get("available") is True else retained_window or current_window
+    return merged
 
 
 def _post_exit_windows(*, outcome: Mapping[str, Any], forward_index: _ForwardCaptureIndex) -> dict[str, Any]:
@@ -491,6 +612,8 @@ def render_summary_markdown(summary: Mapping[str, Any]) -> str:
             f"- MAE coverage: `{overall.get('mae_coverage')}`",
             f"- Timebox-grid counterfactual ready: `{overall.get('timebox_counterfactual_ready_count')}`",
             f"- Trailing-exit ready: `{overall.get('trailing_exit_ready_count')}`",
+            f"- Retained path captures: `{overall.get('retained_path_capture_count')}`",
+            f"- Retained paths reused this run: `{overall.get('retained_reused_path_count')}`",
         ]
     ) + "\n"
 
@@ -505,6 +628,8 @@ It may include:
 - entry-to-exit timestamped path rows when retained market data exists
 - MFE/MAE and time-to-MFE/MAE
 - post-exit forward windows when retained forward bars exist
+- persistent retained path captures so rolling candle buffers cannot erase
+  already reconstructed trade paths
 - counterfactual readiness flags
 
 It must not submit, cancel, modify, close, flatten, restart, gate, or change strategy behavior.
