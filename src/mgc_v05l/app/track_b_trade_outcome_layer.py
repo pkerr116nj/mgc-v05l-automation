@@ -10,6 +10,7 @@ from typing import Sequence
 
 from mgc_v05l.execution_core.track_b_trade_outcome_layer import (
     DEFAULT_CANONICAL_TRADE_RECORDS,
+    DEFAULT_CANONICAL_TRADE_PATHS,
     DEFAULT_CRFD_ROWS,
     DEFAULT_OUTPUT_DIR,
     DEFAULT_SIDE_SESSION_REPLAY,
@@ -24,6 +25,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--canonical-records-path", type=Path, default=DEFAULT_CANONICAL_TRADE_RECORDS)
     parser.add_argument("--side-session-replay-path", type=Path, default=DEFAULT_SIDE_SESSION_REPLAY)
     parser.add_argument("--crfd-rows-path", type=Path, default=DEFAULT_CRFD_ROWS)
+    parser.add_argument("--canonical-trade-paths-path", type=Path, default=DEFAULT_CANONICAL_TRADE_PATHS)
     parser.add_argument("--output-dir", type=Path, default=DEFAULT_OUTPUT_DIR)
     parser.add_argument("--now", help="Optional ISO timestamp for deterministic report generation.")
     return parser
@@ -35,6 +37,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         canonical_records_path=args.canonical_records_path,
         side_session_replay_path=args.side_session_replay_path,
         crfd_rows_path=args.crfd_rows_path,
+        canonical_trade_paths_path=args.canonical_trade_paths_path,
         output_dir=args.output_dir,
         now=args.now,
     )

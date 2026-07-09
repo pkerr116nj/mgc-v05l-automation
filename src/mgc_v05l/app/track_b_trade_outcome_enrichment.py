@@ -10,6 +10,7 @@ from typing import Sequence
 
 from mgc_v05l.execution_core.track_b_trade_outcome_enrichment import (
     DEFAULT_CRFD_ROWS,
+    DEFAULT_CANONICAL_TRADE_PATHS,
     DEFAULT_GRE_REPORT,
     DEFAULT_HISTORICAL_GRE_ROWS,
     DEFAULT_MARKET_CONTEXT_ROWS,
@@ -28,6 +29,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--gre-report-path", type=Path, default=DEFAULT_GRE_REPORT)
     parser.add_argument("--historical-gre-rows-path", type=Path, default=DEFAULT_HISTORICAL_GRE_ROWS)
     parser.add_argument("--market-context-rows-path", type=Path, default=DEFAULT_MARKET_CONTEXT_ROWS)
+    parser.add_argument("--canonical-trade-paths-path", type=Path, default=DEFAULT_CANONICAL_TRADE_PATHS)
     parser.add_argument("--output-dir", type=Path, default=DEFAULT_OUTPUT_DIR)
     parser.add_argument("--now", help="Optional ISO timestamp for deterministic report generation.")
     return parser
@@ -41,6 +43,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         gre_report_path=args.gre_report_path,
         historical_gre_rows_path=args.historical_gre_rows_path,
         market_context_rows_path=args.market_context_rows_path,
+        canonical_trade_paths_path=args.canonical_trade_paths_path,
         output_dir=args.output_dir,
         now=args.now,
     )
@@ -57,6 +60,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                 "avwap_coverage": overall.get("avwap_coverage"),
                 "vix_coverage": overall.get("vix_coverage"),
                 "market_context_coverage": overall.get("market_context_coverage"),
+                "path_coverage": overall.get("path_coverage"),
+                "complete_path_coverage": overall.get("complete_path_coverage"),
                 "enrichment_path": str(result.enrichment_path),
                 "summary_path": str(result.summary_path),
                 "diagnostic_only": result.summary.get("diagnostic_only"),

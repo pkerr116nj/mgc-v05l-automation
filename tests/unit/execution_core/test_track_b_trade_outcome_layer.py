@@ -60,6 +60,42 @@ def test_missing_mfe_mae_are_flagged() -> None:
     assert "missing_mae" in outcomes[0]["data_quality_flags"]
 
 
+def test_canonical_trade_path_propagates_mfe_mae_and_path_metadata() -> None:
+    row = _trade("lane_a", side="LONG", entry=100.0, exit=104.0, mfe=None, mae=None)
+    outcome_id = "trade_outcome_e29dec96f8254ba6ff1c127b"
+    path = _path(outcome_id=outcome_id, mfe=7.0, mae=-1.5, status="PARTIAL")
+
+    outcomes = build_trade_outcomes([row], canonical_trade_paths=[path], generated_at=NOW)
+    outcome = outcomes[0]
+
+    assert outcome["mfe_points"] == 7.0
+    assert outcome["mae_points"] == -1.5
+    assert outcome["path_status"] == "PARTIAL"
+    assert outcome["path_available"] is True
+    assert outcome["path_complete"] is False
+    assert outcome["path_sample_count"] == 3
+    assert outcome["timebox_ready"] is True
+    assert outcome["trailing_ready"] is True
+    assert outcome["vwap_ready"] is False
+    assert outcome["atr_ready"] is False
+    assert outcome["forward_15m_available"] is True
+    assert outcome["canonical_trade_path_id"] == "canonical_path_fixture"
+    assert outcome["path_fingerprint"] == "path_fingerprint_fixture"
+    assert "missing_mfe" not in outcome["data_quality_flags"]
+    assert "missing_mae" not in outcome["data_quality_flags"]
+
+
+def test_missing_canonical_trade_path_preserves_null_telemetry() -> None:
+    outcomes = build_trade_outcomes([_trade("lane_a")], canonical_trade_paths=[], generated_at=NOW)
+    outcome = outcomes[0]
+
+    assert outcome["path_status"] is None
+    assert outcome["path_available"] is False
+    assert outcome["path_complete"] is False
+    assert outcome["canonical_trade_path_id"] is None
+    assert "missing_canonical_trade_path" in outcome["data_quality_flags"]
+
+
 def test_unpaired_records_excluded_and_reported_in_summary() -> None:
     records = [_trade("lane_a", side="LONG", entry=100.0, exit=104.0), _trade("lane_b", pairing="UNPAIRED_ENTRY")]
     outcomes = build_trade_outcomes(records, generated_at=NOW)
@@ -166,4 +202,30 @@ def _trade(
         "exit_reason": "TIMEBOX",
         "exit_policy": "TIMEBOX",
         "trade_id": f"{lane}_{side}_{realized_points}_{pairing}",
+    }
+
+
+def _path(*, outcome_id: str, mfe: float | None, mae: float | None, status: str) -> dict:
+    return {
+        "schema_version": "canonical_trade_path_v1",
+        "canonical_trade_path_id": "canonical_path_fixture",
+        "trade_outcome_id": outcome_id,
+        "source_trade_id": "lane_a_LONG_4.0_PAIRED",
+        "path_coverage_status": status,
+        "path_complete_entry_to_exit": status == "COMPLETE",
+        "path_sample_count": 3,
+        "mfe": mfe,
+        "mae": mae,
+        "mfe_timestamp": "2026-07-01T10:20:00Z",
+        "mae_timestamp": "2026-07-01T10:10:00Z",
+        "max_favorable_ticks": 28,
+        "max_adverse_ticks": -6,
+        "counterfactual_ready": {
+            "timebox": True,
+            "trailing": True,
+            "vwap_avwap": False,
+            "atr": False,
+        },
+        "post_exit_forward_windows": {"15m": {"sample_count": 15}, "30m": {}, "60m": None, "120m": None},
+        "deterministic_fingerprint": "path_fingerprint_fixture",
     }

@@ -213,6 +213,46 @@ def test_missing_crfd_vwap_avwap_are_flagged_and_null() -> None:
     assert "missing_avwap_context" in row["data_quality_flags"]
 
 
+def test_canonical_trade_path_telemetry_propagates_to_enrichment() -> None:
+    enrichments = build_trade_outcome_enrichments(
+        [_outcome("GC", "GCQ6")],
+        canonical_trade_paths=[_path("outcome_GCQ6", status="COMPLETE")],
+        generated_at=NOW,
+    )
+    row = enrichments[0]
+
+    assert row["path_status"] == "COMPLETE"
+    assert row["path_available"] is True
+    assert row["path_complete"] is True
+    assert row["path_sample_count"] == 4
+    assert row["mfe_points"] == 6.5
+    assert row["mae_points"] == -1.25
+    assert row["timebox_ready"] is True
+    assert row["trailing_ready"] is True
+    assert row["vwap_ready"] is False
+    assert row["atr_ready"] is False
+    assert row["forward_15m_available"] is True
+    assert row["forward_30m_available"] is False
+    assert row["canonical_trade_path_id"] == "canonical_path_fixture"
+    assert row["path_fingerprint"] == "path_fingerprint_fixture"
+    assert row["path_propagation_timestamp"] == NOW.isoformat()
+    assert "missing_canonical_trade_path" not in row["data_quality_flags"]
+
+
+def test_missing_canonical_trade_path_telemetry_remains_null_in_enrichment() -> None:
+    enrichments = build_trade_outcome_enrichments([_outcome("GC", "GCQ6")], canonical_trade_paths=[], generated_at=NOW)
+    row = enrichments[0]
+
+    assert row["path_status"] is None
+    assert row["path_available"] is False
+    assert row["path_complete"] is False
+    assert row["path_sample_count"] is None
+    assert row["mfe_points"] is None
+    assert row["mae_points"] is None
+    assert row["canonical_trade_path_id"] is None
+    assert "missing_canonical_trade_path" in row["data_quality_flags"]
+
+
 def test_unavailable_vwap_and_avwap_are_not_fabricated() -> None:
     enrichments = build_trade_outcome_enrichments(
         [_outcome("GC", "GCQ6")],
@@ -453,6 +493,36 @@ def _historical_gre(observation_time: str, *, label: str, confidence: int) -> di
         },
         "source_refs": {"gre_report": "BACKFILL_GENERATED_GRE_OBSERVATION"},
         "diagnostic_only": True,
+    }
+
+
+def _path(outcome_id: str, *, status: str = "COMPLETE") -> dict:
+    return {
+        "schema_version": "canonical_trade_path_v1",
+        "canonical_trade_path_id": "canonical_path_fixture",
+        "trade_outcome_id": outcome_id,
+        "path_coverage_status": status,
+        "path_complete_entry_to_exit": status == "COMPLETE",
+        "path_sample_count": 4,
+        "mfe": 6.5,
+        "mae": -1.25,
+        "mfe_timestamp": "2026-07-01T10:20:00Z",
+        "mae_timestamp": "2026-07-01T10:10:00Z",
+        "max_favorable_ticks": 26,
+        "max_adverse_ticks": -5,
+        "counterfactual_ready": {
+            "timebox": True,
+            "trailing": True,
+            "vwap_avwap": False,
+            "atr": False,
+        },
+        "post_exit_forward_windows": {
+            "15m": {"sample_count": 15},
+            "30m": {"sample_count": 0},
+            "60m": None,
+            "120m": None,
+        },
+        "deterministic_fingerprint": "path_fingerprint_fixture",
     }
 
 

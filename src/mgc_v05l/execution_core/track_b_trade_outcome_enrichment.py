@@ -22,6 +22,9 @@ DEFAULT_CRFD_ROWS = DEFAULT_OUTPUT_ROOT / "research" / "canonical_research_featu
 DEFAULT_GRE_REPORT = DEFAULT_OUTPUT_ROOT / "research" / "gold_regime_engine" / "latest_gold_regime_engine.json"
 DEFAULT_HISTORICAL_GRE_ROWS = DEFAULT_OUTPUT_ROOT / "research" / "gold_regime_engine" / "gre_backfill_observations.jsonl"
 DEFAULT_MARKET_CONTEXT_ROWS = DEFAULT_OUTPUT_ROOT / "research" / "canonical_market_context" / "canonical_market_context.jsonl"
+DEFAULT_CANONICAL_TRADE_PATHS = (
+    DEFAULT_OUTPUT_ROOT / "research_analytics" / "canonical_trade_path_layer" / "canonical_trade_paths.jsonl"
+)
 DEFAULT_OUTPUT_DIR = DEFAULT_OUTPUT_ROOT / "trade_outcome_enrichment"
 
 ENRICHMENT_JSONL = "canonical_trade_outcome_enrichment.jsonl"
@@ -82,6 +85,7 @@ def run_trade_outcome_enrichment(
     gre_report_path: Path = DEFAULT_GRE_REPORT,
     historical_gre_rows_path: Path = DEFAULT_HISTORICAL_GRE_ROWS,
     market_context_rows_path: Path = DEFAULT_MARKET_CONTEXT_ROWS,
+    canonical_trade_paths_path: Path = DEFAULT_CANONICAL_TRADE_PATHS,
     output_dir: Path = DEFAULT_OUTPUT_DIR,
     now: datetime | str | None = None,
     max_snapshot_bytes: int | None = None,
@@ -93,12 +97,14 @@ def run_trade_outcome_enrichment(
     gre_report = _read_json_mapping(gre_report_path)
     historical_gre_rows = _read_jsonl(historical_gre_rows_path)
     market_context_rows = _read_jsonl(market_context_rows_path)
+    canonical_trade_paths = _read_jsonl(canonical_trade_paths_path)
     enrichments = build_trade_outcome_enrichments(
         outcomes,
         crfd_rows=crfd_rows,
         gre_report=gre_report,
         historical_gre_rows=historical_gre_rows,
         market_context_rows=market_context_rows,
+        canonical_trade_paths=canonical_trade_paths,
         generated_at=generated_at,
         source_paths={
             "canonical_trade_outcomes": outcomes_path,
@@ -106,6 +112,7 @@ def run_trade_outcome_enrichment(
             "gre_report": gre_report_path,
             "historical_gre_rows": historical_gre_rows_path,
             "market_context_rows": market_context_rows_path,
+            "canonical_trade_paths": canonical_trade_paths_path,
         },
     )
     summary = build_trade_outcome_enrichment_summary(
@@ -115,6 +122,7 @@ def run_trade_outcome_enrichment(
         gre_report=gre_report,
         historical_gre_row_count=len(historical_gre_rows),
         market_context_row_count=len(market_context_rows),
+        canonical_trade_path_count=len(canonical_trade_paths),
         generated_at=generated_at,
         source_paths={
             "canonical_trade_outcomes": outcomes_path,
@@ -122,6 +130,7 @@ def run_trade_outcome_enrichment(
             "gre_report": gre_report_path,
             "historical_gre_rows": historical_gre_rows_path,
             "market_context_rows": market_context_rows_path,
+            "canonical_trade_paths": canonical_trade_paths_path,
         },
     )
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -188,6 +197,7 @@ def build_trade_outcome_enrichments(
     gre_report: Mapping[str, Any] | None = None,
     historical_gre_rows: Sequence[Mapping[str, Any]] = (),
     market_context_rows: Sequence[Mapping[str, Any]] = (),
+    canonical_trade_paths: Sequence[Mapping[str, Any]] = (),
     generated_at: datetime,
     source_paths: Mapping[str, Path | str] | None = None,
     max_crfd_join_age_seconds: int = DEFAULT_MAX_CRFD_JOIN_AGE_SECONDS,
@@ -196,6 +206,7 @@ def build_trade_outcome_enrichments(
     crfd_index = _CrfdIndex(crfd_rows)
     historical_gre_index = _HistoricalGreIndex(historical_gre_rows)
     market_context_index = _MarketContextIndex(market_context_rows)
+    trade_path_index = _CanonicalTradePathIndex(canonical_trade_paths)
     gre = dict(gre_report or {})
     enrichments: list[dict[str, Any]] = []
     for outcome in outcomes:
@@ -218,6 +229,7 @@ def build_trade_outcome_enrichments(
             historical_gre_provider_window=historical_gre_index.provider_window(),
         )
         market_context = market_context_index.latest_at_or_before(entry_time)
+        canonical_trade_path = trade_path_index.find(outcome)
         market_context_age = _age_seconds(
             market_context.get("vix_observation_time") if market_context else None,
             entry_time,
@@ -262,6 +274,9 @@ def build_trade_outcome_enrichments(
             crfd_validity=crfd_validity,
             market_context_validity=market_context_validity,
         )
+        if canonical_trade_path is None or canonical_trade_path.get("path_coverage_status") in (None, "MISSING_SOURCE", "UNAVAILABLE"):
+            flags.append("missing_canonical_trade_path")
+        path_telemetry = _path_telemetry(canonical_trade_path, generated_at=generated_at)
         enrichments.append(
             {
                 "schema_version": SCHEMA_VERSION,
@@ -323,6 +338,7 @@ def build_trade_outcome_enrichments(
                 "market_context_validity_classification": market_context_validity["validity_classification"],
                 "market_context_validity": market_context_validity,
                 "market_context_provenance": market_context.get("source_provenance") if market_context else None,
+                **path_telemetry,
                 "data_quality_flags": sorted(set(flags)),
                 "source_refs": {
                     "canonical_trade_outcomes": str((source_paths or {}).get("canonical_trade_outcomes", "")),
@@ -330,6 +346,7 @@ def build_trade_outcome_enrichments(
                     "gre_report": str((source_paths or {}).get("gre_report", "")) if gre_context.get("provenance") else None,
                     "historical_gre_rows": str((source_paths or {}).get("historical_gre_rows", "")) if gre_context.get("provenance") == "historical_gre_backfill" else None,
                     "market_context_rows": str((source_paths or {}).get("market_context_rows", "")) if market_context else None,
+                    "canonical_trade_paths": str((source_paths or {}).get("canonical_trade_paths", "")) if canonical_trade_path else None,
                     "source_outcome_refs": outcome.get("source_refs"),
                 },
                 "diagnostic_only": True,
@@ -346,6 +363,7 @@ def build_trade_outcome_enrichment_summary(
     gre_report: Mapping[str, Any] | None,
     historical_gre_row_count: int = 0,
     market_context_row_count: int = 0,
+    canonical_trade_path_count: int = 0,
     generated_at: datetime,
     source_paths: Mapping[str, Path | str] | None = None,
 ) -> dict[str, Any]:
@@ -357,6 +375,8 @@ def build_trade_outcome_enrichment_summary(
     avwap_count = sum(1 for row in enrichments if row.get("avwap_relation") not in (None, "unavailable"))
     market_context_count = sum(1 for row in enrichments if row.get("market_context_join_success") is True)
     vix_count = sum(1 for row in enrichments if row.get("vix_level") is not None)
+    path_available_count = sum(1 for row in enrichments if row.get("path_available") is True)
+    complete_path_count = sum(1 for row in enrichments if row.get("path_complete") is True)
     staleness_values = [
         float(row["market_context_staleness"])
         for row in enrichments
@@ -390,6 +410,7 @@ def build_trade_outcome_enrichment_summary(
             "crfd_row_count": crfd_row_count,
             "historical_gre_row_count": historical_gre_row_count,
             "market_context_row_count": market_context_row_count,
+            "canonical_trade_path_count": canonical_trade_path_count,
             "gre_report_present": bool(gre_report),
         },
         "overall": {
@@ -401,6 +422,8 @@ def build_trade_outcome_enrichment_summary(
             "avwap_coverage": _rate(avwap_count, len(enrichments)),
             "vix_coverage": _rate(vix_count, len(enrichments)),
             "market_context_coverage": _rate(market_context_count, len(enrichments)),
+            "path_coverage": _rate(path_available_count, len(enrichments)),
+            "complete_path_coverage": _rate(complete_path_count, len(enrichments)),
             "join_success": _rate(crfd_count, len(enrichments)),
         },
         "coverage_counts": {
@@ -411,6 +434,12 @@ def build_trade_outcome_enrichment_summary(
             "avwap": avwap_count,
             "market_context": market_context_count,
             "vix": vix_count,
+            "canonical_trade_path": path_available_count,
+            "complete_trade_path": complete_path_count,
+            "timebox_ready": sum(1 for row in enrichments if row.get("timebox_ready") is True),
+            "trailing_ready": sum(1 for row in enrichments if row.get("trailing_ready") is True),
+            "vwap_ready": sum(1 for row in enrichments if row.get("vwap_ready") is True),
+            "atr_ready": sum(1 for row in enrichments if row.get("atr_ready") is True),
         },
         "market_context": {
             "provider": "VIX",
@@ -886,6 +915,17 @@ def _enrichment_flags(
     return flags
 
 
+class _CanonicalTradePathIndex:
+    def __init__(self, rows: Sequence[Mapping[str, Any]]) -> None:
+        self._by_outcome_id = {str(row.get("trade_outcome_id")): row for row in rows if row.get("trade_outcome_id")}
+
+    def find(self, outcome: Mapping[str, Any]) -> Mapping[str, Any] | None:
+        trade_outcome_id = str(outcome.get("trade_outcome_id") or "")
+        if trade_outcome_id and trade_outcome_id in self._by_outcome_id:
+            return self._by_outcome_id[trade_outcome_id]
+        return None
+
+
 class _CrfdIndex:
     def __init__(self, rows: Sequence[Mapping[str, Any]]) -> None:
         by_contract: dict[str, list[tuple[datetime, Mapping[str, Any]]]] = {}
@@ -1113,6 +1153,80 @@ def _first_non_null(*values: Any) -> Any:
         if value is not None:
             return value
     return None
+
+
+def _path_telemetry(path: Mapping[str, Any] | None, *, generated_at: datetime) -> dict[str, Any]:
+    if not path:
+        return {
+            "path_status": None,
+            "path_available": False,
+            "path_complete": False,
+            "path_sample_count": None,
+            "mfe_points": None,
+            "mae_points": None,
+            "mfe_timestamp": None,
+            "mae_timestamp": None,
+            "max_favorable_ticks": None,
+            "max_adverse_ticks": None,
+            "timebox_ready": None,
+            "trailing_ready": None,
+            "vwap_ready": None,
+            "atr_ready": None,
+            "forward_15m_available": None,
+            "forward_30m_available": None,
+            "forward_60m_available": None,
+            "forward_120m_available": None,
+            "canonical_trade_path_id": None,
+            "path_fingerprint": None,
+            "path_propagation_timestamp": None,
+        }
+    status = path.get("path_coverage_status")
+    readiness = path.get("counterfactual_ready") if isinstance(path.get("counterfactual_ready"), Mapping) else {}
+    forward_windows = path.get("post_exit_forward_windows") if isinstance(path.get("post_exit_forward_windows"), Mapping) else {}
+    return {
+        "path_status": status,
+        "path_available": status not in (None, "MISSING_SOURCE", "UNAVAILABLE"),
+        "path_complete": path.get("path_complete_entry_to_exit") is True or status == "COMPLETE",
+        "path_sample_count": _int_or_none(path.get("path_sample_count")),
+        "mfe_points": _optional_float(path.get("mfe")),
+        "mae_points": _optional_float(path.get("mae")),
+        "mfe_timestamp": path.get("mfe_timestamp"),
+        "mae_timestamp": path.get("mae_timestamp"),
+        "max_favorable_ticks": path.get("max_favorable_ticks"),
+        "max_adverse_ticks": path.get("max_adverse_ticks"),
+        "timebox_ready": readiness.get("timebox"),
+        "trailing_ready": readiness.get("trailing"),
+        "vwap_ready": readiness.get("vwap_avwap"),
+        "atr_ready": readiness.get("atr"),
+        "forward_15m_available": _forward_window_available(forward_windows, "15m"),
+        "forward_30m_available": _forward_window_available(forward_windows, "30m"),
+        "forward_60m_available": _forward_window_available(forward_windows, "60m"),
+        "forward_120m_available": _forward_window_available(forward_windows, "120m"),
+        "canonical_trade_path_id": path.get("canonical_trade_path_id"),
+        "path_fingerprint": path.get("deterministic_fingerprint"),
+        "path_propagation_timestamp": generated_at.isoformat(),
+    }
+
+
+def _int_or_none(value: Any) -> int | None:
+    number = _optional_float(value)
+    if number is None:
+        return None
+    return int(number)
+
+
+def _forward_window_available(forward_windows: Mapping[str, Any], key: str) -> bool:
+    value = forward_windows.get(key)
+    if isinstance(value, Mapping):
+        if "available" in value:
+            return value.get("available") is True
+        sample_count = _int_or_none(value.get("sample_count"))
+        if sample_count is not None:
+            return sample_count > 0
+        return bool(value)
+    if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
+        return len(value) > 0
+    return value is not None
 
 
 def _optional_float(value: Any) -> float | None:

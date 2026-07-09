@@ -19,6 +19,9 @@ DEFAULT_STRATEGY_PERFORMANCE_DIR = DEFAULT_OUTPUT_ROOT / "strategy_performance"
 DEFAULT_CANONICAL_TRADE_RECORDS = DEFAULT_STRATEGY_PERFORMANCE_DIR / "canonical_trade_records.jsonl"
 DEFAULT_SIDE_SESSION_REPLAY = DEFAULT_STRATEGY_PERFORMANCE_DIR / "side_session_attribution" / "side_session_trade_replay.jsonl"
 DEFAULT_CRFD_ROWS = DEFAULT_OUTPUT_ROOT / "research" / "canonical_research_feature_dataset" / "research_feature_dataset.jsonl"
+DEFAULT_CANONICAL_TRADE_PATHS = (
+    DEFAULT_OUTPUT_ROOT / "research_analytics" / "canonical_trade_path_layer" / "canonical_trade_paths.jsonl"
+)
 DEFAULT_OUTPUT_DIR = DEFAULT_OUTPUT_ROOT / "trade_outcome_layer"
 
 OUTCOMES_JSONL = "canonical_trade_outcomes.jsonl"
@@ -47,6 +50,7 @@ def run_trade_outcome_layer(
     canonical_records_path: Path = DEFAULT_CANONICAL_TRADE_RECORDS,
     side_session_replay_path: Path = DEFAULT_SIDE_SESSION_REPLAY,
     crfd_rows_path: Path = DEFAULT_CRFD_ROWS,
+    canonical_trade_paths_path: Path = DEFAULT_CANONICAL_TRADE_PATHS,
     output_dir: Path = DEFAULT_OUTPUT_DIR,
     now: datetime | str | None = None,
     max_snapshot_bytes: int | None = None,
@@ -56,15 +60,18 @@ def run_trade_outcome_layer(
     canonical_records = _read_jsonl(canonical_records_path)
     side_session_rows = _read_jsonl(side_session_replay_path)
     crfd_rows = _read_jsonl(crfd_rows_path)
+    canonical_trade_paths = _read_jsonl(canonical_trade_paths_path)
     outcomes = build_trade_outcomes(
         canonical_records,
         side_session_rows=side_session_rows,
         crfd_rows=crfd_rows,
+        canonical_trade_paths=canonical_trade_paths,
         generated_at=generated_at,
         source_paths={
             "canonical_records": canonical_records_path,
             "side_session_replay": side_session_replay_path,
             "crfd_rows": crfd_rows_path,
+            "canonical_trade_paths": canonical_trade_paths_path,
         },
     )
     summary = build_trade_outcome_summary(
@@ -75,6 +82,7 @@ def run_trade_outcome_layer(
             "canonical_records": canonical_records_path,
             "side_session_replay": side_session_replay_path,
             "crfd_rows": crfd_rows_path,
+            "canonical_trade_paths": canonical_trade_paths_path,
         },
     )
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -105,11 +113,13 @@ def build_trade_outcomes(
     *,
     side_session_rows: Sequence[Mapping[str, Any]] = (),
     crfd_rows: Sequence[Mapping[str, Any]] = (),
+    canonical_trade_paths: Sequence[Mapping[str, Any]] = (),
     generated_at: datetime,
     source_paths: Mapping[str, Path | str] | None = None,
 ) -> list[dict[str, Any]]:
     replay_index = _side_session_index(side_session_rows)
     crfd_index = _CrfdIndex(crfd_rows)
+    path_index = _CanonicalTradePathIndex(canonical_trade_paths)
     outcomes: list[dict[str, Any]] = []
     for row in canonical_records:
         if not _is_completed_paired_trade(row):
@@ -117,7 +127,8 @@ def build_trade_outcomes(
         replay = replay_index.get(_trade_join_key(row))
         entry_time = _parse_datetime(row.get("entry_time"))
         crfd = crfd_index.latest_at_or_before(contract=str(row.get("symbol") or row.get("local_symbol") or ""), timestamp=entry_time)
-        outcomes.append(_build_outcome_record(row, replay=replay, crfd=crfd, generated_at=generated_at, source_paths=source_paths or {}))
+        path = path_index.find(row)
+        outcomes.append(_build_outcome_record(row, replay=replay, crfd=crfd, canonical_trade_path=path, generated_at=generated_at, source_paths=source_paths or {}))
     return outcomes
 
 
@@ -135,6 +146,8 @@ def build_trade_outcome_summary(
     exit_coverage = _counts(str(outcome.get("exit_policy") or outcome.get("exit_reason") or "UNKNOWN") for outcome in outcomes)
     session_coverage = _counts(str(outcome.get("session_at_entry") or "UNKNOWN") for outcome in outcomes)
     regime_join_count = sum(1 for outcome in outcomes if outcome.get("gre_label_at_entry") or outcome.get("vwap_relation_at_entry") or outcome.get("avwap_relation_at_entry"))
+    path_available_count = sum(1 for outcome in outcomes if outcome.get("path_available") is True)
+    complete_path_count = sum(1 for outcome in outcomes if outcome.get("path_complete") is True)
     return {
         "schema_version": SUMMARY_SCHEMA_VERSION,
         "generated_at": generated_at.isoformat(),
@@ -150,6 +163,10 @@ def build_trade_outcome_summary(
             "r_proxy_available_count": sum(1 for outcome in outcomes if outcome.get("realized_r_proxy") is not None),
             "mfe_available_count": sum(1 for outcome in outcomes if outcome.get("mfe_points") is not None),
             "mae_available_count": sum(1 for outcome in outcomes if outcome.get("mae_points") is not None),
+            "path_available_count": path_available_count,
+            "complete_path_count": complete_path_count,
+            "path_coverage_rate": _rate(path_available_count, len(outcomes)),
+            "complete_path_rate": _rate(complete_path_count, len(outcomes)),
             "average_realized_points": _average(_numeric_values(outcomes, "realized_points")),
             "average_pnl_proxy": _average(_numeric_values(outcomes, "realized_pnl_proxy")),
             "average_r_proxy": _average(_numeric_values(outcomes, "realized_r_proxy")),
@@ -188,6 +205,7 @@ def _build_outcome_record(
     *,
     replay: Mapping[str, Any] | None,
     crfd: Mapping[str, Any] | None,
+    canonical_trade_path: Mapping[str, Any] | None,
     generated_at: datetime,
     source_paths: Mapping[str, Path | str],
 ) -> dict[str, Any]:
@@ -223,6 +241,15 @@ def _build_outcome_record(
             mfe = _number(replay.get("mfe_points"))
         if mae is None:
             mae = _number(replay.get("mae_points"))
+    if canonical_trade_path:
+        path_mfe = _number(canonical_trade_path.get("mfe"))
+        path_mae = _number(canonical_trade_path.get("mae"))
+        if path_mfe is not None:
+            mfe = path_mfe
+            flags.append("mfe_propagated_from_canonical_trade_path")
+        if path_mae is not None:
+            mae = path_mae
+            flags.append("mae_propagated_from_canonical_trade_path")
     if mfe is None:
         flags.append("missing_mfe")
     if mae is None:
@@ -236,6 +263,18 @@ def _build_outcome_record(
 
     if crfd is None:
         flags.append("missing_crfd_regime_join")
+    path_status = canonical_trade_path.get("path_coverage_status") if canonical_trade_path else None
+    path_sample_count = _int_or_none(canonical_trade_path.get("path_sample_count")) if canonical_trade_path else None
+    path_available = bool(canonical_trade_path) and path_status not in (None, "MISSING_SOURCE", "UNAVAILABLE")
+    path_complete = bool(canonical_trade_path) and (
+        canonical_trade_path.get("path_complete_entry_to_exit") is True or path_status == "COMPLETE"
+    )
+    readiness = canonical_trade_path.get("counterfactual_ready") if isinstance(canonical_trade_path, Mapping) else {}
+    readiness = readiness if isinstance(readiness, Mapping) else {}
+    forward_windows = canonical_trade_path.get("post_exit_forward_windows") if isinstance(canonical_trade_path, Mapping) else {}
+    forward_windows = forward_windows if isinstance(forward_windows, Mapping) else {}
+    if not path_available:
+        flags.append("missing_canonical_trade_path")
 
     flags.append("missing_realized_r_proxy")
     return {
@@ -260,6 +299,25 @@ def _build_outcome_record(
         "realized_r_proxy": None,
         "mfe_points": mfe,
         "mae_points": mae,
+        "mfe_timestamp": canonical_trade_path.get("mfe_timestamp") if canonical_trade_path else None,
+        "mae_timestamp": canonical_trade_path.get("mae_timestamp") if canonical_trade_path else None,
+        "max_favorable_ticks": canonical_trade_path.get("max_favorable_ticks") if canonical_trade_path else None,
+        "max_adverse_ticks": canonical_trade_path.get("max_adverse_ticks") if canonical_trade_path else None,
+        "path_status": path_status,
+        "path_available": path_available,
+        "path_complete": path_complete,
+        "path_sample_count": path_sample_count,
+        "timebox_ready": readiness.get("timebox") if canonical_trade_path else None,
+        "trailing_ready": readiness.get("trailing") if canonical_trade_path else None,
+        "vwap_ready": readiness.get("vwap_avwap") if canonical_trade_path else None,
+        "atr_ready": readiness.get("atr") if canonical_trade_path else None,
+        "forward_15m_available": _forward_window_available(forward_windows, "15m") if canonical_trade_path else None,
+        "forward_30m_available": _forward_window_available(forward_windows, "30m") if canonical_trade_path else None,
+        "forward_60m_available": _forward_window_available(forward_windows, "60m") if canonical_trade_path else None,
+        "forward_120m_available": _forward_window_available(forward_windows, "120m") if canonical_trade_path else None,
+        "canonical_trade_path_id": canonical_trade_path.get("canonical_trade_path_id") if canonical_trade_path else None,
+        "path_fingerprint": canonical_trade_path.get("deterministic_fingerprint") if canonical_trade_path else None,
+        "path_propagation_timestamp": generated_at.isoformat() if canonical_trade_path else None,
         "mfe_capture_ratio": _ratio(realized_points, mfe),
         "mae_to_realized_ratio": _ratio(mae, realized_points),
         "exit_policy": row.get("exit_policy") or row.get("exit_reason"),
@@ -275,6 +333,7 @@ def _build_outcome_record(
             "canonical_trade_records": str(source_paths.get("canonical_records", "")),
             "side_session_replay": str(source_paths.get("side_session_replay", "")) if replay else None,
             "crfd_rows": str(source_paths.get("crfd_rows", "")) if crfd else None,
+            "canonical_trade_paths": str(source_paths.get("canonical_trade_paths", "")) if canonical_trade_path else None,
             "source_trade_id": row.get("trade_id"),
         },
         "diagnostic_only": True,
@@ -368,6 +427,21 @@ def _trade_join_key(row: Mapping[str, Any]) -> tuple[str, str, str]:
     return (str(row.get("lane_id") or ""), str(row.get("entry_time") or ""), str(row.get("exit_time") or ""))
 
 
+class _CanonicalTradePathIndex:
+    def __init__(self, rows: Sequence[Mapping[str, Any]]) -> None:
+        self._by_outcome_id = {str(row.get("trade_outcome_id")): row for row in rows if row.get("trade_outcome_id")}
+        self._by_source_trade_id = {str(row.get("source_trade_id")): row for row in rows if row.get("source_trade_id")}
+
+    def find(self, canonical_record: Mapping[str, Any]) -> Mapping[str, Any] | None:
+        outcome_id = _outcome_id(canonical_record)
+        if outcome_id in self._by_outcome_id:
+            return self._by_outcome_id[outcome_id]
+        source_trade_id = str(canonical_record.get("trade_id") or "")
+        if source_trade_id and source_trade_id in self._by_source_trade_id:
+            return self._by_source_trade_id[source_trade_id]
+        return None
+
+
 class _CrfdIndex:
     def __init__(self, rows: Sequence[Mapping[str, Any]]) -> None:
         by_contract: dict[str, list[tuple[datetime, Mapping[str, Any]]]] = {}
@@ -435,6 +509,27 @@ def _number(value: Any) -> float | None:
         return float(str(value))
     except (TypeError, ValueError):
         return None
+
+
+def _int_or_none(value: Any) -> int | None:
+    number = _number(value)
+    if number is None:
+        return None
+    return int(number)
+
+
+def _forward_window_available(forward_windows: Mapping[str, Any], key: str) -> bool:
+    value = forward_windows.get(key)
+    if isinstance(value, Mapping):
+        if "available" in value:
+            return value.get("available") is True
+        sample_count = _int_or_none(value.get("sample_count"))
+        if sample_count is not None:
+            return sample_count > 0
+        return bool(value)
+    if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
+        return len(value) > 0
+    return value is not None
 
 
 def _seconds_between(start: Any, end: Any) -> float | None:
