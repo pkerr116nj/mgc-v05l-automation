@@ -208,6 +208,8 @@ def test_reconciles_flat_lifecycle_with_fresh_broker_truth_and_unrelated_positio
     assert report["track_b_broker_open_order_count"] == 0
     assert report["open_order_truth_classification"] == "NO_OPEN_ORDERS"
     assert report["open_order_truth"]["source"] == "OPEN_ORDER_TRUTH_BUILDER_DIRECT"
+    assert report["open_order_truth"]["canonical_refresh_scope"] == "GLOBAL_COMPLETE"
+    assert report["open_order_truth"]["canonical_scope_blockers"] == []
     assert report["managed_order_registry_classification"] == "NO_MANAGED_ORDERS"
     assert report["managed_order_registry"]["source"] == "MANAGED_ORDER_REGISTRY_AUTHORITY_ARTIFACT"
     assert "outputs/operator_dashboard/runtime/latest_track_b_managed_orders.json" not in report["managed_order_registry"]["artifact_path"]
@@ -4603,11 +4605,13 @@ def _write_broker_truth(
     _write_json(
         positions_path,
         {
+            "ok": True,
             "generated_at": generated_at,
             "account": "DUM882026",
             "selected_account_id": "DUM882026",
             "read_only": True,
             "positions_complete": positions_complete,
+            "completion_callback": "positionEnd",
             "request_method": "reqPositions",
             "positions": positions_payload,
         },
@@ -4615,11 +4619,13 @@ def _write_broker_truth(
     _write_json(
         open_orders_path,
         {
+            "ok": True,
             "generated_at": generated_at,
             "account": "DUM882026",
             "selected_account_id": "DUM882026",
             "read_only": True,
             "open_orders_complete": open_orders_complete,
+            "completion_callback": "openOrderEnd",
             "request_method": "reqAllOpenOrders",
             "auto_open_orders_requested": False,
             "order_binding_requested": False,

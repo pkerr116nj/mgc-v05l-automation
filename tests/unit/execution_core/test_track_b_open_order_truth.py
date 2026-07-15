@@ -380,6 +380,84 @@ def test_complete_global_broker_snapshot_can_publish_canonical_without_reconcili
     assert written["summary"]["duplicate_close_order_group_count"] == 0
 
 
+def test_complete_global_broker_snapshot_with_zero_orders_publishes_no_open_orders(tmp_path: Path) -> None:
+    _seed_reconciliation(
+        tmp_path,
+        generated_at=(NOW - timedelta(minutes=35)).isoformat(),
+    )
+    reconciliation_path = _reconciliation_path(tmp_path)
+    reconciliation = json.loads(reconciliation_path.read_text(encoding="utf-8"))
+    reconciliation["symbols"] = ["MES", "MNQ"]
+    _write_json(reconciliation_path, reconciliation)
+    _seed_raw_broker_snapshots(
+        tmp_path,
+        broker_positions=[],
+        open_orders=[],
+        generated_at=NOW.isoformat(),
+    )
+    config = TrackBOpenOrderTruthConfig(repo_root=tmp_path)
+
+    payload = build_track_b_open_order_truth(config=config, now=NOW)
+    output_path, _ = write_track_b_open_order_truth(config=config, payload=payload, now=NOW)
+    written = json.loads(output_path.read_text(encoding="utf-8"))
+
+    assert written["classification"] == NO_OPEN_ORDERS
+    assert written["canonical_refresh_scope"] == "GLOBAL_COMPLETE"
+    assert written["canonical_scope_blockers"] == []
+    assert written["source_freshness"]["authority_source"] == "FRESH_COMPLETE_IBKR_BROKER_SNAPSHOT"
+    evidence = written["source_freshness"]["global_complete_scope_evidence"]
+    assert evidence["request_method"] == "reqAllOpenOrders"
+    assert evidence["completion_callback"] == "openOrderEnd"
+    assert evidence["selected_account_id"] == "DUM882026"
+
+
+def test_empty_open_orders_without_open_order_end_does_not_grant_global_scope(tmp_path: Path) -> None:
+    _seed_reconciliation(tmp_path, generated_at=(NOW - timedelta(minutes=35)).isoformat())
+    reconciliation_path = _reconciliation_path(tmp_path)
+    reconciliation = json.loads(reconciliation_path.read_text(encoding="utf-8"))
+    reconciliation["symbols"] = ["MES", "MNQ"]
+    _write_json(reconciliation_path, reconciliation)
+    _seed_raw_broker_snapshots(
+        tmp_path,
+        broker_positions=[],
+        open_orders=[],
+        generated_at=NOW.isoformat(),
+        completion_callback=None,
+    )
+    config = TrackBOpenOrderTruthConfig(repo_root=tmp_path)
+
+    payload = build_track_b_open_order_truth(config=config, now=NOW)
+
+    assert payload["canonical_refresh_scope"] == "PARTIAL_DIAGNOSTIC"
+    assert payload["canonical_scope_blockers"] == ["partial_symbol_scope"]
+    assert payload["source_freshness"]["authority_source"] == "BROKER_RECONCILIATION_ARTIFACT"
+    assert payload["source_freshness"]["fresh_broker_snapshot_overlay"] is False
+    with pytest.raises(ValueError, match="partial_symbol_scope"):
+        write_track_b_open_order_truth(config=config, payload=payload, now=NOW)
+
+
+def test_account_local_open_order_evidence_cannot_masquerade_as_global_scope(tmp_path: Path) -> None:
+    _seed_reconciliation(tmp_path)
+    reconciliation_path = _reconciliation_path(tmp_path)
+    reconciliation = json.loads(reconciliation_path.read_text(encoding="utf-8"))
+    reconciliation["symbols"] = ["MES", "MNQ"]
+    _write_json(reconciliation_path, reconciliation)
+    _seed_raw_broker_snapshots(
+        tmp_path,
+        broker_positions=[],
+        open_orders=[],
+        generated_at=NOW.isoformat(),
+        request_method="reqOpenOrders",
+    )
+    config = TrackBOpenOrderTruthConfig(repo_root=tmp_path)
+
+    payload = build_track_b_open_order_truth(config=config, now=NOW)
+
+    assert payload["source_freshness"]["authority_source"] == "BROKER_RECONCILIATION_ARTIFACT"
+    assert payload["source_freshness"]["fresh_broker_snapshot_overlay"] is False
+    assert payload["canonical_refresh_scope"] == "PARTIAL_DIAGNOSTIC"
+
+
 def test_stale_reconciliation_still_blocks_when_raw_snapshot_is_missing(tmp_path: Path) -> None:
     _seed_reconciliation(
         tmp_path,
@@ -563,28 +641,41 @@ def _seed_raw_broker_snapshots(
     generated_at: str | None = None,
     open_orders_complete: bool = True,
     positions_complete: bool = True,
+    completion_callback: str | None = "openOrderEnd",
+    request_method: str = "reqAllOpenOrders",
 ) -> None:
     snapshot_root = root / "outputs" / "reports" / "ibkr_read_only_verification"
     _write_json(
         snapshot_root / "ibkr_positions_snapshot.json",
         {
+            "ok": True,
             "generated_at": generated_at or NOW.isoformat(),
+            "account": "DUM882026",
+            "selected_account_id": "DUM882026",
             "positions": broker_positions or [],
             "position_count": len(broker_positions or []),
             "positions_complete": positions_complete,
+            "completion_callback": "positionEnd",
+            "request_method": "reqPositions",
             "read_only": True,
         },
     )
-    _write_json(
-        snapshot_root / "ibkr_open_orders_snapshot.json",
-        {
-            "generated_at": generated_at or NOW.isoformat(),
-            "open_orders": open_orders or [],
-            "open_order_count": len(open_orders or []),
-            "open_orders_complete": open_orders_complete,
-            "read_only": True,
-        },
-    )
+    open_order_snapshot = {
+        "ok": True,
+        "generated_at": generated_at or NOW.isoformat(),
+        "account": "DUM882026",
+        "selected_account_id": "DUM882026",
+        "open_orders": open_orders or [],
+        "open_order_count": len(open_orders or []),
+        "open_orders_complete": open_orders_complete,
+        "request_method": request_method,
+        "auto_open_orders_requested": False,
+        "order_binding_requested": False,
+        "read_only": True,
+    }
+    if completion_callback is not None:
+        open_order_snapshot["completion_callback"] = completion_callback
+    _write_json(snapshot_root / "ibkr_open_orders_snapshot.json", open_order_snapshot)
 
 
 def _position(symbol: str, local_symbol: str, quantity: str) -> dict:

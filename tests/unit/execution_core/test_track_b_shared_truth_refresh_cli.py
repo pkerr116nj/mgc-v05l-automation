@@ -161,20 +161,32 @@ def test_refresh_publishes_global_open_order_truth_from_complete_broker_snapshot
     _write(
         broker_root / "ibkr_positions_snapshot.json",
         {
+            "ok": True,
             "generated_at": NOW.isoformat(),
+            "account": "DUM882026",
+            "selected_account_id": "DUM882026",
             "positions": [msl_position],
             "position_count": 1,
             "positions_complete": True,
+            "completion_callback": "positionEnd",
+            "request_method": "reqPositions",
             "read_only": True,
         },
     )
     _write(
         broker_root / "ibkr_open_orders_snapshot.json",
         {
+            "ok": True,
             "generated_at": NOW.isoformat(),
+            "account": "DUM882026",
+            "selected_account_id": "DUM882026",
             "open_orders": [msl_order],
             "open_order_count": 1,
             "open_orders_complete": True,
+            "completion_callback": "openOrderEnd",
+            "request_method": "reqAllOpenOrders",
+            "auto_open_orders_requested": False,
+            "order_binding_requested": False,
             "read_only": True,
         },
     )

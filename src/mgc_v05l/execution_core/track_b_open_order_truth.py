@@ -100,6 +100,7 @@ class TrackBOpenOrderTruthConfig:
     lifecycle_root: Path = DEFAULT_LIFECYCLE_ROOT
     broker_positions_snapshot_path: Path = DEFAULT_BROKER_POSITIONS_SNAPSHOT
     broker_open_orders_snapshot_path: Path = DEFAULT_BROKER_OPEN_ORDERS_SNAPSHOT
+    account_id: str = _PAPER_TEST_ACCOUNT_ID
     artifact_max_age_seconds: float = 180.0
     close_order_stale_seconds: float = 900.0
     marketable_unfilled_seconds: float = 60.0
@@ -157,7 +158,11 @@ def build_track_b_open_order_truth_from_reconciliation(
     unknown_orders = _list(reconciliation.get("unknown_broker_open_orders"))
     known_managed_exit_orders = _list(reconciliation.get("known_managed_exit_orders"))
     unresolved_ownership = _list(reconciliation.get("unresolved_submit_intent_ownership_records"))
-    scope = _canonical_scope_from_fresh_broker_snapshot() if broker_snapshot else _canonical_scope(reconciliation)
+    scope = (
+        _canonical_scope_from_fresh_broker_snapshot(broker_snapshot)
+        if broker_snapshot
+        else _canonical_scope(reconciliation)
+    )
 
     order_states = [
         _classify_order(
@@ -213,6 +218,9 @@ def build_track_b_open_order_truth_from_reconciliation(
             "authority_source": authority_source,
             "authority_source_generated_at": source_generated_at,
             "fresh_broker_snapshot_overlay": bool(broker_snapshot),
+            "global_complete_scope_evidence": broker_snapshot.get("global_complete_scope_evidence")
+            if broker_snapshot
+            else None,
             "age_seconds": source_age,
             "ttl_seconds": float(config.artifact_max_age_seconds),
             "stale": bool(source_stale),
@@ -323,13 +331,14 @@ def _canonical_scope(reconciliation: Mapping[str, Any]) -> dict[str, Any]:
     }
 
 
-def _canonical_scope_from_fresh_broker_snapshot() -> dict[str, Any]:
+def _canonical_scope_from_fresh_broker_snapshot(snapshot_source: Mapping[str, Any]) -> dict[str, Any]:
     canonical = _normal_symbols(PHASE1_RUNTIME_TICKER_ORDER)
     return {
         "canonical_refresh_scope": GLOBAL_COMPLETE_SCOPE,
         "canonical_scope_blockers": [],
         "input_symbols": list(canonical),
         "canonical_symbols": list(canonical),
+        "global_complete_scope_evidence": snapshot_source.get("global_complete_scope_evidence"),
     }
 
 
@@ -338,7 +347,10 @@ def _enforce_canonical_scope(*, config: TrackBOpenOrderTruthConfig, payload: Map
         return
     if payload.get("canonical_refresh_scope") == GLOBAL_COMPLETE_SCOPE:
         return
-    blockers = _list(payload.get("canonical_scope_blockers")) or ["missing_global_complete_scope"]
+    raw_blockers = payload.get("canonical_scope_blockers")
+    blockers = [str(item) for item in raw_blockers if str(item)] if isinstance(raw_blockers, list) else []
+    if not blockers:
+        blockers = ["missing_global_complete_scope"]
     raise ValueError(
         "refusing to publish canonical open-order truth from non-global scope: " + ",".join(map(str, blockers))
     )
@@ -534,6 +546,8 @@ def _fresh_complete_broker_snapshot_source(
         return None
     if positions.get("read_only") is False or open_orders.get("read_only") is False:
         return None
+    if not _open_order_snapshot_has_global_complete_scope(open_orders, account_id=config.account_id):
+        return None
     position_age = _age_seconds(positions.get("generated_at"), now)
     open_order_age = _age_seconds(open_orders.get("generated_at"), now)
     if position_age is None or open_order_age is None:
@@ -548,6 +562,36 @@ def _fresh_complete_broker_snapshot_source(
         "open_orders_generated_at": open_orders.get("generated_at"),
         "source_generated_at": min(str(positions.get("generated_at")), str(open_orders.get("generated_at"))),
         "source_age_seconds": max(position_age, open_order_age),
+        "global_complete_scope_evidence": _global_complete_scope_evidence(open_orders),
+    }
+
+
+def _open_order_snapshot_has_global_complete_scope(snapshot: Mapping[str, Any], *, account_id: str) -> bool:
+    return bool(
+        snapshot.get("ok") is True
+        and snapshot.get("read_only") is True
+        and snapshot.get("open_orders_complete") is True
+        and str(snapshot.get("completion_callback") or "").strip() == "openOrderEnd"
+        and str(snapshot.get("request_method") or "").strip() == "reqAllOpenOrders"
+        and str(snapshot.get("selected_account_id") or snapshot.get("account") or "").strip() == account_id
+        and snapshot.get("auto_open_orders_requested") is not True
+        and snapshot.get("order_binding_requested") is not True
+    )
+
+
+def _global_complete_scope_evidence(snapshot: Mapping[str, Any]) -> dict[str, Any]:
+    return {
+        "source": snapshot.get("source"),
+        "request_method": snapshot.get("request_method"),
+        "completion_callback": snapshot.get("completion_callback"),
+        "account": snapshot.get("account"),
+        "selected_account_id": snapshot.get("selected_account_id"),
+        "client_id": snapshot.get("client_id"),
+        "generated_at": snapshot.get("generated_at"),
+        "open_order_count": snapshot.get("open_order_count"),
+        "open_orders_complete": snapshot.get("open_orders_complete"),
+        "auto_open_orders_requested": snapshot.get("auto_open_orders_requested"),
+        "order_binding_requested": snapshot.get("order_binding_requested"),
     }
 
 
@@ -862,12 +906,22 @@ def _matching_broker_positions(order: Mapping[str, Any], broker_positions: list[
 
 
 def _same_contract(left: Mapping[str, Any], right: Mapping[str, Any]) -> bool:
-    left_con = str(left.get("con_id") or "").strip()
-    right_con = str(right.get("con_id") or "").strip()
+    left_contract = _mapping(left.get("contract"))
+    right_contract = _mapping(right.get("contract"))
+    left_con = str(left.get("con_id") or left_contract.get("con_id") or left_contract.get("conId") or "").strip()
+    right_con = str(right.get("con_id") or right_contract.get("con_id") or right_contract.get("conId") or "").strip()
     if left_con and right_con and left_con == right_con:
         return True
-    left_local = str(left.get("local_symbol") or "").upper()
-    right_local = str(right.get("local_symbol") or "").upper()
+    left_local = str(
+        left.get("local_symbol") or left.get("localSymbol") or left_contract.get("local_symbol") or left_contract.get("localSymbol") or ""
+    ).upper()
+    right_local = str(
+        right.get("local_symbol")
+        or right.get("localSymbol")
+        or right_contract.get("local_symbol")
+        or right_contract.get("localSymbol")
+        or ""
+    ).upper()
     if left_local and right_local and left_local == right_local:
         return True
     return bool(_row_symbol(left) and _row_symbol(left) == _row_symbol(right))
@@ -1027,15 +1081,31 @@ def _terminal_scoped_lifecycle_report(
 
 
 def _contract_key(row: Mapping[str, Any]) -> str:
-    return str(row.get("con_id") or row.get("local_symbol") or row.get("contract_key") or _row_symbol(row)).upper()
+    contract = _mapping(row.get("contract"))
+    return str(
+        row.get("con_id")
+        or contract.get("con_id")
+        or contract.get("conId")
+        or row.get("local_symbol")
+        or row.get("localSymbol")
+        or contract.get("local_symbol")
+        or contract.get("localSymbol")
+        or row.get("contract_key")
+        or _row_symbol(row)
+    ).upper()
 
 
 def _row_symbol(row: Mapping[str, Any]) -> str:
+    contract = _mapping(row.get("contract"))
     return str(
         row.get("track_b_root")
         or row.get("instrument_family")
         or row.get("symbol")
         or _symbol_from_local(row.get("local_symbol"))
+        or contract.get("track_b_root")
+        or contract.get("instrument_family")
+        or contract.get("symbol")
+        or _symbol_from_local(contract.get("local_symbol") or contract.get("localSymbol"))
         or ""
     ).upper()
 

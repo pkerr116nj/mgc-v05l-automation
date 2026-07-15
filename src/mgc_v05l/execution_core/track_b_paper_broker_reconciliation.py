@@ -2248,6 +2248,7 @@ def _open_order_truth_evidence(
                 "generated_at": now.isoformat(),
                 "live_money_eligible": False,
                 "paper_proof_invoked": False,
+                "symbols": list(config.symbols),
                 "track_b_broker_positions": [dict(row) for row in track_b_positions],
                 "track_b_broker_open_orders": [dict(row) for row in track_b_open_orders],
                 "track_b_lifecycle_positions": [dict(row) for row in lifecycle_positions],
@@ -2275,6 +2276,11 @@ def _open_order_truth_evidence(
 def _open_order_truth_report_context(open_order_truth: Mapping[str, Any]) -> dict[str, Any]:
     return {
         "classification": open_order_truth.get("classification"),
+        "canonical_refresh_scope": open_order_truth.get("canonical_refresh_scope"),
+        "canonical_scope_blockers": open_order_truth.get("canonical_scope_blockers") or [],
+        "input_symbols": open_order_truth.get("input_symbols") or [],
+        "canonical_symbols": open_order_truth.get("canonical_symbols") or [],
+        "source_freshness": open_order_truth.get("source_freshness") or {},
         "summary": open_order_truth.get("summary") or {},
         "source": open_order_truth.get("broker_reconciliation_evidence_source"),
         "error": open_order_truth.get("broker_reconciliation_open_order_truth_error"),
