@@ -1688,6 +1688,60 @@ def test_missing_reconciliation_blocks() -> None:
     assert result["readiness_blockers"][0]["code"] == "phase1_reconciliation_not_clean"
 
 
+def test_stale_legacy_reconciliation_is_diagnostic_when_current_shared_truth_is_clean() -> None:
+    inputs = _clean_inputs()
+    inputs["phase1_reconciliation"]["fresh"] = False
+    inputs["broker_truth_lease"] = {
+        "available": True,
+        "lease_state": "ACTIVE",
+        "submit_entry_allowed": True,
+        "submit_exit_allowed": True,
+        "broker_reconciled": True,
+        "blockers": [],
+        "live_money_eligible": False,
+    }
+    inputs["execution_core_shared_truth"] = _shared_truth_evidence(
+        reconciliation="TRACK_B_PAPER_BROKER_RECONCILED",
+        broker_truth_lease="ACTIVE",
+        open_order_truth="NO_OPEN_ORDERS",
+        position_truth="CLEAN_FLAT_READY",
+    )
+
+    result = classify_canonical_readiness(inputs)
+
+    assert result["canonical_readiness"] == "READY_SUBMIT_CAPABLE"
+    assert result["ready_submit_capable"] is True
+    assert result["readiness_blockers"] == []
+    assert {row["code"] for row in result["readiness_warnings"]} == {
+        "legacy_phase1_reconciliation_stale_diagnostic"
+    }
+
+
+def test_stale_legacy_reconciliation_still_blocks_when_current_open_order_truth_is_not_clean() -> None:
+    inputs = _clean_inputs()
+    inputs["phase1_reconciliation"]["fresh"] = False
+    inputs["broker_truth_lease"] = {
+        "available": True,
+        "lease_state": "ACTIVE",
+        "submit_entry_allowed": True,
+        "submit_exit_allowed": True,
+        "broker_reconciled": True,
+        "blockers": [],
+        "live_money_eligible": False,
+    }
+    inputs["execution_core_shared_truth"] = _shared_truth_evidence(
+        reconciliation="TRACK_B_PAPER_BROKER_RECONCILED",
+        broker_truth_lease="ACTIVE",
+        open_order_truth="UNKNOWN_OPEN_ORDERS",
+        position_truth="CLEAN_FLAT_READY",
+    )
+
+    result = classify_canonical_readiness(inputs)
+
+    assert result["canonical_readiness"] == "NOT_READY_DEPENDENCY"
+    assert result["readiness_blockers"][0]["code"] == "open_order_truth_not_clean"
+
+
 def test_live_money_eligible_true_blocks_paper_readiness() -> None:
     inputs = _clean_inputs()
     inputs["live_money_eligible"] = True

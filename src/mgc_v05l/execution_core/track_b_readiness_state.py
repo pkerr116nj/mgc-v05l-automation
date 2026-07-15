@@ -407,16 +407,27 @@ def classify_canonical_readiness(inputs: Mapping[str, Any]) -> dict[str, Any]:
             inputs=inputs,
         )
 
+    current_authoritative_reconciliation_clean = _current_authoritative_reconciliation_clean(
+        execution_core_shared_truth=execution_core_shared_truth,
+        broker_truth_lease=broker_truth_lease,
+    )
     lifecycle_open_position_count = int(reconciliation.get("lifecycle_open_position_count") or 0)
     reconciliation_has_allowed_managed_exit = managed_exit_submit_allowed and lifecycle_open_position_count > 0
-    if (
+    legacy_reconciliation_not_clean = (
         not _bool(reconciliation.get("available"))
         or not _bool(reconciliation.get("fresh"))
         or not _reconciliation_classification_clean(str(reconciliation.get("classification") or ""))
         or not _bool(reconciliation.get("broker_reconciled"))
         or int(reconciliation.get("review_required_count") or 0) != 0
         or (lifecycle_open_position_count != 0 and not reconciliation_has_allowed_managed_exit)
-    ):
+    )
+    if legacy_reconciliation_not_clean and current_authoritative_reconciliation_clean:
+        warn(
+            "legacy_phase1_reconciliation_stale_diagnostic",
+            "Legacy Phase-1 reconciliation projection is stale, but current execution-core shared truth, Broker Truth Lease, Open Order Truth, and Position Truth are clean.",
+            source="phase1_reconciliation",
+        )
+    elif legacy_reconciliation_not_clean:
         block(
             "phase1_reconciliation_not_clean",
             "Fresh clean Phase-1 PAPER broker reconciliation is required before submit capability.",
@@ -1252,6 +1263,29 @@ def _shared_truth_has_managed_exit_due(evidence: Mapping[str, Any]) -> bool:
         and str(classifications.get("Managed Position Registry") or "") == "OPEN_MANAGED_EXIT_DUE"
         and str(classifications.get("Order Adjustment Planner") or "") in {"NO_ACTION_NEEDED", "ORDER_NOT_FOUND"}
     )
+
+
+def _current_authoritative_reconciliation_clean(
+    *,
+    execution_core_shared_truth: Mapping[str, Any],
+    broker_truth_lease: Mapping[str, Any],
+) -> bool:
+    if execution_core_shared_truth.get("available") is not True:
+        return False
+    classifications = _mapping(execution_core_shared_truth.get("classifications"))
+    if not _reconciliation_classification_clean(str(classifications.get("Reconciliation") or "")):
+        return False
+    if str(classifications.get("Broker Truth Lease") or "") != "ACTIVE":
+        return False
+    if str(classifications.get("Open Order Truth") or "") != "NO_OPEN_ORDERS":
+        return False
+    if str(classifications.get("Position Truth") or "") != "CLEAN_FLAT_READY":
+        return False
+    if broker_truth_lease and str(broker_truth_lease.get("lease_state") or "") != "ACTIVE":
+        return False
+    if list(broker_truth_lease.get("blockers") or []):
+        return False
+    return True
 
 
 def _execution_core_shared_truth_decision(
