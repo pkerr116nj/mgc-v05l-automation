@@ -383,6 +383,37 @@ def test_blocked_intent_classification_keeps_broker_truth_stale_distinct_from_ex
     assert classification == "BROKER_TRUTH_STALE_OR_MISSING"
 
 
+def test_blocked_intent_classification_preserves_contract_identity_failures() -> None:
+    classification = _blocked_intent_classification(
+        "Broker stage=broker_submit: BLOCKED_NOT_SENT_TO_BROKER: PAPER_STRATEGY_INTENT_BLOCKED",
+        {
+            "bridge_gate_trace": [
+                {
+                    "name": "execution_target_identity",
+                    "passed": False,
+                    "detail": "EXECUTION_TARGET_MISMATCH: Execution target identity is not internally coherent (contract_month_mismatch).",
+                },
+                {
+                    "name": "futures_contract_resolver",
+                    "passed": False,
+                    "detail": "CONTRACT_DETAILS_STALE: Fresh IBKR contractDetails confirmation is required before a new futures entry can submit.",
+                },
+            ]
+        },
+    )
+
+    assert classification == "EXECUTION_TARGET_MISMATCH"
+
+
+def test_blocked_intent_classification_keeps_pending_conflict_distinct() -> None:
+    classification = _blocked_intent_classification(
+        "Execution engine rejected the intent due to an existing pending or opposite-side conflict.",
+        {"bridge_gate_trace": []},
+    )
+
+    assert classification == "PRE_SUBMIT_GATE_BLOCKED"
+
+
 def test_alert_dispatcher_deduplicates_and_resolves_stateful_alerts(tmp_path: Path) -> None:
     logger = StructuredLogger(tmp_path / "artifacts")
     dispatcher = AlertDispatcher(logger, source_subsystem="test")

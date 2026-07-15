@@ -3,6 +3,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+from mgc_v05l.execution_core.track_b_contract_identity import validate_track_b_execution_target
+
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 START_SCRIPT = REPO_ROOT / "scripts" / "track_b_start_paper_stack.sh"
@@ -2087,6 +2089,91 @@ def test_paper_stack_full_session_materializes_seventy_one_lane_specs(tmp_path: 
         for lane in entry_capable_lanes
         if lane["runtime_overlay_params"].get("managed_exit_policy_id") != lane["managed_exit_policy_id"]
     ]
+    mes_us = next(lane for lane in lanes if lane["long_sources"] == ["PAPER_ACTIVE_EVIDENCE_MES_US_PARTICIPATION_LONG_V1"])
+    mes_target = mes_us["bridge_execution_target"]
+    assert mes_us["contract_key"] == "MES-202609"
+    assert mes_us["contract_month"] == "202609"
+    assert mes_us["local_symbol"] == "MESU6"
+    assert mes_us["con_id"] == 793356217
+    assert mes_target["contract_key"] == "MES-202609"
+    assert mes_target["contract_month"] == "202609"
+    assert mes_target["expiry"] == "20260918"
+    assert mes_target["local_symbol"] == "MESU6"
+    assert mes_target["con_id"] == 793356217
+    assert mes_target["qualified_contract_identifier"] == 793356217
+    incoherent = [
+        {
+            "lane_id": lane.get("lane_id"),
+            "blockers": validate_track_b_execution_target(
+                dict(lane.get("bridge_execution_target") or {}),
+                expected_symbol=str(lane.get("symbol") or ""),
+            ).get("blockers"),
+        }
+        for lane in lanes
+        if validate_track_b_execution_target(
+            dict(lane.get("bridge_execution_target") or {}),
+            expected_symbol=str(lane.get("symbol") or ""),
+        ).get("submit_allowed")
+        is not True
+    ]
+    assert incoherent == []
+
+
+def test_paper_stack_materializer_replaces_stale_nested_bridge_target_with_canonical_contract(tmp_path: Path) -> None:
+    source = START_SCRIPT.read_text(encoding="utf-8")
+    helper_block = source.split("materialize_scoped_lane_config_from_roster() {", 1)[1]
+    helper_python = helper_block.split("<<'PY'\n", 1)[1].split("\nPY\n", 1)[0]
+    roster_path = tmp_path / "roster.json"
+    source_config_path = tmp_path / "paper_config_in_force.json"
+    output_config_path = tmp_path / "paper_stack_mnq_mes_full_session_active_evidence.yaml"
+    roster_path.write_text(
+        json.dumps(
+            {
+                "enabled_strategy_ids": ["PAPER_ACTIVE_EVIDENCE_MES_US_PARTICIPATION_LONG_V1"],
+            }
+        ),
+        encoding="utf-8",
+    )
+    source_config_path.write_text(
+        json.dumps(
+            {
+                "lanes": [
+                    {
+                        "lane_id": "mes_us_active_participation_long",
+                        "long_sources": ["PAPER_ACTIVE_EVIDENCE_MES_US_PARTICIPATION_LONG_V1"],
+                        "short_sources": [],
+                        "symbol": "MES",
+                        "bridge_execution_target": {
+                            "symbol": "MES",
+                            "contract_key": "MES-202609",
+                            "con_id": 793356217,
+                            "local_symbol": "MESU6",
+                            "contract_month": "202606",
+                            "friendly_label": "MES 202606",
+                        },
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    subprocess.run(
+        [sys.executable, "-", str(roster_path), str(source_config_path), str(output_config_path), str(REPO_ROOT)],
+        input=helper_python,
+        text=True,
+        check=True,
+    )
+
+    raw_lanes = output_config_path.read_text(encoding="utf-8").split("probationary_paper_lanes_json: ", 1)[1].strip()
+    lane = json.loads(raw_lanes)[0]
+    target = lane["bridge_execution_target"]
+    assert target["contract_key"] == "MES-202609"
+    assert target["contract_month"] == "202609"
+    assert target["expiry"] == "20260918"
+    assert target["local_symbol"] == "MESU6"
+    assert target["con_id"] == 793356217
+    assert target["friendly_label"] == "MES 202609"
 
 
 def test_paper_stack_full_session_materializer_fills_missing_lane_specs_from_contract(tmp_path: Path) -> None:

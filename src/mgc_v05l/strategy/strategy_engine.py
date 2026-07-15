@@ -142,6 +142,17 @@ def _blocked_intent_classification(reason: str, submit_attempt: dict[str, object
         or ("broker position" in text and "truth" in text)
     ):
         return "BROKER_TRUTH_STALE_OR_MISSING"
+    if (
+        "contract_identity" in text
+        or "contract_details_stale" in text
+        or "execution_target_mismatch" in text
+        or "execution target" in failed_gate_text
+        or "local_symbol" in failed_gate_text
+        or "expiry" in failed_gate_text
+        or "exact_qualified_contract" in failed_gate_text
+        or "futures_contract_resolver" in failed_gate_text
+    ):
+        return "EXECUTION_TARGET_MISMATCH"
     if "paper_strategy_monitor_running" in failed_gate_text or "monitor_not_running" in text or "not running" in text or "health_stopped" in text or "stopped" in text:
         return "PAPER_MONITOR_NOT_HEALTHY"
     if (
@@ -2290,7 +2301,7 @@ class StrategyEngine:
             return broker_effect_state
         reason = default_reason
         if failure is not None and failure.order_intent_id == intent.order_intent_id:
-            reason = f"{default_reason} Broker stage={failure.failure_stage}: {failure.error}"
+            reason = f"Broker stage={failure.failure_stage}: {failure.error}"
         blocked_payload = self._persist_blocked_strategy_intent(
             intent,
             occurred_at=occurred_at,

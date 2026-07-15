@@ -180,7 +180,11 @@ repo_root = Path(sys.argv[4])
 
 sys.path.insert(0, str(repo_root / "src"))
 
-from mgc_v05l.execution_core.track_b_contract_identity import VALIDATED_TRACK_B_FUTURES_BY_SYMBOL
+from mgc_v05l.execution_core.track_b_contract_identity import (
+    VALIDATED_TRACK_B_FUTURES_BY_SYMBOL,
+    validate_track_b_execution_target,
+    validated_track_b_execution_target,
+)
 
 
 ACTIVE_EVIDENCE_US_EXIT_POLICY = "US_ACTIVE_EVIDENCE_TIMEBOX_60M_EXIT_V1"
@@ -269,35 +273,43 @@ def _managed_exit_policy_for_lane(row: dict) -> str:
 
 def _enrich_active_participation_lane(row: dict) -> dict:
     lane = dict(row)
-    if not _is_active_participation_lane(lane):
-        return lane
+    active_participation = _is_active_participation_lane(lane)
 
     symbol = _lane_symbol(lane)
     if symbol and not _text(lane.get("symbol")):
         lane["symbol"] = symbol
-    session = _lane_session(lane)
-    if session and not _text(lane.get("session_restriction")):
-        lane["session_restriction"] = session
+    if active_participation:
+        session = _lane_session(lane)
+        if session and not _text(lane.get("session_restriction")):
+            lane["session_restriction"] = session
 
-    policy_id = _text(lane.get("managed_exit_policy_id")) or _managed_exit_policy_for_lane(lane)
-    if policy_id:
-        lane["managed_exit_policy_id"] = policy_id
+        policy_id = _text(lane.get("managed_exit_policy_id")) or _managed_exit_policy_for_lane(lane)
+        if policy_id:
+            lane["managed_exit_policy_id"] = policy_id
 
     contract = VALIDATED_TRACK_B_FUTURES_BY_SYMBOL.get(symbol)
     if contract is not None:
-        if not _text(lane.get("local_symbol")):
-            lane["local_symbol"] = contract.local_symbol
-        if not lane.get("con_id"):
-            lane["con_id"] = contract.con_id
-        if not _text(lane.get("contract_key")):
-            lane["contract_key"] = contract.contract_key
-        if not _text(lane.get("exchange")):
-            lane["exchange"] = contract.exchange
-        if not _text(lane.get("expiry")):
-            lane["expiry"] = contract.expiry
-        if not _text(lane.get("tick_size")):
+        target = validated_track_b_execution_target(symbol)
+        validation = validate_track_b_execution_target(target, expected_symbol=symbol)
+        if validation.get("submit_allowed") is not True:
+            raise SystemExit(
+                "BLOCKED_PROFILE_EXECUTION_TARGET_IDENTITY_INVALID: "
+                f"{_text(lane.get('lane_id')) or symbol}: {validation}"
+            )
+        lane["local_symbol"] = contract.local_symbol
+        lane["con_id"] = contract.con_id
+        lane["contract_key"] = contract.contract_key
+        lane["contract_month"] = contract.contract_month
+        lane["exchange"] = contract.exchange
+        lane["expiry"] = contract.expiry
+        lane["currency"] = contract.currency
+        lane["multiplier"] = contract.multiplier
+        lane["qualified_contract_identifier"] = contract.con_id
+        lane["friendly_label"] = f"{contract.symbol} {contract.contract_month}"
+        lane["bridge_execution_target"] = target
+        if contract.min_tick is not None:
             lane["tick_size"] = contract.min_tick
-        if not _text(lane.get("point_value")):
+        if contract.multiplier is not None:
             lane["point_value"] = contract.multiplier
         if not lane.get("max_position_quantity"):
             lane["max_position_quantity"] = 1

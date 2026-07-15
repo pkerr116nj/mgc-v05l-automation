@@ -6,7 +6,11 @@ from mgc_v05l.execution_core.track_b_broker_position_identity import (
     IDENTITY_READY,
     canonicalize_broker_position_identity,
 )
-from mgc_v05l.execution_core.track_b_contract_identity import normalize_track_b_contract_identity
+from mgc_v05l.execution_core.track_b_contract_identity import (
+    normalize_track_b_contract_identity,
+    validate_track_b_execution_target,
+    validated_track_b_execution_target,
+)
 
 
 @pytest.mark.parametrize(
@@ -73,6 +77,53 @@ def test_normalizer_fails_closed_on_identity_contradiction() -> None:
     assert identity["classification"] == "TRACK_B_CONTRACT_IDENTITY_CONTRADICTION"
     assert identity["resolved"] is False
     assert "con_id_mismatch" in identity["blockers"]
+
+
+def test_normalizer_fails_closed_on_mixed_contract_month_identity() -> None:
+    identity = normalize_track_b_contract_identity(
+        {
+            "account_id": "DUM882026",
+            "security_type": "FUT",
+            "symbol": "MES",
+            "local_symbol": "MESU6",
+            "con_id": 793356217,
+            "expiry": "20260918",
+            "contract_key": "MES-202609",
+            "contract_month": "202606",
+        }
+    )
+
+    assert identity["classification"] == "TRACK_B_CONTRACT_IDENTITY_CONTRADICTION"
+    assert identity["resolved"] is False
+    assert "contract_month_mismatch" in identity["blockers"]
+
+
+def test_validated_execution_target_carries_atomic_contract_identity() -> None:
+    target = validated_track_b_execution_target("MES")
+    validation = validate_track_b_execution_target(target)
+
+    assert validation["classification"] == "TRACK_B_EXECUTION_TARGET_COHERENT"
+    assert validation["submit_allowed"] is True
+    assert target["contract_key"] == "MES-202609"
+    assert target["contract_month"] == "202609"
+    assert target["expiry"] == "20260918"
+    assert target["local_symbol"] == "MESU6"
+    assert target["con_id"] == 793356217
+    assert target["qualified_contract_identifier"] == 793356217
+
+
+def test_execution_target_validator_blocks_mixed_mes_month_identity() -> None:
+    target = {
+        **validated_track_b_execution_target("MES"),
+        "contract_month": "202606",
+        "friendly_label": "MES 202606",
+    }
+
+    validation = validate_track_b_execution_target(target)
+
+    assert validation["classification"] == "EXECUTION_TARGET_MISMATCH"
+    assert validation["submit_allowed"] is False
+    assert "contract_month_mismatch" in validation["blockers"]
 
 
 def test_unvalidated_rates_contract_identity_fails_closed() -> None:

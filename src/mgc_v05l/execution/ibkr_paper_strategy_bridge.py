@@ -75,6 +75,7 @@ from ..execution_core.track_b_broker_market_truth_entry_authority import (
     evaluate_broker_market_truth_entry_authority,
     BrokerMarketTruthEntryAuthorityInput,
 )
+from ..execution_core.track_b_contract_identity import validate_track_b_execution_target
 from ..execution_core.track_b_exit_safety import (
     ExitAttemptPolicy,
     classify_exit_attempt_policy,
@@ -418,9 +419,12 @@ def _bridge_phase1_target(
 ) -> dict[str, Any]:
     metadata = dict(config.caller_metadata or {})
     active_profile_lane = _active_profile_bridge_lane(config=config, intent=intent)
-    lane_adapter = lane_submit_bridge_adapter(lane_id=intent.strategy_id)
-    if lane_adapter is None and active_profile_lane.get("passed") is True:
-        lane_adapter = _lane_adapter_from_active_profile_row(active_profile_lane.get("row"))
+    active_profile_adapter = (
+        _lane_adapter_from_active_profile_row(active_profile_lane.get("row"))
+        if active_profile_lane.get("passed") is True
+        else None
+    )
+    lane_adapter = active_profile_adapter or lane_submit_bridge_adapter(lane_id=intent.strategy_id)
     target = dict(lane_adapter.get("bridge_execution_target") or {}) if lane_adapter is not None else {}
     approved = bool(target)
     if not target:
@@ -601,6 +605,22 @@ def _phase1_target_detail_label(target: dict[str, Any]) -> str:
 
 def _phase1_target_is_configured(target: dict[str, Any]) -> bool:
     return bool(target.get("approved")) and bool(str(target.get("symbol") or "").strip())
+
+
+def _execution_target_identity_check(target: dict[str, Any]) -> dict[str, Any]:
+    validation = validate_track_b_execution_target(target)
+    passed = validation.get("submit_allowed") is True
+    blockers = ", ".join(str(value) for value in validation.get("blockers") or [])
+    detail = (
+        "Execution target identity is coherent with the validated Track B futures contract registry."
+        if passed
+        else f"EXECUTION_TARGET_MISMATCH: Execution target identity is not internally coherent ({blockers or 'unknown'})."
+    )
+    row = _check("execution_target_identity", passed, True, detail)
+    row["blocker"] = None if passed else "EXECUTION_TARGET_MISMATCH"
+    row["contract_identity"] = validation.get("contract_identity")
+    row["canonical_target"] = validation.get("canonical_target")
+    return row
 
 
 def _deprecated_submit_root_detail(repo_root: Path) -> str | None:
@@ -2978,6 +2998,7 @@ def _build_preflight_checks(
                 else "A fresh delayed quote is required before strategy bridge submit is allowed when no runtime execution price is selected."
             ),
         ),
+        _execution_target_identity_check(expected_target),
         _check(
             "exact_qualified_contract",
             _qualified_contract_is_exact(qualified_contract_report, expected_target=expected_target),

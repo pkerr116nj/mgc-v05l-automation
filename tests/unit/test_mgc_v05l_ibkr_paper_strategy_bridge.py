@@ -22,6 +22,7 @@ from mgc_v05l.execution.ibkr_paper_strategy_bridge import (
     _build_preflight_checks,
     _build_static_preflight_checks,
     _entry_execution_pricing_for_bridge,
+    _execution_target_identity_check,
     _exit_attempt_policy_for_bridge,
     _map_delegate_classification,
     _quote_is_fresh,
@@ -568,6 +569,29 @@ def _mes_qualified_contract() -> dict[str, object]:
     }
 
 
+def test_bridge_preflight_blocks_mixed_execution_target_identity_before_submit() -> None:
+    row = _execution_target_identity_check(
+        {
+            "symbol": "MES",
+            "contract_key": "MES-202609",
+            "contract_month": "202606",
+            "expiry": "20260918",
+            "local_symbol": "MESU6",
+            "con_id": 793356217,
+            "exchange": "CME",
+            "currency": "USD",
+            "multiplier": "5",
+            "qualified_contract_identifier": 793356217,
+            "friendly_label": "MES 202606",
+        }
+    )
+
+    assert row["passed"] is False
+    assert row["blocking"] is True
+    assert row["blocker"] == "EXECUTION_TARGET_MISMATCH"
+    assert "contract_month_mismatch" in row["detail"]
+
+
 def _write_submit_ownership(tmp_path: Path, *rows: dict[str, object]) -> None:
     path = tmp_path / DEFAULT_TRACK_B_SUBMIT_INTENT_OWNERSHIP_JSONL
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -764,6 +788,8 @@ def _write_leak_authorization(
     strategy_id: str = "asia_london_participation_core_v1__GC",
     symbol: str = "GC",
     local_symbol: str = "GCM6",
+    expiry: str = "202606",
+    con_id: int | None = None,
 ) -> tuple[Path, str]:
     now = datetime.now(timezone.utc)
     payload: dict[str, object] = {
@@ -774,8 +800,8 @@ def _write_leak_authorization(
         "strategy_id": strategy_id,
         "symbol": symbol,
         "local_symbol": local_symbol,
-        "expiry": "202606",
-        "con_id": None,
+        "expiry": expiry,
+        "con_id": con_id,
         "action": action,
         "exit_action": "SELL" if action == "BUY" else "BUY",
         "qty": 1,
@@ -2657,6 +2683,7 @@ def test_ported_es_lane_passes_static_submit_gate_with_full_size_es_execution_ta
         submit=True,
         strategy_id="es_1x_ny_early_core__us_midday_long",
         symbol="ES",
+        contract_month="202609",
         caller_path="probationary_paper_runtime_lane",
         caller_metadata=_approved_runtime_metadata(
             strategy_id="es_1x_ny_early_core__us_midday_long",
@@ -2692,7 +2719,7 @@ def test_ported_es_lane_passes_static_submit_gate_with_full_size_es_execution_ta
             "submit_allowed": True,
             "health_classification": "HEALTHY",
             "account_id": "DUM882026",
-            "exact_contract": {"symbol": "ES", "expiry": "20260619", "con_id": 123, "local_symbol": "ESM6"},
+            "exact_contract": {"symbol": "ES", "expiry": "20260918", "con_id": 649180671, "local_symbol": "ESU6"},
             "block_reasons": [],
         },
         governance_status={
@@ -3294,8 +3321,8 @@ def test_supervised_runtime_route_uses_lane_authoritative_target_matrix_even_wit
             "ES",
             "ES_SIGNAL_DIRECT_PHASE1",
             "ES",
-            "20260619",
-            "ESM6",
+            "20260918",
+            "ESU6",
         ),
         (
             "mes_1x_ny_early_core__us_midday_long",
@@ -3303,8 +3330,8 @@ def test_supervised_runtime_route_uses_lane_authoritative_target_matrix_even_wit
             "MES",
             "MES_SIGNAL_DIRECT_PHASE1",
             "MES",
-            "20260619",
-            "MESM6",
+            "20260918",
+            "MESU6",
         ),
         (
             "nq_1x_asia_london_participation__asia_london_long_v5",
@@ -3312,8 +3339,8 @@ def test_supervised_runtime_route_uses_lane_authoritative_target_matrix_even_wit
             "NQ",
             "NQ_SIGNAL_DIRECT_PHASE1",
             "NQ",
-            "20260619",
-            "NQM6",
+            "20260918",
+            "NQU6",
         ),
         (
             "mnq_1x_asia_london_participation__asia_london_long_v5",
@@ -3321,8 +3348,8 @@ def test_supervised_runtime_route_uses_lane_authoritative_target_matrix_even_wit
             "MNQ",
             "MNQ_SIGNAL_DIRECT_PHASE1",
             "MNQ",
-            "20260619",
-            "MNQM6",
+            "20260918",
+            "MNQU6",
         ),
     ]
     for strategy_id, source_instrument, executable_proxy, proxy_mode, exact_symbol, exact_expiry, exact_local_symbol in cases:
@@ -3331,6 +3358,7 @@ def test_supervised_runtime_route_uses_lane_authoritative_target_matrix_even_wit
             submit=True,
             strategy_id=strategy_id,
             symbol=executable_proxy,
+            contract_month=exact_expiry[:6],
             caller_path="probationary_paper_runtime_lane",
             caller_metadata=_approved_runtime_metadata(
                 strategy_id=strategy_id,
@@ -3689,14 +3717,16 @@ def test_lifecycle_validation_entry_governance_readiness_blockers_are_diagnostic
         lane_id="mes_globex_active_participation_long",
         strategy_id="PAPER_ACTIVE_EVIDENCE_MES_GLOBEX_PARTICIPATION_LONG_V1",
         symbol="MES",
-        local_symbol="MESM6",
+        local_symbol="MESU6",
+        expiry="202609",
+        con_id=793356217,
     )
     config = _config(
         tmp_path,
         submit=True,
         strategy_id="mes_globex_active_participation_long",
         symbol="MES",
-        contract_month="202606",
+        contract_month="202609",
         caller_path="track_b_paper_leak_test_apply",
         leak_test_authorization_path=auth_path,
         leak_test_authorization_digest=digest,
@@ -3711,7 +3741,7 @@ def test_lifecycle_validation_entry_governance_readiness_blockers_are_diagnostic
             "mode": "PAPER",
             "host": "127.0.0.1",
             "port": 7497,
-            "local_symbol": "MESM6",
+            "local_symbol": "MESU6",
             "paper_only": True,
             "live_money_eligible": False,
         },
@@ -6929,7 +6959,7 @@ def test_preflight_blocks_wrong_contract_month_for_approved_runtime_lane(tmp_pat
         submit=True,
         strategy_id="es_1x_ny_early_core__us_midday_long",
         symbol="ES",
-        contract_month="202609",
+        contract_month="202606",
         caller_path="probationary_paper_runtime_lane",
         caller_metadata=_approved_runtime_metadata(
             strategy_id="es_1x_ny_early_core__us_midday_long",
@@ -7396,7 +7426,7 @@ def test_mnq_short_entry_lane_reaches_guarded_submit_boundary_when_fresh(tmp_pat
         submit=True,
         strategy_id="mnq_1x_ny_early_core__us_early_short_reclaim_fail",
         symbol="MNQ",
-        contract_month="202606",
+        contract_month="202609",
         action="SELL",
         limit_price_model="DELAYED_BID_MINUS_1T_MARKETABLE_SELL",
         caller_path="probationary_paper_runtime_lane",

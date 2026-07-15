@@ -35,6 +35,10 @@ class TrackBContractIdentity:
     min_tick: str | None = None
     account_id: str | None = None
 
+    @property
+    def contract_month(self) -> str:
+        return self.contract_key.rsplit("-", 1)[-1]
+
     def as_dict(self) -> dict[str, Any]:
         payload: dict[str, Any] = {
             "symbol": self.symbol,
@@ -44,9 +48,11 @@ class TrackBContractIdentity:
             "con_id": self.con_id,
             "expiry": self.expiry,
             "contract_key": self.contract_key,
+            "contract_month": self.contract_month,
             "exchange": self.exchange,
             "currency": self.currency,
             "qualified_contract_identifier": self.con_id,
+            "friendly_label": f"{self.symbol} {self.contract_month}",
         }
         if self.multiplier is not None:
             payload["multiplier"] = self.multiplier
@@ -235,6 +241,60 @@ VALIDATED_TRACK_B_FUTURES_BY_SYMBOL: dict[str, TrackBContractIdentity] = {
 }
 
 
+def validated_track_b_execution_target(symbol: str) -> dict[str, Any]:
+    normalized = _text(symbol)
+    if normalized not in VALIDATED_TRACK_B_FUTURES_BY_SYMBOL:
+        raise KeyError(f"Unsupported Track B futures execution target: {symbol}")
+    return VALIDATED_TRACK_B_FUTURES_BY_SYMBOL[normalized].as_dict()
+
+
+def validate_track_b_execution_target(
+    target: Mapping[str, Any],
+    *,
+    expected_symbol: str | None = None,
+) -> dict[str, Any]:
+    observed = dict(target)
+    if expected_symbol and _text(observed.get("symbol")) is None:
+        observed["symbol"] = expected_symbol
+    identity = normalize_track_b_contract_identity(observed)
+    required_fields = (
+        "symbol",
+        "contract_key",
+        "contract_month",
+        "expiry",
+        "local_symbol",
+        "con_id",
+        "exchange",
+        "currency",
+        "multiplier",
+        "qualified_contract_identifier",
+        "friendly_label",
+    )
+    missing = [field for field in required_fields if _text(observed.get(field)) is None and field not in {"con_id", "qualified_contract_identifier"}]
+    if observed.get("con_id") in (None, ""):
+        missing.append("con_id")
+    if observed.get("qualified_contract_identifier") in (None, ""):
+        missing.append("qualified_contract_identifier")
+    blockers = list(identity.get("blockers") or [])
+    if missing:
+        blockers.extend(f"missing_{field}" for field in missing)
+    resolved = identity.get("resolved") is True and not missing
+    return {
+        "classification": "TRACK_B_EXECUTION_TARGET_COHERENT" if resolved else "EXECUTION_TARGET_MISMATCH",
+        "blocker": None if resolved else "EXECUTION_TARGET_MISMATCH",
+        "resolved": resolved,
+        "submit_allowed": resolved,
+        "blockers": blockers,
+        "contract_identity": identity,
+        "canonical_target": (
+            VALIDATED_TRACK_B_FUTURES_BY_SYMBOL[str(identity.get("symbol") or "").upper()].as_dict()
+            if identity.get("resolved") is True and str(identity.get("symbol") or "").upper() in VALIDATED_TRACK_B_FUTURES_BY_SYMBOL
+            else None
+        ),
+        "source": "VALIDATED_TRACK_B_FUTURES_CONTRACT_REGISTRY",
+    }
+
+
 def normalize_track_b_contract_identity(row: Mapping[str, Any], *, account_id: str | None = None) -> dict[str, Any]:
     """Return a conservative canonical identity for validated Track B futures rows."""
 
@@ -299,10 +359,12 @@ def normalize_track_b_contract_row(row: Mapping[str, Any], *, account_id: str | 
                 "con_id": identity["con_id"],
                 "expiry": identity["expiry"],
                 "contract_key": identity["contract_key"],
+                "contract_month": identity["contract_month"],
                 "exchange": normalized.get("exchange") or identity.get("exchange"),
                 "currency": normalized.get("currency") or identity.get("currency"),
                 "multiplier": normalized.get("multiplier") or identity.get("multiplier"),
                 "qualified_contract_identifier": identity["con_id"],
+                "friendly_label": identity.get("friendly_label"),
             }
         )
     return normalized
@@ -415,6 +477,9 @@ def _identity_contradictions(observed: Mapping[str, Any], candidate: TrackBContr
     contract_key = _text(observed.get("contract_key"))
     if contract_key and contract_key != candidate.contract_key:
         contradictions.append("contract_key_mismatch")
+    contract_month = _text(observed.get("contract_month"))
+    if contract_month and contract_month != candidate.contract_month:
+        contradictions.append("contract_month_mismatch")
     return contradictions
 
 
