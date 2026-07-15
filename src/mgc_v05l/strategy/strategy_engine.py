@@ -34,6 +34,7 @@ from ..execution.execution_engine import ExecutionEngine, PendingExecution
 from ..execution.order_models import FillEvent, OrderIntent
 from ..execution.paper_broker import PaperBroker
 from ..execution_core.track_b_no_trade_diagnostics import (
+    NoCandidateWindowAggregator,
     NoTradeFinalDecision,
     build_no_trade_diagnostic,
     diagnostics_root_from_artifact_dir,
@@ -337,6 +338,9 @@ class StrategyEngine:
         self._latest_live_intent_summary: dict[str, object] = {}
         self._no_trade_diagnostics_root = diagnostics_root_from_artifact_dir(
             structured_logger.artifact_dir if structured_logger is not None else None
+        )
+        self._no_candidate_observability = NoCandidateWindowAggregator(
+            diagnostics_root=self._no_trade_diagnostics_root
         )
         self._restore_processing_context()
 
@@ -857,6 +861,15 @@ class StrategyEngine:
         extra: dict[str, object] | None = None,
     ) -> None:
         try:
+            warmup_required = self._settings.warmup_bars_required()
+            warmup_observed = len(self._bar_history)
+            diagnostic_extra = {
+                "warmup_bars_observed": warmup_observed,
+                "warmup_bars_required": warmup_required,
+                "warmup_complete": warmup_observed >= warmup_required,
+                "min_evidence_met": bool(setup_detected or order_intent_created or would_route),
+                **(extra or {}),
+            }
             payload = build_no_trade_diagnostic(
                 lane_id=str(self._runtime_identity.get("lane_id") or self._settings.probationary_paper_lane_id or ""),
                 symbol=self._settings.symbol,
@@ -875,9 +888,10 @@ class StrategyEngine:
                 would_route=would_route,
                 order_intent_id=order_intent_id,
                 runtime_identity=self._runtime_identity,
-                extra=extra,
+                extra=diagnostic_extra,
             )
             write_no_trade_diagnostic(payload, diagnostics_root=self._no_trade_diagnostics_root)
+            self._no_candidate_observability.observe(payload)
         except Exception as exc:
             if self._alert_dispatcher is not None:
                 self._alert_dispatcher.emit(

@@ -8,13 +8,15 @@ from __future__ import annotations
 
 import json
 import os
+from collections import Counter
 from collections.abc import Mapping
 from dataclasses import asdict, is_dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from enum import Enum
 from pathlib import Path
 from typing import Any
 
+from .bounded_jsonl import append_bounded_jsonl
 from .models import to_jsonable
 from .track_b_strategy_attrition_funnel import (
     events_from_no_trade_diagnostic,
@@ -25,6 +27,9 @@ from .track_b_strategy_attrition_funnel import (
 NO_TRADE_DIAGNOSTICS_ROOT = Path("outputs/track_b_execution_core/no_trade_diagnostics")
 LATEST_NO_TRADE_DIAGNOSTICS_JSON = NO_TRADE_DIAGNOSTICS_ROOT / "latest_no_trade_diagnostics.json"
 NO_TRADE_DIAGNOSTICS_JSONL = NO_TRADE_DIAGNOSTICS_ROOT / "no_trade_diagnostics.jsonl"
+NO_CANDIDATE_SUMMARY_JSON = NO_TRADE_DIAGNOSTICS_ROOT / "latest_no_candidate_summary.json"
+NO_CANDIDATE_SUMMARY_JSONL = NO_TRADE_DIAGNOSTICS_ROOT / "no_candidate_summary.jsonl"
+DEFAULT_NO_CANDIDATE_WINDOW_SECONDS = 300
 
 
 class NoTradeFinalDecision(str, Enum):
@@ -60,6 +65,228 @@ _EXPOSURE_BLOCKER_TOKENS = (
     "stack",
     "pyramid",
 )
+
+
+class NoCandidateReasonCode(str, Enum):
+    NO_SETUP = "NO_SETUP"
+    SESSION_DISALLOWED = "SESSION_DISALLOWED"
+    WARMUP_INCOMPLETE = "WARMUP_INCOMPLETE"
+    MIN_EVIDENCE_NOT_MET = "MIN_EVIDENCE_NOT_MET"
+    SIDE_DISABLED = "SIDE_DISABLED"
+    COOLDOWN_ACTIVE = "COOLDOWN_ACTIVE"
+    SAME_UNDERLYING_HOLD = "SAME_UNDERLYING_HOLD"
+    MISSING_CONTEXT = "MISSING_CONTEXT"
+    SUBMIT_BLOCKED = "SUBMIT_BLOCKED"
+    UNKNOWN = "UNKNOWN"
+
+
+_TERMINAL_CANDIDATE_DECISIONS = {
+    NoTradeFinalDecision.ORDER_INTENT_CREATED.value,
+    NoTradeFinalDecision.WOULD_ROUTE.value,
+}
+
+
+class NoCandidateWindowAggregator:
+    """Aggregate no-candidate reasons without emitting one artifact per bar."""
+
+    def __init__(
+        self,
+        *,
+        diagnostics_root: Path | str,
+        window_seconds: int = DEFAULT_NO_CANDIDATE_WINDOW_SECONDS,
+    ) -> None:
+        if window_seconds <= 0:
+            raise ValueError("window_seconds must be positive")
+        self._diagnostics_root = Path(diagnostics_root)
+        self._window = timedelta(seconds=window_seconds)
+        self._window_seconds = window_seconds
+        self._state: dict[str, Any] | None = None
+
+    def observe(self, payload: Mapping[str, Any]) -> dict[str, Any] | None:
+        """Record one no-candidate observation and emit only at window boundaries."""
+
+        if not is_no_candidate_observation(payload):
+            return None
+        observed_at = _parse_timestamp(payload.get("bar_timestamp") or payload.get("generated_at"))
+        emitted: dict[str, Any] | None = None
+        if self._state is None:
+            self._state = self._new_window(payload, observed_at)
+        elif observed_at >= self._state["window_started_at"] + self._window:
+            emitted = self.flush(generated_at=observed_at)
+            self._state = self._new_window(payload, observed_at)
+        self._add(payload, observed_at)
+        return emitted
+
+    def flush(self, *, generated_at: datetime | None = None) -> dict[str, Any] | None:
+        if self._state is None or self._state["bars_evaluated"] <= 0:
+            self._state = None
+            return None
+        generated = generated_at or datetime.now(timezone.utc)
+        summary = _build_no_candidate_summary(self._state, generated_at=generated, window_seconds=self._window_seconds)
+        write_no_candidate_summary(summary, diagnostics_root=self._diagnostics_root)
+        self._state = None
+        return summary
+
+    def _new_window(self, payload: Mapping[str, Any], observed_at: datetime) -> dict[str, Any]:
+        return {
+            "lane_id": str(payload.get("lane_id") or ""),
+            "symbol": str(payload.get("symbol") or "").upper(),
+            "session": str(payload.get("session") or "UNKNOWN"),
+            "window_started_at": observed_at,
+            "window_ended_at": observed_at,
+            "bars_evaluated": 0,
+            "reason_counts": Counter(),
+            "latest_evaluation_timestamp": observed_at,
+            "latest_bar_id": payload.get("bar_id"),
+            "session_state": {},
+            "warmup_min_evidence_state": {},
+            "cooldown_hold_state": {},
+        }
+
+    def _add(self, payload: Mapping[str, Any], observed_at: datetime) -> None:
+        if self._state is None:
+            self._state = self._new_window(payload, observed_at)
+        reason = classify_no_candidate_reason(payload)
+        extra = payload.get("extra") if isinstance(payload.get("extra"), Mapping) else {}
+        self._state["bars_evaluated"] += 1
+        self._state["reason_counts"][reason] += 1
+        self._state["window_ended_at"] = max(self._state["window_ended_at"], observed_at)
+        self._state["latest_evaluation_timestamp"] = observed_at
+        self._state["latest_bar_id"] = payload.get("bar_id")
+        self._state["session"] = str(payload.get("session") or self._state["session"] or "UNKNOWN")
+        self._state["session_state"] = {
+            "session": self._state["session"],
+            "session_allowed": payload.get("session_allowed"),
+        }
+        self._state["warmup_min_evidence_state"] = {
+            "warmup_complete": extra.get("warmup_complete"),
+            "warmup_bars_observed": extra.get("warmup_bars_observed"),
+            "warmup_bars_required": extra.get("warmup_bars_required"),
+            "min_evidence_met": extra.get("min_evidence_met"),
+        }
+        self._state["cooldown_hold_state"] = {
+            "cooldown_active": reason == NoCandidateReasonCode.COOLDOWN_ACTIVE.value,
+            "entries_enabled": extra.get("entries_enabled"),
+            "exits_enabled": extra.get("exits_enabled"),
+            "operator_halt": extra.get("operator_halt"),
+            "same_underlying_entry_hold": extra.get("same_underlying_entry_hold"),
+        }
+
+
+def classify_no_candidate_reason(payload: Mapping[str, Any]) -> str:
+    extra = payload.get("extra") if isinstance(payload.get("extra"), Mapping) else {}
+    reason_text = " ".join(
+        str(value or "")
+        for value in (
+            payload.get("blocker_reason"),
+            payload.get("final_decision"),
+            extra.get("same_underlying_hold_reason"),
+        )
+    ).lower()
+    if payload.get("session_allowed") is False or "session_not_allowed" in reason_text:
+        return NoCandidateReasonCode.SESSION_DISALLOWED.value
+    if payload.get("strategy_evaluated") is False or "context_feature_history_not_ready" in reason_text:
+        return NoCandidateReasonCode.MISSING_CONTEXT.value
+    if "warmup" in reason_text or extra.get("warmup_complete") is False:
+        return NoCandidateReasonCode.WARMUP_INCOMPLETE.value
+    if "same_underlying" in reason_text or extra.get("same_underlying_entry_hold") is True:
+        return NoCandidateReasonCode.SAME_UNDERLYING_HOLD.value
+    if "side_not_allowed" in reason_text or "side_disabled" in reason_text:
+        return NoCandidateReasonCode.SIDE_DISABLED.value
+    if (
+        "cooldown" in reason_text
+        or "entries_disabled" in reason_text
+        or "operator_halt" in reason_text
+        or extra.get("operator_halt") is True
+    ):
+        return NoCandidateReasonCode.COOLDOWN_ACTIVE.value
+    if "entry_signal_filtered" in reason_text or "controls_not_satisfied" in reason_text:
+        return NoCandidateReasonCode.MIN_EVIDENCE_NOT_MET.value
+    if str(payload.get("final_decision") or "").upper() in {
+        NoTradeFinalDecision.GOVERNANCE_BLOCKED.value,
+        NoTradeFinalDecision.EXPOSURE_BLOCKED.value,
+        NoTradeFinalDecision.ROUTE_HELD_UNTIL_READINESS_CONVERGED.value,
+    }:
+        return NoCandidateReasonCode.SUBMIT_BLOCKED.value
+    if "no_setup" in reason_text or payload.get("setup_detected") is False:
+        return NoCandidateReasonCode.NO_SETUP.value
+    if str(payload.get("final_decision") or "").upper() == NoTradeFinalDecision.FILTER_REJECTED.value:
+        return NoCandidateReasonCode.MIN_EVIDENCE_NOT_MET.value
+    return NoCandidateReasonCode.UNKNOWN.value
+
+
+def is_no_candidate_observation(payload: Mapping[str, Any]) -> bool:
+    decision = str(payload.get("final_decision") or "").upper()
+    if decision in _TERMINAL_CANDIDATE_DECISIONS:
+        return False
+    if payload.get("order_intent_id"):
+        return False
+    return True
+
+
+def write_no_candidate_summary(
+    payload: Mapping[str, Any],
+    *,
+    repo_root: Path | str = Path("."),
+    diagnostics_root: Path | str | None = None,
+) -> dict[str, Path]:
+    root = Path(diagnostics_root) if diagnostics_root is not None else Path(repo_root) / NO_TRADE_DIAGNOSTICS_ROOT
+    root.mkdir(parents=True, exist_ok=True)
+    latest_path = root / "latest_no_candidate_summary.json"
+    jsonl_path = root / "no_candidate_summary.jsonl"
+    record = to_jsonable(dict(payload))
+    tmp_path = latest_path.with_name(f".{latest_path.name}.{os.getpid()}.tmp")
+    try:
+        with tmp_path.open("w", encoding="utf-8") as handle:
+            json.dump(record, handle, indent=2, sort_keys=True)
+            handle.write("\n")
+        tmp_path.replace(latest_path)
+    finally:
+        if tmp_path.exists():
+            tmp_path.unlink(missing_ok=True)
+    append_bounded_jsonl(jsonl_path, record)
+    return {"latest": latest_path, "jsonl": jsonl_path}
+
+
+def _build_no_candidate_summary(
+    state: Mapping[str, Any],
+    *,
+    generated_at: datetime,
+    window_seconds: int,
+) -> dict[str, Any]:
+    reason_counts = dict(sorted(state["reason_counts"].items()))
+    return {
+        "schema_version": "track_b_no_candidate_observability_v1",
+        "generated_at": generated_at.isoformat(),
+        "lane_id": state["lane_id"],
+        "symbol": state["symbol"],
+        "window": {
+            "started_at": state["window_started_at"].isoformat(),
+            "ended_at": state["window_ended_at"].isoformat(),
+            "duration_seconds": window_seconds,
+        },
+        "bars_evaluated": state["bars_evaluated"],
+        "primary_no_candidate_reason_counts": reason_counts,
+        "latest_evaluation_timestamp": state["latest_evaluation_timestamp"].isoformat(),
+        "latest_bar_id": state["latest_bar_id"],
+        "session_state": state["session_state"],
+        "warmup_min_evidence_state": state["warmup_min_evidence_state"],
+        "cooldown_hold_state": state["cooldown_hold_state"],
+        "live_money_eligible": False,
+    }
+
+
+def _parse_timestamp(value: Any) -> datetime:
+    if isinstance(value, datetime):
+        parsed = value
+    else:
+        text = str(value or "").strip()
+        if text.endswith("Z"):
+            text = f"{text[:-1]}+00:00"
+        parsed = datetime.fromisoformat(text) if text else datetime.now(timezone.utc)
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
 
 
 def build_no_trade_diagnostic(

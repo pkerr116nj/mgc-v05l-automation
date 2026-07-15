@@ -1,11 +1,15 @@
 from __future__ import annotations
 
 import json
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from mgc_v05l.domain.models import SignalPacket
+import mgc_v05l.execution_core.track_b_no_trade_diagnostics as no_trade_diag
 from mgc_v05l.execution_core.track_b_no_trade_diagnostics import (
+    NoCandidateReasonCode,
+    NoCandidateWindowAggregator,
     NoTradeFinalDecision,
+    classify_no_candidate_reason,
     build_no_trade_diagnostic,
     write_no_trade_diagnostic,
 )
@@ -190,3 +194,100 @@ def test_writer_updates_latest_and_jsonl(tmp_path) -> None:
     jsonl_rows = [json.loads(line) for line in paths["jsonl"].read_text(encoding="utf-8").splitlines()]
     assert latest["lane_id"] == "mgc_1x_all_lanes__asia_early_long"
     assert jsonl_rows[-1]["final_decision"] == "NO_SETUP"
+
+
+def test_no_candidate_reason_taxonomy_covers_required_codes() -> None:
+    base_time = datetime(2026, 5, 19, 1, 5, tzinfo=timezone.utc)
+    examples = [
+        build_record(blocker_reason="no_setup_detected"),
+        build_record(session_allowed=False, blocker_reason="session_not_allowed"),
+        build_record(blocker_reason="warmup_incomplete", extra={"warmup_complete": False}),
+        build_record(blocker_reason="entry_signal_filtered_or_controls_not_satisfied", setup_detected=True),
+        build_record(blocker_reason="long_entry_side_not_allowed"),
+        build_record(blocker_reason="operator_halt", extra={"operator_halt": True}),
+        build_record(blocker_reason="same_underlying_entry_hold", extra={"same_underlying_entry_hold": True}),
+        build_record(
+            bar_timestamp=base_time + timedelta(minutes=1),
+            strategy_evaluated=False,
+            blocker_reason="context_feature_history_not_ready",
+        ),
+    ]
+
+    assert {classify_no_candidate_reason(record) for record in examples} >= {
+        NoCandidateReasonCode.NO_SETUP.value,
+        NoCandidateReasonCode.SESSION_DISALLOWED.value,
+        NoCandidateReasonCode.WARMUP_INCOMPLETE.value,
+        NoCandidateReasonCode.MIN_EVIDENCE_NOT_MET.value,
+        NoCandidateReasonCode.SIDE_DISABLED.value,
+        NoCandidateReasonCode.COOLDOWN_ACTIVE.value,
+        NoCandidateReasonCode.SAME_UNDERLYING_HOLD.value,
+        NoCandidateReasonCode.MISSING_CONTEXT.value,
+    }
+
+
+def test_no_candidate_aggregator_emits_one_summary_per_window(tmp_path) -> None:
+    root = tmp_path / "diag"
+    aggregator = NoCandidateWindowAggregator(diagnostics_root=root, window_seconds=300)
+    start = datetime(2026, 5, 19, 1, 0, tzinfo=timezone.utc)
+
+    assert aggregator.observe(build_record(bar_timestamp=start, blocker_reason="no_setup_detected")) is None
+    assert aggregator.observe(
+        build_record(
+            bar_timestamp=start + timedelta(minutes=1),
+            session_allowed=False,
+            blocker_reason="session_not_allowed",
+        )
+    ) is None
+
+    emitted = aggregator.observe(
+        build_record(
+            bar_timestamp=start + timedelta(minutes=5),
+            blocker_reason="warmup_incomplete",
+            extra={"warmup_complete": False, "warmup_bars_observed": 2, "warmup_bars_required": 20},
+        )
+    )
+
+    assert emitted is not None
+    assert emitted["bars_evaluated"] == 2
+    assert emitted["primary_no_candidate_reason_counts"] == {
+        "NO_SETUP": 1,
+        "SESSION_DISALLOWED": 1,
+    }
+    latest = json.loads((root / "latest_no_candidate_summary.json").read_text(encoding="utf-8"))
+    rows = (root / "no_candidate_summary.jsonl").read_text(encoding="utf-8").splitlines()
+    assert latest["schema_version"] == "track_b_no_candidate_observability_v1"
+    assert len(rows) == 1
+
+
+def test_no_candidate_aggregator_does_not_emit_per_bar(monkeypatch, tmp_path) -> None:
+    writes: list[dict[str, object]] = []
+
+    def fake_write(payload: dict[str, object], **_: object) -> dict[str, object]:
+        writes.append(payload)
+        return {}
+
+    monkeypatch.setattr(no_trade_diag, "write_no_candidate_summary", fake_write)
+    aggregator = NoCandidateWindowAggregator(diagnostics_root=tmp_path, window_seconds=300)
+    start = datetime(2026, 5, 19, 1, 0, tzinfo=timezone.utc)
+
+    for minute in range(4):
+        aggregator.observe(build_record(bar_timestamp=start + timedelta(minutes=minute), blocker_reason="no_setup_detected"))
+
+    assert writes == []
+    aggregator.observe(build_record(bar_timestamp=start + timedelta(minutes=5), blocker_reason="no_setup_detected"))
+    assert len(writes) == 1
+
+
+def test_no_candidate_aggregator_ignores_candidate_payload_without_mutation(tmp_path) -> None:
+    aggregator = NoCandidateWindowAggregator(diagnostics_root=tmp_path, window_seconds=300)
+    record = build_record(
+        setup_detected=True,
+        order_intent_created=True,
+        order_intent_id="bar-1|BUY_TO_OPEN",
+    )
+
+    assert aggregator.observe(record) is None
+    assert aggregator.flush() is None
+    assert record["final_decision"] == "ORDER_INTENT_CREATED"
+    assert not (tmp_path / "latest_no_candidate_summary.json").exists()
+    assert not (tmp_path / "no_candidate_summary.jsonl").exists()
