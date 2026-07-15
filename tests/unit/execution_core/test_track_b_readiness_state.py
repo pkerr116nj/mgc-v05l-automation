@@ -8,6 +8,7 @@ from mgc_v05l.execution_core.track_b_readiness_state import (
     CONTROL_PLANE_SNAPSHOT_MAX_AGE_SECONDS,
     DEFAULT_CONTROL_PLANE_SNAPSHOT_ARTIFACT,
     _broker_truth_input,
+    _execution_core_shared_truth_input,
     _market_data_input,
     _operator_status_with_lane_artifacts,
     _reconciliation_input,
@@ -1787,6 +1788,46 @@ def test_stale_legacy_reconciliation_still_blocks_when_current_open_order_truth_
 
     assert result["canonical_readiness"] == "NOT_READY_DEPENDENCY"
     assert result["readiness_blockers"][0]["code"] == "open_order_truth_not_clean"
+
+
+def test_latest_shared_truth_refresh_overrides_stale_proof_shared_truth_snapshot() -> None:
+    now = datetime(2026, 5, 18, 12, 0, tzinfo=timezone.utc)
+    evidence = _execution_core_shared_truth_input(
+        {
+            "proof_readiness": {
+                "generated_at": now.isoformat(),
+                "classification": "READY_FOR_PROOF",
+                "shared_truth_classifications": {
+                    "Reconciliation": "WAITING_FOR_BROKER_TRUTH_SETTLEMENT",
+                    "Broker Truth Lease": "INVALIDATED_CONTRADICTION",
+                    "Open Order Truth": "NO_OPEN_ORDERS",
+                    "Position Truth": "CLEAN_FLAT_READY",
+                    "Runtime Environment Truth": "RUNTIME_ACTIVE_OBSERVATION_ONLY",
+                },
+            },
+            "shared_truth_refresh": {
+                "generated_at": now.isoformat(),
+                "refresh_generation_id": "track-b-shared-truth-current",
+                "classifications": {
+                    "Broker Truth Lease": "ACTIVE",
+                    "Open Order Truth": "NO_OPEN_ORDERS",
+                    "Managed Order Registry": "NO_MANAGED_ORDERS",
+                    "Managed Position Registry": "NO_MANAGED_POSITIONS",
+                    "Order Adjustment Planner": "NO_ACTION_NEEDED",
+                    "Position Truth": "CLEAN_FLAT_READY",
+                    "Reconciliation": "TRACK_B_PAPER_BROKER_RECONCILED",
+                    "Runtime Environment Truth": "RUNTIME_ACTIVE_TRADE_CAPABLE",
+                },
+            },
+        },
+        now=now,
+    )
+
+    assert evidence["source"] == "execution_core_shared_truth_refresh"
+    assert evidence["shared_truth_refresh"]["refresh_generation_id"] == "track-b-shared-truth-current"
+    assert evidence["classifications"]["Reconciliation"] == "TRACK_B_PAPER_BROKER_RECONCILED"
+    assert evidence["classifications"]["Broker Truth Lease"] == "ACTIVE"
+    assert evidence["classifications"]["Runtime Environment Truth"] == "RUNTIME_ACTIVE_TRADE_CAPABLE"
 
 
 def test_live_money_eligible_true_blocks_paper_readiness() -> None:

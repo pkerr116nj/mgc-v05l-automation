@@ -94,6 +94,9 @@ DEFAULT_POSITION_TRUTH_ARTIFACT = (
 DEFAULT_RUNTIME_ENVIRONMENT_TRUTH_ARTIFACT = (
     Path("outputs") / "track_b_execution_core" / "runtime_truth" / "latest_runtime_environment_truth.json"
 )
+DEFAULT_SHARED_TRUTH_REFRESH_ARTIFACT = (
+    Path("outputs") / "track_b_execution_core" / "shared_truth" / "latest_track_b_shared_truth_refresh.json"
+)
 DEFAULT_MANAGED_POSITION_REGISTRY_ARTIFACT = (
     Path("outputs") / "track_b_execution_core" / "managed_positions" / "latest_managed_positions.json"
 )
@@ -960,6 +963,7 @@ def _load_readiness_artifacts(repo_root: Path) -> dict[str, Any]:
         "order_adjustment_plan": _read_json(repo_root / DEFAULT_ORDER_ADJUSTMENT_PLAN_ARTIFACT),
         "position_truth": _read_json(repo_root / DEFAULT_POSITION_TRUTH_ARTIFACT),
         "runtime_environment_truth": _read_json(repo_root / DEFAULT_RUNTIME_ENVIRONMENT_TRUTH_ARTIFACT),
+        "shared_truth_refresh": _read_json(repo_root / DEFAULT_SHARED_TRUTH_REFRESH_ARTIFACT),
         "managed_position_registry": _read_json(repo_root / DEFAULT_MANAGED_POSITION_REGISTRY_ARTIFACT),
         "control_plane_snapshot": _read_json(repo_root / DEFAULT_CONTROL_PLANE_SNAPSHOT_ARTIFACT),
         "strategy_exit_coverage": _read_json(repo_root / DEFAULT_STRATEGY_EXIT_COVERAGE_ARTIFACT),
@@ -1178,6 +1182,7 @@ def _write_refreshed_broker_truth_lease_if_present(*, repo_root: Path, payload: 
 
 def _execution_core_shared_truth_input(artifacts: Mapping[str, Any], *, now: datetime) -> dict[str, Any]:
     proof_readiness = _mapping(artifacts.get("proof_readiness"))
+    shared_truth_refresh = _mapping(artifacts.get("shared_truth_refresh"))
     open_order_truth = _mapping(artifacts.get("open_order_truth"))
     managed_order_registry = _mapping(artifacts.get("managed_order_registry"))
     order_adjustment_plan = _mapping(artifacts.get("order_adjustment_plan"))
@@ -1191,26 +1196,36 @@ def _execution_core_shared_truth_input(artifacts: Mapping[str, Any], *, now: dat
         if proof_age_seconds is not None and proof_age_seconds <= PROOF_CLASSIFICATION_MAX_AGE_SECONDS
         else {}
     )
+    current_shared_classifications = _mapping(shared_truth_refresh.get("classifications"))
     classifications = {
         "Open Order Truth": _classification(open_order_truth)
+        or current_shared_classifications.get("Open Order Truth")
         or proof_classifications.get("Open Order Truth"),
         "Managed Order Registry": _classification(managed_order_registry)
+        or current_shared_classifications.get("Managed Order Registry")
         or proof_classifications.get("Managed Order Registry"),
-        "Order Adjustment Planner": _classification(order_adjustment_plan),
+        "Order Adjustment Planner": _classification(order_adjustment_plan)
+        or current_shared_classifications.get("Order Adjustment Planner"),
         "Position Truth": _classification(position_truth, "overall_classification", "classification")
         or _classification(position_truth_summary, "overall_classification", "classification")
+        or current_shared_classifications.get("Position Truth")
         or proof_classifications.get("Position Truth"),
         "Runtime Environment Truth": _classification(runtime_environment_truth)
+        or current_shared_classifications.get("Runtime Environment Truth")
         or proof_classifications.get("Runtime Environment Truth"),
         "Managed Position Registry": _classification(managed_position_registry)
+        or current_shared_classifications.get("Managed Position Registry")
         or proof_classifications.get("Managed Position Registry"),
-        "Reconciliation": proof_classifications.get("Reconciliation"),
-        "Broker Truth Lease": proof_classifications.get("Broker Truth Lease"),
+        "Reconciliation": current_shared_classifications.get("Reconciliation")
+        or proof_classifications.get("Reconciliation"),
+        "Broker Truth Lease": current_shared_classifications.get("Broker Truth Lease")
+        or proof_classifications.get("Broker Truth Lease"),
     }
     available = any(
         bool(payload)
         for payload in (
             proof_readiness,
+            shared_truth_refresh,
             open_order_truth,
             managed_order_registry,
             order_adjustment_plan,
@@ -1223,8 +1238,8 @@ def _execution_core_shared_truth_input(artifacts: Mapping[str, Any], *, now: dat
         "available": available,
         "evidence_only": True,
         "readiness_authority": True,
-        "source": "execution_core_authority",
-        "generated_at": proof_readiness.get("generated_at"),
+        "source": "execution_core_shared_truth_refresh" if shared_truth_refresh else "execution_core_authority",
+        "generated_at": shared_truth_refresh.get("generated_at") or proof_readiness.get("generated_at"),
         "proof_readiness": {
             "available": bool(proof_readiness),
             "classification": proof_readiness.get("classification"),
@@ -1236,9 +1251,15 @@ def _execution_core_shared_truth_input(artifacts: Mapping[str, Any], *, now: dat
             "blockers": list(proof_readiness.get("blockers") or []),
             "age_seconds": proof_age_seconds,
         },
+        "shared_truth_refresh": {
+            "available": bool(shared_truth_refresh),
+            "generated_at": shared_truth_refresh.get("generated_at"),
+            "refresh_generation_id": shared_truth_refresh.get("refresh_generation_id"),
+        },
         "classifications": {key: value for key, value in classifications.items() if value},
         "artifact_paths": {
             "proof_readiness": str(DEFAULT_PROOF_READINESS_ARTIFACT),
+            "shared_truth_refresh": str(DEFAULT_SHARED_TRUTH_REFRESH_ARTIFACT),
             "open_order_truth": str(DEFAULT_OPEN_ORDER_TRUTH_ARTIFACT),
             "managed_order_registry": str(DEFAULT_MANAGED_ORDER_REGISTRY_ARTIFACT),
             "order_adjustment_plan": str(DEFAULT_ORDER_ADJUSTMENT_PLAN_ARTIFACT),
