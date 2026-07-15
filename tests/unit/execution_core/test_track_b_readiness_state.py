@@ -303,6 +303,23 @@ def test_clean_shared_truth_and_fresh_phase1_preserve_submit_capable_readiness()
     assert result["readiness_blockers"] == []
 
 
+def test_runtime_trade_capable_shared_truth_breaks_prior_canonical_loop() -> None:
+    inputs = _clean_inputs()
+    inputs["canonical_readiness"] = {
+        "canonical_readiness": "NOT_READY_DEPENDENCY",
+        "readiness_blockers": [{"code": "runtime_not_healthy"}],
+    }
+    inputs["execution_core_shared_truth"] = _shared_truth_evidence(
+        runtime_environment_truth="RUNTIME_ACTIVE_TRADE_CAPABLE"
+    )
+
+    result = classify_canonical_readiness(inputs)
+
+    assert result["canonical_readiness"] == "READY_SUBMIT_CAPABLE"
+    assert result["ready_submit_capable"] is True
+    assert result["readiness_blockers"] == []
+
+
 def test_reconciliation_input_prefers_current_scope_lifecycle_count_over_raw_projection() -> None:
     payload = {
         "generated_at": "2026-05-18T11:59:30+00:00",

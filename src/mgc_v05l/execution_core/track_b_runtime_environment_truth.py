@@ -66,6 +66,25 @@ DEFAULT_RECONCILIATION_ARTIFACT = (
     / "track_b_paper_broker_reconciliation"
     / "latest_track_b_paper_broker_reconciliation.json"
 )
+DEFAULT_DETACHED_CHILD_STATUS_ARTIFACT = (
+    Path("outputs")
+    / "probationary_pattern_engine"
+    / "paper_session"
+    / "runtime"
+    / "probationary_paper_detached_child_status.json"
+)
+DEFAULT_BROKER_TRUTH_LEASE_ARTIFACT = (
+    Path("outputs") / "operator_dashboard" / "runtime" / "latest_broker_truth_lease.json"
+)
+DEFAULT_OPEN_ORDER_TRUTH_ARTIFACT = (
+    Path("outputs") / "track_b_execution_core" / "open_order_truth" / "latest_open_order_truth.json"
+)
+DEFAULT_BROKER_POSITION_GUARDIAN_ARTIFACT = (
+    Path("outputs") / "track_b_execution_core" / "broker_position_guardian" / "latest_broker_position_guardian.json"
+)
+DEFAULT_SAFE_STATE_ENVELOPE_ARTIFACT = (
+    Path("outputs") / "track_b_execution_core" / "safe_state" / "latest_runtime_safe_state_envelope.json"
+)
 
 
 @dataclass(frozen=True)
@@ -82,6 +101,11 @@ class TrackBRuntimeEnvironmentTruthConfig:
     self_healing_health_path: Path = DEFAULT_SELF_HEALING_HEALTH_ARTIFACT
     position_truth_path: Path = DEFAULT_POSITION_TRUTH_ARTIFACT
     reconciliation_path: Path = DEFAULT_RECONCILIATION_ARTIFACT
+    detached_child_status_path: Path = DEFAULT_DETACHED_CHILD_STATUS_ARTIFACT
+    broker_truth_lease_path: Path = DEFAULT_BROKER_TRUTH_LEASE_ARTIFACT
+    open_order_truth_path: Path = DEFAULT_OPEN_ORDER_TRUTH_ARTIFACT
+    broker_position_guardian_path: Path = DEFAULT_BROKER_POSITION_GUARDIAN_ARTIFACT
+    safe_state_envelope_path: Path = DEFAULT_SAFE_STATE_ENVELOPE_ARTIFACT
 
     def resolve(self, path: Path) -> Path:
         return path if path.is_absolute() else self.repo_root / path
@@ -108,6 +132,11 @@ def build_track_b_runtime_environment_truth(
     self_healing_health = _read_json(config.resolve(config.self_healing_health_path))
     position_truth = _read_json(config.resolve(config.position_truth_path))
     reconciliation = _read_json(config.resolve(config.reconciliation_path))
+    detached_child_status = _read_json(config.resolve(config.detached_child_status_path))
+    broker_truth_lease = _read_json(config.resolve(config.broker_truth_lease_path))
+    open_order_truth = _read_json(config.resolve(config.open_order_truth_path))
+    broker_position_guardian = _read_json(config.resolve(config.broker_position_guardian_path))
+    safe_state_envelope = _read_json(config.resolve(config.safe_state_envelope_path))
 
     runtime_pid = _first_int(runtime_truth.get("producer_pid"), pid_metadata.get("pid"), operator_status.get("source_runtime_pid"))
     runtime_pid_alive = bool(runtime_pid is not None and pid_running(runtime_pid))
@@ -126,7 +155,18 @@ def build_track_b_runtime_environment_truth(
     position_classification = _position_truth_classification(position_truth=position_truth, reconciliation=reconciliation)
     broker_exposure = _broker_exposure_present(position_truth=position_truth, reconciliation=reconciliation)
     canonical_state = str(canonical_readiness.get("canonical_readiness") or canonical_readiness.get("state") or "").strip()
-    paper_trade_allowed = canonical_state == "READY_SUBMIT_CAPABLE"
+    trade_capability = _build_current_state_trade_capability(
+        runtime_truth=runtime_truth,
+        detached_child_status=detached_child_status,
+        broker_truth_lease=broker_truth_lease,
+        open_order_truth=open_order_truth,
+        broker_position_guardian=broker_position_guardian,
+        safe_state_envelope=safe_state_envelope,
+        position_truth=position_truth,
+        reconciliation=reconciliation,
+        now=actual_now,
+    )
+    paper_trade_allowed = bool(trade_capability.get("trade_capable"))
 
     classification, blockers, warnings = _classify(
         runtime_pid=runtime_pid,
@@ -142,6 +182,7 @@ def build_track_b_runtime_environment_truth(
         position_classification=position_classification,
         broker_exposure=broker_exposure,
         paper_trade_allowed=paper_trade_allowed,
+        paper_trade_blocking_reasons=_list(trade_capability.get("blocking_reasons")),
     )
     payload = {
         "schema_version": "track_b_runtime_environment_truth_v1",
@@ -185,10 +226,12 @@ def build_track_b_runtime_environment_truth(
         "canonical_readiness": {
             "classification": canonical_state or None,
             "ready_submit_capable": canonical_state == "READY_SUBMIT_CAPABLE",
+            "diagnostic_only_for_runtime_environment_truth": True,
             "blockers": canonical_readiness.get("readiness_blockers") or canonical_readiness.get("blockers") or [],
             "warnings": canonical_readiness.get("readiness_warnings") or canonical_readiness.get("warnings") or [],
             "generated_at": canonical_readiness.get("generated_at"),
         },
+        "current_state_trade_capability": trade_capability,
         "position_truth": {
             "classification": position_classification,
             "broker_exposure_present": broker_exposure,
@@ -228,6 +271,11 @@ def build_track_b_runtime_environment_truth(
             "self_healing_health": str(config.resolve(config.self_healing_health_path)),
             "position_truth": str(config.resolve(config.position_truth_path)),
             "reconciliation": str(config.resolve(config.reconciliation_path)),
+            "detached_child_status": str(config.resolve(config.detached_child_status_path)),
+            "broker_truth_lease": str(config.resolve(config.broker_truth_lease_path)),
+            "open_order_truth": str(config.resolve(config.open_order_truth_path)),
+            "broker_position_guardian": str(config.resolve(config.broker_position_guardian_path)),
+            "safe_state_envelope": str(config.resolve(config.safe_state_envelope_path)),
         },
     }
     return payload
@@ -305,6 +353,7 @@ def _classify(
     position_classification: str,
     broker_exposure: bool,
     paper_trade_allowed: bool,
+    paper_trade_blocking_reasons: list[Any],
 ) -> tuple[str, list[dict[str, Any]], list[dict[str, Any]]]:
     blockers: list[dict[str, Any]] = []
     warnings: list[dict[str, Any]] = []
@@ -346,9 +395,10 @@ def _classify(
         return UNKNOWN_RUNTIME_STATE, blockers, warnings
     if paper_trade_allowed:
         return RUNTIME_ACTIVE_TRADE_CAPABLE, blockers, warnings
+    reason_text = ", ".join(str(reason) for reason in paper_trade_blocking_reasons) or position_classification
     warn(
         "runtime_observation_only",
-        f"Runtime is alive but canonical readiness/position state is not submit-capable: {position_classification}.",
+        f"Runtime is alive but current-state submit capability is not clean: {reason_text}.",
     )
     return RUNTIME_ACTIVE_OBSERVATION_ONLY, blockers, warnings
 
@@ -410,6 +460,168 @@ def _broker_exposure_present(*, position_truth: Mapping[str, Any], reconciliatio
         or int(reconciliation.get("track_b_broker_open_order_count") or 0) > 0
         or int(reconciliation.get("unknown_broker_open_order_count") or 0) > 0
     )
+
+
+
+def _build_current_state_trade_capability(
+    *,
+    runtime_truth: Mapping[str, Any],
+    detached_child_status: Mapping[str, Any],
+    broker_truth_lease: Mapping[str, Any],
+    open_order_truth: Mapping[str, Any],
+    broker_position_guardian: Mapping[str, Any],
+    safe_state_envelope: Mapping[str, Any],
+    position_truth: Mapping[str, Any],
+    reconciliation: Mapping[str, Any],
+    now: datetime,
+) -> dict[str, Any]:
+    reasons: list[str] = []
+
+    trading_loop_entered = _current_state_has_value(
+        detached_child_status, "TRADING_LOOP_ENTERED"
+    ) or _current_state_has_value(runtime_truth, "TRADING_LOOP_ENTERED")
+    submit_authority = _current_state_has_key_value(
+        detached_child_status, "submit_authority", True
+    ) or _current_state_has_key_value(runtime_truth, "submit_authority", True)
+    submit_authority_source = _first_text_recursive(
+        detached_child_status,
+        "submit_authority_source",
+        fallback=_first_text_recursive(runtime_truth, "submit_authority_source"),
+    )
+    if not trading_loop_entered:
+        reasons.append("trading_loop_not_entered")
+    if not submit_authority:
+        reasons.append("current_state_submit_authority_false")
+    if submit_authority and submit_authority_source and submit_authority_source != "current_state_authority":
+        reasons.append(f"submit_authority_source_not_current_state:{submit_authority_source}")
+
+    lease_state = str(broker_truth_lease.get("lease_state") or broker_truth_lease.get("classification") or "").strip()
+    if lease_state != "ACTIVE":
+        reasons.append(f"broker_truth_lease_not_active:{lease_state or 'missing'}")
+    if broker_truth_lease.get("submit_entry_allowed") is False:
+        reasons.append("broker_truth_lease_submit_entry_not_allowed")
+    if broker_truth_lease.get("broker_reconciled") is False:
+        reasons.append("broker_truth_lease_not_reconciled")
+    if _count_gt_zero(broker_truth_lease, "unknown_broker_open_order_count"):
+        reasons.append("broker_truth_lease_unknown_orders_present")
+    if _count_gt_zero(broker_truth_lease, "track_b_broker_open_order_count"):
+        reasons.append("broker_truth_lease_open_orders_present")
+    if _list(broker_truth_lease.get("blockers")):
+        reasons.append("broker_truth_lease_blockers_present")
+
+    open_order_class = str(open_order_truth.get("classification") or open_order_truth.get("state") or "").strip()
+    if open_order_class and open_order_class != "NO_OPEN_ORDERS":
+        reasons.append(f"open_order_truth_not_clean:{open_order_class}")
+    if _count_gt_zero(open_order_truth, "unknown_order_count") or _count_gt_zero(open_order_truth, "unknown_broker_open_order_count"):
+        reasons.append("open_order_truth_unknown_orders_present")
+    if _count_gt_zero(open_order_truth, "open_order_count") or _count_gt_zero(open_order_truth, "track_b_broker_open_order_count"):
+        reasons.append("open_order_truth_open_orders_present")
+    if _list(open_order_truth.get("blockers")):
+        reasons.append("open_order_truth_blockers_present")
+
+    guardian_class = str(
+        broker_position_guardian.get("classification")
+        or broker_position_guardian.get("guardian_state")
+        or broker_position_guardian.get("state")
+        or ""
+    ).strip()
+    if guardian_class and guardian_class != "BROKER_POSITION_GUARDIAN_READY":
+        reasons.append(f"guardian_not_ready:{guardian_class}")
+    if _list(broker_position_guardian.get("blockers")):
+        reasons.append("guardian_blockers_present")
+
+    safe_state_class = str(
+        safe_state_envelope.get("classification")
+        or safe_state_envelope.get("safe_state")
+        or safe_state_envelope.get("safe_state_classification")
+        or ""
+    ).strip()
+    if safe_state_class and safe_state_class != "SAFE_STATE_NORMAL":
+        reasons.append(f"safe_state_not_normal:{safe_state_class}")
+    if safe_state_envelope.get("submit_allowed") is False or safe_state_envelope.get("entry_submit_allowed") is False:
+        reasons.append("safe_state_submit_not_allowed")
+    if _list(safe_state_envelope.get("blockers")):
+        reasons.append("safe_state_blockers_present")
+
+    position_classification = _position_truth_classification(position_truth=position_truth, reconciliation=reconciliation)
+    if position_classification != "CLEAN_FLAT_READY":
+        reasons.append(f"position_truth_not_clean:{position_classification}")
+    if _broker_exposure_present(position_truth=position_truth, reconciliation=reconciliation):
+        reasons.append("broker_exposure_present")
+
+    reconciliation_class = str(reconciliation.get("classification") or "").strip()
+    if reconciliation_class not in {"TRACK_B_PAPER_BROKER_RECONCILED", "BROKER_LIFECYCLE_RECONCILED"}:
+        reasons.append(f"reconciliation_not_clean:{reconciliation_class or 'missing'}")
+    if reconciliation.get("broker_reconciled") is False:
+        reasons.append("reconciliation_broker_reconciled_false")
+    for key in (
+        "track_b_broker_position_count",
+        "track_b_broker_open_order_count",
+        "unknown_broker_open_order_count",
+        "review_required_count",
+        "unresolved_submit_intent_ownership_count",
+    ):
+        if _count_gt_zero(reconciliation, key):
+            reasons.append(f"reconciliation_{key}_nonzero")
+
+    return {
+        "trade_capable": not reasons,
+        "authority_source": "lower_level_current_state_authority",
+        "canonical_readiness_dependency": False,
+        "blocking_reasons": reasons,
+        "trading_loop_entered": trading_loop_entered,
+        "submit_authority": submit_authority,
+        "submit_authority_source": submit_authority_source,
+        "broker_truth_lease_state": lease_state or None,
+        "open_order_truth_classification": open_order_class or None,
+        "guardian_classification": guardian_class or None,
+        "safe_state_classification": safe_state_class or None,
+        "position_truth_classification": position_classification,
+        "reconciliation_classification": reconciliation_class or None,
+        "generated_at": now.isoformat(),
+    }
+
+
+def _current_state_has_value(payload: Any, expected: Any) -> bool:
+    if isinstance(payload, Mapping):
+        return any(_current_state_has_value(value, expected) for value in payload.values())
+    if isinstance(payload, list):
+        return any(_current_state_has_value(value, expected) for value in payload)
+    return payload == expected
+
+
+def _current_state_has_key_value(payload: Any, key: str, expected: Any) -> bool:
+    if isinstance(payload, Mapping):
+        if payload.get(key) == expected:
+            return True
+        return any(_current_state_has_key_value(value, key, expected) for value in payload.values())
+    if isinstance(payload, list):
+        return any(_current_state_has_key_value(value, key, expected) for value in payload)
+    return False
+
+
+def _first_text_recursive(payload: Any, key: str, *, fallback: str | None = None) -> str | None:
+    if isinstance(payload, Mapping):
+        value = payload.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+        for child in payload.values():
+            found = _first_text_recursive(child, key)
+            if found:
+                return found
+    elif isinstance(payload, list):
+        for child in payload:
+            found = _first_text_recursive(child, key)
+            if found:
+                return found
+    return fallback
+
+
+def _count_gt_zero(payload: Mapping[str, Any], key: str) -> bool:
+    try:
+        return int(payload.get(key) or 0) > 0
+    except (TypeError, ValueError):
+        return False
 
 
 def _git_head(repo_root: Path) -> str | None:

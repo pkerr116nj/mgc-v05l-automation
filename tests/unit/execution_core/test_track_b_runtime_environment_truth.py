@@ -35,17 +35,81 @@ def test_active_healthy_single_writer_is_trade_capable(tmp_path: Path) -> None:
     assert payload["blockers"] == []
 
 
-def test_active_runtime_not_submit_capable_is_observation_only(tmp_path: Path) -> None:
+def test_active_runtime_trade_capable_ignores_stale_not_ready_canonical(tmp_path: Path) -> None:
     _seed_trade_capable(tmp_path)
     _write_json(
         _canonical_path(tmp_path),
-        {"generated_at": NOW.isoformat(), "canonical_readiness": "READY_OBSERVATION_ONLY", "live_money_eligible": False},
+        {
+            "generated_at": NOW.isoformat(),
+            "canonical_readiness": "NOT_READY_DEPENDENCY",
+            "readiness_blockers": [{"code": "runtime_not_healthy"}],
+            "live_money_eligible": False,
+        },
     )
 
     payload = _build(tmp_path)
 
+    assert payload["classification"] == RUNTIME_ACTIVE_TRADE_CAPABLE
+    assert payload["canonical_readiness"]["diagnostic_only_for_runtime_environment_truth"] is True
+    assert payload["current_state_trade_capability"]["canonical_readiness_dependency"] is False
+    assert payload["current_state_trade_capability"]["blocking_reasons"] == []
+
+
+def test_false_current_submit_authority_remains_observation_only(tmp_path: Path) -> None:
+    _seed_trade_capable(tmp_path)
+    child = json.loads(_detached_child_status_path(tmp_path).read_text(encoding="utf-8"))
+    child["submit_authority"] = False
+    _write_json(_detached_child_status_path(tmp_path), child)
+
+    payload = _build(tmp_path)
+
     assert payload["classification"] == RUNTIME_ACTIVE_OBSERVATION_ONLY
-    assert payload["warnings"][0]["code"] == "runtime_observation_only"
+    assert "current_state_submit_authority_false" in payload["current_state_trade_capability"]["blocking_reasons"]
+
+
+def test_stale_or_invalid_broker_lease_prevents_trade_capable(tmp_path: Path) -> None:
+    _seed_trade_capable(tmp_path)
+    lease = json.loads(_broker_truth_lease_path(tmp_path).read_text(encoding="utf-8"))
+    lease["lease_state"] = "INVALIDATED_CONTRADICTION"
+    lease["blockers"] = [{"code": "lifecycle_broker_position_mismatch"}]
+    _write_json(_broker_truth_lease_path(tmp_path), lease)
+
+    payload = _build(tmp_path)
+
+    assert payload["classification"] == RUNTIME_ACTIVE_OBSERVATION_ONLY
+    reasons = set(payload["current_state_trade_capability"]["blocking_reasons"])
+    assert "broker_truth_lease_not_active:INVALIDATED_CONTRADICTION" in reasons
+    assert "broker_truth_lease_blockers_present" in reasons
+
+
+def test_unsafe_safe_state_prevents_trade_capable(tmp_path: Path) -> None:
+    _seed_trade_capable(tmp_path)
+    safe_state = json.loads(_safe_state_path(tmp_path).read_text(encoding="utf-8"))
+    safe_state["classification"] = "SAFE_STATE_HARD_HALT"
+    safe_state["submit_allowed"] = False
+    _write_json(_safe_state_path(tmp_path), safe_state)
+
+    payload = _build(tmp_path)
+
+    assert payload["classification"] == RUNTIME_ACTIVE_OBSERVATION_ONLY
+    reasons = set(payload["current_state_trade_capability"]["blocking_reasons"])
+    assert "safe_state_not_normal:SAFE_STATE_HARD_HALT" in reasons
+    assert "safe_state_submit_not_allowed" in reasons
+
+
+def test_reconciliation_blocker_prevents_trade_capable(tmp_path: Path) -> None:
+    _seed_trade_capable(tmp_path)
+    reconciliation = json.loads(_reconciliation_path(tmp_path).read_text(encoding="utf-8"))
+    reconciliation["classification"] = "WAITING_FOR_BROKER_TRUTH_SETTLEMENT"
+    reconciliation["broker_reconciled"] = False
+    _write_json(_reconciliation_path(tmp_path), reconciliation)
+
+    payload = _build(tmp_path)
+
+    assert payload["classification"] == RUNTIME_ACTIVE_OBSERVATION_ONLY
+    reasons = set(payload["current_state_trade_capability"]["blocking_reasons"])
+    assert "reconciliation_not_clean:WAITING_FOR_BROKER_TRUTH_SETTLEMENT" in reasons
+    assert "reconciliation_broker_reconciled_false" in reasons
 
 
 def test_no_runtime_clean_flat_is_down_clean(tmp_path: Path) -> None:
@@ -162,6 +226,7 @@ def _seed_trade_capable(root: Path, *, pid_alive: bool = True, runtime_generated
             "freshness_state": "FRESH",
             "writer_authority": "SINGLE_WRITER",
             "source_commit": "abc123",
+            "profile": "mnq_mes_full_session_active_evidence",
             "config_fingerprint": "cfg-1",
             "lane_count": 17,
             "test_mule_enabled": True,
@@ -201,6 +266,66 @@ def _seed_trade_capable(root: Path, *, pid_alive: bool = True, runtime_generated
     )
     _write_json(_launch_status_path(root), {"classification": "RUNTIME_PID_AVAILABLE", "generated_at": generated_at})
     _write_json(_self_healing_path(root), {"classification": "SELF_HEALING_READY", "generated_at": generated_at})
+    _write_json(
+        _detached_child_status_path(root),
+        {
+            "generated_at": generated_at,
+            "pid": 123 if pid_alive else 987,
+            "state": "TRADING_LOOP_ENTERED",
+            "submit_authority": True,
+            "submit_authority_source": "current_state_authority",
+            "live_money_eligible": False,
+        },
+    )
+    _write_json(
+        _broker_truth_lease_path(root),
+        {
+            "generated_at": generated_at,
+            "lease_state": "ACTIVE",
+            "submit_entry_allowed": True,
+            "submit_exit_allowed": True,
+            "broker_reconciled": True,
+            "track_b_broker_position_count": 0,
+            "track_b_broker_open_order_count": 0,
+            "unknown_broker_open_order_count": 0,
+            "review_required_count": 0,
+            "blockers": [],
+            "live_money_eligible": False,
+        },
+    )
+    _write_json(
+        _open_order_truth_path(root),
+        {
+            "generated_at": generated_at,
+            "classification": "NO_OPEN_ORDERS",
+            "open_order_count": 0,
+            "unknown_order_count": 0,
+            "track_b_broker_open_order_count": 0,
+            "unknown_broker_open_order_count": 0,
+            "blockers": [],
+            "live_money_eligible": False,
+        },
+    )
+    _write_json(
+        _guardian_path(root),
+        {
+            "generated_at": generated_at,
+            "classification": "BROKER_POSITION_GUARDIAN_READY",
+            "blockers": [],
+            "live_money_eligible": False,
+        },
+    )
+    _write_json(
+        _safe_state_path(root),
+        {
+            "generated_at": generated_at,
+            "classification": "SAFE_STATE_NORMAL",
+            "submit_allowed": True,
+            "entry_submit_allowed": True,
+            "blockers": [],
+            "live_money_eligible": False,
+        },
+    )
     _write_json(
         _position_truth_path(root),
         {
@@ -257,6 +382,26 @@ def _position_truth_path(root: Path) -> Path:
 
 def _reconciliation_path(root: Path) -> Path:
     return root / "outputs" / "reports" / "track_b_paper_broker_reconciliation" / "latest_track_b_paper_broker_reconciliation.json"
+
+
+def _detached_child_status_path(root: Path) -> Path:
+    return root / "outputs" / "probationary_pattern_engine" / "paper_session" / "runtime" / "probationary_paper_detached_child_status.json"
+
+
+def _broker_truth_lease_path(root: Path) -> Path:
+    return root / "outputs" / "operator_dashboard" / "runtime" / "latest_broker_truth_lease.json"
+
+
+def _open_order_truth_path(root: Path) -> Path:
+    return root / "outputs" / "track_b_execution_core" / "open_order_truth" / "latest_open_order_truth.json"
+
+
+def _guardian_path(root: Path) -> Path:
+    return root / "outputs" / "track_b_execution_core" / "broker_position_guardian" / "latest_broker_position_guardian.json"
+
+
+def _safe_state_path(root: Path) -> Path:
+    return root / "outputs" / "track_b_execution_core" / "safe_state" / "latest_runtime_safe_state_envelope.json"
 
 
 def _write_json(path: Path, payload: dict) -> None:
