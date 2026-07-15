@@ -320,6 +320,36 @@ def test_runtime_trade_capable_shared_truth_breaks_prior_canonical_loop() -> Non
     assert result["readiness_blockers"] == []
 
 
+def test_trade_capable_runtime_truth_overrides_stale_runtime_health_projection() -> None:
+    inputs = _clean_inputs()
+    inputs["runtime"]["healthy"] = False
+    inputs["execution_core_shared_truth"] = _shared_truth_evidence(
+        runtime_environment_truth="RUNTIME_ACTIVE_TRADE_CAPABLE"
+    )
+
+    result = classify_canonical_readiness(inputs)
+
+    assert result["canonical_readiness"] == "READY_SUBMIT_CAPABLE"
+    assert result["ready_submit_capable"] is True
+    assert result["readiness_blockers"] == []
+    warning_codes = {row["code"] for row in result["readiness_warnings"]}
+    assert "runtime_health_projection_stale_diagnostic" in warning_codes
+
+
+def test_stale_runtime_health_still_blocks_without_trade_capable_runtime_truth() -> None:
+    inputs = _clean_inputs()
+    inputs["runtime"]["healthy"] = False
+    inputs["execution_core_shared_truth"] = _shared_truth_evidence(
+        runtime_environment_truth="RUNTIME_ACTIVE_OBSERVATION_ONLY"
+    )
+
+    result = classify_canonical_readiness(inputs)
+
+    assert result["canonical_readiness"] == "NOT_READY_DEPENDENCY"
+    assert result["ready_submit_capable"] is False
+    assert result["readiness_blockers"][0]["code"] == "runtime_not_healthy"
+
+
 def test_reconciliation_input_prefers_current_scope_lifecycle_count_over_raw_projection() -> None:
     payload = {
         "generated_at": "2026-05-18T11:59:30+00:00",

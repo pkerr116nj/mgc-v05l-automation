@@ -241,6 +241,14 @@ def classify_canonical_readiness(inputs: Mapping[str, Any]) -> dict[str, Any]:
 
     runtime_running = _bool(runtime.get("running"))
     runtime_healthy = _bool(runtime.get("healthy"))
+    runtime_trade_capable_from_shared_truth = _shared_truth_runtime_trade_capable(execution_core_shared_truth)
+    if runtime_running and not runtime_healthy and runtime_trade_capable_from_shared_truth:
+        warn(
+            "runtime_health_projection_stale_diagnostic",
+            "Runtime health projection is stale, but Runtime Environment Truth is RUNTIME_ACTIVE_TRADE_CAPABLE from current lower-level authority.",
+            source="runtime",
+        )
+        runtime_healthy = True
     if runtime_running and runtime_healthy and paper_minimal_startup.get("allowed") is True:
         for row in list(paper_minimal_startup.get("warnings") or []):
             if isinstance(row, Mapping):
@@ -1286,6 +1294,13 @@ def _current_authoritative_reconciliation_clean(
     if list(broker_truth_lease.get("blockers") or []):
         return False
     return True
+
+
+def _shared_truth_runtime_trade_capable(execution_core_shared_truth: Mapping[str, Any]) -> bool:
+    if execution_core_shared_truth.get("available") is not True:
+        return False
+    classifications = _mapping(execution_core_shared_truth.get("classifications"))
+    return str(classifications.get("Runtime Environment Truth") or "") == "RUNTIME_ACTIVE_TRADE_CAPABLE"
 
 
 def _execution_core_shared_truth_decision(
