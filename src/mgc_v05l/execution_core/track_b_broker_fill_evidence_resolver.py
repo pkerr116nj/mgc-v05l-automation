@@ -55,15 +55,25 @@ class BrokerFillEvidenceResult:
         return _text(self.evidence.get("exec_id") or self.evidence.get("execution_id")) or None
 
 
-def resolve_broker_backed_fill_evidence(
+@dataclass(frozen=True)
+class BrokerFillEvidenceCorpus:
+    """Immutable, read-only candidate corpus reusable within one reconciliation run."""
+
+    candidates: tuple[dict[str, Any], ...]
+    searched_paths: tuple[str, ...]
+
+
+def build_broker_fill_evidence_corpus(
     *,
     repo_root: Path,
-    request: BrokerFillEvidenceRequest,
     extra_source_paths: Sequence[Path] = (),
-) -> BrokerFillEvidenceResult:
-    """Resolve exact broker-backed fill evidence for one PAPER submit identity."""
-
-    paths = _candidate_paths(repo_root=repo_root, extra_source_paths=extra_source_paths)
+    include_repository_discovery: bool = True,
+) -> BrokerFillEvidenceCorpus:
+    paths = _candidate_paths(
+        repo_root=repo_root,
+        extra_source_paths=extra_source_paths,
+        include_repository_discovery=include_repository_discovery,
+    )
     searched: list[str] = []
     candidates: list[dict[str, Any]] = []
     for path in paths:
@@ -73,6 +83,26 @@ def resolve_broker_backed_fill_evidence(
         searched.append(str(path))
         for payload in payloads:
             candidates.extend(_candidates_from_payload(payload, source_path=path))
+    return BrokerFillEvidenceCorpus(candidates=tuple(candidates), searched_paths=tuple(searched))
+
+
+def resolve_broker_backed_fill_evidence(
+    *,
+    repo_root: Path,
+    request: BrokerFillEvidenceRequest,
+    extra_source_paths: Sequence[Path] = (),
+    corpus: BrokerFillEvidenceCorpus | None = None,
+    include_repository_discovery: bool = True,
+) -> BrokerFillEvidenceResult:
+    """Resolve exact broker-backed fill evidence for one PAPER submit identity."""
+
+    evidence_corpus = corpus or build_broker_fill_evidence_corpus(
+        repo_root=repo_root,
+        extra_source_paths=extra_source_paths,
+        include_repository_discovery=include_repository_discovery,
+    )
+    searched = evidence_corpus.searched_paths
+    candidates = evidence_corpus.candidates
 
     matches: list[dict[str, Any]] = []
     rejected: list[dict[str, Any]] = []
@@ -104,7 +134,7 @@ def resolve_broker_backed_fill_evidence(
             evidence=evidence,
             matches=tuple(with_exec),
             rejected=tuple(rejected),
-            searched_paths=tuple(searched),
+            searched_paths=searched,
             reason_codes=("BROKER_BACKED_FILL_EXEC_ID_RESOLVED",),
         )
     if len(unique_by_exec) > 1:
@@ -113,7 +143,7 @@ def resolve_broker_backed_fill_evidence(
             broker_backed_evidence_valid=False,
             matches=tuple(unique_by_exec.values()),
             rejected=tuple(rejected),
-            searched_paths=tuple(searched),
+            searched_paths=searched,
             reason_codes=("MULTIPLE_MATCHING_EXEC_IDS",),
         )
     return BrokerFillEvidenceResult(
@@ -121,12 +151,17 @@ def resolve_broker_backed_fill_evidence(
         broker_backed_evidence_valid=False,
         matches=tuple(matches),
         rejected=tuple(rejected),
-        searched_paths=tuple(searched),
+        searched_paths=searched,
         reason_codes=("EXEC_ID_NOT_FOUND",),
     )
 
 
-def _candidate_paths(*, repo_root: Path, extra_source_paths: Sequence[Path]) -> tuple[Path, ...]:
+def _candidate_paths(
+    *,
+    repo_root: Path,
+    extra_source_paths: Sequence[Path],
+    include_repository_discovery: bool = True,
+) -> tuple[Path, ...]:
     roots = [
         repo_root / DEFAULT_TRACK_B_SUBMIT_INTENT_OWNERSHIP_JSONL,
         repo_root / "outputs" / "reports" / "ibkr_runtime_route_dispatch",
@@ -140,6 +175,11 @@ def _candidate_paths(*, repo_root: Path, extra_source_paths: Sequence[Path]) -> 
         path = _repo_path(repo_root, item)
         if path.is_file():
             paths.append(path)
+    if not include_repository_discovery:
+        unique_direct: dict[str, Path] = {}
+        for path in paths:
+            unique_direct.setdefault(str(path), path)
+        return tuple(unique_direct.values())
     for root in roots:
         if root.is_file():
             paths.append(root)

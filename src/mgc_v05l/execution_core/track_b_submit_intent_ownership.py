@@ -13,7 +13,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from enum import Enum
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any, Mapping, Sequence
 
 from mgc_v05l.execution_core.bounded_jsonl import append_bounded_jsonl
 
@@ -310,6 +310,37 @@ def append_submit_intent_ownership_record(
         jsonl_path=jsonl_path,
         latest_path=latest_path,
         record=payload,
+        latest_view=latest_view,
+    )
+
+
+def append_submit_intent_ownership_records(
+    records: Sequence[SubmitIntentOwnershipRecord | Mapping[str, Any]],
+    *,
+    jsonl_path: Path = DEFAULT_TRACK_B_SUBMIT_INTENT_OWNERSHIP_JSONL,
+    latest_path: Path = DEFAULT_TRACK_B_SUBMIT_INTENT_OWNERSHIP_LATEST_JSON,
+) -> SubmitIntentOwnershipStoreResult | None:
+    """Append multiple PAPER ownership records and rebuild the latest view once."""
+
+    payloads: list[dict[str, Any]] = []
+    for record in records:
+        payload = record.to_payload() if isinstance(record, SubmitIntentOwnershipRecord) else dict(record)
+        validate_submit_intent_ownership_payload(payload)
+        payload = dict(payload)
+        payload["digest"] = submit_intent_ownership_digest(payload)
+        payloads.append(payload)
+    if not payloads:
+        return None
+    for payload in payloads:
+        append_bounded_jsonl(jsonl_path, to_jsonable(payload))
+    all_records = load_submit_intent_ownership_records(jsonl_path)
+    latest_view = _latest_view(records=all_records, generated_at=payloads[-1]["updated_at"])
+    latest_path.parent.mkdir(parents=True, exist_ok=True)
+    latest_path.write_text(json.dumps(to_jsonable(latest_view), indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    return SubmitIntentOwnershipStoreResult(
+        jsonl_path=jsonl_path,
+        latest_path=latest_path,
+        record=payloads[-1],
         latest_view=latest_view,
     )
 

@@ -11,6 +11,7 @@ from mgc_v05l.execution_core.track_b_submit_intent_ownership import (
     SubmitIntentOwnershipRecord,
     SubmitIntentOwnershipState,
     append_submit_intent_ownership_record,
+    append_submit_intent_ownership_records,
     load_unresolved_submit_intent_ownership_records,
     submit_intent_ownership_digest,
 )
@@ -129,6 +130,22 @@ def test_unresolved_intent_loading_uses_latest_state_per_ownership_id(tmp_path: 
     assert latest_payload["unresolved_count"] == 1
     assert latest_payload["latest_ownership_record_count"] == 2
     assert [row["lane_id"] for row in latest_payload["unresolved_submit_intent_ownership"]] == ["other_lane"]
+
+
+def test_batch_append_rebuilds_latest_view_once_with_paper_guardrails(tmp_path: Path) -> None:
+    result = append_submit_intent_ownership_records(
+        [
+            base_record(lane_id="first_lane", strategy_id="first_strategy"),
+            base_record(lane_id="second_lane", strategy_id="second_strategy"),
+        ],
+        jsonl_path=tmp_path / "ownership.jsonl",
+        latest_path=tmp_path / "latest.json",
+    )
+
+    assert result is not None
+    assert result.latest_view["record_count"] == 2
+    assert result.latest_view["latest_record"]["lane_id"] == "second_lane"
+    assert result.record["live_money_eligible"] is False
 
 
 def test_module_has_no_broker_imports_or_mutation_symbols() -> None:

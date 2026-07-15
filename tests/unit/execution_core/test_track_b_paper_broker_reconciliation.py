@@ -1491,6 +1491,132 @@ def test_terminal_registry_truth_supersedes_post_close_review_noise(tmp_path: Pa
     assert "BROKER_BACKED_EXIT_EVIDENCE_CONFIRMED" in superseded[0]["reason_codes"]
 
 
+def test_current_flat_truth_excludes_stale_open_lifecycle_without_trade_id(tmp_path: Path) -> None:
+    lifecycle_id = "bridge_fill_ES|1m|2026-07-09T11:51:00Z|SELL_TO_OPEN"
+    config = _write_base_artifacts(
+        tmp_path,
+        open_position={
+            "strategy_id": "es_london_late_active_participation_short",
+            "lane_id": "es_london_late_active_participation_short",
+            "lifecycle_id": lifecycle_id,
+            "instrument_family": "ES",
+            "contract_key": "ES-202609",
+            "local_symbol": "ESU6",
+            "con_id": 649180671,
+            "expiry": "20260918",
+            "side": "SHORT",
+            "quantity": "1",
+            "final_position_status": "OPEN_MANAGED",
+            "entry_exec_id": "0000e1a7.6a60016a.01.01",
+            "managed_exit_policy_id": "GLOBEX_ACTIVE_EVIDENCE_TIMEBOX_15M_EXIT_V1",
+        },
+    )
+    _write_managed_position_projection(config, classification="NO_MANAGED_POSITIONS")
+    _write_broker_truth(config)
+
+    report = reconcile_track_b_paper_broker_truth(config=config, now=NOW)
+
+    assert report["classification"] == "TRACK_B_PAPER_BROKER_RECONCILED"
+    assert report["broker_reconciled"] is True
+    assert report["track_b_broker_position_count"] == 0
+    assert report["track_b_broker_open_order_count"] == 0
+    assert report["track_b_lifecycle_positions"] == []
+    assert report["current_scope_lifecycle_open_position_count"] == 0
+    assert report["lifecycle_projection_classification"] == "STALE_LIFECYCLE_PROJECTIONS_EXCLUDED_BY_CURRENT_FLAT_TRUTH"
+    superseded = report["superseded_lifecycle_projections"]
+    assert superseded[0]["classification"] == "STALE_LIFECYCLE_PROJECTION_EXCLUDED_BY_CURRENT_FLAT_TRUTH"
+    assert superseded[0]["lifecycle_id"] == lifecycle_id
+    assert superseded[0]["trade_id"] is None
+    assert "NO_MANAGED_POSITION_PROJECTION_CONFIRMED" in superseded[0]["reason_codes"]
+    assert not any(
+        blocker["code"] == "REGISTRY_LIFECYCLE_OPEN_WITHOUT_TRADE_ID_REVIEW_REQUIRED"
+        for blocker in report["registry_reconciliation"].get("blockers", [])
+    )
+
+
+def test_current_flat_truth_does_not_exclude_lifecycle_when_broker_position_exists(tmp_path: Path) -> None:
+    config = _write_base_artifacts(
+        tmp_path,
+        open_position={
+            "strategy_id": "es_london_late_active_participation_short",
+            "lane_id": "es_london_late_active_participation_short",
+            "lifecycle_id": "life_broker_still_open",
+            "instrument_family": "ES",
+            "contract_key": "ES-202609",
+            "local_symbol": "ESU6",
+            "con_id": 649180671,
+            "expiry": "20260918",
+            "side": "SHORT",
+            "quantity": "1",
+            "final_position_status": "OPEN_MANAGED",
+        },
+    )
+    _write_managed_position_projection(config, classification="NO_MANAGED_POSITIONS")
+    _write_broker_truth(
+        config,
+        positions=[
+            {
+                "account_id": "DUM882026",
+                "symbol": "ES",
+                "local_symbol": "ESU6",
+                "expiry": "20260918",
+                "con_id": 649180671,
+                "security_type": "FUT",
+                "quantity": "-1",
+            }
+        ],
+    )
+
+    report = reconcile_track_b_paper_broker_truth(config=config, now=NOW)
+
+    assert report["track_b_lifecycle_positions"]
+    assert report["superseded_lifecycle_projections"] == []
+    assert report["position_match_report"]["matched"] is True
+
+
+def test_current_flat_truth_does_not_exclude_lifecycle_when_open_order_exists(tmp_path: Path) -> None:
+    config = _write_base_artifacts(
+        tmp_path,
+        open_position={
+            "strategy_id": "es_london_late_active_participation_short",
+            "lane_id": "es_london_late_active_participation_short",
+            "lifecycle_id": "life_order_still_working",
+            "instrument_family": "ES",
+            "contract_key": "ES-202609",
+            "local_symbol": "ESU6",
+            "con_id": 649180671,
+            "expiry": "20260918",
+            "side": "SHORT",
+            "quantity": "1",
+            "final_position_status": "OPEN_MANAGED",
+        },
+    )
+    _write_managed_position_projection(config, classification="NO_MANAGED_POSITIONS")
+    _write_broker_truth(
+        config,
+        open_orders=[
+            {
+                "account_id": "DUM882026",
+                "symbol": "ES",
+                "local_symbol": "ESU6",
+                "con_id": 649180671,
+                "order_id": "285",
+                "action": "BUY",
+                "quantity": "1",
+                "order_type": "LMT",
+                "status": "Submitted",
+            }
+        ],
+    )
+
+    report = reconcile_track_b_paper_broker_truth(config=config, now=NOW)
+
+    assert report["broker_reconciled"] is False
+    assert report["track_b_lifecycle_positions"]
+    assert report["superseded_lifecycle_projections"] == []
+    assert any(blocker["code"] == "UNKNOWN_BROKER_OPEN_ORDER" for blocker in report["blockers"])
+
+
 def test_stale_open_lifecycle_projection_without_close_evidence_still_blocks(tmp_path: Path) -> None:
     trade_id = "trade_missing_close_evidence_still_blocks"
     lifecycle_id = "life_missing_close_evidence_still_blocks"
@@ -3741,6 +3867,8 @@ def test_unresolved_submit_intent_without_broker_effect_times_out_resolves_as_hi
         )
     )
     assert latest_ownership["unresolved_count"] == 0
+    assert latest_ownership["latest_record"]["live_money_eligible"] is False
+    assert latest_ownership["latest_record"]["paper_proof_invoked"] is False
 
 
 def test_resolved_submit_intent_does_not_block_when_other_historical_debris_is_pending(
@@ -4412,6 +4540,31 @@ def _write_base_artifacts(
         },
     )
     return config
+
+
+def _write_managed_position_projection(
+    config: ReconciliationConfig,
+    *,
+    classification: str,
+    managed_positions: list[dict[str, object]] | None = None,
+    review_required_positions: list[dict[str, object]] | None = None,
+) -> None:
+    path = config.repo_root / "outputs/track_b_execution_core/managed_positions/latest_managed_positions.json"
+    _write_json(
+        path,
+        {
+            "schema_version": "track_b_managed_position_registry_v1",
+            "generated_at": NOW.isoformat(),
+            "classification": classification,
+            "managed_position_count": len(managed_positions or []),
+            "review_required_count": len(review_required_positions or []),
+            "managed_positions": managed_positions or [],
+            "review_required_positions": review_required_positions or [],
+            "read_only": True,
+            "live_money_eligible": False,
+            "paper_proof_invoked": False,
+        },
+    )
 
 
 def _write_broker_truth(

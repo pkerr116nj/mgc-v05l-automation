@@ -14,8 +14,10 @@ from pathlib import Path
 from typing import Any, Mapping, Sequence
 
 from mgc_v05l.execution_core.track_b_broker_fill_evidence_resolver import (
+    BrokerFillEvidenceCorpus,
     BrokerFillEvidenceRequest,
     RESOLVED,
+    build_broker_fill_evidence_corpus,
     resolve_broker_backed_fill_evidence,
 )
 from mgc_v05l.execution_core.track_b_central_trade_registry import TradeEventType
@@ -29,7 +31,7 @@ from mgc_v05l.execution_core.track_b_submit_intent_ownership import (
     DEFAULT_TRACK_B_SUBMIT_INTENT_OWNERSHIP_JSONL,
     DEFAULT_TRACK_B_SUBMIT_INTENT_OWNERSHIP_LATEST_JSON,
     SubmitIntentOwnershipState,
-    append_submit_intent_ownership_record,
+    append_submit_intent_ownership_records,
 )
 
 
@@ -110,6 +112,17 @@ def resolve_historical_reconciliation_debris(
 
     resolved: list[dict[str, Any]] = []
     blocked: list[dict[str, Any]] = []
+    submit_intent_resolution_records: list[dict[str, Any]] = []
+    historical_flat_trade_ids = _historical_flat_trade_ids(config)
+    evidence_corpus = build_broker_fill_evidence_corpus(
+        repo_root=config.repo_root,
+        extra_source_paths=tuple(
+            Path(path)
+            for row in unresolved_submit_intents
+            for path in row.get("source_artifact_paths") or []
+            if str(path).strip()
+        ),
+    )
     for row in unresolved_submit_intents:
         item = _resolve_submit_intent_debris(
             config=config,
@@ -118,8 +131,20 @@ def resolve_historical_reconciliation_debris(
             broker_flat_proof_path=broker_flat_proof_path,
             open_orders_proof_path=open_orders_proof_path,
             source_artifact_path=source_artifact_path,
+            evidence_corpus=evidence_corpus,
+            historical_flat_trade_ids=historical_flat_trade_ids,
         )
         (resolved if item.get("resolved") else blocked).append(item)
+        resolution_record = item.pop("_submit_intent_resolution_record", None)
+        if isinstance(resolution_record, Mapping):
+            submit_intent_resolution_records.append(dict(resolution_record))
+
+    if config.apply and submit_intent_resolution_records:
+        append_submit_intent_ownership_records(
+            submit_intent_resolution_records,
+            jsonl_path=config.resolve(config.submit_intent_ownership_path),
+            latest_path=config.resolve(config.latest_submit_intent_ownership_path),
+        )
 
     if lifecycle_review_required:
         lifecycle_review_rows = _historical_lifecycle_review_rows(config)
@@ -146,6 +171,7 @@ def resolve_historical_reconciliation_debris(
                 broker_flat_proof_path=broker_flat_proof_path,
                 open_orders_proof_path=open_orders_proof_path,
                 source_artifact_path=source_artifact_path,
+                historical_flat_trade_ids=historical_flat_trade_ids,
             )
             (resolved if item.get("resolved") else blocked).append(item)
 
@@ -171,6 +197,8 @@ def _resolve_submit_intent_debris(
     broker_flat_proof_path: str | Path | None,
     open_orders_proof_path: str | Path | None,
     source_artifact_path: str | Path | None,
+    evidence_corpus: BrokerFillEvidenceCorpus,
+    historical_flat_trade_ids: set[str],
 ) -> dict[str, Any]:
     age = _age_seconds(row.get("created_at") or row.get("updated_at"), now)
     identity = _identity_from_submit_intent(row)
@@ -178,7 +206,7 @@ def _resolve_submit_intent_debris(
         return {**identity, "kind": "submit_intent", "resolved": False, "reason_codes": ["ARTIFACT_NOT_STALE_ENOUGH"]}
     if _bool(row.get("lifecycle_position_open")):
         return {**identity, "kind": "submit_intent", "resolved": False, "reason_codes": ["LINKED_TO_CURRENT_LIFECYCLE_OPEN_STATE"]}
-    if _registry_record_historical_flat(config, identity.get("trade_id")):
+    if _text(identity.get("trade_id")) in historical_flat_trade_ids:
         return {
             **identity,
             "kind": "submit_intent",
@@ -203,6 +231,7 @@ def _resolve_submit_intent_debris(
             symbol=row.get("symbol"),
         ),
         extra_source_paths=[Path(path) for path in row.get("source_artifact_paths") or []],
+        corpus=evidence_corpus,
     )
     reason_codes = [
         "HISTORICAL_SUBMIT_INTENT_RESOLVED_FLAT",
@@ -257,7 +286,12 @@ def _resolve_submit_intent_debris(
                 "broker_fill_evidence": evidence.evidence,
             },
         )
-        _append_submit_intent_resolution(config=config, now=now, row=row, reason_codes=reason_codes, evidence=evidence.evidence)
+        resolution_record = _build_submit_intent_resolution(
+            now=now,
+            row=row,
+            reason_codes=reason_codes,
+            evidence=evidence.evidence,
+        )
     return {
         **identity,
         "kind": "submit_intent",
@@ -266,6 +300,7 @@ def _resolve_submit_intent_debris(
         "submit_intent_terminal_classification": terminal_classification,
         "broker_fill_evidence_classification": evidence.classification,
         "reason_codes": reason_codes,
+        "_submit_intent_resolution_record": resolution_record if config.apply else None,
     }
 
 
@@ -277,12 +312,13 @@ def _resolve_lifecycle_review_debris(
     broker_flat_proof_path: str | Path | None,
     open_orders_proof_path: str | Path | None,
     source_artifact_path: str | Path | None,
+    historical_flat_trade_ids: set[str],
 ) -> dict[str, Any]:
     identity = _identity_from_lifecycle_review(row)
     age = _age_seconds(row.get("generated_at") or row.get("updated_at") or row.get("created_at"), now)
     if age is None or age < config.stale_after_seconds:
         return {**identity, "kind": "lifecycle_review", "resolved": False, "reason_codes": ["ARTIFACT_NOT_STALE_ENOUGH"]}
-    if _registry_record_historical_flat(config, identity.get("trade_id")):
+    if _text(identity.get("trade_id")) in historical_flat_trade_ids:
         return {
             **identity,
             "kind": "lifecycle_review",
@@ -318,18 +354,21 @@ def _resolve_lifecycle_review_debris(
     return {**identity, "kind": "lifecycle_review", "resolved": True, "artifact_age_seconds": age, "reason_codes": reason_codes}
 
 
-def _append_submit_intent_resolution(
+def _build_submit_intent_resolution(
     *,
-    config: HistoricalReconciliationDebrisResolverConfig,
     now: datetime,
     row: Mapping[str, Any],
     reason_codes: Sequence[str],
     evidence: Mapping[str, Any] | None,
-) -> None:
+) -> dict[str, Any]:
     payload = dict(row)
     payload["state"] = SubmitIntentOwnershipState.HISTORICAL_FLAT_RESOLVED.value
     payload["updated_at"] = now.isoformat()
     payload["lifecycle_position_open"] = False
+    # Terminal cleanup records remain subject to the ownership store's PAPER
+    # contract even when older source rows predate these explicit guardrails.
+    payload["live_money_eligible"] = False
+    payload["paper_proof_invoked"] = False
     extra = dict(payload.get("extra") or {})
     extra.update(
         {
@@ -342,11 +381,7 @@ def _append_submit_intent_resolution(
         }
     )
     payload["extra"] = extra
-    append_submit_intent_ownership_record(
-        payload,
-        jsonl_path=config.resolve(config.submit_intent_ownership_path),
-        latest_path=config.resolve(config.latest_submit_intent_ownership_path),
-    )
+    return payload
 
 
 def _submit_intent_has_broker_ack_or_effect_evidence(row: Mapping[str, Any]) -> bool:
@@ -431,20 +466,17 @@ def _historical_lifecycle_review_rows(config: HistoricalReconciliationDebrisReso
     return list(unique.values())
 
 
-def _registry_record_historical_flat(config: HistoricalReconciliationDebrisResolverConfig, trade_id: object) -> bool:
-    text = _text(trade_id)
-    if not text:
-        return False
+def _historical_flat_trade_ids(config: HistoricalReconciliationDebrisResolverConfig) -> set[str]:
     try:
         records = load_live_trade_registry_records(repo_root=config.repo_root)
     except Exception:
-        return False
-    for record in records:
-        if record.trade_id != text:
-            continue
-        if record.current_state.value == "CLOSED_FLAT" and "RECONCILED_FLAT_HISTORICAL_CLEANUP" in record.latest_reason_codes:
-            return True
-    return False
+        return set()
+    return {
+        record.trade_id
+        for record in records
+        if record.current_state.value == "CLOSED_FLAT"
+        and "RECONCILED_FLAT_HISTORICAL_CLEANUP" in record.latest_reason_codes
+    }
 
 
 def _identity_from_submit_intent(row: Mapping[str, Any]) -> dict[str, Any]:

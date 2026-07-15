@@ -35,6 +35,9 @@ from mgc_v05l.execution_core.track_b_lifecycle_state_transition import (
     is_registry_eligible,
     normalize_lifecycle_state,
 )
+from mgc_v05l.execution_core.track_b_managed_position_registry import (
+    DEFAULT_MANAGED_POSITION_REGISTRY_ARTIFACT,
+)
 from mgc_v05l.execution_core.track_b_open_order_truth import (
     DUPLICATE_CLOSE_ORDER,
     PAPER_TEST_ORDER_PENDING_CANCEL_QUARANTINED,
@@ -151,6 +154,7 @@ class ReconciliationConfig:
     managed_order_registry_path: Path = DEFAULT_MANAGED_ORDER_REGISTRY_ARTIFACT
     broker_truth_lease_path: Path = DEFAULT_LEASE_ARTIFACT
     broker_session_authority_path: Path = DEFAULT_BROKER_SESSION_AUTHORITY_ARTIFACT
+    managed_position_registry_path: Path = DEFAULT_MANAGED_POSITION_REGISTRY_ARTIFACT
 
     @property
     def trade_summary_path(self) -> Path:
@@ -234,6 +238,7 @@ def reconcile_track_b_paper_broker_truth(
         broker_positions=track_b_positions,
         broker_open_orders=track_b_open_orders,
         lifecycle_positions=raw_lifecycle_positions,
+        broker_truth_blockers=blockers,
     )
     lifecycle_positions = list(lifecycle_projection_precedence["current_scope_lifecycle_positions"])
     current_exposure_owner_resolution = resolve_current_exposure_ownership(
@@ -973,6 +978,7 @@ def _closed_flat_lifecycle_projection_precedence(
     broker_positions: Sequence[Mapping[str, Any]],
     broker_open_orders: Sequence[Mapping[str, Any]],
     lifecycle_positions: Sequence[Mapping[str, Any]],
+    broker_truth_blockers: Sequence[Mapping[str, Any]] = (),
 ) -> dict[str, Any]:
     """Scope stale lifecycle-open rows after broker-backed registry flat close.
 
@@ -990,6 +996,12 @@ def _closed_flat_lifecycle_projection_precedence(
         }
 
     records = load_live_trade_registry_records(repo_root=config.repo_root)
+    current_flat_projection = _current_flat_projection_truth(
+        config=config,
+        broker_positions=broker_positions,
+        broker_open_orders=broker_open_orders,
+        broker_truth_blockers=broker_truth_blockers,
+    )
     current_scope: list[dict[str, Any]] = []
     superseded: list[dict[str, Any]] = []
     for lifecycle_position in lifecycle_positions:
@@ -1018,17 +1030,71 @@ def _closed_flat_lifecycle_projection_precedence(
                 }
             )
             continue
+        if current_flat_projection["flat_current_truth"] is True:
+            superseded.append(
+                {
+                    "classification": "STALE_LIFECYCLE_PROJECTION_EXCLUDED_BY_CURRENT_FLAT_TRUTH",
+                    "reason_codes": [
+                        "BROKER_FLAT_PROOF_CONFIRMED",
+                        "NO_OPEN_ORDER_PROOF_CONFIRMED",
+                        "NO_MANAGED_POSITION_PROJECTION_CONFIRMED",
+                        "STALE_LIFECYCLE_NOT_CURRENT_OWNERSHIP",
+                    ],
+                    "trade_id": lifecycle_position.get("trade_id"),
+                    "lifecycle_id": lifecycle_position.get("lifecycle_id"),
+                    "lifecycle_position": dict(lifecycle_position),
+                    "current_flat_projection_truth": dict(current_flat_projection),
+                }
+            )
+            continue
         current_scope.append(dict(lifecycle_position))
 
-    classification = (
-        "STALE_LIFECYCLE_PROJECTIONS_SUPERSEDED_BY_BROKER_BACKED_CLOSED_FLAT"
-        if superseded
-        else "NO_LIFECYCLE_PROJECTION_SUPERSESSION_NEEDED"
-    )
+    if superseded and any(
+        str(row.get("classification") or "") == "STALE_LIFECYCLE_PROJECTION_EXCLUDED_BY_CURRENT_FLAT_TRUTH"
+        for row in superseded
+    ):
+        classification = "STALE_LIFECYCLE_PROJECTIONS_EXCLUDED_BY_CURRENT_FLAT_TRUTH"
+    elif superseded:
+        classification = "STALE_LIFECYCLE_PROJECTIONS_SUPERSEDED_BY_BROKER_BACKED_CLOSED_FLAT"
+    else:
+        classification = "NO_LIFECYCLE_PROJECTION_SUPERSESSION_NEEDED"
     return {
         "classification": classification,
         "current_scope_lifecycle_positions": current_scope,
         "superseded_lifecycle_projections": superseded,
+    }
+
+
+def _current_flat_projection_truth(
+    *,
+    config: ReconciliationConfig,
+    broker_positions: Sequence[Mapping[str, Any]],
+    broker_open_orders: Sequence[Mapping[str, Any]],
+    broker_truth_blockers: Sequence[Mapping[str, Any]],
+) -> dict[str, Any]:
+    managed_path = _repo_scoped_path(config.repo_root, config.managed_position_registry_path)
+    managed_projection = _load_json(managed_path)
+    managed_classification = str(managed_projection.get("classification") or "").strip()
+    managed_rows = _list_of_mappings(managed_projection.get("managed_positions"))
+    review_rows = _list_of_mappings(managed_projection.get("review_required_positions"))
+    blockers = [dict(row) for row in broker_truth_blockers if isinstance(row, Mapping)]
+    flat_current_truth = (
+        not blockers
+        and not broker_positions
+        and not broker_open_orders
+        and managed_classification == "NO_MANAGED_POSITIONS"
+        and not managed_rows
+        and not review_rows
+    )
+    return {
+        "flat_current_truth": flat_current_truth,
+        "broker_position_count": len(broker_positions),
+        "broker_open_order_count": len(broker_open_orders),
+        "broker_truth_blockers": blockers,
+        "managed_position_registry_path": str(managed_path),
+        "managed_position_classification": managed_classification,
+        "managed_position_count": len(managed_rows),
+        "managed_review_required_count": len(review_rows),
     }
 
 
