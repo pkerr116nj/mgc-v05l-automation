@@ -1,11 +1,14 @@
 from __future__ import annotations
 
 import json
+import threading
 from pathlib import Path
 
 from mgc_v05l.execution.ibkr_read_only_verifier import (
     IbkrReadOnlyVerificationArtifacts,
     IbkrReadOnlyVerificationConfig,
+    _wait_for_connection_ready,
+    _wait_for_event,
     evaluate_ibkr_environment_lock,
     render_ibkr_read_only_connection_report_markdown,
     verify_ibkr_read_only_connection,
@@ -237,3 +240,77 @@ def test_verify_handles_unavailable_tws_gracefully() -> None:
     assert artifacts.classification == "IBKR_READ_ONLY_BLOCKED"
     assert artifacts.connection_report["account_truth_check"]["ok"] is False
     assert "Verify TWS paper is running" in artifacts.connection_report["next_manual_check"]
+
+
+def test_connection_ready_wait_allows_late_next_valid_id_after_transient_502() -> None:
+    class Collector:
+        def __init__(self) -> None:
+            self.next_valid_id_ready = threading.Event()
+            self.polls = 0
+
+        def latest_error(self, *, codes=None):  # noqa: ANN001
+            del codes
+            return {"code": 502, "message": "Couldn't connect to TWS"}
+
+    class Transport:
+        def is_connected(self) -> bool:
+            return True
+
+    collector = Collector()
+
+    def sleep_fn(seconds: float) -> None:
+        del seconds
+        collector.polls += 1
+        collector.next_valid_id_ready.set()
+
+    assert _wait_for_connection_ready(
+        transport=Transport(),
+        collector=collector,  # type: ignore[arg-type]
+        timeout_seconds=0.1,
+        sleep_fn=sleep_fn,
+    )
+
+
+def test_connection_ready_wait_still_fails_when_502_and_transport_disconnected() -> None:
+    class Collector:
+        next_valid_id_ready = threading.Event()
+
+        def latest_error(self, *, codes=None):  # noqa: ANN001
+            del codes
+            return {"code": 502, "message": "Couldn't connect to TWS"}
+
+    class Transport:
+        def is_connected(self) -> bool:
+            return False
+
+    assert not _wait_for_connection_ready(
+        transport=Transport(),
+        collector=Collector(),  # type: ignore[arg-type]
+        timeout_seconds=0.1,
+        sleep_fn=lambda seconds: None,
+    )
+
+
+def test_event_wait_allows_late_completion_after_transient_502() -> None:
+    class Collector:
+        def __init__(self) -> None:
+            self.polls = 0
+
+        def latest_error(self, *, codes=None):  # noqa: ANN001
+            del codes
+            return {"code": 502, "message": "Couldn't connect to TWS"}
+
+    event = threading.Event()
+    collector = Collector()
+
+    def sleep_fn(seconds: float) -> None:
+        del seconds
+        collector.polls += 1
+        event.set()
+
+    assert _wait_for_event(
+        event,
+        collector=collector,  # type: ignore[arg-type]
+        timeout_seconds=0.1,
+        sleep_fn=sleep_fn,
+    )

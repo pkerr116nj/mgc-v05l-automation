@@ -1070,8 +1070,10 @@ def _wait_for_event(
     while time.monotonic() < deadline:
         if event.is_set():
             return True
-        if collector.latest_error(codes=_CONNECTION_ERROR_CODES) is not None:
-            return False
+        # TWS can emit generic connectivity callbacks before the requested
+        # read-only callback arrives. Do not let those outrank the actual
+        # completion event; callers still fail closed if the event never comes.
+        collector.latest_error(codes=_CONNECTION_ERROR_CODES)
         sleep_fn(_POLL_INTERVAL_SECONDS)
     return event.is_set()
 
@@ -1087,13 +1089,16 @@ def _wait_for_connection_ready(
     while time.monotonic() < deadline:
         if collector.next_valid_id_ready.is_set():
             return True
-        if collector.latest_error(codes=_CONNECTION_ERROR_CODES) is not None:
-            return False
+        # Treat early connectivity errors and transient disconnected states as
+        # diagnostic until the callback deadline expires. Some TWS sessions can
+        # emit/close early while still delivering the readiness callbacks that
+        # prove a usable read-only API session.
+        collector.latest_error(codes=_CONNECTION_ERROR_CODES)
         if getattr(transport, "is_connected", None) is not None:
             try:
                 transport.is_connected()
             except Exception:
-                return False
+                pass
         sleep_fn(_POLL_INTERVAL_SECONDS)
     return collector.next_valid_id_ready.is_set()
 
