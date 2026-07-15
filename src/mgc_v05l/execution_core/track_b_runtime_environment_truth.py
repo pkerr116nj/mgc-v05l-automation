@@ -73,6 +73,13 @@ DEFAULT_DETACHED_CHILD_STATUS_ARTIFACT = (
     / "runtime"
     / "probationary_paper_detached_child_status.json"
 )
+DEFAULT_RUNTIME_STARTUP_PROGRESS_EVENTS = (
+    Path("outputs")
+    / "probationary_pattern_engine"
+    / "paper_session"
+    / "runtime"
+    / "paper_post_truth_startup_progress_events.jsonl"
+)
 DEFAULT_BROKER_TRUTH_LEASE_ARTIFACT = (
     Path("outputs") / "operator_dashboard" / "runtime" / "latest_broker_truth_lease.json"
 )
@@ -102,6 +109,7 @@ class TrackBRuntimeEnvironmentTruthConfig:
     position_truth_path: Path = DEFAULT_POSITION_TRUTH_ARTIFACT
     reconciliation_path: Path = DEFAULT_RECONCILIATION_ARTIFACT
     detached_child_status_path: Path = DEFAULT_DETACHED_CHILD_STATUS_ARTIFACT
+    runtime_startup_progress_events_path: Path = DEFAULT_RUNTIME_STARTUP_PROGRESS_EVENTS
     broker_truth_lease_path: Path = DEFAULT_BROKER_TRUTH_LEASE_ARTIFACT
     open_order_truth_path: Path = DEFAULT_OPEN_ORDER_TRUTH_ARTIFACT
     broker_position_guardian_path: Path = DEFAULT_BROKER_POSITION_GUARDIAN_ARTIFACT
@@ -133,6 +141,14 @@ def build_track_b_runtime_environment_truth(
     position_truth = _read_json(config.resolve(config.position_truth_path))
     reconciliation = _read_json(config.resolve(config.reconciliation_path))
     detached_child_status = _read_json(config.resolve(config.detached_child_status_path))
+    runtime_startup_progress_events = _current_runtime_progress_events(
+        _read_jsonl_tail(config.resolve(config.runtime_startup_progress_events_path)),
+        runtime_truth=runtime_truth,
+    )
+    current_runtime_status = {
+        "detached_child_status": detached_child_status,
+        "runtime_startup_progress_events": runtime_startup_progress_events,
+    }
     broker_truth_lease = _read_json(config.resolve(config.broker_truth_lease_path))
     open_order_truth = _read_json(config.resolve(config.open_order_truth_path))
     broker_position_guardian = _read_json(config.resolve(config.broker_position_guardian_path))
@@ -157,7 +173,7 @@ def build_track_b_runtime_environment_truth(
     canonical_state = str(canonical_readiness.get("canonical_readiness") or canonical_readiness.get("state") or "").strip()
     trade_capability = _build_current_state_trade_capability(
         runtime_truth=runtime_truth,
-        detached_child_status=detached_child_status,
+        detached_child_status=current_runtime_status,
         broker_truth_lease=broker_truth_lease,
         open_order_truth=open_order_truth,
         broker_position_guardian=broker_position_guardian,
@@ -232,6 +248,12 @@ def build_track_b_runtime_environment_truth(
             "generated_at": canonical_readiness.get("generated_at"),
         },
         "current_state_trade_capability": trade_capability,
+        "runtime_startup_progress": {
+            "event_count": len(runtime_startup_progress_events),
+            "latest_event_generated_at": runtime_startup_progress_events[-1].get("generated_at")
+            if runtime_startup_progress_events
+            else None,
+        },
         "position_truth": {
             "classification": position_classification,
             "broker_exposure_present": broker_exposure,
@@ -617,6 +639,24 @@ def _first_text_recursive(payload: Any, key: str, *, fallback: str | None = None
     return fallback
 
 
+def _current_runtime_progress_events(
+    events: list[dict[str, Any]], *, runtime_truth: Mapping[str, Any]
+) -> list[dict[str, Any]]:
+    if not events:
+        return []
+    runtime_pid = _first_int(runtime_truth.get("producer_pid"))
+    runtime_instance_id = str(runtime_truth.get("runtime_instance_id") or "").strip()
+    scoped: list[dict[str, Any]] = []
+    for event in events:
+        event_pid = _first_int(event.get("producer_pid"))
+        event_instance_id = str(event.get("runtime_instance_id") or "").strip()
+        pid_matches = runtime_pid is not None and event_pid == runtime_pid
+        instance_matches = bool(runtime_instance_id and event_instance_id == runtime_instance_id)
+        if pid_matches or instance_matches:
+            scoped.append(event)
+    return scoped
+
+
 def _count_gt_zero(payload: Mapping[str, Any], key: str) -> bool:
     try:
         return int(payload.get(key) or 0) > 0
@@ -751,6 +791,24 @@ def _read_json(path: Path) -> dict[str, Any]:
     except (OSError, json.JSONDecodeError):
         return {}
     return payload if isinstance(payload, dict) else {}
+
+
+def _read_jsonl_tail(path: Path, *, max_lines: int = 200) -> list[dict[str, Any]]:
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return []
+    events: list[dict[str, Any]] = []
+    for line in lines[-max_lines:]:
+        if not line.strip():
+            continue
+        try:
+            payload = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(payload, dict):
+            events.append(payload)
+    return events
 
 
 def _write_json_atomic(path: Path, payload: Mapping[str, Any]) -> None:

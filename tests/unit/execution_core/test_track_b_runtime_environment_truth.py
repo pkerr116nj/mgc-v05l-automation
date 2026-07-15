@@ -67,6 +67,79 @@ def test_false_current_submit_authority_remains_observation_only(tmp_path: Path)
     assert "current_state_submit_authority_false" in payload["current_state_trade_capability"]["blocking_reasons"]
 
 
+def test_current_runtime_startup_progress_proves_submit_capability(tmp_path: Path) -> None:
+    _seed_trade_capable(tmp_path)
+    _write_json(
+        _detached_child_status_path(tmp_path),
+        {
+            "generated_at": NOW.isoformat(),
+            "pid": 123,
+            "state": "LANE_RESTORE_COMPLETED",
+            "submit_authority": False,
+            "live_money_eligible": False,
+        },
+    )
+    _write_jsonl(
+        _runtime_startup_progress_path(tmp_path),
+        [
+            {
+                "generated_at": NOW.isoformat(),
+                "producer_pid": 123,
+                "runtime_instance_id": "runtime-a",
+                "stage": "runtime_cycle",
+                "state": "TRADING_LOOP_ENTERED",
+                "submit_authority": True,
+                "payload": {"submit_authority_source": "current_state_authority"},
+                "live_money_eligible": False,
+            }
+        ],
+    )
+
+    payload = _build(tmp_path)
+
+    assert payload["classification"] == RUNTIME_ACTIVE_TRADE_CAPABLE
+    assert payload["current_state_trade_capability"]["trading_loop_entered"] is True
+    assert payload["current_state_trade_capability"]["submit_authority"] is True
+    assert payload["runtime_startup_progress"]["event_count"] == 1
+
+
+def test_stale_runtime_startup_progress_does_not_prove_submit_capability(tmp_path: Path) -> None:
+    _seed_trade_capable(tmp_path)
+    _write_json(
+        _detached_child_status_path(tmp_path),
+        {
+            "generated_at": NOW.isoformat(),
+            "pid": 123,
+            "state": "LANE_RESTORE_COMPLETED",
+            "submit_authority": False,
+            "live_money_eligible": False,
+        },
+    )
+    _write_jsonl(
+        _runtime_startup_progress_path(tmp_path),
+        [
+            {
+                "generated_at": NOW.isoformat(),
+                "producer_pid": 987,
+                "runtime_instance_id": "old-runtime",
+                "stage": "runtime_cycle",
+                "state": "TRADING_LOOP_ENTERED",
+                "submit_authority": True,
+                "payload": {"submit_authority_source": "current_state_authority"},
+                "live_money_eligible": False,
+            }
+        ],
+    )
+
+    payload = _build(tmp_path)
+
+    assert payload["classification"] == RUNTIME_ACTIVE_OBSERVATION_ONLY
+    assert payload["runtime_startup_progress"]["event_count"] == 0
+    reasons = set(payload["current_state_trade_capability"]["blocking_reasons"])
+    assert "trading_loop_not_entered" in reasons
+    assert "current_state_submit_authority_false" in reasons
+
+
 def test_stale_or_invalid_broker_lease_prevents_trade_capable(tmp_path: Path) -> None:
     _seed_trade_capable(tmp_path)
     lease = json.loads(_broker_truth_lease_path(tmp_path).read_text(encoding="utf-8"))
@@ -388,6 +461,17 @@ def _detached_child_status_path(root: Path) -> Path:
     return root / "outputs" / "probationary_pattern_engine" / "paper_session" / "runtime" / "probationary_paper_detached_child_status.json"
 
 
+def _runtime_startup_progress_path(root: Path) -> Path:
+    return (
+        root
+        / "outputs"
+        / "probationary_pattern_engine"
+        / "paper_session"
+        / "runtime"
+        / "paper_post_truth_startup_progress_events.jsonl"
+    )
+
+
 def _broker_truth_lease_path(root: Path) -> Path:
     return root / "outputs" / "operator_dashboard" / "runtime" / "latest_broker_truth_lease.json"
 
@@ -407,3 +491,8 @@ def _safe_state_path(root: Path) -> Path:
 def _write_json(path: Path, payload: dict) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+
+def _write_jsonl(path: Path, payloads: list[dict]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("".join(json.dumps(payload, sort_keys=True) + "\n" for payload in payloads), encoding="utf-8")
