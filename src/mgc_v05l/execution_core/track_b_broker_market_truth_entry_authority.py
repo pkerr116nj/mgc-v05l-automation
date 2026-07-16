@@ -53,6 +53,8 @@ class BrokerMarketTruthEntryAuthorityInput:
     price_max_age_seconds: float = DEFAULT_PRICE_MAX_AGE_SECONDS
     now: datetime | None = None
     diagnostics: Mapping[str, Any] = field(default_factory=dict)
+    managed_exit_status: Mapping[str, Any] = field(default_factory=dict)
+    require_exit_capability: bool = True
 
 
 def evaluate_broker_market_truth_entry_authority(
@@ -103,6 +105,8 @@ def evaluate_broker_market_truth_entry_authority(
             price_max_age_seconds=authority_input.price_max_age_seconds,
             now=now,
             diagnostics=diagnostics,
+            managed_exit_status=authority_input.managed_exit_status,
+            require_exit_capability=authority_input.require_exit_capability,
         )
     )
     blockers.extend(dict(row) for row in current_state.get("blockers") or [] if isinstance(row, Mapping))
@@ -160,6 +164,7 @@ def build_broker_market_truth_entry_authority_from_repo(
     positions = _load_json(root / "outputs" / "reports" / "ibkr_read_only_verification" / "ibkr_positions_snapshot.json")
     orders = _load_json(root / "outputs" / "reports" / "ibkr_read_only_verification" / "ibkr_open_orders_snapshot.json")
     order_truth = _load_json(root / "outputs" / "track_b_execution_core" / "open_order_truth" / "latest_open_order_truth.json")
+    managed_exit_status = _load_json(root / "outputs" / "track_b_execution_core" / "managed_exit_service" / "latest_managed_exit_service_status.json")
     runtime_price = _load_runtime_price(root=root, instrument=instrument)
     resolved_contract = _enrich_contract_from_broker_truth(
         root=root,
@@ -192,6 +197,8 @@ def build_broker_market_truth_entry_authority_from_repo(
             price_max_age_seconds=price_max_age_seconds,
             now=now,
             diagnostics=dict(diagnostics or {}),
+            managed_exit_status=managed_exit_status,
+            require_exit_capability=True,
         )
     )
 

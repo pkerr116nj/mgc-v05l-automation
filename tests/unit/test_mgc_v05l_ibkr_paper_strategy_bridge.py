@@ -459,6 +459,17 @@ def _write_fresh_broker_truth(tmp_path: Path) -> None:
         ),
         encoding="utf-8",
     )
+    _write_json(
+        tmp_path / "outputs" / "track_b_execution_core" / "managed_exit_service" / "latest_managed_exit_service_status.json",
+        {
+            "generated_at": generated_at,
+            "pid": 456,
+            "mode": "GUARDED_CLOSE_ONLY_APPLY",
+            "classification": "NO_ELIGIBLE_EXITS",
+            "live_money_eligible": False,
+            "paper_proof_invoked": False,
+        },
+    )
 
 
 def _write_retryable_broker_unavailable(tmp_path: Path) -> None:

@@ -55,6 +55,32 @@ def test_active_runtime_trade_capable_ignores_stale_not_ready_canonical(tmp_path
     assert payload["current_state_trade_capability"]["blocking_reasons"] == []
 
 
+def test_apply_blocked_managed_exit_prevents_trade_capable(tmp_path: Path) -> None:
+    _seed_trade_capable(tmp_path)
+    status = json.loads(_managed_exit_service_status_path(tmp_path).read_text(encoding="utf-8"))
+    status["classification"] = "APPLY_BLOCKED"
+    _write_json(_managed_exit_service_status_path(tmp_path), status)
+
+    payload = _build(tmp_path)
+
+    assert payload["classification"] == RUNTIME_ACTIVE_OBSERVATION_ONLY
+    reasons = set(payload["current_state_trade_capability"]["blocking_reasons"])
+    assert "EXIT_CAPABILITY_APPLY_BLOCKED" in reasons
+
+
+def test_stale_managed_exit_heartbeat_prevents_trade_capable(tmp_path: Path) -> None:
+    _seed_trade_capable(tmp_path)
+    status = json.loads(_managed_exit_service_status_path(tmp_path).read_text(encoding="utf-8"))
+    status["generated_at"] = "2026-05-22T11:00:00+00:00"
+    _write_json(_managed_exit_service_status_path(tmp_path), status)
+
+    payload = _build(tmp_path)
+
+    assert payload["classification"] == RUNTIME_ACTIVE_OBSERVATION_ONLY
+    reasons = set(payload["current_state_trade_capability"]["blocking_reasons"])
+    assert "EXIT_CAPABILITY_STALE" in reasons
+
+
 def test_false_current_submit_authority_remains_observation_only(tmp_path: Path) -> None:
     _seed_trade_capable(tmp_path)
     child = json.loads(_detached_child_status_path(tmp_path).read_text(encoding="utf-8"))
@@ -423,7 +449,22 @@ def _seed_trade_capable(root: Path, *, pid_alive: bool = True, runtime_generated
             "live_money_eligible": False,
         },
     )
+    _write_json(
+        _managed_exit_service_status_path(root),
+        {
+            "generated_at": generated_at,
+            "pid": 456,
+            "mode": "GUARDED_CLOSE_ONLY_APPLY",
+            "classification": "NO_ELIGIBLE_EXITS",
+            "live_money_eligible": False,
+            "paper_proof_invoked": False,
+        },
+    )
 
+
+
+def _managed_exit_service_status_path(root: Path) -> Path:
+    return root / "outputs" / "track_b_execution_core" / "managed_exit_service" / "latest_managed_exit_service_status.json"
 
 def _runtime_truth_path(root: Path) -> Path:
     return root / "outputs" / "probationary_pattern_engine" / "paper_session" / "runtime" / "paper_runtime_truth.json"

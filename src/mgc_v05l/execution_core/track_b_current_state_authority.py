@@ -19,6 +19,12 @@ from mgc_v05l.execution_core.track_b_contract_identity import normalize_track_b_
 CURRENT_STATE_AUTHORITY_ALLOWED = "CURRENT_STATE_AUTHORITY_ALLOWED"
 CURRENT_STATE_AUTHORITY_BLOCKED = "CURRENT_STATE_AUTHORITY_BLOCKED"
 
+EXIT_CAPABILITY_READY = "EXIT_CAPABILITY_READY"
+EXIT_CAPABILITY_STALE = "EXIT_CAPABILITY_STALE"
+EXIT_CAPABILITY_APPLY_BLOCKED = "EXIT_CAPABILITY_APPLY_BLOCKED"
+EXIT_CAPABILITY_PROCESS_DOWN = "EXIT_CAPABILITY_PROCESS_DOWN"
+EXIT_CAPABILITY_CLOSE_PATH_UNAVAILABLE = "EXIT_CAPABILITY_CLOSE_PATH_UNAVAILABLE"
+
 BROKER_TRUTH_CRITICAL = "BROKER_TRUTH_CRITICAL"
 MARKET_TRUTH_CRITICAL = "MARKET_TRUTH_CRITICAL"
 RISK_TRUTH_CRITICAL = "RISK_TRUTH_CRITICAL"
@@ -53,6 +59,63 @@ class CurrentStateAuthorityInput:
     price_max_age_seconds: float = DEFAULT_PRICE_MAX_AGE_SECONDS
     now: datetime | None = None
     diagnostics: Mapping[str, Any] = field(default_factory=dict)
+    managed_exit_status: Mapping[str, Any] = field(default_factory=dict)
+    require_exit_capability: bool = True
+    managed_exit_max_age_seconds: float = 180.0
+
+
+def evaluate_exit_capability(
+    managed_exit_status: Mapping[str, Any],
+    *,
+    now: datetime | None = None,
+    max_age_seconds: float = 180.0,
+) -> dict[str, Any]:
+    actual_now = now or datetime.now(timezone.utc)
+    blockers: list[str] = []
+    status = dict(managed_exit_status or {})
+    classification = str(status.get("classification") or status.get("status") or "").strip().upper()
+    mode = str(status.get("mode") or status.get("apply_mode") or "").strip().upper()
+    pid = int_or_none(status.get("pid") or status.get("process_pid"))
+    generated_at = parse_datetime(status.get("heartbeat_at") or status.get("generated_at") or status.get("last_success_at"))
+    age_seconds = None
+    fresh = False
+    if generated_at is not None:
+        observed = generated_at if generated_at.tzinfo else generated_at.replace(tzinfo=timezone.utc)
+        age_seconds = max(0.0, (actual_now.astimezone(timezone.utc) - observed.astimezone(timezone.utc)).total_seconds())
+        fresh = age_seconds <= max_age_seconds
+
+    if not status or pid is None or pid <= 0:
+        blockers.append(EXIT_CAPABILITY_PROCESS_DOWN)
+    if not fresh:
+        blockers.append(EXIT_CAPABILITY_STALE)
+    if mode != "GUARDED_CLOSE_ONLY_APPLY":
+        blockers.append(EXIT_CAPABILITY_CLOSE_PATH_UNAVAILABLE)
+    if classification == "APPLY_BLOCKED" or "APPLY_BLOCKED" in classification:
+        blockers.append(EXIT_CAPABILITY_APPLY_BLOCKED)
+
+    close_path_available = (
+        mode == "GUARDED_CLOSE_ONLY_APPLY"
+        and status.get("live_money_eligible") is not True
+        and status.get("paper_proof_invoked") is not True
+    )
+    if not close_path_available:
+        if EXIT_CAPABILITY_CLOSE_PATH_UNAVAILABLE not in blockers:
+            blockers.append(EXIT_CAPABILITY_CLOSE_PATH_UNAVAILABLE)
+
+    ready = not blockers
+    return {
+        "classification": EXIT_CAPABILITY_READY if ready else blockers[0],
+        "ready": ready,
+        "block_reasons": list(dict.fromkeys(blockers)),
+        "managed_exit_pid": pid,
+        "managed_exit_mode": mode or None,
+        "managed_exit_classification": classification or None,
+        "heartbeat_at": status.get("heartbeat_at") or status.get("generated_at"),
+        "age_seconds": age_seconds,
+        "max_age_seconds": max_age_seconds,
+        "close_path_available": close_path_available,
+        "stale_artifact_policy": "ENTRY_BLOCKING_CLOSE_AUTHORITY_SIGNAL",
+    }
 
 
 def evaluate_current_state_authority(authority_input: CurrentStateAuthorityInput) -> dict[str, Any]:
@@ -79,6 +142,20 @@ def evaluate_current_state_authority(authority_input: CurrentStateAuthorityInput
         block(BROKER_TRUTH_CRITICAL, "live_money_eligible", "live_money_eligible=true blocks PAPER mutation.")
     if bool(authority_input.paper_proof):
         block(BROKER_TRUTH_CRITICAL, "paper_proof_true", "paper_proof=true blocks PAPER mutation.")
+
+    exit_capability = evaluate_exit_capability(
+        authority_input.managed_exit_status,
+        now=now,
+        max_age_seconds=authority_input.managed_exit_max_age_seconds,
+    )
+    if authority_input.require_exit_capability and exit_capability.get("ready") is not True:
+        for reason in list(exit_capability.get("block_reasons") or []):
+            block(
+                RISK_TRUTH_CRITICAL,
+                str(reason),
+                "PAPER new entry is blocked because Managed Exit close capability is unavailable.",
+                exit_capability=exit_capability,
+            )
 
     quantity = float_or_zero(authority_input.quantity)
     max_quantity = float_or_zero(authority_input.max_quantity)
@@ -174,6 +251,7 @@ def evaluate_current_state_authority(authority_input: CurrentStateAuthorityInput
         "blockers": blockers,
         "block_reasons": [str(row.get("reason") or "") for row in blockers],
         "diagnostics": dict(authority_input.diagnostics or {}),
+        "exit_capability": exit_capability,
         "authority_scope": "CURRENT_BROKER_ORDER_MARKET_IDENTITY_TRUTH",
         "broker_truth": {
             "positions_known": positions_known,

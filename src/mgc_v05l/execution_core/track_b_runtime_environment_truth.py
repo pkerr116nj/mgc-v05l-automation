@@ -18,6 +18,7 @@ from mgc_v05l.execution_core.bounded_jsonl import append_bounded_jsonl
 from mgc_v05l.execution_core.track_b_atomic_io import write_json_atomic
 from mgc_v05l.execution_core.track_b_fresh_truth_contract import build_authority_freshness_metadata
 from mgc_v05l.execution_core.track_b_projection_metadata import build_projection_metadata
+from mgc_v05l.execution_core.track_b_current_state_authority import evaluate_exit_capability
 
 
 RUNTIME_ACTIVE_TRADE_CAPABLE = "RUNTIME_ACTIVE_TRADE_CAPABLE"
@@ -92,6 +93,9 @@ DEFAULT_BROKER_POSITION_GUARDIAN_ARTIFACT = (
 DEFAULT_SAFE_STATE_ENVELOPE_ARTIFACT = (
     Path("outputs") / "track_b_execution_core" / "safe_state" / "latest_runtime_safe_state_envelope.json"
 )
+DEFAULT_MANAGED_EXIT_SERVICE_STATUS_ARTIFACT = (
+    Path("outputs") / "track_b_execution_core" / "managed_exit_service" / "latest_managed_exit_service_status.json"
+)
 
 
 @dataclass(frozen=True)
@@ -114,6 +118,7 @@ class TrackBRuntimeEnvironmentTruthConfig:
     open_order_truth_path: Path = DEFAULT_OPEN_ORDER_TRUTH_ARTIFACT
     broker_position_guardian_path: Path = DEFAULT_BROKER_POSITION_GUARDIAN_ARTIFACT
     safe_state_envelope_path: Path = DEFAULT_SAFE_STATE_ENVELOPE_ARTIFACT
+    managed_exit_service_status_path: Path = DEFAULT_MANAGED_EXIT_SERVICE_STATUS_ARTIFACT
 
     def resolve(self, path: Path) -> Path:
         return path if path.is_absolute() else self.repo_root / path
@@ -153,6 +158,7 @@ def build_track_b_runtime_environment_truth(
     open_order_truth = _read_json(config.resolve(config.open_order_truth_path))
     broker_position_guardian = _read_json(config.resolve(config.broker_position_guardian_path))
     safe_state_envelope = _read_json(config.resolve(config.safe_state_envelope_path))
+    managed_exit_status = _read_json(config.resolve(config.managed_exit_service_status_path))
 
     runtime_pid = _first_int(runtime_truth.get("producer_pid"), pid_metadata.get("pid"), operator_status.get("source_runtime_pid"))
     runtime_pid_alive = bool(runtime_pid is not None and pid_running(runtime_pid))
@@ -178,6 +184,7 @@ def build_track_b_runtime_environment_truth(
         open_order_truth=open_order_truth,
         broker_position_guardian=broker_position_guardian,
         safe_state_envelope=safe_state_envelope,
+        managed_exit_status=managed_exit_status,
         position_truth=position_truth,
         reconciliation=reconciliation,
         now=actual_now,
@@ -298,6 +305,7 @@ def build_track_b_runtime_environment_truth(
             "open_order_truth": str(config.resolve(config.open_order_truth_path)),
             "broker_position_guardian": str(config.resolve(config.broker_position_guardian_path)),
             "safe_state_envelope": str(config.resolve(config.safe_state_envelope_path)),
+            "managed_exit_service_status": str(config.resolve(config.managed_exit_service_status_path)),
         },
     }
     return payload
@@ -493,6 +501,7 @@ def _build_current_state_trade_capability(
     open_order_truth: Mapping[str, Any],
     broker_position_guardian: Mapping[str, Any],
     safe_state_envelope: Mapping[str, Any],
+    managed_exit_status: Mapping[str, Any],
     position_truth: Mapping[str, Any],
     reconciliation: Mapping[str, Any],
     now: datetime,
@@ -565,6 +574,10 @@ def _build_current_state_trade_capability(
     if _list(safe_state_envelope.get("blockers")):
         reasons.append("safe_state_blockers_present")
 
+    exit_capability = evaluate_exit_capability(managed_exit_status, now=now)
+    if exit_capability.get("ready") is not True:
+        reasons.extend(str(reason) for reason in list(exit_capability.get("block_reasons") or []))
+
     position_classification = _position_truth_classification(position_truth=position_truth, reconciliation=reconciliation)
     if position_classification != "CLEAN_FLAT_READY":
         reasons.append(f"position_truth_not_clean:{position_classification}")
@@ -598,6 +611,7 @@ def _build_current_state_trade_capability(
         "open_order_truth_classification": open_order_class or None,
         "guardian_classification": guardian_class or None,
         "safe_state_classification": safe_state_class or None,
+        "exit_capability": exit_capability,
         "position_truth_classification": position_classification,
         "reconciliation_classification": reconciliation_class or None,
         "generated_at": now.isoformat(),

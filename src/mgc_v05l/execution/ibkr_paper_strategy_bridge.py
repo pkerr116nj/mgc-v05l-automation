@@ -3570,6 +3570,13 @@ def _broker_market_truth_entry_authority_for_bridge(
                 / "open_order_truth"
                 / "latest_open_order_truth.json"
             ),
+            managed_exit_status=_read_json(
+                config.repo_root
+                / "outputs"
+                / "track_b_execution_core"
+                / "managed_exit_service"
+                / "latest_managed_exit_service_status.json"
+            ),
             runtime_price=runtime_price,
             contract=contract,
             require_resolved_contract=require_resolved_contract,

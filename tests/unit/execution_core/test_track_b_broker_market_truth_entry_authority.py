@@ -4,6 +4,7 @@ import json
 from datetime import datetime, timezone
 from pathlib import Path
 
+from mgc_v05l.execution_core.track_b_current_state_authority import EXIT_CAPABILITY_APPLY_BLOCKED
 from mgc_v05l.execution_core.track_b_broker_market_truth_entry_authority import (
     BROKER_MARKET_TRUTH_ENTRY_ALLOWED,
     BROKER_MARKET_TRUTH_ENTRY_BLOCKED,
@@ -48,6 +49,19 @@ def _orders(*, rows: list[dict[str, object]] | None = None) -> dict[str, object]
     }
 
 
+def _managed_exit_status(**overrides: object) -> dict[str, object]:
+    payload: dict[str, object] = {
+        "pid": 12345,
+        "mode": "GUARDED_CLOSE_ONLY_APPLY",
+        "classification": "NO_ELIGIBLE_EXITS",
+        "generated_at": "2026-06-11T14:00:30+00:00",
+        "live_money_eligible": False,
+        "paper_proof_invoked": False,
+    }
+    payload.update(overrides)
+    return payload
+
+
 def _input(**overrides: object) -> BrokerMarketTruthEntryAuthorityInput:
     payload = {
         "account_id": "DUM882026",
@@ -73,6 +87,7 @@ def _input(**overrides: object) -> BrokerMarketTruthEntryAuthorityInput:
             "local_symbol": "MNQU6",
             "con_id": 793356225,
         },
+        "managed_exit_status": _managed_exit_status(),
         "now": datetime(2026, 6, 11, 14, 1, tzinfo=timezone.utc),
     }
     payload.update(overrides)
@@ -439,6 +454,7 @@ def test_repo_authority_enriches_missing_con_id_from_zero_broker_position(tmp_pa
             ]
         },
     )
+    _write_managed_exit_status(tmp_path)
 
     result = build_broker_market_truth_entry_authority_from_repo(
         repo_root=tmp_path,
@@ -506,6 +522,7 @@ def test_repo_authority_enriches_missing_con_id_from_trade_ledger_identity(tmp_p
         tmp_path / "outputs/track_b_execution_core/phase1_runtime_market_data/MES/1m/latest_runtime_candles.json",
         {"bars": [{"bar_end": "2026-06-11T14:00:00+00:00", "close": 7400.25}]},
     )
+    _write_managed_exit_status(tmp_path)
 
     result = build_broker_market_truth_entry_authority_from_repo(
         repo_root=tmp_path,
@@ -561,6 +578,7 @@ def test_repo_authority_prefers_next_contract_identity_when_broker_snapshot_lack
         tmp_path / "outputs/track_b_execution_core/phase1_runtime_market_data/MNQ/1m/latest_runtime_candles.json",
         {"bars": [{"bar_end": "2026-06-11T14:00:00+00:00", "close": 29000.25}]},
     )
+    _write_managed_exit_status(tmp_path)
 
     result = build_broker_market_truth_entry_authority_from_repo(
         repo_root=tmp_path,
@@ -596,6 +614,7 @@ def test_repo_authority_still_blocks_when_contract_identity_cannot_be_enriched(t
         tmp_path / "outputs/track_b_execution_core/phase1_runtime_market_data/MNQ/1m/latest_runtime_candles.json",
         {"bars": [{"bar_end": "2026-06-11T14:00:00+00:00", "close": 29000.25}]},
     )
+    _write_managed_exit_status(tmp_path)
 
     result = build_broker_market_truth_entry_authority_from_repo(
         repo_root=tmp_path,
@@ -634,6 +653,22 @@ def test_wrong_account_live_proof_and_non_paper_block() -> None:
     }.issubset(set(reasons))
 
 
+def _write_managed_exit_status(path_root: Path, **overrides: object) -> None:
+    _write_json(
+        path_root / "outputs/track_b_execution_core/managed_exit_service/latest_managed_exit_service_status.json",
+        _managed_exit_status(**overrides),
+    )
+
 def _write_json(path: Path, payload: dict[str, object]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(payload), encoding="utf-8")
+
+
+def test_managed_exit_apply_blocked_blocks_entry_authority() -> None:
+    result = evaluate_broker_market_truth_entry_authority(
+        _input(managed_exit_status=_managed_exit_status(classification="APPLY_BLOCKED"))
+    )
+
+    assert result["classification"] == BROKER_MARKET_TRUTH_ENTRY_BLOCKED
+    assert EXIT_CAPABILITY_APPLY_BLOCKED in result["block_reasons"]
+    assert result["current_state_authority"]["exit_capability"]["ready"] is False

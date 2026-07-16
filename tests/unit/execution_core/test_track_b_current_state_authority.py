@@ -5,8 +5,13 @@ from datetime import datetime, timezone
 from mgc_v05l.execution_core.track_b_current_state_authority import (
     CURRENT_STATE_AUTHORITY_ALLOWED,
     CURRENT_STATE_AUTHORITY_BLOCKED,
+    EXIT_CAPABILITY_APPLY_BLOCKED,
+    EXIT_CAPABILITY_PROCESS_DOWN,
+    EXIT_CAPABILITY_READY,
+    EXIT_CAPABILITY_STALE,
     CurrentStateAuthorityInput,
     evaluate_current_state_authority,
+    evaluate_exit_capability,
     open_order_truth_duplicate_close_group_count,
     open_order_truth_is_global_no_open_orders,
     open_order_truth_open_order_count,
@@ -22,6 +27,19 @@ def _positions(*, rows: list[dict[str, object]] | None = None) -> dict[str, obje
 
 def _orders(*, rows: list[dict[str, object]] | None = None) -> dict[str, object]:
     return {"ok": True, "account": "DUM882026", "open_orders_complete": True, "open_orders": list(rows or [])}
+
+
+def _managed_exit_status(**overrides: object) -> dict[str, object]:
+    payload: dict[str, object] = {
+        "pid": 12345,
+        "mode": "GUARDED_CLOSE_ONLY_APPLY",
+        "classification": "NO_ELIGIBLE_EXITS",
+        "generated_at": "2026-06-18T13:59:30+00:00",
+        "live_money_eligible": False,
+        "paper_proof_invoked": False,
+    }
+    payload.update(overrides)
+    return payload
 
 
 def _input(**overrides: object) -> CurrentStateAuthorityInput:
@@ -41,6 +59,7 @@ def _input(**overrides: object) -> CurrentStateAuthorityInput:
             "local_symbol": "MGCQ6",
             "con_id": 123456789,
         },
+        "managed_exit_status": _managed_exit_status(),
         "now": NOW,
         "diagnostics": {
             "stale_reconciliation": {"classification": "BROKER_LIFECYCLE_RECONCILIATION_NOT_CLEAN"},
@@ -271,3 +290,58 @@ def test_live_money_or_paper_proof_blocks() -> None:
     assert classification == CURRENT_STATE_AUTHORITY_BLOCKED
     assert "live_money_eligible" in reasons
     assert "paper_proof_true" in reasons
+
+
+def test_exit_capability_ready_when_managed_exit_apply_healthy() -> None:
+    result = evaluate_exit_capability(_managed_exit_status(), now=NOW)
+
+    assert result["classification"] == EXIT_CAPABILITY_READY
+    assert result["ready"] is True
+    assert result["block_reasons"] == []
+
+
+def test_apply_blocked_managed_exit_blocks_new_entries() -> None:
+    classification, reasons = _classification(
+        managed_exit_status=_managed_exit_status(classification="APPLY_BLOCKED"),
+    )
+
+    assert classification == CURRENT_STATE_AUTHORITY_BLOCKED
+    assert EXIT_CAPABILITY_APPLY_BLOCKED in reasons
+
+
+def test_stale_managed_exit_heartbeat_blocks_new_entries() -> None:
+    classification, reasons = _classification(
+        managed_exit_status=_managed_exit_status(generated_at="2026-06-18T13:00:00+00:00"),
+    )
+
+    assert classification == CURRENT_STATE_AUTHORITY_BLOCKED
+    assert EXIT_CAPABILITY_STALE in reasons
+
+
+def test_managed_exit_process_down_blocks_new_entries() -> None:
+    classification, reasons = _classification(managed_exit_status=_managed_exit_status(pid=0))
+
+    assert classification == CURRENT_STATE_AUTHORITY_BLOCKED
+    assert EXIT_CAPABILITY_PROCESS_DOWN in reasons
+
+
+def test_exact_risk_reducing_close_callers_can_bypass_entry_exit_capability_interlock() -> None:
+    classification, reasons = _classification(
+        action="SELL_TO_CLOSE",
+        managed_exit_status=_managed_exit_status(classification="APPLY_BLOCKED"),
+        require_exit_capability=False,
+    )
+
+    assert classification == CURRENT_STATE_AUTHORITY_ALLOWED
+    assert EXIT_CAPABILITY_APPLY_BLOCKED not in reasons
+
+
+def test_exit_capability_auto_recovers_when_managed_exit_status_returns_healthy() -> None:
+    blocked = evaluate_current_state_authority(
+        _input(managed_exit_status=_managed_exit_status(classification="APPLY_BLOCKED"))
+    )
+    recovered = evaluate_current_state_authority(_input(managed_exit_status=_managed_exit_status()))
+
+    assert blocked["classification"] == CURRENT_STATE_AUTHORITY_BLOCKED
+    assert recovered["classification"] == CURRENT_STATE_AUTHORITY_ALLOWED
+    assert recovered["exit_capability"]["classification"] == EXIT_CAPABILITY_READY
