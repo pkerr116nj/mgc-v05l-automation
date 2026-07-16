@@ -551,6 +551,8 @@ def build_track_b_managed_exit_attach_plan(
         managed_exit_policy_id=managed_exit_policy_id,
         required_completed_5m_bars=required_completed_5m_bars,
         exit_authority_allows=exit_authority_allows,
+        prior_lifecycle_close_is_stale_diagnostic=prior_lifecycle_close_is_stale_diagnostic,
+        raw_prior_lifecycle_close=raw_prior_lifecycle_close,
         now=actual_now,
     )
     payload["apply_result"] = apply_result
@@ -625,6 +627,8 @@ def _apply_managed_exit(
     managed_exit_policy_id: str,
     required_completed_5m_bars: int,
     exit_authority_allows: bool,
+    prior_lifecycle_close_is_stale_diagnostic: bool,
+    raw_prior_lifecycle_close: str | None,
     now: datetime,
 ) -> dict[str, Any]:
     lifecycle_report = _with_registry_trade_id_for_managed_exit(
@@ -705,9 +709,15 @@ def _apply_managed_exit(
         managed_close_broker_position_snapshot=_mapping(selected_position.get("broker_position")),
         managed_exit_v1_1_authorized=bool(exit_authority_allows),
     )
+    lifecycle_report_for_maintenance = dict(lifecycle_report)
+    if prior_lifecycle_close_is_stale_diagnostic:
+        lifecycle_report_for_maintenance.pop("close_fill", None)
+        lifecycle_report_for_maintenance.pop("close_submit_attempt", None)
+        lifecycle_report_for_maintenance["prior_lifecycle_close_stale_diagnostic"] = raw_prior_lifecycle_close
+        lifecycle_report_for_maintenance["prior_lifecycle_close_stale_diagnostic_reason"] = "fresh_broker_risk_still_open"
     result = maintain_open_track_b_strategy_managed_paper_lifecycle(
         config=lifecycle_config,
-        existing_lifecycle_report=lifecycle_report,
+        existing_lifecycle_report=lifecycle_report_for_maintenance,
         now=now,
     )
     ledger_update: dict[str, Any] = {}

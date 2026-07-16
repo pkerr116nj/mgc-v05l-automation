@@ -529,7 +529,9 @@ def test_prior_lifecycle_close_submit_is_diagnostic_when_fresh_order_truth_has_n
     assert payload["duplicate_close_order_detected"] is False
     assert payload["prior_lifecycle_close_submit_blocker"] is None
     assert "broker order 36" in payload["prior_lifecycle_close_stale_diagnostic"]
-    assert called["maintain"]["existing_lifecycle_report"]["close_submit_attempt"]["broker_order_id"] == "36"
+    assert "close_submit_attempt" not in called["maintain"]["existing_lifecycle_report"]
+    assert called["maintain"]["existing_lifecycle_report"]["prior_lifecycle_close_stale_diagnostic"]
+    assert called["maintain"]["existing_lifecycle_report"]["prior_lifecycle_close_stale_diagnostic_reason"] == "fresh_broker_risk_still_open"
 
 
 def test_prior_lifecycle_close_fill_is_diagnostic_when_broker_risk_still_open_and_v11_allows(
@@ -585,7 +587,9 @@ def test_prior_lifecycle_close_fill_is_diagnostic_when_broker_risk_still_open_an
     assert payload["prior_lifecycle_close_submit_blocker"] is None
     assert "close fill" in payload["prior_lifecycle_close_stale_diagnostic"]
     assert payload["exit_authority_contract"]["decision"]["decision"] in {"ALLOWED", "DEGRADED_ALLOWED"}
-    assert called["maintain"]["existing_lifecycle_report"]["close_fill"]["broker_order_id"] == "84"
+    assert "close_fill" not in called["maintain"]["existing_lifecycle_report"]
+    assert called["maintain"]["existing_lifecycle_report"]["prior_lifecycle_close_stale_diagnostic"]
+    assert called["maintain"]["existing_lifecycle_report"]["prior_lifecycle_close_stale_diagnostic_reason"] == "fresh_broker_risk_still_open"
 
 
 def test_previous_attach_guard_review_state_can_retry_when_broker_identity_matches(tmp_path: Path) -> None:
