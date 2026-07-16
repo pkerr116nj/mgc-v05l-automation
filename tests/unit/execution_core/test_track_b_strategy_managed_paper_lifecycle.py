@@ -2721,6 +2721,65 @@ def test_managed_exit_close_authority_demotes_stale_safe_state_duplicate_intent_
     assert "SAFE_STATE_BLOCKS_CLOSE:SAFE_STATE_DUPLICATE_INTENT_RISK" in close_authority["diagnostic_block_reasons"]
 
 
+def test_managed_exit_close_authority_demotes_position_limit_hit_for_exact_v11_close(
+    tmp_path: Path,
+) -> None:
+    config = base_config(
+        tmp_path,
+        strategy_id="mgc_us_active_participation_long",
+        lane_id="mgc_us_active_participation_long",
+        instrument_family="MGC",
+        contract_key="MGC-202608",
+        local_symbol="MGCQ6",
+        con_id=732156883,
+        side="LONG",
+        close_limit_price="4060.2",
+        managed_exit_policy_id=TrackBManagedExitPolicy.US_ACTIVE_EVIDENCE_TIMEBOX_60M_EXIT_V1.value,
+        managed_exit_v1_1_authorized=True,
+    )
+    close_intent = {
+        "lifecycle_id": "reserved-submit-mgc",
+        "trade_id": "trade-mgc-managed",
+        "order_action": "SELL",
+        "quantity": 1,
+        "close_limit_price": "4060.2",
+    }
+    seed_strategy_submit_authority(
+        tmp_path,
+        config=config,
+        intent_payload=close_intent,
+        intent_kind=IntentKind.CLOSE,
+        limit_price="4060.2",
+        safe_state_overrides={
+            "safe_state_classification": "SAFE_STATE_POSITION_LIMIT_HIT",
+            "submit_allowed": False,
+            "broker_mutation_allowed": False,
+            "managed_close_mutation_allowed": False,
+            "observe_only": True,
+        },
+        snapshot_overrides={
+            "open_order_truth_classification": "NO_OPEN_ORDERS",
+            "managed_order_registry_classification": "POSITION_WITHOUT_CLOSE_ORDER",
+            "position_truth_classification": "OPEN_MANAGED_MATCHED",
+            "managed_position_registry_classification": "OPEN_MANAGED_EXIT_DUE",
+        },
+    )
+
+    authorization = lifecycle_module.build_strategy_managed_submit_authorization(
+        config=config,
+        intent_payload=close_intent,
+        intent_kind=IntentKind.CLOSE,
+        limit_price="4060.2",
+        now=aware_now(),
+    )
+
+    close_authority = authorization["managed_exit_close_authority"]
+    assert authorization["classification"] == lifecycle_module.STRATEGY_SUBMIT_AUTHORIZED
+    assert close_authority["allowed"] is True
+    assert close_authority["block_reasons"] == []
+    assert "SAFE_STATE_BLOCKS_CLOSE:SAFE_STATE_POSITION_LIMIT_HIT" in close_authority["diagnostic_block_reasons"]
+
+
 def test_managed_exit_close_authority_keeps_real_duplicate_order_truth_hard_blocker(
     tmp_path: Path,
 ) -> None:
