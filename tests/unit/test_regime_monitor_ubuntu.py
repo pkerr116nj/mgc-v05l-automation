@@ -257,6 +257,36 @@ def test_state_dir_config_override_is_supported_for_non_production_layouts(
     assert root == tmp_path / "configured"
 
 
+def test_dashboard_axis_labels_are_kiosk_readable_and_spaced() -> None:
+    html = regime_monitor.DASHBOARD_HTML
+
+    assert 'yLabelFont: "500 22px system-ui, sans-serif"' in html
+    assert 'xLabelFont: "500 20px system-ui, sans-serif"' in html
+    assert "calculateTimeLabelIndices(valid.length, plotWidth)" in html
+    assert "return new Set(indices)" in html
+
+    antix_kiosk_width = 1920
+    chart_panel_horizontal_padding = antix_kiosk_width * 0.06
+    plot_width = antix_kiosk_width - chart_panel_horizontal_padding - 94 - 72
+    candle_step = plot_width / 72
+    max_labels = max(2, int(plot_width // 132))
+    tick_every = max(1, (72 + max_labels - 1) // max_labels)
+    label_indices = []
+    for index in range(0, 72, tick_every):
+        distance_to_final = (71 - index) * candle_step
+        if index == 0 or distance_to_final >= 132:
+            label_indices.append(index)
+    if (71 - label_indices[-1]) * candle_step >= 132:
+        label_indices.append(71)
+    else:
+        label_indices[-1] = 71
+
+    assert tick_every >= 6
+    assert len(label_indices) <= max_labels
+    assert label_indices[-1] == 71
+    assert min((b - a) * candle_step for a, b in zip(label_indices, label_indices[1:])) >= 132
+
+
 def test_monitor_files_do_not_hard_code_patrick_home_or_magic_output_paths() -> None:
     repo_root = MODULE_PATH.parents[1]
     checked = [

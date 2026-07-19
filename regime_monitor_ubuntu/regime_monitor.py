@@ -640,6 +640,18 @@ DASHBOARD_HTML = """<!doctype html>
     };
     const chartCanvas = document.getElementById("chart");
     const chartContext = chartCanvas.getContext("2d");
+    const chartAxis = {
+      yLabelFont: "500 22px system-ui, sans-serif",
+      xLabelFont: "500 20px system-ui, sans-serif",
+      yLabelWidth: 94,
+      rightPadding: 72,
+      topPadding: 16,
+      bottomPadding: 46,
+      yLabelGap: 12,
+      xLabelBottomGap: 12,
+      minXLabelGap: 132,
+      fallbackLabelFont: "500 20px system-ui, sans-serif",
+    };
     let lastChartPayload = null;
     const current = {};
 
@@ -740,10 +752,10 @@ DASHBOARD_HTML = """<!doctype html>
         Number.isFinite(bar.low) &&
         Number.isFinite(bar.close)
       );
-      const left = 50;
-      const right = 58;
-      const top = 10;
-      const bottom = 24;
+      const left = chartAxis.yLabelWidth;
+      const right = chartAxis.rightPadding;
+      const top = chartAxis.topPadding;
+      const bottom = chartAxis.bottomPadding;
       const plotWidth = Math.max(1, width - left - right);
       const plotHeight = Math.max(1, height - top - bottom);
 
@@ -759,7 +771,7 @@ DASHBOARD_HTML = """<!doctype html>
 
       if (valid.length === 0) {
         chartContext.fillStyle = "#555";
-        chartContext.font = "14px system-ui, sans-serif";
+        chartContext.font = chartAxis.fallbackLabelFont;
         chartContext.textAlign = "center";
         chartContext.fillText("Waiting for live 5m candles", width / 2, height / 2);
         return;
@@ -777,14 +789,15 @@ DASHBOARD_HTML = """<!doctype html>
       const candleStep = plotWidth / Math.max(valid.length, 1);
       const bodyWidth = Math.max(2, Math.min(16, candleStep * 0.62));
 
-      chartContext.font = "12px system-ui, sans-serif";
+      chartContext.font = chartAxis.yLabelFont;
       chartContext.textAlign = "right";
       chartContext.fillStyle = "#777";
       for (let i = 0; i <= 4; i += 1) {
         const price = maxPrice - ((maxPrice - minPrice) * i / 4);
-        chartContext.fillText(formatPrice(price), left - 8, top + (plotHeight * i / 4) + 4);
+        chartContext.fillText(formatPrice(price), left - chartAxis.yLabelGap, top + (plotHeight * i / 4) + 7);
       }
 
+      const timeLabelIndices = calculateTimeLabelIndices(valid.length, plotWidth);
       valid.forEach((bar, index) => {
         const x = left + candleStep * index + candleStep / 2;
         const openY = priceToY(bar.open);
@@ -805,12 +818,38 @@ DASHBOARD_HTML = """<!doctype html>
         chartContext.fillRect(x - bodyWidth / 2, bodyTop, bodyWidth, bodyHeight);
         chartContext.globalAlpha = 1;
 
-        if (index % 12 === 0 || index === valid.length - 1) {
+        if (timeLabelIndices.has(index)) {
           chartContext.fillStyle = "#777";
+          chartContext.font = chartAxis.xLabelFont;
           chartContext.textAlign = index === valid.length - 1 ? "right" : "center";
-          chartContext.fillText(formatTimeLabel(bar.time), x, height - 7);
+          chartContext.fillText(formatTimeLabel(bar.time), x, height - chartAxis.xLabelBottomGap);
         }
       });
+    }
+
+    function calculateTimeLabelIndices(barCount, plotWidth) {
+      if (barCount <= 0) return new Set();
+      if (barCount === 1) return new Set([0]);
+      const candleStep = plotWidth / barCount;
+      const maxLabels = Math.max(2, Math.floor(plotWidth / chartAxis.minXLabelGap));
+      const tickEvery = Math.max(1, Math.ceil(barCount / maxLabels));
+      const indices = [];
+      for (let index = 0; index < barCount; index += tickEvery) {
+        const distanceToFinal = (barCount - 1 - index) * candleStep;
+        if (index === 0 || distanceToFinal >= chartAxis.minXLabelGap) {
+          indices.push(index);
+        }
+      }
+      const finalIndex = barCount - 1;
+      const previousIndex = indices[indices.length - 1];
+      if (previousIndex == null) {
+        indices.push(finalIndex);
+      } else if ((finalIndex - previousIndex) * candleStep >= chartAxis.minXLabelGap) {
+        indices.push(finalIndex);
+      } else {
+        indices[indices.length - 1] = finalIndex;
+      }
+      return new Set(indices);
     }
 
     function formatPrice(value) {

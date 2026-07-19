@@ -193,7 +193,10 @@ journalctl -u regime-monitor-ubuntu.service -f
 - The browser renders candlesticks with native canvas JavaScript, with no CDN
   dependency.
 - The price axis auto-scales to the visible candle high/low with modest padding.
-- Time labels are shown at roughly hourly intervals.
+- Y-axis price labels render at 22px medium weight.
+- X-axis time labels render at 20px medium weight.
+- Time-label frequency is reduced automatically when needed so the 72-candle
+  view stays readable on kiosk-width displays.
 - `handleSnapshotMessage(...)` is the future SSE migration boundary.
 
 ## AntiX Kiosk Command
