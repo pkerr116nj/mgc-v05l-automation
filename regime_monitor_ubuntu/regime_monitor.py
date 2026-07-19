@@ -57,9 +57,24 @@ class DatabentoFeedConfig:
     api_key: str | None
     dataset: str = "GLBX.MDP3"
     schema: str = "trades"
-    symbols: tuple[str, ...] = ("MBT.FUT",)
-    stype_in: str = "parent"
+    symbols: tuple[str, ...] = ("MNQ.v.0", "MES.v.0", "MGC.v.0", "MBT.v.0")
+    stype_in: str = "continuous"
     reconnect_interval: float = 5.0
+
+
+@dataclass(frozen=True)
+class InstrumentConfig:
+    key: str
+    name: str
+    symbol: str
+
+
+DEFAULT_INSTRUMENTS: tuple[InstrumentConfig, ...] = (
+    InstrumentConfig("MNQ", "Micro Nasdaq", "MNQ.v.0"),
+    InstrumentConfig("MES", "Micro S&P", "MES.v.0"),
+    InstrumentConfig("MGC", "Micro Gold", "MGC.v.0"),
+    InstrumentConfig("MBT", "Micro Bitcoin", "MBT.v.0"),
+)
 
 
 @dataclass(frozen=True)
@@ -100,6 +115,25 @@ class RollingCandleState:
         self._last_error: str | None = None
         self.load()
 
+    @classmethod
+    def from_payload(
+        cls,
+        *,
+        state_dir: Path,
+        symbol: str,
+        payload: object,
+        bar_limit: int = DEFAULT_CHART_BAR_LIMIT,
+        persist_interval: float = 1.0,
+    ) -> RollingCandleState:
+        state = cls(
+            state_dir=state_dir,
+            symbol=symbol,
+            bar_limit=bar_limit,
+            persist_interval=persist_interval,
+        )
+        state.load_payload(payload)
+        return state
+
     def load(self) -> None:
         try:
             payload = json.loads(self.state_path.read_text(encoding="utf-8"))
@@ -121,7 +155,19 @@ class RollingCandleState:
             self._current_1m = current_1m
             self._last_error = None
 
-    def record_trade(self, *, price: float, event_time: datetime | None = None) -> None:
+    def load_payload(self, payload: object) -> None:
+        if not isinstance(payload, dict):
+            return
+        completed = _normalize_payload_candles(payload.get("completed_5m"), completed=True)
+        current_5m = _normalize_payload_candle(payload.get("current_5m"), default_completed=False)
+        current_1m = _normalize_payload_candle(payload.get("current_1m"), default_completed=False)
+        with self._lock:
+            self._completed_5m = _dedupe_sorted_candles(completed)[-self.bar_limit :]
+            self._current_5m = current_5m
+            self._current_1m = current_1m
+            self._last_error = None
+
+    def record_trade(self, *, price: float, event_time: datetime | None = None, persist: bool = True) -> None:
         event_dt = event_time or datetime.now(timezone.utc)
         event_dt = _ensure_utc(event_dt)
         one_minute_start = event_dt.replace(second=0, microsecond=0)
@@ -155,7 +201,7 @@ class RollingCandleState:
                 self.persist_interval == 0
                 or time.monotonic() - self._last_persist_monotonic >= self.persist_interval
             )
-        if should_persist:
+        if persist and should_persist:
             self.persist()
 
     def payload(self) -> dict[str, Any]:
@@ -180,16 +226,7 @@ class RollingCandleState:
         }
 
     def persist(self) -> None:
-        with self._lock:
-            payload = {
-                "schema_version": "regime_monitor_candle_state_v1",
-                "generated_at": utc_now_text(),
-                "symbol": self.symbol,
-                "bar_limit": self.bar_limit,
-                "completed_5m": [bar.to_payload() for bar in self._completed_5m[-self.bar_limit :]],
-                "current_5m": None if self._current_5m is None else self._current_5m.to_payload(),
-                "current_1m": None if self._current_1m is None else self._current_1m.to_payload(),
-            }
+        payload = self.export_state()
         self.state_dir.mkdir(parents=True, exist_ok=True)
         fd, tmp_name = tempfile.mkstemp(
             prefix=f".{self.state_path.name}.",
@@ -212,6 +249,18 @@ class RollingCandleState:
             except OSError:
                 pass
 
+    def export_state(self) -> dict[str, Any]:
+        with self._lock:
+            return {
+                "schema_version": "regime_monitor_candle_state_v1",
+                "generated_at": utc_now_text(),
+                "symbol": self.symbol,
+                "bar_limit": self.bar_limit,
+                "completed_5m": [bar.to_payload() for bar in self._completed_5m[-self.bar_limit :]],
+                "current_5m": None if self._current_5m is None else self._current_5m.to_payload(),
+                "current_1m": None if self._current_1m is None else self._current_1m.to_payload(),
+            }
+
 
 class PriceRegimeState:
     def __init__(self, *, max_prices: int = 20, candle_state: RollingCandleState | None = None) -> None:
@@ -228,7 +277,7 @@ class PriceRegimeState:
             self._connection_status = status
             self._error = error
 
-    def record_message(self, msg: object) -> None:
+    def record_message(self, msg: object, *, persist_candle: bool = True) -> None:
         price_value = getattr(msg, "px", None)
         if price_value is None:
             price_value = getattr(msg, "price", None)
@@ -245,7 +294,7 @@ class PriceRegimeState:
             self._connection_status = "CONNECTED"
             self._error = None
         if self._candle_state is not None:
-            self._candle_state.record_trade(price=price, event_time=event_time)
+            self._candle_state.record_trade(price=price, event_time=event_time, persist=persist_candle)
 
     def snapshot(self) -> RegimeSnapshot:
         now = datetime.now(EASTERN_TZ)
@@ -279,6 +328,137 @@ class PriceRegimeState:
         )
 
 
+class InstrumentMonitorState:
+    def __init__(
+        self,
+        *,
+        config: InstrumentConfig,
+        state_dir: Path,
+        bar_limit: int,
+        persisted_candles: object = None,
+    ) -> None:
+        self.config = config
+        self.candles = RollingCandleState.from_payload(
+            state_dir=state_dir,
+            symbol=config.key,
+            payload=persisted_candles,
+            bar_limit=bar_limit,
+            persist_interval=9999,
+        )
+        self.regime = PriceRegimeState(candle_state=self.candles)
+
+    def mark_status(self, status: str, error: str | None = None) -> None:
+        self.regime.mark_status(status, error)
+
+    def record_message(self, msg: object) -> None:
+        self.regime.record_message(msg, persist_candle=False)
+
+    def payload(self) -> dict[str, Any]:
+        snapshot = self.regime.snapshot().to_payload()
+        snapshot["instrument"] = self.config.key
+        snapshot["name"] = self.config.name
+        snapshot["symbol"] = self.config.symbol
+        snapshot["chart"] = self.candles.payload()
+        return snapshot
+
+    def export_state(self) -> dict[str, Any]:
+        return {
+            "name": self.config.name,
+            "symbol": self.config.symbol,
+            "candles": self.candles.export_state(),
+        }
+
+
+class MultiInstrumentMonitorState:
+    def __init__(
+        self,
+        *,
+        instruments: tuple[InstrumentConfig, ...],
+        state_dir: Path,
+        bar_limit: int = DEFAULT_CHART_BAR_LIMIT,
+        persist_interval: float = 1.0,
+    ) -> None:
+        self.instruments = instruments
+        self.state_dir = state_dir
+        self.state_path = state_dir / DEFAULT_STATE_FILE_NAME
+        self.bar_limit = bar_limit
+        self.persist_interval = max(0.0, float(persist_interval))
+        self._last_persist_monotonic = 0.0
+        self._lock = threading.Lock()
+        self._instrument_by_key: dict[str, InstrumentMonitorState] = {}
+        persisted = self._load_persisted_state()
+        persisted_instruments = persisted.get("instruments") if isinstance(persisted, dict) else {}
+        for config in instruments:
+            persisted_entry = persisted_instruments.get(config.key, {}) if isinstance(persisted_instruments, dict) else {}
+            persisted_candles = persisted_entry.get("candles") if isinstance(persisted_entry, dict) else None
+            self._instrument_by_key[config.key] = InstrumentMonitorState(
+                config=config,
+                state_dir=state_dir,
+                bar_limit=bar_limit,
+                persisted_candles=persisted_candles,
+            )
+        self._symbol_to_key = _build_symbol_lookup(instruments)
+
+    def mark_all(self, status: str, error: str | None = None) -> None:
+        for state in self._instrument_by_key.values():
+            state.mark_status(status, error)
+
+    def mark_instrument(self, key: str, status: str, error: str | None = None) -> None:
+        instrument = self._instrument_by_key.get(key.upper())
+        if instrument is not None:
+            instrument.mark_status(status, error)
+
+    def record_message(self, msg: object) -> str | None:
+        key = self.resolve_message_key(msg)
+        if key is None:
+            return None
+        instrument = self._instrument_by_key.get(key)
+        if instrument is None:
+            return None
+        instrument.record_message(msg)
+        if self.persist_interval == 0 or time.monotonic() - self._last_persist_monotonic >= self.persist_interval:
+            self.persist()
+        return key
+
+    def resolve_message_key(self, msg: object) -> str | None:
+        for candidate in _message_symbol_candidates(msg):
+            key = self._symbol_to_key.get(candidate.upper())
+            if key is not None:
+                return key
+        return None
+
+    def payload(self) -> dict[str, Any]:
+        return {
+            "schema_version": "regime_monitor_multi_instrument_v1",
+            "generated_at": utc_now_text(),
+            "instruments": {
+                config.key: self._instrument_by_key[config.key].payload()
+                for config in self.instruments
+            },
+        }
+
+    def persist(self) -> None:
+        with self._lock:
+            payload = {
+                "schema_version": "regime_monitor_multi_candle_state_v1",
+                "generated_at": utc_now_text(),
+                "bar_limit": self.bar_limit,
+                "instruments": {
+                    key: state.export_state()
+                    for key, state in self._instrument_by_key.items()
+                },
+            }
+            _atomic_write_json(self.state_path, payload)
+            self._last_persist_monotonic = time.monotonic()
+
+    def _load_persisted_state(self) -> dict[str, Any]:
+        try:
+            payload = json.loads(self.state_path.read_text(encoding="utf-8"))
+        except (FileNotFoundError, OSError, json.JSONDecodeError):
+            return {}
+        return payload if isinstance(payload, dict) else {}
+
+
 def utc_now_text() -> str:
     return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
 
@@ -291,6 +471,68 @@ def load_config(path: Path) -> dict[str, object]:
     except (OSError, json.JSONDecodeError):
         return {}
     return payload if isinstance(payload, dict) else {}
+
+
+def _atomic_write_json(path: Path, payload: dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp_name = tempfile.mkstemp(
+        prefix=f".{path.name}.",
+        suffix=".tmp",
+        dir=str(path.parent),
+        text=True,
+    )
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            json.dump(payload, handle, separators=(",", ":"), sort_keys=True)
+            handle.write("\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(tmp_name, path)
+    finally:
+        try:
+            if Path(tmp_name).exists():
+                Path(tmp_name).unlink()
+        except OSError:
+            pass
+
+
+def _build_symbol_lookup(instruments: tuple[InstrumentConfig, ...]) -> dict[str, str]:
+    lookup: dict[str, str] = {}
+    for config in instruments:
+        root = config.symbol.split(".", 1)[0].upper()
+        aliases = {
+            config.key.upper(),
+            config.symbol.upper(),
+            root,
+            f"{root}.FUT",
+            f"{root}.V.0",
+        }
+        for alias in aliases:
+            lookup[alias] = config.key
+    return lookup
+
+
+def _message_symbol_candidates(msg: object) -> list[str]:
+    candidates: list[str] = []
+    for attr in (
+        "symbol",
+        "raw_symbol",
+        "stype_in_symbol",
+        "continuous_symbol",
+        "parent_symbol",
+        "instrument_symbol",
+    ):
+        value = getattr(msg, attr, None)
+        if value not in (None, ""):
+            candidates.append(str(value).strip())
+    text = str(msg)
+    for marker in ("symbol=", "raw_symbol=", "stype_in_symbol="):
+        if marker in text:
+            tail = text.split(marker, 1)[1]
+            token = tail.split(",", 1)[0].split(")", 1)[0].strip().strip("'\"")
+            if token:
+                candidates.append(token)
+    return candidates
 
 
 def _normalize_payload_candles(raw_bars: object, *, completed: bool) -> list[CandleBar]:
@@ -447,12 +689,12 @@ def _float_or_none(value: object) -> float | None:
 def run_databento_feed(
     *,
     config: DatabentoFeedConfig,
-    state: PriceRegimeState,
+    state: PriceRegimeState | MultiInstrumentMonitorState,
     stop: threading.Event,
     live_factory: Any | None = None,
 ) -> None:
     if not config.api_key:
-        state.mark_status("NO_API_KEY", "DATABENTO_API_KEY is not configured")
+        _mark_feed_state(state, "NO_API_KEY", "DATABENTO_API_KEY is not configured")
         return
 
     if live_factory is None:
@@ -460,7 +702,7 @@ def run_databento_feed(
             import databento as db  # type: ignore[import-not-found]
         except ModuleNotFoundError as exc:
             if exc.name == "databento":
-                state.mark_status("DATABENTO_PACKAGE_MISSING", "Install the databento Python package")
+                _mark_feed_state(state, "DATABENTO_PACKAGE_MISSING", "Install the databento Python package")
                 return
             raise
         live_factory = db.Live
@@ -468,25 +710,25 @@ def run_databento_feed(
     while not stop.is_set():
         client: Any | None = None
         try:
-            state.mark_status("CONNECTING")
+            _mark_feed_state(state, "CONNECTING")
             client = live_factory(key=config.api_key)
-            state.mark_status("CONNECTING")
+            _mark_feed_state(state, "CONNECTING")
             client.subscribe(
                 dataset=config.dataset,
                 schema=config.schema,
                 symbols=list(config.symbols),
                 stype_in=config.stype_in,
             )
-            state.mark_status("CONNECTED")
+            _mark_feed_state(state, "CONNECTED")
             for msg in client:
                 if stop.is_set():
                     break
                 print(msg, flush=True)
                 state.record_message(msg)
             if not stop.is_set():
-                state.mark_status("DISCONNECTED", "Databento live feed ended")
+                _mark_feed_state(state, "DISCONNECTED", "Databento live feed ended")
         except Exception as exc:
-            state.mark_status("DISCONNECTED", str(exc))
+            _mark_feed_state(state, "DISCONNECTED", str(exc))
         finally:
             close = getattr(client, "close", None)
             stop_client = getattr(client, "stop", None)
@@ -504,7 +746,22 @@ def run_databento_feed(
         stop.wait(max(1.0, config.reconnect_interval))
 
 
-def create_app(*, state: PriceRegimeState, candle_source: RollingCandleState | None = None) -> Flask:
+def _mark_feed_state(
+    state: PriceRegimeState | MultiInstrumentMonitorState,
+    status: str,
+    error: str | None = None,
+) -> None:
+    if isinstance(state, MultiInstrumentMonitorState):
+        state.mark_all(status, error)
+    else:
+        state.mark_status(status, error)
+
+
+def create_app(
+    *,
+    state: PriceRegimeState | MultiInstrumentMonitorState,
+    candle_source: RollingCandleState | None = None,
+) -> Flask:
     app = Flask(__name__)
 
     @app.get("/")
@@ -513,8 +770,11 @@ def create_app(*, state: PriceRegimeState, candle_source: RollingCandleState | N
 
     @app.get("/data")
     def data() -> Response:
-        payload = state.snapshot().to_payload()
-        if candle_source is not None:
+        if isinstance(state, MultiInstrumentMonitorState):
+            payload = state.payload()
+        else:
+            payload = state.snapshot().to_payload()
+        if candle_source is not None and "instruments" not in payload:
             payload["chart"] = candle_source.payload()
         response = jsonify(payload)
         response.headers["Cache-Control"] = "no-store"
@@ -533,8 +793,10 @@ DASHBOARD_HTML = """<!doctype html>
     :root {
       color-scheme: dark;
       --bg: #000;
+      --panel: #030303;
+      --panel-border: #171717;
       --text: #f4f4f4;
-      --muted: #777;
+      --muted: #8c8c8c;
       --long: #00e676;
       --short: #ff3333;
       --no-trade: #9e9e9e;
@@ -552,150 +814,212 @@ DASHBOARD_HTML = """<!doctype html>
       font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
     }
     main {
-      min-height: 100vh;
+      width: 100vw;
+      height: 100vh;
       display: grid;
-      grid-template-rows: minmax(0, 0.64fr) minmax(180px, 0.28fr) auto;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      grid-template-rows: repeat(2, minmax(0, 1fr));
+      gap: 8px;
+      padding: 8px;
       background: #000;
     }
-    .center {
-      display: flex;
-      flex-direction: column;
-      align-items: center;
-      justify-content: center;
-      gap: clamp(1rem, 4vh, 3rem);
-      padding: 4vw;
-      text-align: center;
+    .panel {
+      min-width: 0;
+      min-height: 0;
+      display: grid;
+      grid-template-rows: auto auto minmax(0, 1fr) auto;
+      gap: 4px;
+      padding: 10px 12px 8px;
+      background: var(--panel);
+      border: 1px solid var(--panel-border);
+      overflow: hidden;
     }
-    #regime {
+    .instrument {
+      display: flex;
+      align-items: baseline;
+      justify-content: space-between;
+      gap: 1rem;
+      min-width: 0;
+    }
+    .name {
       margin: 0;
-      font-size: clamp(4rem, 18vw, 18rem);
-      line-height: 0.9;
+      font-size: clamp(1.4rem, 2.1vw, 2.3rem);
+      line-height: 1;
+      font-weight: 700;
+      letter-spacing: 0;
+    }
+    .symbol {
+      color: var(--muted);
+      font-size: clamp(1rem, 1.35vw, 1.45rem);
+      font-weight: 600;
+      white-space: nowrap;
+    }
+    .regime {
+      margin: 0;
+      font-size: clamp(3.2rem, 6.2vw, 7.2rem);
+      line-height: 0.92;
       letter-spacing: 0;
       font-weight: 800;
       color: var(--no-data);
+      text-align: center;
       overflow-wrap: anywhere;
     }
-    #confidence {
+    .confidence {
       margin: 0;
-      font-size: clamp(1.6rem, 5vw, 5rem);
-      line-height: 1.1;
       color: #ddd;
-      font-weight: 500;
+      font-size: clamp(1.2rem, 2vw, 2.4rem);
+      line-height: 1;
+      font-weight: 550;
+      text-align: center;
     }
-    .chart-panel {
-      width: 100%;
-      min-height: 0;
-      padding: 0 3vw 1vh;
-    }
-    #chart {
+    .chart {
       display: block;
       width: 100%;
       height: 100%;
-      min-height: 180px;
+      min-height: 190px;
       background: #020202;
     }
-    footer {
+    .status {
       display: grid;
-      gap: 0.35rem;
-      padding: 0 2vw 2vh;
+      grid-template-columns: minmax(0, 1fr) auto;
+      gap: 0.4rem 1rem;
       color: var(--muted);
-      text-align: center;
-      font-size: clamp(0.85rem, 1.6vw, 1.5rem);
-      line-height: 1.25;
+      font-size: clamp(0.9rem, 1.1vw, 1.2rem);
+      line-height: 1.1;
+      font-weight: 500;
+      min-width: 0;
     }
-    #connection[data-state="CONNECTED"] { color: var(--long); }
-    #connection[data-state="CONNECTING"] { color: #ddd; }
-    #connection[data-state="DISCONNECTED"],
-    #connection[data-state="NO_API_KEY"],
-    #connection[data-state="DATABENTO_PACKAGE_MISSING"],
-    #connection[data-state="STARTING"] { color: var(--no-data); }
-    .hidden { display: none; }
+    .connection[data-state="CONNECTED"] { color: var(--long); }
+    .connection[data-state="CONNECTING"] { color: #ddd; }
+    .connection[data-state="DISCONNECTED"],
+    .connection[data-state="NO_API_KEY"],
+    .connection[data-state="DATABENTO_PACKAGE_MISSING"],
+    .connection[data-state="STARTING"],
+    .connection[data-state="DASHBOARD_DISCONNECTED"] { color: var(--no-data); }
+    .error {
+      grid-column: 1 / -1;
+      min-height: 1.1em;
+      color: var(--no-data);
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .hidden { visibility: hidden; }
   </style>
 </head>
 <body>
-  <main>
-    <section class="center" aria-live="polite" aria-atomic="true">
-      <h1 id="regime">NO DATA</h1>
-      <p id="confidence">Confidence: --</p>
-    </section>
-    <section class="chart-panel" aria-label="Five-minute candlestick chart">
-      <canvas id="chart"></canvas>
-    </section>
-    <footer>
-      <div id="connection" data-state="STARTING">STARTING</div>
-      <div id="timestamp">Timestamp unavailable</div>
-      <div id="error" class="hidden"></div>
-    </footer>
-  </main>
+  <main id="dashboard" aria-live="polite" aria-atomic="false"></main>
+  <template id="panel-template">
+    <article class="panel">
+      <header class="instrument">
+        <h2 class="name"></h2>
+        <div class="symbol"></div>
+      </header>
+      <section>
+        <h1 class="regime">NO DATA</h1>
+        <p class="confidence">Confidence: --</p>
+      </section>
+      <canvas class="chart"></canvas>
+      <footer class="status">
+        <div class="connection" data-state="STARTING">STARTING</div>
+        <div class="timestamp">--:--:--</div>
+        <div class="error hidden"></div>
+      </footer>
+    </article>
+  </template>
   <script>
     const DATA_ENDPOINT = "/data";
     const POLL_INTERVAL_MS = 250;
+    const PANEL_ORDER = ["MNQ", "MES", "MGC", "MBT"];
     const colors = {
       LONG: "var(--long)",
       SHORT: "var(--short)",
       NO_TRADE: "var(--no-trade)",
       "NO DATA": "var(--no-data)",
     };
-    const nodes = {
-      regime: document.getElementById("regime"),
-      confidence: document.getElementById("confidence"),
-      timestamp: document.getElementById("timestamp"),
-      connection: document.getElementById("connection"),
-      error: document.getElementById("error"),
-    };
-    const chartCanvas = document.getElementById("chart");
-    const chartContext = chartCanvas.getContext("2d");
     const chartAxis = {
       yLabelFont: "500 22px system-ui, sans-serif",
       xLabelFont: "500 20px system-ui, sans-serif",
       yLabelWidth: 94,
       rightPadding: 72,
-      topPadding: 16,
-      bottomPadding: 46,
+      topPadding: 14,
+      bottomPadding: 44,
       yLabelGap: 12,
-      xLabelBottomGap: 12,
+      xLabelBottomGap: 11,
       minXLabelGap: 132,
       fallbackLabelFont: "500 20px system-ui, sans-serif",
     };
-    let lastChartPayload = null;
-    const current = {};
+    const dashboard = document.getElementById("dashboard");
+    const template = document.getElementById("panel-template");
+    const panels = new Map();
 
-    function setText(key, value) {
+    function ensurePanel(key, payload) {
+      if (panels.has(key)) return panels.get(key);
+      const fragment = template.content.cloneNode(true);
+      const panel = fragment.querySelector(".panel");
+      const nodes = {
+        panel,
+        name: fragment.querySelector(".name"),
+        symbol: fragment.querySelector(".symbol"),
+        regime: fragment.querySelector(".regime"),
+        confidence: fragment.querySelector(".confidence"),
+        canvas: fragment.querySelector(".chart"),
+        connection: fragment.querySelector(".connection"),
+        timestamp: fragment.querySelector(".timestamp"),
+        error: fragment.querySelector(".error"),
+        current: {},
+      };
+      panel.dataset.instrument = key;
+      nodes.name.textContent = payload.name || key;
+      nodes.symbol.textContent = payload.symbol || key;
+      dashboard.appendChild(fragment);
+      panels.set(key, nodes);
+      return nodes;
+    }
+
+    function updateText(nodes, field, value) {
       const next = value == null || value === "" ? "" : String(value);
-      if (current[key] === next) return;
-      current[key] = next;
-      nodes[key].textContent = next;
+      if (nodes.current[field] === next) return;
+      nodes.current[field] = next;
+      nodes[field].textContent = next;
     }
 
-    function setConnectionStatus(status) {
-      const next = status || "UNKNOWN";
-      if (current.connectionStatus === next) return;
-      current.connectionStatus = next;
-      nodes.connection.dataset.state = next;
-      nodes.connection.textContent = next;
-    }
-
-    function updateDashboard(payload) {
+    function updatePanel(key, payload) {
+      const nodes = ensurePanel(key, payload);
+      updateText(nodes, "name", payload.name || key);
+      updateText(nodes, "symbol", payload.symbol || key);
       const regime = payload.regime || "NO DATA";
-      setText("regime", regime);
+      updateText(nodes, "regime", regime);
       const color = colors[regime] || colors["NO DATA"];
-      if (current.regimeColor !== color) {
-        current.regimeColor = color;
+      if (nodes.current.regimeColor !== color) {
+        nodes.current.regimeColor = color;
         nodes.regime.style.color = color;
       }
       const confidence = typeof payload.confidence === "number"
         ? `Confidence: ${(payload.confidence * 100).toFixed(1)}%`
         : "Confidence: --";
-      setText("confidence", confidence);
-      setText("timestamp", payload.timestamp || "Timestamp unavailable");
-      setConnectionStatus(payload.connection_status || "UNKNOWN");
-      const error = payload.error || "";
-      if (current.error !== error) {
-        current.error = error;
-        nodes.error.textContent = error;
-        nodes.error.classList.toggle("hidden", error === "");
+      updateText(nodes, "confidence", confidence);
+      const status = payload.connection_status || "UNKNOWN";
+      if (nodes.current.connectionStatus !== status) {
+        nodes.current.connectionStatus = status;
+        nodes.connection.dataset.state = status;
+        nodes.connection.textContent = status;
       }
-      updateChart(payload.chart || null);
+      updateText(nodes, "timestamp", payload.timestamp || "--:--:--");
+      const error = payload.error || "";
+      updateText(nodes, "error", error);
+      nodes.error.classList.toggle("hidden", error === "");
+      updateChart(nodes, payload.chart || null);
+    }
+
+    function updateDashboard(payload) {
+      const instruments = payload && payload.instruments ? payload.instruments : { MBT: payload || {} };
+      const orderedKeys = PANEL_ORDER.filter((key) => instruments[key]).concat(
+        Object.keys(instruments).filter((key) => !PANEL_ORDER.includes(key)).sort()
+      );
+      for (const key of orderedKeys) {
+        updatePanel(key, instruments[key] || {});
+      }
     }
 
     // Future SSE migration point: EventSource messages can call this function
@@ -710,45 +1034,51 @@ DASHBOARD_HTML = """<!doctype html>
         if (!response.ok) throw new Error(`HTTP ${response.status}`);
         handleSnapshotMessage(await response.json());
       } catch (error) {
-        handleSnapshotMessage({
-          regime: "NO DATA",
-          confidence: null,
-          timestamp: new Date().toISOString(),
-          connection_status: "DASHBOARD_DISCONNECTED",
-          error: error.message,
-        });
+        const fallback = {};
+        for (const key of PANEL_ORDER) {
+          fallback[key] = {
+            name: key,
+            symbol: key,
+            regime: "NO DATA",
+            confidence: null,
+            timestamp: new Date().toISOString(),
+            connection_status: "DASHBOARD_DISCONNECTED",
+            error: error.message,
+            chart: { bars: [] },
+          };
+        }
+        handleSnapshotMessage({ instruments: fallback });
       }
     }
 
-    function updateChart(chart) {
+    function updateChart(nodes, chart) {
       const bars = chart && Array.isArray(chart.bars) ? chart.bars : [];
       const key = JSON.stringify(bars);
-      if (current.chartKey === key) return;
-      current.chartKey = key;
-      lastChartPayload = chart || { bars: [] };
-      drawChart(lastChartPayload);
+      if (nodes.current.chartKey === key) return;
+      nodes.current.chartKey = key;
+      nodes.current.lastChartPayload = chart || { bars: [] };
+      drawChart(nodes.canvas, nodes.current.lastChartPayload);
     }
 
-    function resizeChartCanvas() {
-      const rect = chartCanvas.getBoundingClientRect();
+    function resizeChartCanvas(canvas) {
+      const rect = canvas.getBoundingClientRect();
       const ratio = window.devicePixelRatio || 1;
       const width = Math.max(1, Math.floor(rect.width * ratio));
       const height = Math.max(1, Math.floor(rect.height * ratio));
-      if (chartCanvas.width !== width || chartCanvas.height !== height) {
-        chartCanvas.width = width;
-        chartCanvas.height = height;
-        chartContext.setTransform(ratio, 0, 0, ratio, 0, 0);
+      if (canvas.width !== width || canvas.height !== height) {
+        canvas.width = width;
+        canvas.height = height;
       }
+      const context = canvas.getContext("2d");
+      context.setTransform(ratio, 0, 0, ratio, 0, 0);
+      return { context, width: rect.width, height: rect.height };
     }
 
-    function drawChart(chart) {
-      resizeChartCanvas();
-      const rect = chartCanvas.getBoundingClientRect();
-      const width = rect.width;
-      const height = rect.height;
-      chartContext.clearRect(0, 0, width, height);
-      chartContext.fillStyle = "#020202";
-      chartContext.fillRect(0, 0, width, height);
+    function drawChart(canvas, chart) {
+      const { context, width, height } = resizeChartCanvas(canvas);
+      context.clearRect(0, 0, width, height);
+      context.fillStyle = "#020202";
+      context.fillRect(0, 0, width, height);
 
       const bars = chart && Array.isArray(chart.bars) ? chart.bars : [];
       const valid = bars.filter((bar) =>
@@ -764,21 +1094,21 @@ DASHBOARD_HTML = """<!doctype html>
       const plotWidth = Math.max(1, width - left - right);
       const plotHeight = Math.max(1, height - top - bottom);
 
-      chartContext.strokeStyle = "#151515";
-      chartContext.lineWidth = 1;
+      context.strokeStyle = "#151515";
+      context.lineWidth = 1;
       for (let i = 0; i <= 4; i += 1) {
         const y = top + (plotHeight * i / 4);
-        chartContext.beginPath();
-        chartContext.moveTo(left, y);
-        chartContext.lineTo(width - right, y);
-        chartContext.stroke();
+        context.beginPath();
+        context.moveTo(left, y);
+        context.lineTo(width - right, y);
+        context.stroke();
       }
 
       if (valid.length === 0) {
-        chartContext.fillStyle = "#555";
-        chartContext.font = chartAxis.fallbackLabelFont;
-        chartContext.textAlign = "center";
-        chartContext.fillText("Waiting for live 5m candles", width / 2, height / 2);
+        context.fillStyle = "#555";
+        context.font = chartAxis.fallbackLabelFont;
+        context.textAlign = "center";
+        context.fillText("Waiting for live 5m candles", width / 2, height / 2);
         return;
       }
 
@@ -792,14 +1122,14 @@ DASHBOARD_HTML = """<!doctype html>
       maxPrice += padding;
       const priceToY = (price) => top + ((maxPrice - price) / (maxPrice - minPrice)) * plotHeight;
       const candleStep = plotWidth / Math.max(valid.length, 1);
-      const bodyWidth = Math.max(2, Math.min(16, candleStep * 0.62));
+      const bodyWidth = Math.max(2, Math.min(12, candleStep * 0.58));
 
-      chartContext.font = chartAxis.yLabelFont;
-      chartContext.textAlign = "right";
-      chartContext.fillStyle = "#777";
+      context.font = chartAxis.yLabelFont;
+      context.textAlign = "right";
+      context.fillStyle = "#777";
       for (let i = 0; i <= 4; i += 1) {
         const price = maxPrice - ((maxPrice - minPrice) * i / 4);
-        chartContext.fillText(formatPrice(price), left - chartAxis.yLabelGap, top + (plotHeight * i / 4) + 7);
+        context.fillText(formatPrice(price), left - chartAxis.yLabelGap, top + (plotHeight * i / 4) + 7);
       }
 
       const timeLabelIndices = calculateTimeLabelIndices(valid.length, plotWidth);
@@ -811,23 +1141,23 @@ DASHBOARD_HTML = """<!doctype html>
         const lowY = priceToY(bar.low);
         const rising = bar.close >= bar.open;
         const color = rising ? "#00e676" : "#ff3333";
-        chartContext.strokeStyle = color;
-        chartContext.fillStyle = color;
-        chartContext.globalAlpha = bar.completed === false ? 0.55 : 1;
-        chartContext.beginPath();
-        chartContext.moveTo(x, highY);
-        chartContext.lineTo(x, lowY);
-        chartContext.stroke();
+        context.strokeStyle = color;
+        context.fillStyle = color;
+        context.globalAlpha = bar.completed === false ? 0.55 : 1;
+        context.beginPath();
+        context.moveTo(x, highY);
+        context.lineTo(x, lowY);
+        context.stroke();
         const bodyTop = Math.min(openY, closeY);
         const bodyHeight = Math.max(2, Math.abs(closeY - openY));
-        chartContext.fillRect(x - bodyWidth / 2, bodyTop, bodyWidth, bodyHeight);
-        chartContext.globalAlpha = 1;
+        context.fillRect(x - bodyWidth / 2, bodyTop, bodyWidth, bodyHeight);
+        context.globalAlpha = 1;
 
         if (timeLabelIndices.has(index)) {
-          chartContext.fillStyle = "#777";
-          chartContext.font = chartAxis.xLabelFont;
-          chartContext.textAlign = index === valid.length - 1 ? "right" : "center";
-          chartContext.fillText(formatTimeLabel(bar.time), x, height - chartAxis.xLabelBottomGap);
+          context.fillStyle = "#777";
+          context.font = chartAxis.xLabelFont;
+          context.textAlign = index === valid.length - 1 ? "right" : "center";
+          context.fillText(formatTimeLabel(bar.time), x, height - chartAxis.xLabelBottomGap);
         }
       });
     }
@@ -868,8 +1198,9 @@ DASHBOARD_HTML = """<!doctype html>
     }
 
     window.addEventListener("resize", () => {
-      resizeChartCanvas();
-      drawChart(lastChartPayload || { bars: [] });
+      for (const nodes of panels.values()) {
+        drawChart(nodes.canvas, nodes.current.lastChartPayload || { bars: [] });
+      }
     });
     setInterval(pollOnce, POLL_INTERVAL_MS);
     pollOnce();
@@ -888,7 +1219,6 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--symbols", help="Comma-separated Databento symbols.")
     parser.add_argument("--stype-in", help="Databento input symbol type.")
     parser.add_argument("--reconnect-interval", type=float, help="Databento reconnect interval in seconds.")
-    parser.add_argument("--chart-symbol", help="Symbol label for the dashboard chart.")
     parser.add_argument("--chart-bar-limit", type=int, help="Maximum five-minute candles to display.")
     parser.add_argument("--state-dir", type=Path, help="Directory for bounded persisted runtime state.")
     parser.add_argument("--host", default="0.0.0.0")
@@ -903,13 +1233,22 @@ def _symbols_from_config(value: object) -> tuple[str, ...]:
         symbols = [str(part).strip() for part in value]
     else:
         symbols = []
-    return tuple(symbol for symbol in symbols if symbol) or ("MBT.FUT",)
+    return tuple(symbol for symbol in symbols if symbol) or tuple(config.symbol for config in DEFAULT_INSTRUMENTS)
 
 
-def _default_chart_symbol(symbols: tuple[str, ...]) -> str:
-    first = symbols[0] if symbols else "MBT.FUT"
-    root = str(first).split(".", 1)[0].strip().upper()
-    return root or "MBT"
+def _instruments_from_config(value: object) -> tuple[InstrumentConfig, ...]:
+    if not isinstance(value, list):
+        return DEFAULT_INSTRUMENTS
+    instruments: list[InstrumentConfig] = []
+    for raw in value:
+        if not isinstance(raw, dict):
+            continue
+        key = str(raw.get("key") or "").strip().upper()
+        name = str(raw.get("name") or key).strip()
+        symbol = str(raw.get("symbol") or "").strip()
+        if key and name and symbol:
+            instruments.append(InstrumentConfig(key=key, name=name, symbol=symbol))
+    return tuple(instruments) or DEFAULT_INSTRUMENTS
 
 
 def resolve_state_dir(*, config: dict[str, object], state_dir_override: object = None) -> Path:
@@ -925,21 +1264,20 @@ def main() -> int:
     api_key = os.environ.get(api_key_env) or str(config.get("api_key") or "").strip() or None
     dataset = str(args.dataset or config.get("dataset") or "GLBX.MDP3").strip()
     schema = str(args.schema or config.get("schema") or "trades").strip()
+    instruments = _instruments_from_config(config.get("instruments"))
     symbol_value = args.symbols if args.symbols is not None else config.get("symbols")
-    symbols = _symbols_from_config(symbol_value)
-    stype_in = str(args.stype_in or config.get("stype_in") or "parent").strip()
+    symbols = _symbols_from_config(symbol_value) if symbol_value is not None else tuple(item.symbol for item in instruments)
+    stype_in = str(args.stype_in or config.get("stype_in") or "continuous").strip()
     reconnect_interval = float(args.reconnect_interval or config.get("reconnect_interval", 5.0))
-    chart_symbol = str(args.chart_symbol or config.get("chart_symbol") or _default_chart_symbol(symbols)).strip().upper()
     chart_bar_limit = int(args.chart_bar_limit or config.get("chart_bar_limit", DEFAULT_CHART_BAR_LIMIT))
     state_dir = resolve_state_dir(config=config, state_dir_override=args.state_dir)
     host = str(config.get("host") or args.host)
     port = int(config.get("port") or args.port)
-    candle_state = RollingCandleState(
+    state = MultiInstrumentMonitorState(
+        instruments=instruments,
         state_dir=state_dir,
-        symbol=chart_symbol,
         bar_limit=chart_bar_limit,
     )
-    state = PriceRegimeState(candle_state=candle_state)
     stop_event = threading.Event()
     worker = threading.Thread(
         target=run_databento_feed,
@@ -958,7 +1296,7 @@ def main() -> int:
         daemon=True,
     )
     worker.start()
-    app = create_app(state=state, candle_source=candle_state)
+    app = create_app(state=state)
     try:
         app.run(host=host, port=port, debug=False, use_reloader=False, threaded=True)
     finally:

@@ -15,9 +15,10 @@ Runtime layout:
 One Flask process owns:
 
 - Databento Live ingestion
-- the current 20-trade moving-average regime calculation
-- current one-minute OHLC state
-- rolling five-minute OHLC chart state
+- independent 20-trade moving-average regime calculation for MNQ, MES, MGC,
+  and MBT
+- independent current one-minute OHLC state for each instrument
+- independent rolling five-minute OHLC chart state for each instrument
 - the `/data` JSON endpoint
 - the dashboard served at `/`
 
@@ -27,24 +28,32 @@ the Ubuntu dashboard in Chromium kiosk mode.
 
 ## JSON Endpoint Contract
 
-`GET /data` returns the current regime snapshot:
+`GET /data` returns an instrument-keyed snapshot:
 
 ```json
 {
-  "regime": "LONG",
-  "confidence": 0.0031,
-  "timestamp": "14:30:04",
-  "connection_status": "CONNECTED",
-  "error": null,
-  "received_at": "2026-07-19T18:30:04Z",
-  "chart": {
-    "schema_version": "regime_monitor_in_process_5m_chart_v1",
-    "source": "regime_monitor_databento_live",
-    "symbol": "MBT",
-    "timeframe": "5m",
-    "bar_limit": 72,
-    "bar_count": 72,
-    "bars": []
+  "schema_version": "regime_monitor_multi_instrument_v1",
+  "generated_at": "2026-07-19T18:30:04Z",
+  "instruments": {
+    "MNQ": {
+      "instrument": "MNQ",
+      "name": "Micro Nasdaq",
+      "symbol": "MNQ.v.0",
+      "regime": "LONG",
+      "confidence": 0.0031,
+      "timestamp": "14:30:04",
+      "connection_status": "CONNECTED",
+      "error": null,
+      "chart": {
+        "schema_version": "regime_monitor_in_process_5m_chart_v1",
+        "source": "regime_monitor_databento_live",
+        "symbol": "MNQ",
+        "timeframe": "5m",
+        "bar_limit": 72,
+        "bar_count": 72,
+        "bars": []
+      }
+    }
   }
 }
 ```
@@ -61,10 +70,14 @@ Default subscription:
 client.subscribe(
     dataset="GLBX.MDP3",
     schema="trades",
-    symbols=["MBT.FUT"],
-    stype_in="parent",
+    symbols=["MNQ.v.0", "MES.v.0", "MGC.v.0", "MBT.v.0"],
+    stype_in="continuous",
 )
 ```
+
+The monitor uses Databento continuous front-month futures symbology. `MBT` is
+the CME Micro Bitcoin futures root, so the Bitcoin panel subscribes to
+`MBT.v.0`.
 
 The service preserves the current message handling:
 
@@ -79,16 +92,17 @@ The service preserves the current message handling:
 ## Candlestick Chart State
 
 The chart state is built from the monitor's own Databento stream. Each accepted
-trade updates both the regime price window and the in-process candle state:
+trade is routed to one instrument and updates both that instrument's regime
+price window and in-process candle state:
 
 - current one-minute OHLC bar
 - current five-minute OHLC bar
 - latest completed five-minute bars
 
-The `/data` chart payload returns the latest 72 five-minute candles, including
-the currently forming five-minute candle when present. The visible price axis
-is scaled in the browser to the high/low range of those displayed candles with
-modest padding.
+Each panel's `/data` chart payload returns the latest 72 five-minute candles,
+including the currently forming five-minute candle when present. Each visible
+price axis is scaled independently in the browser to the high/low range of that
+panel's displayed candles with modest padding.
 
 State is persisted atomically to:
 
@@ -96,10 +110,11 @@ State is persisted atomically to:
 /var/lib/regime-monitor/candle_state.json
 ```
 
-The state file is bounded to the recent candle window and the current forming
-bars. It is used only for restart continuity, so service restart or browser
-reload does not reset the chart to empty when recent state exists. There is no
-general logging or historical archive subsystem.
+The state file atomically stores the bounded recent candle window and current
+forming bars for all four instruments. It is used only for restart continuity,
+so service restart or browser reload does not reset the charts to empty when
+recent state exists. There is no general logging or historical archive
+subsystem.
 
 For local development only, the state directory can be overridden with
 `REGIME_MONITOR_STATE_DIR` or the `state_dir` config value. Production should
@@ -139,10 +154,14 @@ Example:
   "api_key_env": "DATABENTO_API_KEY",
   "dataset": "GLBX.MDP3",
   "schema": "trades",
-  "symbols": ["MBT.FUT"],
-  "stype_in": "parent",
+  "stype_in": "continuous",
+  "instruments": [
+    {"key": "MNQ", "name": "Micro Nasdaq", "symbol": "MNQ.v.0"},
+    {"key": "MES", "name": "Micro S&P", "symbol": "MES.v.0"},
+    {"key": "MGC", "name": "Micro Gold", "symbol": "MGC.v.0"},
+    {"key": "MBT", "name": "Micro Bitcoin", "symbol": "MBT.v.0"}
+  ],
   "reconnect_interval": 5.0,
-  "chart_symbol": "MBT",
   "chart_bar_limit": 72,
   "state_dir_env": "REGIME_MONITOR_STATE_DIR",
   "state_dir": "/var/lib/regime-monitor",
@@ -188,6 +207,8 @@ journalctl -u regime-monitor-ubuntu.service -f
 ## Dashboard Behavior
 
 - Served directly by Ubuntu Flask at `http://192.168.1.80:5000/`.
+- 2 columns by 2 rows at the 1920x1080 AntiX kiosk resolution.
+- Panel order: MNQ top-left, MES top-right, MGC bottom-left, MBT bottom-right.
 - Browser polls `/data` every `250 ms`.
 - Only changed fields are updated in the DOM.
 - The browser renders candlesticks with native canvas JavaScript, with no CDN

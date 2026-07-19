@@ -113,9 +113,19 @@ def test_price_window_is_bounded_to_latest_20_values() -> None:
 
 
 def test_symbols_from_config_accepts_string_or_list() -> None:
-    assert regime_monitor._symbols_from_config("MBT.FUT, MES.FUT") == ("MBT.FUT", "MES.FUT")
-    assert regime_monitor._symbols_from_config(["MBT.FUT", "  "]) == ("MBT.FUT",)
-    assert regime_monitor._symbols_from_config(None) == ("MBT.FUT",)
+    assert regime_monitor._symbols_from_config("MNQ.v.0, MES.v.0") == ("MNQ.v.0", "MES.v.0")
+    assert regime_monitor._symbols_from_config(["MBT.v.0", "  "]) == ("MBT.v.0",)
+    assert regime_monitor._symbols_from_config(None) == ("MNQ.v.0", "MES.v.0", "MGC.v.0", "MBT.v.0")
+
+
+def test_default_instruments_use_verified_continuous_front_month_symbols() -> None:
+    assert [(item.key, item.symbol) for item in regime_monitor.DEFAULT_INSTRUMENTS] == [
+        ("MNQ", "MNQ.v.0"),
+        ("MES", "MES.v.0"),
+        ("MGC", "MGC.v.0"),
+        ("MBT", "MBT.v.0"),
+    ]
+    assert regime_monitor.DatabentoFeedConfig(api_key="x").stype_in == "continuous"
 
 
 def test_successful_databento_stream_clears_package_missing_status() -> None:
@@ -148,6 +158,47 @@ def test_successful_databento_stream_clears_package_missing_status() -> None:
     snapshot = state.snapshot()
     assert snapshot.connection_status == "CONNECTED"
     assert snapshot.error is None
+
+
+def test_successful_multi_instrument_stream_clears_package_missing_status(tmp_path: Path) -> None:
+    state = regime_monitor.MultiInstrumentMonitorState(
+        instruments=regime_monitor.DEFAULT_INSTRUMENTS,
+        state_dir=tmp_path,
+        persist_interval=0,
+    )
+    state.mark_all("DATABENTO_PACKAGE_MISSING", "old startup failure")
+    stop = threading.Event()
+
+    class FakeLiveClient:
+        def __init__(self, *, key: str) -> None:
+            self.key = key
+
+        def subscribe(self, **kwargs: object) -> None:
+            assert kwargs["symbols"] == ["MNQ.v.0", "MES.v.0", "MGC.v.0", "MBT.v.0"]
+            assert kwargs["stype_in"] == "continuous"
+
+        def __iter__(self) -> object:
+            yield SimpleNamespace(symbol="MNQ.v.0", px=100_000_000_000, ts_event="2026-07-19T00:00:05+00:00")
+            stop.set()
+
+        def close(self) -> None:
+            pass
+
+    regime_monitor.run_databento_feed(
+        config=regime_monitor.DatabentoFeedConfig(
+            api_key="test_key",
+            symbols=tuple(item.symbol for item in regime_monitor.DEFAULT_INSTRUMENTS),
+            stype_in="continuous",
+        ),
+        state=state,
+        stop=stop,
+        live_factory=FakeLiveClient,
+    )
+
+    payload = state.payload()["instruments"]
+    assert payload["MNQ"]["connection_status"] == "CONNECTED"
+    assert payload["MNQ"]["error"] is None
+    assert all(item["connection_status"] != "DATABENTO_PACKAGE_MISSING" for item in payload.values())
 
 
 def test_databento_import_failure_reports_package_missing(monkeypatch: object) -> None:
@@ -267,6 +318,95 @@ def test_candle_state_recovers_after_restart(tmp_path: Path) -> None:
     assert payload["bars"][1]["completed"] is False
 
 
+def test_multi_instrument_state_isolates_updates_and_rollovers(tmp_path: Path) -> None:
+    state = regime_monitor.MultiInstrumentMonitorState(
+        instruments=regime_monitor.DEFAULT_INSTRUMENTS,
+        state_dir=tmp_path,
+        persist_interval=0,
+    )
+
+    state.record_message(SimpleNamespace(symbol="MNQ.v.0", px=100_000_000_000, ts_event="2026-07-19T00:04:59+00:00"))
+    state.record_message(SimpleNamespace(symbol="MNQ.v.0", px=101_000_000_000, ts_event="2026-07-19T00:05:00+00:00"))
+    state.record_message(SimpleNamespace(symbol="MES.v.0", px=50_000_000_000, ts_event="2026-07-19T00:01:00+00:00"))
+
+    instruments = state.payload()["instruments"]
+
+    assert instruments["MNQ"]["chart"]["bar_count"] == 2
+    assert instruments["MNQ"]["chart"]["bars"][0]["completed"] is True
+    assert instruments["MES"]["chart"]["bar_count"] == 1
+    assert instruments["MGC"]["chart"]["bars"] == []
+    assert instruments["MBT"]["chart"]["bars"] == []
+
+
+def test_multi_instrument_state_keeps_72_bars_per_instrument(tmp_path: Path) -> None:
+    state = regime_monitor.MultiInstrumentMonitorState(
+        instruments=regime_monitor.DEFAULT_INSTRUMENTS,
+        state_dir=tmp_path,
+    )
+    for index in range(75):
+        state.record_message(
+            SimpleNamespace(
+                symbol="MGC.v.0",
+                px=(200 + index) * 1_000_000_000,
+                ts_event=_trade_time(index).isoformat(),
+            )
+        )
+
+    mgc = state.payload()["instruments"]["MGC"]["chart"]
+
+    assert mgc["bar_count"] == 72
+    assert mgc["bars"][0]["time"] == "2026-07-19T00:20:00+00:00"
+    assert mgc["bars"][-1]["time"] == "2026-07-19T06:15:00+00:00"
+
+
+def test_multi_instrument_persistence_recovers_all_four_instruments(tmp_path: Path) -> None:
+    first = regime_monitor.MultiInstrumentMonitorState(
+        instruments=regime_monitor.DEFAULT_INSTRUMENTS,
+        state_dir=tmp_path,
+        persist_interval=0,
+    )
+    for index, symbol in enumerate(["MNQ.v.0", "MES.v.0", "MGC.v.0", "MBT.v.0"]):
+        first.record_message(
+            SimpleNamespace(
+                symbol=symbol,
+                px=(100 + index) * 1_000_000_000,
+                ts_event="2026-07-19T00:00:05+00:00",
+            )
+        )
+
+    second = regime_monitor.MultiInstrumentMonitorState(
+        instruments=regime_monitor.DEFAULT_INSTRUMENTS,
+        state_dir=tmp_path,
+    )
+    payload = second.payload()["instruments"]
+
+    assert (tmp_path / "candle_state.json").exists()
+    assert list(tmp_path.glob("*.tmp")) == []
+    assert {key: item["chart"]["bar_count"] for key, item in payload.items()} == {
+        "MNQ": 1,
+        "MES": 1,
+        "MGC": 1,
+        "MBT": 1,
+    }
+
+
+def test_one_instrument_error_does_not_affect_other_panels(tmp_path: Path) -> None:
+    state = regime_monitor.MultiInstrumentMonitorState(
+        instruments=regime_monitor.DEFAULT_INSTRUMENTS,
+        state_dir=tmp_path,
+    )
+    state.record_message(SimpleNamespace(symbol="MNQ.v.0", px=100_000_000_000, ts_event="2026-07-19T00:00:05+00:00"))
+    state.mark_instrument("MBT", "DISCONNECTED", "single panel failure")
+
+    payload = state.payload()["instruments"]
+
+    assert payload["MNQ"]["connection_status"] == "CONNECTED"
+    assert payload["MNQ"]["chart"]["bar_count"] == 1
+    assert payload["MBT"]["connection_status"] == "DISCONNECTED"
+    assert payload["MBT"]["error"] == "single panel failure"
+    assert payload["MES"]["connection_status"] == "STARTING"
+
+
 def test_candle_state_atomic_write_leaves_no_temp_file(tmp_path: Path) -> None:
     source = regime_monitor.RollingCandleState(
         state_dir=tmp_path,
@@ -318,14 +458,17 @@ def test_state_dir_config_override_is_supported_for_non_production_layouts(
 def test_dashboard_axis_labels_are_kiosk_readable_and_spaced() -> None:
     html = regime_monitor.DASHBOARD_HTML
 
+    assert "grid-template-columns: repeat(2, minmax(0, 1fr))" in html
+    assert "grid-template-rows: repeat(2, minmax(0, 1fr))" in html
+    assert 'const PANEL_ORDER = ["MNQ", "MES", "MGC", "MBT"]' in html
+    assert html.count('class="chart"') == 1
     assert 'yLabelFont: "500 22px system-ui, sans-serif"' in html
     assert 'xLabelFont: "500 20px system-ui, sans-serif"' in html
     assert "calculateTimeLabelIndices(valid.length, plotWidth)" in html
     assert "return new Set(indices)" in html
 
-    antix_kiosk_width = 1920
-    chart_panel_horizontal_padding = antix_kiosk_width * 0.06
-    plot_width = antix_kiosk_width - chart_panel_horizontal_padding - 94 - 72
+    antix_panel_width = (1920 - 24) / 2
+    plot_width = antix_panel_width - 24 - 94 - 72
     candle_step = plot_width / 72
     max_labels = max(2, int(plot_width // 132))
     tick_every = max(1, (72 + max_labels - 1) // max_labels)

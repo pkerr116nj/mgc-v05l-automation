@@ -2,10 +2,14 @@
   "api_key_env": "DATABENTO_API_KEY",
   "dataset": "GLBX.MDP3",
   "schema": "trades",
-  "symbols": ["MBT.FUT"],
-  "stype_in": "parent",
+  "stype_in": "continuous",
+  "instruments": [
+    {"key": "MNQ", "name": "Micro Nasdaq", "symbol": "MNQ.v.0"},
+    {"key": "MES", "name": "Micro S&P", "symbol": "MES.v.0"},
+    {"key": "MGC", "name": "Micro Gold", "symbol": "MGC.v.0"},
+    {"key": "MBT", "name": "Micro Bitcoin", "symbol": "MBT.v.0"}
+  ],
   "reconnect_interval": 5.0,
-  "chart_symbol": "MBT",
   "chart_bar_limit": 72,
   "state_dir_env": "REGIME_MONITOR_STATE_DIR",
   "state_dir": "/var/lib/regime-monitor",
