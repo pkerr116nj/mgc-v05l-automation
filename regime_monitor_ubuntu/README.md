@@ -87,11 +87,26 @@ The chart shows the latest 72 five-minute candles, roughly six hours. On page
 reload or service restart, it immediately recovers from those canonical recent
 bar artifacts instead of waiting for six hours of new data.
 
+Path resolution is intentionally portable:
+
+1. If `REGIME_MONITOR_REPO_ROOT` is set, chart candles are read from
+   `$REGIME_MONITOR_REPO_ROOT/outputs/track_b_execution_core/phase1_runtime_market_data`.
+2. Otherwise, the service derives the same relative path from the deployed app
+   directory: `Path(__file__).resolve().parent / outputs / ...`.
+
+The simple `/opt/regime-monitor-ubuntu` copy layout below installs only the
+monitor app, config, and requirements. It does not include the repository
+`outputs` tree, so production deployments that use that layout should set
+`REGIME_MONITOR_REPO_ROOT` in `/etc/regime-monitor/regime-monitor.env`.
+
 ## Install On Ubuntu
 
 ```bash
 sudo apt update
 sudo apt install -y python3 python3-pip python3-flask
+sudo mkdir -p /opt/mgc-v05l-automation
+# Keep or deploy the repository checkout at /opt/mgc-v05l-automation so
+# Phase-1 can publish outputs/track_b_execution_core/phase1_runtime_market_data.
 sudo python3 -m pip install -r regime_monitor_ubuntu/requirements.txt
 sudo mkdir -p /opt/regime-monitor-ubuntu
 sudo cp regime_monitor_ubuntu/regime_monitor.py regime_monitor_ubuntu/config.json.example regime_monitor_ubuntu/requirements.txt /opt/regime-monitor-ubuntu/
@@ -105,6 +120,7 @@ Create the protected environment file for the Databento API key:
 ```bash
 sudo install -m 600 -o root -g root /dev/null /etc/regime-monitor/regime-monitor.env
 sudo sh -c 'printf "%s\n" "DATABENTO_API_KEY=your_databento_key_here" > /etc/regime-monitor/regime-monitor.env'
+sudo sh -c 'printf "%s\n" "REGIME_MONITOR_REPO_ROOT=/opt/mgc-v05l-automation" >> /etc/regime-monitor/regime-monitor.env'
 ```
 
 Edit the runtime configuration if needed:
@@ -123,8 +139,9 @@ Example:
   "symbols": ["MBT.FUT"],
   "stype_in": "parent",
   "reconnect_interval": 5.0,
+  "repo_root_env": "REGIME_MONITOR_REPO_ROOT",
   "chart_symbol": "MBT",
-  "chart_runtime_candle_root": "/Users/patrick/Dev/MGC-v05l-automation/outputs/track_b_execution_core/phase1_runtime_market_data",
+  "chart_runtime_candle_root": "outputs/track_b_execution_core/phase1_runtime_market_data",
   "chart_bar_limit": 72,
   "host": "0.0.0.0",
   "port": 5000

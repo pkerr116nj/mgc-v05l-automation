@@ -179,6 +179,67 @@ def test_chart_payload_has_stable_shape_when_artifacts_missing(tmp_path: Path) -
     assert "missing canonical candle artifact" in payload["error"]
 
 
+def test_default_chart_root_derives_from_app_root(monkeypatch: object, tmp_path: Path) -> None:
+    monkeypatch.delenv("REGIME_MONITOR_REPO_ROOT", raising=False)
+
+    root = regime_monitor.resolve_chart_runtime_candle_root(config={}, app_root=tmp_path / "app")
+
+    assert root == tmp_path / "app" / "outputs" / "track_b_execution_core" / "phase1_runtime_market_data"
+
+
+def test_chart_root_uses_configured_repo_root_env(monkeypatch: object, tmp_path: Path) -> None:
+    repo_root = tmp_path / "repo"
+    monkeypatch.setenv("REGIME_MONITOR_REPO_ROOT", str(repo_root))
+
+    root = regime_monitor.resolve_chart_runtime_candle_root(config={}, app_root=tmp_path / "app")
+
+    assert root == repo_root / "outputs" / "track_b_execution_core" / "phase1_runtime_market_data"
+
+
+def test_chart_root_relative_override_resolves_under_authoritative_repo_root(
+    monkeypatch: object,
+    tmp_path: Path,
+) -> None:
+    repo_root = tmp_path / "repo"
+    monkeypatch.setenv("REGIME_MONITOR_REPO_ROOT", str(repo_root))
+
+    root = regime_monitor.resolve_chart_runtime_candle_root(
+        config={},
+        app_root=tmp_path / "app",
+        chart_root_override="custom/candles",
+    )
+
+    assert root == repo_root / "custom" / "candles"
+
+
+def test_chart_root_absolute_override_is_preserved(monkeypatch: object, tmp_path: Path) -> None:
+    monkeypatch.setenv("REGIME_MONITOR_REPO_ROOT", str(tmp_path / "repo"))
+    override = tmp_path / "other" / "candles"
+
+    root = regime_monitor.resolve_chart_runtime_candle_root(
+        config={},
+        app_root=tmp_path / "app",
+        chart_root_override=override,
+    )
+
+    assert root == override
+
+
+def test_monitor_files_do_not_hard_code_patrick_home_paths() -> None:
+    repo_root = MODULE_PATH.parents[1]
+    checked = [
+        repo_root / "regime_monitor_ubuntu" / "regime_monitor.py",
+        repo_root / "regime_monitor_ubuntu" / "config.json.example",
+        repo_root / "regime_monitor_ubuntu" / "README.md",
+    ]
+    forbidden = ("/Users/" + "patrick", "/home/" + "patrick")
+
+    for path in checked:
+        text = path.read_text(encoding="utf-8")
+        for value in forbidden:
+            assert value not in text
+
+
 def _write_candles(root: Path, symbol: str, timeframe: str, bars: list[dict[str, object]]) -> None:
     path = root / symbol / timeframe / "latest_runtime_candles.json"
     path.parent.mkdir(parents=True, exist_ok=True)

@@ -5,8 +5,9 @@
   "symbols": ["MBT.FUT"],
   "stype_in": "parent",
   "reconnect_interval": 5.0,
+  "repo_root_env": "REGIME_MONITOR_REPO_ROOT",
   "chart_symbol": "MBT",
-  "chart_runtime_candle_root": "/Users/patrick/Dev/MGC-v05l-automation/outputs/track_b_execution_core/phase1_runtime_market_data",
+  "chart_runtime_candle_root": "outputs/track_b_execution_core/phase1_runtime_market_data",
   "chart_bar_limit": 72,
   "host": "0.0.0.0",
   "port": 5000

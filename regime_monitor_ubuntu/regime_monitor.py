@@ -23,6 +23,7 @@ from zoneinfo import ZoneInfo
 from flask import Flask, Response, jsonify
 
 
+APP_ROOT = Path(__file__).resolve().parent
 VALID_REGIMES = {"LONG", "SHORT", "NO_TRADE"}
 REGIME_COLORS = {
     "LONG": "#00e676",
@@ -31,7 +32,7 @@ REGIME_COLORS = {
     "NO DATA": "#ffcc33",
 }
 EASTERN_TZ = ZoneInfo("America/New_York")
-DEFAULT_CHART_RUNTIME_CANDLE_ROOT = (
+CHART_RUNTIME_CANDLE_RELATIVE_PATH = (
     Path("outputs") / "track_b_execution_core" / "phase1_runtime_market_data"
 )
 DEFAULT_CHART_BAR_LIMIT = 72
@@ -755,6 +756,23 @@ def _default_chart_symbol(symbols: tuple[str, ...]) -> str:
     return root or "MBT"
 
 
+def resolve_chart_runtime_candle_root(
+    *,
+    config: dict[str, object],
+    app_root: Path = APP_ROOT,
+    chart_root_override: object = None,
+) -> Path:
+    repo_root_env = str(config.get("repo_root_env") or "REGIME_MONITOR_REPO_ROOT").strip()
+    repo_root_value = os.environ.get(repo_root_env) or config.get("repo_root")
+    base_root = Path(str(repo_root_value)).expanduser() if repo_root_value else app_root
+
+    root_value = chart_root_override if chart_root_override is not None else config.get("chart_runtime_candle_root")
+    if root_value:
+        root = Path(str(root_value)).expanduser()
+        return root if root.is_absolute() else base_root / root
+    return base_root / CHART_RUNTIME_CANDLE_RELATIVE_PATH
+
+
 def main() -> int:
     args = parse_args()
     config = load_config(Path(args.config).expanduser())
@@ -767,8 +785,10 @@ def main() -> int:
     stype_in = str(args.stype_in or config.get("stype_in") or "parent").strip()
     reconnect_interval = float(args.reconnect_interval or config.get("reconnect_interval", 5.0))
     chart_symbol = str(args.chart_symbol or config.get("chart_symbol") or _default_chart_symbol(symbols)).strip().upper()
-    chart_root_value = args.chart_runtime_candle_root or config.get("chart_runtime_candle_root")
-    chart_root = Path(str(chart_root_value)).expanduser() if chart_root_value else DEFAULT_CHART_RUNTIME_CANDLE_ROOT
+    chart_root = resolve_chart_runtime_candle_root(
+        config=config,
+        chart_root_override=args.chart_runtime_candle_root,
+    )
     chart_bar_limit = int(args.chart_bar_limit or config.get("chart_bar_limit", DEFAULT_CHART_BAR_LIMIT))
     host = str(config.get("host") or args.host)
     port = int(config.get("port") or args.port)
