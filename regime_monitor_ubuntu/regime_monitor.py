@@ -449,18 +449,28 @@ def run_databento_feed(
     config: DatabentoFeedConfig,
     state: PriceRegimeState,
     stop: threading.Event,
+    live_factory: Any | None = None,
 ) -> None:
     if not config.api_key:
         state.mark_status("NO_API_KEY", "DATABENTO_API_KEY is not configured")
         return
 
+    if live_factory is None:
+        try:
+            import databento as db  # type: ignore[import-not-found]
+        except ModuleNotFoundError as exc:
+            if exc.name == "databento":
+                state.mark_status("DATABENTO_PACKAGE_MISSING", "Install the databento Python package")
+                return
+            raise
+        live_factory = db.Live
+
     while not stop.is_set():
         client: Any | None = None
         try:
-            import databento as db  # type: ignore[import-not-found]
-
             state.mark_status("CONNECTING")
-            client = db.Live(key=config.api_key)
+            client = live_factory(key=config.api_key)
+            state.mark_status("CONNECTING")
             client.subscribe(
                 dataset=config.dataset,
                 schema=config.schema,
@@ -475,11 +485,6 @@ def run_databento_feed(
                 state.record_message(msg)
             if not stop.is_set():
                 state.mark_status("DISCONNECTED", "Databento live feed ended")
-        except ModuleNotFoundError as exc:
-            if exc.name == "databento":
-                state.mark_status("DATABENTO_PACKAGE_MISSING", "Install the databento Python package")
-                return
-            raise
         except Exception as exc:
             state.mark_status("DISCONNECTED", str(exc))
         finally:

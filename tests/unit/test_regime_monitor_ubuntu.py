@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import builtins
 import importlib.util
 import json
 import sys
+import threading
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
@@ -114,6 +116,62 @@ def test_symbols_from_config_accepts_string_or_list() -> None:
     assert regime_monitor._symbols_from_config("MBT.FUT, MES.FUT") == ("MBT.FUT", "MES.FUT")
     assert regime_monitor._symbols_from_config(["MBT.FUT", "  "]) == ("MBT.FUT",)
     assert regime_monitor._symbols_from_config(None) == ("MBT.FUT",)
+
+
+def test_successful_databento_stream_clears_package_missing_status() -> None:
+    state = regime_monitor.PriceRegimeState()
+    state.mark_status("DATABENTO_PACKAGE_MISSING", "old startup failure")
+    stop = threading.Event()
+
+    class FakeLiveClient:
+        def __init__(self, *, key: str) -> None:
+            self.key = key
+            self.subscribed = False
+
+        def subscribe(self, **_kwargs: object) -> None:
+            self.subscribed = True
+
+        def __iter__(self) -> object:
+            yield SimpleNamespace(px=100_000_000_000, ts_event="2026-07-19T00:00:05+00:00")
+            stop.set()
+
+        def close(self) -> None:
+            pass
+
+    regime_monitor.run_databento_feed(
+        config=regime_monitor.DatabentoFeedConfig(api_key="test_key"),
+        state=state,
+        stop=stop,
+        live_factory=FakeLiveClient,
+    )
+
+    snapshot = state.snapshot()
+    assert snapshot.connection_status == "CONNECTED"
+    assert snapshot.error is None
+
+
+def test_databento_import_failure_reports_package_missing(monkeypatch: object) -> None:
+    state = regime_monitor.PriceRegimeState()
+    original_import = builtins.__import__
+
+    def fake_import(name: str, *args: object, **kwargs: object) -> object:
+        if name == "databento":
+            exc = ModuleNotFoundError("No module named 'databento'")
+            exc.name = "databento"
+            raise exc
+        return original_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", fake_import)
+
+    regime_monitor.run_databento_feed(
+        config=regime_monitor.DatabentoFeedConfig(api_key="test_key"),
+        state=state,
+        stop=threading.Event(),
+    )
+
+    snapshot = state.snapshot()
+    assert snapshot.connection_status == "DATABENTO_PACKAGE_MISSING"
+    assert snapshot.error == "Install the databento Python package"
 
 
 def test_chart_payload_keeps_latest_72_ordered_bars(tmp_path: Path) -> None:
