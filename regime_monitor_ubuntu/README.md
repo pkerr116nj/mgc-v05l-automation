@@ -6,6 +6,8 @@ Ubuntu runs the only application server. This one Flask process owns:
 - the current 20-trade moving-average regime calculation
 - the `/data` JSON endpoint
 - the dashboard served at `/`
+- a display-only candlestick chart sourced from canonical Phase-1 runtime
+  candle artifacts
 
 The AntiX display device does not run Flask, Python, configuration, Databento
 ingestion, regime calculation, `/data`, or a local polling proxy. It only opens
@@ -22,7 +24,16 @@ the Ubuntu dashboard in Chromium kiosk mode.
   "timestamp": "14:30:04",
   "connection_status": "CONNECTED",
   "error": null,
-  "received_at": "2026-07-19T18:30:04Z"
+  "received_at": "2026-07-19T18:30:04Z",
+  "chart": {
+    "schema_version": "regime_monitor_canonical_5m_chart_v1",
+    "source": "execution_core_phase1_runtime_market_data",
+    "symbol": "MBT",
+    "timeframe": "5m",
+    "bar_limit": 72,
+    "bar_count": 72,
+    "bars": []
+  }
 }
 ```
 
@@ -52,6 +63,29 @@ The service preserves the current message handling:
 - compute `LONG` when latest price is above the simple average, otherwise
   `SHORT`
 - confidence is `abs(latest_price - average) / average`, rounded to 4 decimals
+
+## Candlestick Chart Source
+
+The dashboard does not independently build completed five-minute history.
+Completed chart bars are read from the existing canonical Phase-1 output:
+
+```text
+outputs/track_b_execution_core/phase1_runtime_market_data/<SYMBOL>/5m/latest_runtime_candles.json
+```
+
+That artifact is produced by `phase1_databento_live_runtime_candles.py`, which
+uses the repository's canonical 1m-to-3m/5m OHLC conversion path. For a live
+display of the currently forming five-minute candle, the monitor reads the
+matching canonical 1m artifact and builds a display-only partial bucket from
+1m rows newer than the last completed 5m bar:
+
+```text
+outputs/track_b_execution_core/phase1_runtime_market_data/<SYMBOL>/1m/latest_runtime_candles.json
+```
+
+The chart shows the latest 72 five-minute candles, roughly six hours. On page
+reload or service restart, it immediately recovers from those canonical recent
+bar artifacts instead of waiting for six hours of new data.
 
 ## Install On Ubuntu
 
@@ -89,6 +123,9 @@ Example:
   "symbols": ["MBT.FUT"],
   "stype_in": "parent",
   "reconnect_interval": 5.0,
+  "chart_symbol": "MBT",
+  "chart_runtime_candle_root": "/Users/patrick/Dev/MGC-v05l-automation/outputs/track_b_execution_core/phase1_runtime_market_data",
+  "chart_bar_limit": 72,
   "host": "0.0.0.0",
   "port": 5000
 }
@@ -129,6 +166,10 @@ journalctl -u regime-monitor-ubuntu.service -f
 - Served directly by Ubuntu Flask at `http://192.168.1.80:5000/`.
 - Browser polls `/data` every `250 ms`.
 - Only changed fields are updated in the DOM.
+- The browser renders candlesticks with native canvas JavaScript, with no CDN
+  dependency.
+- The price axis auto-scales to the visible candle high/low with modest padding.
+- Time labels are shown at roughly hourly intervals.
 - `handleSnapshotMessage(...)` is the future SSE migration boundary.
 
 ## Files

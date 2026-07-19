@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 import sys
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -84,3 +86,142 @@ def test_symbols_from_config_accepts_string_or_list() -> None:
     assert regime_monitor._symbols_from_config("MBT.FUT, MES.FUT") == ("MBT.FUT", "MES.FUT")
     assert regime_monitor._symbols_from_config(["MBT.FUT", "  "]) == ("MBT.FUT",)
     assert regime_monitor._symbols_from_config(None) == ("MBT.FUT",)
+
+
+def test_chart_payload_keeps_latest_72_ordered_bars(tmp_path: Path) -> None:
+    _write_candles(tmp_path, "MBT", "5m", [_bar(index) for index in range(75)])
+    _write_candles(tmp_path, "MBT", "1m", [])
+    source = regime_monitor.CanonicalCandleSource(
+        config=regime_monitor.ChartConfig(runtime_candle_root=tmp_path, symbol="MBT")
+    )
+
+    payload = source.payload()
+
+    assert payload["source"] == "execution_core_phase1_runtime_market_data"
+    assert payload["bar_count"] == 72
+    assert payload["bars"][0]["time"] == "2026-07-19T00:20:00+00:00"
+    assert payload["bars"][-1]["time"] == "2026-07-19T06:15:00+00:00"
+
+
+def test_chart_payload_appends_forming_bar_from_canonical_one_minute(tmp_path: Path) -> None:
+    _write_candles(tmp_path, "MBT", "5m", [_bar(0), _bar(1)])
+    _write_candles(
+        tmp_path,
+        "MBT",
+        "1m",
+        [
+            _one_minute_bar("2026-07-19T00:11:00+00:00", 101, 103, 100, 102),
+            _one_minute_bar("2026-07-19T00:12:00+00:00", 102, 104, 101, 103),
+        ],
+    )
+    source = regime_monitor.CanonicalCandleSource(
+        config=regime_monitor.ChartConfig(runtime_candle_root=tmp_path, symbol="MBT")
+    )
+
+    payload = source.payload()
+
+    assert payload["bars"][-1] == {
+        "time": "2026-07-19T00:15:00+00:00",
+        "start": "2026-07-19T00:10:00+00:00",
+        "open": 101.0,
+        "high": 104.0,
+        "low": 100.0,
+        "close": 103.0,
+        "volume": 2.0,
+        "completed": False,
+        "source_bar_count": 2,
+    }
+
+
+def test_chart_payload_replaces_active_bar_by_bucket(tmp_path: Path) -> None:
+    _write_candles(tmp_path, "MBT", "5m", [_bar(0)])
+    _write_candles(
+        tmp_path,
+        "MBT",
+        "1m",
+        [_one_minute_bar("2026-07-19T00:06:00+00:00", 100, 101, 99, 100.5)],
+    )
+    source = regime_monitor.CanonicalCandleSource(
+        config=regime_monitor.ChartConfig(runtime_candle_root=tmp_path, symbol="MBT")
+    )
+    first = source.payload()
+    _write_candles(
+        tmp_path,
+        "MBT",
+        "1m",
+        [
+            _one_minute_bar("2026-07-19T00:06:00+00:00", 100, 101, 99, 100.5),
+            _one_minute_bar("2026-07-19T00:07:00+00:00", 100.5, 105, 100, 104),
+        ],
+    )
+
+    second = source.payload()
+
+    assert first["bars"][-1]["time"] == second["bars"][-1]["time"] == "2026-07-19T00:10:00+00:00"
+    assert first["bar_count"] == second["bar_count"] == 2
+    assert first["bars"][-1]["close"] == 100.5
+    assert second["bars"][-1]["close"] == 104.0
+    assert second["bars"][-1]["high"] == 105.0
+
+
+def test_chart_payload_has_stable_shape_when_artifacts_missing(tmp_path: Path) -> None:
+    source = regime_monitor.CanonicalCandleSource(
+        config=regime_monitor.ChartConfig(runtime_candle_root=tmp_path, symbol="MBT")
+    )
+
+    payload = source.payload()
+
+    assert payload["schema_version"] == "regime_monitor_canonical_5m_chart_v1"
+    assert payload["symbol"] == "MBT"
+    assert payload["timeframe"] == "5m"
+    assert payload["bar_limit"] == 72
+    assert payload["bars"] == []
+    assert "missing canonical candle artifact" in payload["error"]
+
+
+def _write_candles(root: Path, symbol: str, timeframe: str, bars: list[dict[str, object]]) -> None:
+    path = root / symbol / timeframe / "latest_runtime_candles.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        json.dumps(
+            {
+                "schema_version": "phase1_runtime_market_data_test",
+                "generated_at": "2026-07-19T12:00:00+00:00",
+                "symbol": symbol,
+                "timeframe": timeframe,
+                "bars": bars,
+                "bar_count": len(bars),
+            }
+        ),
+        encoding="utf-8",
+    )
+
+
+def _bar(index: int) -> dict[str, object]:
+    end = datetime(2026, 7, 19, tzinfo=timezone.utc) + timedelta(minutes=(index + 1) * 5)
+    start = end - timedelta(minutes=5)
+    return {
+        "bar_start": start.isoformat(),
+        "bar_end": end.isoformat(),
+        "open": 100 + index,
+        "high": 101 + index,
+        "low": 99 + index,
+        "close": 100.5 + index,
+        "volume": index,
+        "completed": True,
+        "source_bar_count": 5,
+    }
+
+
+def _one_minute_bar(bar_end: str, open_: float, high: float, low: float, close: float) -> dict[str, object]:
+    return {
+        "bar_start": "2026-07-19T00:10:00+00:00",
+        "bar_end": bar_end,
+        "open": open_,
+        "high": high,
+        "low": low,
+        "close": close,
+        "volume": 1,
+        "completed": True,
+        "source_bar_count": 1,
+    }
