@@ -12,10 +12,11 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import tempfile
 import threading
 import time
 from dataclasses import asdict, dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo
@@ -23,7 +24,6 @@ from zoneinfo import ZoneInfo
 from flask import Flask, Response, jsonify
 
 
-APP_ROOT = Path(__file__).resolve().parent
 VALID_REGIMES = {"LONG", "SHORT", "NO_TRADE"}
 REGIME_COLORS = {
     "LONG": "#00e676",
@@ -32,10 +32,9 @@ REGIME_COLORS = {
     "NO DATA": "#ffcc33",
 }
 EASTERN_TZ = ZoneInfo("America/New_York")
-CHART_RUNTIME_CANDLE_RELATIVE_PATH = (
-    Path("outputs") / "track_b_execution_core" / "phase1_runtime_market_data"
-)
 DEFAULT_CHART_BAR_LIMIT = 72
+DEFAULT_STATE_DIR = Path("/var/lib/regime-monitor")
+DEFAULT_STATE_FILE_NAME = "candle_state.json"
 
 
 @dataclass(frozen=True)
@@ -63,14 +62,166 @@ class DatabentoFeedConfig:
     reconnect_interval: float = 5.0
 
 
+@dataclass(frozen=True)
+class CandleBar:
+    time: str
+    start: str
+    open: float
+    high: float
+    low: float
+    close: float
+    volume: float = 0.0
+    completed: bool = False
+    source_bar_count: int = 0
+
+    def to_payload(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+class RollingCandleState:
+    def __init__(
+        self,
+        *,
+        state_dir: Path,
+        symbol: str,
+        bar_limit: int = DEFAULT_CHART_BAR_LIMIT,
+        persist_interval: float = 1.0,
+    ) -> None:
+        self.state_dir = state_dir
+        self.state_path = state_dir / DEFAULT_STATE_FILE_NAME
+        self.symbol = symbol
+        self.bar_limit = max(1, int(bar_limit))
+        self.persist_interval = max(0.0, float(persist_interval))
+        self._lock = threading.Lock()
+        self._completed_5m: list[CandleBar] = []
+        self._current_5m: CandleBar | None = None
+        self._current_1m: CandleBar | None = None
+        self._last_persist_monotonic = 0.0
+        self._last_error: str | None = None
+        self.load()
+
+    def load(self) -> None:
+        try:
+            payload = json.loads(self.state_path.read_text(encoding="utf-8"))
+        except FileNotFoundError:
+            return
+        except (OSError, json.JSONDecodeError) as exc:
+            self._last_error = f"state_load_failed: {exc}"
+            return
+        if not isinstance(payload, dict):
+            self._last_error = "state_load_failed: payload_not_object"
+            return
+
+        completed = _normalize_payload_candles(payload.get("completed_5m"), completed=True)
+        current_5m = _normalize_payload_candle(payload.get("current_5m"), default_completed=False)
+        current_1m = _normalize_payload_candle(payload.get("current_1m"), default_completed=False)
+        with self._lock:
+            self._completed_5m = _dedupe_sorted_candles(completed)[-self.bar_limit :]
+            self._current_5m = current_5m
+            self._current_1m = current_1m
+            self._last_error = None
+
+    def record_trade(self, *, price: float, event_time: datetime | None = None) -> None:
+        event_dt = event_time or datetime.now(timezone.utc)
+        event_dt = _ensure_utc(event_dt)
+        one_minute_start = event_dt.replace(second=0, microsecond=0)
+        one_minute_end = one_minute_start + timedelta(minutes=1)
+        five_minute_start = _five_minute_bucket_start(event_dt)
+        five_minute_end = five_minute_start + timedelta(minutes=5)
+
+        with self._lock:
+            current_5m_end = _parse_datetime_or_none(None if self._current_5m is None else self._current_5m.time)
+            if current_5m_end is not None and five_minute_end < current_5m_end:
+                self._last_error = f"ignored_out_of_order_trade: {event_dt.isoformat()}"
+                return
+            self._current_1m = _update_bar(
+                self._current_1m,
+                start=one_minute_start,
+                end=one_minute_end,
+                price=price,
+            )
+            if self._current_5m is not None and self._current_5m.time != five_minute_end.isoformat():
+                self._completed_5m.append(_complete_bar(self._current_5m))
+                self._completed_5m = _dedupe_sorted_candles(self._completed_5m)[-self.bar_limit :]
+                self._current_5m = None
+            self._current_5m = _update_bar(
+                self._current_5m,
+                start=five_minute_start,
+                end=five_minute_end,
+                price=price,
+            )
+            self._last_error = None
+            should_persist = (
+                self.persist_interval == 0
+                or time.monotonic() - self._last_persist_monotonic >= self.persist_interval
+            )
+        if should_persist:
+            self.persist()
+
+    def payload(self) -> dict[str, Any]:
+        with self._lock:
+            bars = [bar.to_payload() for bar in self._completed_5m]
+            if self._current_5m is not None:
+                bars.append(self._current_5m.to_payload())
+            bars = sorted(bars, key=lambda bar: _parse_datetime_for_sort(bar["time"]))[-self.bar_limit :]
+            error = self._last_error
+        return {
+            "schema_version": "regime_monitor_in_process_5m_chart_v1",
+            "source": "regime_monitor_databento_live",
+            "source_detail": "in-process Databento trade stream aggregated to current 1m and rolling 5m candles",
+            "symbol": self.symbol,
+            "timeframe": "5m",
+            "bar_limit": self.bar_limit,
+            "bar_count": len(bars),
+            "generated_at": utc_now_text(),
+            "state_path": str(self.state_path),
+            "bars": bars,
+            "error": error,
+        }
+
+    def persist(self) -> None:
+        with self._lock:
+            payload = {
+                "schema_version": "regime_monitor_candle_state_v1",
+                "generated_at": utc_now_text(),
+                "symbol": self.symbol,
+                "bar_limit": self.bar_limit,
+                "completed_5m": [bar.to_payload() for bar in self._completed_5m[-self.bar_limit :]],
+                "current_5m": None if self._current_5m is None else self._current_5m.to_payload(),
+                "current_1m": None if self._current_1m is None else self._current_1m.to_payload(),
+            }
+        self.state_dir.mkdir(parents=True, exist_ok=True)
+        fd, tmp_name = tempfile.mkstemp(
+            prefix=f".{self.state_path.name}.",
+            suffix=".tmp",
+            dir=str(self.state_dir),
+            text=True,
+        )
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as handle:
+                json.dump(payload, handle, separators=(",", ":"), sort_keys=True)
+                handle.write("\n")
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(tmp_name, self.state_path)
+            self._last_persist_monotonic = time.monotonic()
+        finally:
+            try:
+                if Path(tmp_name).exists():
+                    Path(tmp_name).unlink()
+            except OSError:
+                pass
+
+
 class PriceRegimeState:
-    def __init__(self, *, max_prices: int = 20) -> None:
+    def __init__(self, *, max_prices: int = 20, candle_state: RollingCandleState | None = None) -> None:
         self._lock = threading.Lock()
         self._latest_price: float | None = None
         self._prices: list[float] = []
         self._max_prices = max_prices
         self._connection_status = "STARTING"
         self._error: str | None = None
+        self._candle_state = candle_state
 
     def mark_status(self, status: str, error: str | None = None) -> None:
         with self._lock:
@@ -85,6 +236,7 @@ class PriceRegimeState:
             return
 
         price = float(price_value) / 1e9
+        event_time = _message_event_time(msg)
         with self._lock:
             self._latest_price = price
             self._prices.append(price)
@@ -92,6 +244,8 @@ class PriceRegimeState:
                 self._prices.pop(0)
             self._connection_status = "CONNECTED"
             self._error = None
+        if self._candle_state is not None:
+            self._candle_state.record_trade(price=price, event_time=event_time)
 
     def snapshot(self) -> RegimeSnapshot:
         now = datetime.now(EASTERN_TZ)
@@ -125,62 +279,6 @@ class PriceRegimeState:
         )
 
 
-@dataclass(frozen=True)
-class ChartConfig:
-    runtime_candle_root: Path
-    symbol: str
-    bar_limit: int = DEFAULT_CHART_BAR_LIMIT
-
-    @property
-    def completed_5m_path(self) -> Path:
-        return self.runtime_candle_root / self.symbol / "5m" / "latest_runtime_candles.json"
-
-    @property
-    def one_minute_path(self) -> Path:
-        return self.runtime_candle_root / self.symbol / "1m" / "latest_runtime_candles.json"
-
-
-class CanonicalCandleSource:
-    def __init__(self, *, config: ChartConfig) -> None:
-        self.config = config
-
-    def payload(self) -> dict[str, Any]:
-        completed_payload = _read_json_payload(self.config.completed_5m_path)
-        one_minute_payload = _read_json_payload(self.config.one_minute_path)
-        completed_bars = _normalize_canonical_bars(completed_payload.get("bars"))
-        latest_completed_end = _latest_bar_end(completed_bars)
-        forming_bar = _forming_five_minute_bar(
-            one_minute_payload.get("bars"),
-            latest_completed_end=latest_completed_end,
-        )
-        bars_by_end = {bar["time"]: bar for bar in completed_bars}
-        if forming_bar is not None:
-            bars_by_end[forming_bar["time"]] = forming_bar
-        bars = [bars_by_end[key] for key in sorted(bars_by_end, key=_parse_datetime_for_sort)]
-        bars = bars[-max(1, int(self.config.bar_limit)) :]
-        source_errors = [
-            str(error)
-            for error in (completed_payload.get("error"), one_minute_payload.get("error"))
-            if error
-        ]
-        return {
-            "schema_version": "regime_monitor_canonical_5m_chart_v1",
-            "source": "execution_core_phase1_runtime_market_data",
-            "source_detail": "completed 5m latest_runtime_candles plus current display bucket from canonical 1m latest_runtime_candles",
-            "symbol": self.config.symbol,
-            "timeframe": "5m",
-            "bar_limit": self.config.bar_limit,
-            "bar_count": len(bars),
-            "generated_at": utc_now_text(),
-            "source_5m_path": str(self.config.completed_5m_path),
-            "source_1m_path": str(self.config.one_minute_path),
-            "source_5m_generated_at": completed_payload.get("generated_at"),
-            "source_1m_generated_at": one_minute_payload.get("generated_at"),
-            "bars": bars,
-            "error": "; ".join(source_errors) if source_errors else None,
-        }
-
-
 def utc_now_text() -> str:
     return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
 
@@ -195,109 +293,123 @@ def load_config(path: Path) -> dict[str, object]:
     return payload if isinstance(payload, dict) else {}
 
 
-def _read_json_payload(path: Path) -> dict[str, Any]:
-    try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
-    except FileNotFoundError:
-        return {"bars": [], "error": f"missing canonical candle artifact: {path}"}
-    except (OSError, json.JSONDecodeError) as exc:
-        return {"bars": [], "error": f"unreadable canonical candle artifact: {exc}"}
-    return payload if isinstance(payload, dict) else {"bars": [], "error": f"unexpected candle payload: {path}"}
-
-
-def _normalize_canonical_bars(raw_bars: object) -> list[dict[str, Any]]:
+def _normalize_payload_candles(raw_bars: object, *, completed: bool) -> list[CandleBar]:
     if not isinstance(raw_bars, list):
         return []
-    normalized: list[dict[str, Any]] = []
+    bars: list[CandleBar] = []
     for raw in raw_bars:
-        if not isinstance(raw, dict):
-            continue
-        bar = _normalize_canonical_bar(raw, default_completed=raw.get("completed") is not False)
+        bar = _normalize_payload_candle(raw, default_completed=completed)
         if bar is not None:
-            normalized.append(bar)
-    return sorted(normalized, key=lambda bar: _parse_datetime_for_sort(bar["time"]))
+            bars.append(bar)
+    return sorted(bars, key=lambda bar: _parse_datetime_for_sort(bar.time))
 
 
-def _normalize_canonical_bar(raw: dict[str, Any], *, default_completed: bool) -> dict[str, Any] | None:
-    bar_end = raw.get("bar_end") or raw.get("candle_timestamp") or raw.get("timestamp")
-    if not bar_end:
+def _normalize_payload_candle(raw: object, *, default_completed: bool) -> CandleBar | None:
+    if not isinstance(raw, dict):
         return None
+    end_text = raw.get("time") or raw.get("bar_end") or raw.get("timestamp")
+    start_text = raw.get("start") or raw.get("bar_start")
+    end = _parse_datetime_or_none(end_text)
+    start = _parse_datetime_or_none(start_text)
     open_value = _float_or_none(raw.get("open"))
     high_value = _float_or_none(raw.get("high"))
     low_value = _float_or_none(raw.get("low"))
     close_value = _float_or_none(raw.get("close"))
-    if None in (open_value, high_value, low_value, close_value):
+    if end is None or start is None or None in (open_value, high_value, low_value, close_value):
         return None
-    return {
-        "time": str(bar_end),
-        "start": None if raw.get("bar_start") is None else str(raw.get("bar_start")),
-        "open": open_value,
-        "high": high_value,
-        "low": low_value,
-        "close": close_value,
-        "volume": _float_or_none(raw.get("volume")) or 0.0,
-        "completed": bool(raw.get("completed", default_completed)),
-        "source_bar_count": int(_float_or_none(raw.get("source_bar_count")) or 0),
-    }
+    return CandleBar(
+        time=end.isoformat(),
+        start=start.isoformat(),
+        open=open_value,
+        high=high_value,
+        low=low_value,
+        close=close_value,
+        volume=_float_or_none(raw.get("volume")) or 0.0,
+        completed=bool(raw.get("completed", default_completed)),
+        source_bar_count=max(0, int(_float_or_none(raw.get("source_bar_count")) or 0)),
+    )
 
 
-def _forming_five_minute_bar(raw_one_minute_bars: object, *, latest_completed_end: str | None) -> dict[str, Any] | None:
-    one_minute_bars = _normalize_one_minute_bars(raw_one_minute_bars)
-    if not one_minute_bars:
-        return None
-    latest_completed_dt = _parse_datetime_or_none(latest_completed_end)
-    grouped: dict[datetime, list[dict[str, Any]]] = {}
-    for bar in one_minute_bars:
-        end = _parse_datetime_or_none(bar["time"])
-        if end is None:
-            continue
-        bucket_end = _five_minute_bucket_end(end)
-        if latest_completed_dt is not None and bucket_end <= latest_completed_dt:
-            continue
-        grouped.setdefault(bucket_end, []).append(bar)
-    if not grouped:
-        return None
-    bucket_end = max(grouped)
-    rows = sorted(grouped[bucket_end], key=lambda row: _parse_datetime_for_sort(row["time"]))
-    if not rows:
-        return None
-    return {
-        "time": bucket_end.isoformat(),
-        "start": rows[0].get("start"),
-        "open": rows[0]["open"],
-        "high": max(row["high"] for row in rows),
-        "low": min(row["low"] for row in rows),
-        "close": rows[-1]["close"],
-        "volume": sum(row.get("volume") or 0.0 for row in rows),
-        "completed": False,
-        "source_bar_count": len(rows),
-    }
+def _dedupe_sorted_candles(bars: list[CandleBar]) -> list[CandleBar]:
+    by_time = {bar.time: bar for bar in bars}
+    return [by_time[key] for key in sorted(by_time, key=_parse_datetime_for_sort)]
 
 
-def _normalize_one_minute_bars(raw_bars: object) -> list[dict[str, Any]]:
-    if not isinstance(raw_bars, list):
-        return []
-    bars: list[dict[str, Any]] = []
-    for raw in raw_bars:
-        if not isinstance(raw, dict):
-            continue
-        bar = _normalize_canonical_bar(raw, default_completed=True)
-        if bar is not None:
-            bars.append(bar)
-    return sorted(bars, key=lambda bar: _parse_datetime_for_sort(bar["time"]))
+def _complete_bar(bar: CandleBar) -> CandleBar:
+    return CandleBar(
+        time=bar.time,
+        start=bar.start,
+        open=bar.open,
+        high=bar.high,
+        low=bar.low,
+        close=bar.close,
+        volume=bar.volume,
+        completed=True,
+        source_bar_count=bar.source_bar_count,
+    )
 
 
-def _latest_bar_end(bars: list[dict[str, Any]]) -> str | None:
-    if not bars:
-        return None
-    return bars[-1]["time"]
+def _update_bar(current: CandleBar | None, *, start: datetime, end: datetime, price: float) -> CandleBar:
+    start_text = start.isoformat()
+    end_text = end.isoformat()
+    if current is None or current.time != end_text:
+        return CandleBar(
+            time=end_text,
+            start=start_text,
+            open=price,
+            high=price,
+            low=price,
+            close=price,
+            volume=1.0,
+            completed=False,
+            source_bar_count=1,
+        )
+    return CandleBar(
+        time=current.time,
+        start=current.start,
+        open=current.open,
+        high=max(current.high, price),
+        low=min(current.low, price),
+        close=price,
+        volume=current.volume + 1.0,
+        completed=False,
+        source_bar_count=current.source_bar_count + 1,
+    )
 
 
-def _five_minute_bucket_end(value: datetime) -> datetime:
+def _five_minute_bucket_start(value: datetime) -> datetime:
     utc_value = value.astimezone(timezone.utc)
     epoch_minutes = int(utc_value.timestamp() // 60)
-    bucket_epoch_minutes = ((epoch_minutes + 4) // 5) * 5
+    bucket_epoch_minutes = (epoch_minutes // 5) * 5
     return datetime.fromtimestamp(bucket_epoch_minutes * 60, tz=timezone.utc)
+
+
+def _message_event_time(msg: object) -> datetime | None:
+    for attr in ("ts_event", "ts_recv", "ts_out", "timestamp"):
+        raw = getattr(msg, attr, None)
+        parsed = _databento_time_or_none(raw)
+        if parsed is not None:
+            return parsed
+    return None
+
+
+def _databento_time_or_none(value: object) -> datetime | None:
+    parsed = _parse_datetime_or_none(value)
+    if parsed is not None:
+        return parsed
+    if isinstance(value, (int, float)):
+        numeric = float(value)
+        if numeric > 1_000_000_000_000_000:
+            return datetime.fromtimestamp(numeric / 1_000_000_000, tz=timezone.utc)
+        if numeric > 1_000_000_000:
+            return datetime.fromtimestamp(numeric, tz=timezone.utc)
+    return None
+
+
+def _ensure_utc(value: datetime) -> datetime:
+    if value.tzinfo is None:
+        return value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc)
 
 
 def _parse_datetime_for_sort(value: object) -> datetime:
@@ -387,7 +499,7 @@ def run_databento_feed(
         stop.wait(max(1.0, config.reconnect_interval))
 
 
-def create_app(*, state: PriceRegimeState, candle_source: CanonicalCandleSource | None = None) -> Flask:
+def create_app(*, state: PriceRegimeState, candle_source: RollingCandleState | None = None) -> Flask:
     app = Flask(__name__)
 
     @app.get("/")
@@ -649,7 +761,7 @@ DASHBOARD_HTML = """<!doctype html>
         chartContext.fillStyle = "#555";
         chartContext.font = "14px system-ui, sans-serif";
         chartContext.textAlign = "center";
-        chartContext.fillText("Waiting for canonical 5m candles", width / 2, height / 2);
+        chartContext.fillText("Waiting for live 5m candles", width / 2, height / 2);
         return;
       }
 
@@ -732,9 +844,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--symbols", help="Comma-separated Databento symbols.")
     parser.add_argument("--stype-in", help="Databento input symbol type.")
     parser.add_argument("--reconnect-interval", type=float, help="Databento reconnect interval in seconds.")
-    parser.add_argument("--chart-symbol", help="Canonical Phase-1 runtime candle symbol for the dashboard chart.")
-    parser.add_argument("--chart-runtime-candle-root", type=Path, help="Canonical Phase-1 runtime candle root.")
+    parser.add_argument("--chart-symbol", help="Symbol label for the dashboard chart.")
     parser.add_argument("--chart-bar-limit", type=int, help="Maximum five-minute candles to display.")
+    parser.add_argument("--state-dir", type=Path, help="Directory for bounded persisted runtime state.")
     parser.add_argument("--host", default="0.0.0.0")
     parser.add_argument("--port", type=int, default=5000)
     return parser.parse_args()
@@ -756,21 +868,10 @@ def _default_chart_symbol(symbols: tuple[str, ...]) -> str:
     return root or "MBT"
 
 
-def resolve_chart_runtime_candle_root(
-    *,
-    config: dict[str, object],
-    app_root: Path = APP_ROOT,
-    chart_root_override: object = None,
-) -> Path:
-    repo_root_env = str(config.get("repo_root_env") or "REGIME_MONITOR_REPO_ROOT").strip()
-    repo_root_value = os.environ.get(repo_root_env) or config.get("repo_root")
-    base_root = Path(str(repo_root_value)).expanduser() if repo_root_value else app_root
-
-    root_value = chart_root_override if chart_root_override is not None else config.get("chart_runtime_candle_root")
-    if root_value:
-        root = Path(str(root_value)).expanduser()
-        return root if root.is_absolute() else base_root / root
-    return base_root / CHART_RUNTIME_CANDLE_RELATIVE_PATH
+def resolve_state_dir(*, config: dict[str, object], state_dir_override: object = None) -> Path:
+    state_dir_env = str(config.get("state_dir_env") or "REGIME_MONITOR_STATE_DIR").strip()
+    state_dir_value = state_dir_override or os.environ.get(state_dir_env) or config.get("state_dir")
+    return Path(str(state_dir_value or DEFAULT_STATE_DIR)).expanduser()
 
 
 def main() -> int:
@@ -785,21 +886,16 @@ def main() -> int:
     stype_in = str(args.stype_in or config.get("stype_in") or "parent").strip()
     reconnect_interval = float(args.reconnect_interval or config.get("reconnect_interval", 5.0))
     chart_symbol = str(args.chart_symbol or config.get("chart_symbol") or _default_chart_symbol(symbols)).strip().upper()
-    chart_root = resolve_chart_runtime_candle_root(
-        config=config,
-        chart_root_override=args.chart_runtime_candle_root,
-    )
     chart_bar_limit = int(args.chart_bar_limit or config.get("chart_bar_limit", DEFAULT_CHART_BAR_LIMIT))
+    state_dir = resolve_state_dir(config=config, state_dir_override=args.state_dir)
     host = str(config.get("host") or args.host)
     port = int(config.get("port") or args.port)
-    state = PriceRegimeState()
-    candle_source = CanonicalCandleSource(
-        config=ChartConfig(
-            runtime_candle_root=chart_root,
-            symbol=chart_symbol,
-            bar_limit=chart_bar_limit,
-        )
+    candle_state = RollingCandleState(
+        state_dir=state_dir,
+        symbol=chart_symbol,
+        bar_limit=chart_bar_limit,
     )
+    state = PriceRegimeState(candle_state=candle_state)
     stop_event = threading.Event()
     worker = threading.Thread(
         target=run_databento_feed,
@@ -818,7 +914,7 @@ def main() -> int:
         daemon=True,
     )
     worker.start()
-    app = create_app(state=state, candle_source=candle_source)
+    app = create_app(state=state, candle_source=candle_state)
     try:
         app.run(host=host, port=port, debug=False, use_reloader=False, threaded=True)
     finally:

@@ -59,6 +59,34 @@ def test_databento_px_message_updates_formula() -> None:
     assert snapshot.connection_status == "CONNECTED"
 
 
+def test_databento_message_updates_candle_state_through_same_ingest_path(tmp_path: Path) -> None:
+    candles = regime_monitor.RollingCandleState(
+        state_dir=tmp_path,
+        symbol="MBT",
+        persist_interval=0,
+    )
+    state = regime_monitor.PriceRegimeState(candle_state=candles)
+
+    state.record_message(SimpleNamespace(px=100_000_000_000, ts_event="2026-07-19T00:00:05+00:00"))
+
+    payload = candles.payload()
+    assert payload["source"] == "regime_monitor_databento_live"
+    assert payload["bars"] == [
+        {
+            "time": "2026-07-19T00:05:00+00:00",
+            "start": "2026-07-19T00:00:00+00:00",
+            "open": 100.0,
+            "high": 100.0,
+            "low": 100.0,
+            "close": 100.0,
+            "volume": 1.0,
+            "completed": False,
+            "source_bar_count": 1,
+        }
+    ]
+    assert (tmp_path / "candle_state.json").exists()
+
+
 def test_databento_price_message_falls_back_when_px_absent() -> None:
     state = regime_monitor.PriceRegimeState()
     state.record_message(SimpleNamespace(price=102_000_000_000))
@@ -89,150 +117,160 @@ def test_symbols_from_config_accepts_string_or_list() -> None:
 
 
 def test_chart_payload_keeps_latest_72_ordered_bars(tmp_path: Path) -> None:
-    _write_candles(tmp_path, "MBT", "5m", [_bar(index) for index in range(75)])
-    _write_candles(tmp_path, "MBT", "1m", [])
-    source = regime_monitor.CanonicalCandleSource(
-        config=regime_monitor.ChartConfig(runtime_candle_root=tmp_path, symbol="MBT")
+    source = regime_monitor.RollingCandleState(
+        state_dir=tmp_path,
+        symbol="MBT",
+        persist_interval=9999,
     )
+    for index in range(75):
+        source.record_trade(price=100 + index, event_time=_trade_time(index))
 
     payload = source.payload()
 
-    assert payload["source"] == "execution_core_phase1_runtime_market_data"
+    assert payload["source"] == "regime_monitor_databento_live"
     assert payload["bar_count"] == 72
     assert payload["bars"][0]["time"] == "2026-07-19T00:20:00+00:00"
     assert payload["bars"][-1]["time"] == "2026-07-19T06:15:00+00:00"
 
 
-def test_chart_payload_appends_forming_bar_from_canonical_one_minute(tmp_path: Path) -> None:
-    _write_candles(tmp_path, "MBT", "5m", [_bar(0), _bar(1)])
-    _write_candles(
-        tmp_path,
-        "MBT",
-        "1m",
-        [
-            _one_minute_bar("2026-07-19T00:11:00+00:00", 101, 103, 100, 102),
-            _one_minute_bar("2026-07-19T00:12:00+00:00", 102, 104, 101, 103),
-        ],
+def test_chart_payload_updates_forming_bar_from_live_trades(tmp_path: Path) -> None:
+    source = regime_monitor.RollingCandleState(
+        state_dir=tmp_path,
+        symbol="MBT",
+        persist_interval=9999,
     )
-    source = regime_monitor.CanonicalCandleSource(
-        config=regime_monitor.ChartConfig(runtime_candle_root=tmp_path, symbol="MBT")
-    )
+    source.record_trade(price=101, event_time=datetime(2026, 7, 19, 0, 11, tzinfo=timezone.utc))
+    source.record_trade(price=103, event_time=datetime(2026, 7, 19, 0, 12, tzinfo=timezone.utc))
 
     payload = source.payload()
 
-    assert payload["bars"][-1] == {
+    assert payload["bars"] == [{
         "time": "2026-07-19T00:15:00+00:00",
         "start": "2026-07-19T00:10:00+00:00",
         "open": 101.0,
-        "high": 104.0,
-        "low": 100.0,
+        "high": 103.0,
+        "low": 101.0,
         "close": 103.0,
         "volume": 2.0,
         "completed": False,
         "source_bar_count": 2,
-    }
+    }]
 
 
 def test_chart_payload_replaces_active_bar_by_bucket(tmp_path: Path) -> None:
-    _write_candles(tmp_path, "MBT", "5m", [_bar(0)])
-    _write_candles(
-        tmp_path,
-        "MBT",
-        "1m",
-        [_one_minute_bar("2026-07-19T00:06:00+00:00", 100, 101, 99, 100.5)],
+    source = regime_monitor.RollingCandleState(
+        state_dir=tmp_path,
+        symbol="MBT",
+        persist_interval=9999,
     )
-    source = regime_monitor.CanonicalCandleSource(
-        config=regime_monitor.ChartConfig(runtime_candle_root=tmp_path, symbol="MBT")
-    )
+    source.record_trade(price=100.5, event_time=datetime(2026, 7, 19, 0, 6, tzinfo=timezone.utc))
     first = source.payload()
-    _write_candles(
-        tmp_path,
-        "MBT",
-        "1m",
-        [
-            _one_minute_bar("2026-07-19T00:06:00+00:00", 100, 101, 99, 100.5),
-            _one_minute_bar("2026-07-19T00:07:00+00:00", 100.5, 105, 100, 104),
-        ],
-    )
+    source.record_trade(price=104, event_time=datetime(2026, 7, 19, 0, 7, tzinfo=timezone.utc))
 
     second = source.payload()
 
     assert first["bars"][-1]["time"] == second["bars"][-1]["time"] == "2026-07-19T00:10:00+00:00"
-    assert first["bar_count"] == second["bar_count"] == 2
     assert first["bars"][-1]["close"] == 100.5
     assert second["bars"][-1]["close"] == 104.0
-    assert second["bars"][-1]["high"] == 105.0
+    assert second["bars"][-1]["high"] == 104.0
 
 
-def test_chart_payload_has_stable_shape_when_artifacts_missing(tmp_path: Path) -> None:
-    source = regime_monitor.CanonicalCandleSource(
-        config=regime_monitor.ChartConfig(runtime_candle_root=tmp_path, symbol="MBT")
+def test_candle_rollover_marks_previous_five_minute_bar_completed(tmp_path: Path) -> None:
+    source = regime_monitor.RollingCandleState(
+        state_dir=tmp_path,
+        symbol="MBT",
+        persist_interval=9999,
     )
+    source.record_trade(price=100, event_time=datetime(2026, 7, 19, 0, 4, 59, tzinfo=timezone.utc))
+    source.record_trade(price=101, event_time=datetime(2026, 7, 19, 0, 5, 0, tzinfo=timezone.utc))
 
     payload = source.payload()
 
-    assert payload["schema_version"] == "regime_monitor_canonical_5m_chart_v1"
-    assert payload["symbol"] == "MBT"
-    assert payload["timeframe"] == "5m"
-    assert payload["bar_limit"] == 72
-    assert payload["bars"] == []
-    assert "missing canonical candle artifact" in payload["error"]
+    assert payload["bars"][0]["time"] == "2026-07-19T00:05:00+00:00"
+    assert payload["bars"][0]["completed"] is True
+    assert payload["bars"][1]["time"] == "2026-07-19T00:10:00+00:00"
+    assert payload["bars"][1]["completed"] is False
 
 
-def test_default_chart_root_derives_from_app_root(monkeypatch: object, tmp_path: Path) -> None:
-    monkeypatch.delenv("REGIME_MONITOR_REPO_ROOT", raising=False)
+def test_candle_state_recovers_after_restart(tmp_path: Path) -> None:
+    first = regime_monitor.RollingCandleState(
+        state_dir=tmp_path,
+        symbol="MBT",
+        persist_interval=0,
+    )
+    first.record_trade(price=100, event_time=datetime(2026, 7, 19, 0, 0, tzinfo=timezone.utc))
+    first.record_trade(price=101, event_time=datetime(2026, 7, 19, 0, 5, tzinfo=timezone.utc))
 
-    root = regime_monitor.resolve_chart_runtime_candle_root(config={}, app_root=tmp_path / "app")
+    second = regime_monitor.RollingCandleState(state_dir=tmp_path, symbol="MBT")
 
-    assert root == tmp_path / "app" / "outputs" / "track_b_execution_core" / "phase1_runtime_market_data"
-
-
-def test_chart_root_uses_configured_repo_root_env(monkeypatch: object, tmp_path: Path) -> None:
-    repo_root = tmp_path / "repo"
-    monkeypatch.setenv("REGIME_MONITOR_REPO_ROOT", str(repo_root))
-
-    root = regime_monitor.resolve_chart_runtime_candle_root(config={}, app_root=tmp_path / "app")
-
-    assert root == repo_root / "outputs" / "track_b_execution_core" / "phase1_runtime_market_data"
+    payload = second.payload()
+    assert payload["bar_count"] == 2
+    assert payload["bars"][0]["completed"] is True
+    assert payload["bars"][1]["completed"] is False
 
 
-def test_chart_root_relative_override_resolves_under_authoritative_repo_root(
+def test_candle_state_atomic_write_leaves_no_temp_file(tmp_path: Path) -> None:
+    source = regime_monitor.RollingCandleState(
+        state_dir=tmp_path,
+        symbol="MBT",
+        persist_interval=0,
+    )
+
+    source.record_trade(price=100, event_time=datetime(2026, 7, 19, 0, 0, tzinfo=timezone.utc))
+
+    assert (tmp_path / "candle_state.json").exists()
+    assert list(tmp_path.glob("*.tmp")) == []
+
+
+def test_out_of_order_trade_does_not_corrupt_current_candle(tmp_path: Path) -> None:
+    source = regime_monitor.RollingCandleState(
+        state_dir=tmp_path,
+        symbol="MBT",
+        persist_interval=9999,
+    )
+    source.record_trade(price=105, event_time=datetime(2026, 7, 19, 0, 10, tzinfo=timezone.utc))
+    source.record_trade(price=99, event_time=datetime(2026, 7, 19, 0, 4, tzinfo=timezone.utc))
+
+    payload = source.payload()
+
+    assert payload["bars"][-1]["time"] == "2026-07-19T00:15:00+00:00"
+    assert payload["bars"][-1]["close"] == 105.0
+    assert "ignored_out_of_order_trade" in payload["error"]
+
+
+def test_default_state_dir_and_env_override(monkeypatch: object, tmp_path: Path) -> None:
+    monkeypatch.delenv("REGIME_MONITOR_STATE_DIR", raising=False)
+    assert regime_monitor.resolve_state_dir(config={}) == Path("/var/lib/regime-monitor")
+
+    monkeypatch.setenv("REGIME_MONITOR_STATE_DIR", str(tmp_path / "state"))
+    assert regime_monitor.resolve_state_dir(config={}) == tmp_path / "state"
+
+
+def test_state_dir_config_override_is_supported_for_non_production_layouts(
     monkeypatch: object,
     tmp_path: Path,
 ) -> None:
-    repo_root = tmp_path / "repo"
-    monkeypatch.setenv("REGIME_MONITOR_REPO_ROOT", str(repo_root))
+    monkeypatch.delenv("REGIME_MONITOR_STATE_DIR", raising=False)
 
-    root = regime_monitor.resolve_chart_runtime_candle_root(
-        config={},
-        app_root=tmp_path / "app",
-        chart_root_override="custom/candles",
-    )
+    root = regime_monitor.resolve_state_dir(config={"state_dir": str(tmp_path / "configured")})
 
-    assert root == repo_root / "custom" / "candles"
+    assert root == tmp_path / "configured"
 
 
-def test_chart_root_absolute_override_is_preserved(monkeypatch: object, tmp_path: Path) -> None:
-    monkeypatch.setenv("REGIME_MONITOR_REPO_ROOT", str(tmp_path / "repo"))
-    override = tmp_path / "other" / "candles"
-
-    root = regime_monitor.resolve_chart_runtime_candle_root(
-        config={},
-        app_root=tmp_path / "app",
-        chart_root_override=override,
-    )
-
-    assert root == override
-
-
-def test_monitor_files_do_not_hard_code_patrick_home_paths() -> None:
+def test_monitor_files_do_not_hard_code_patrick_home_or_magic_output_paths() -> None:
     repo_root = MODULE_PATH.parents[1]
     checked = [
         repo_root / "regime_monitor_ubuntu" / "regime_monitor.py",
         repo_root / "regime_monitor_ubuntu" / "config.json.example",
         repo_root / "regime_monitor_ubuntu" / "README.md",
     ]
-    forbidden = ("/Users/" + "patrick", "/home/" + "patrick")
+    forbidden = (
+        "/Users/" + "patrick",
+        "/home/" + "patrick",
+        "outputs/" + "track_b_execution_core",
+        "phase1_runtime_" + "market_data",
+        "REGIME_MONITOR_" + "REPO_ROOT",
+    )
 
     for path in checked:
         text = path.read_text(encoding="utf-8")
@@ -240,49 +278,5 @@ def test_monitor_files_do_not_hard_code_patrick_home_paths() -> None:
             assert value not in text
 
 
-def _write_candles(root: Path, symbol: str, timeframe: str, bars: list[dict[str, object]]) -> None:
-    path = root / symbol / timeframe / "latest_runtime_candles.json"
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(
-        json.dumps(
-            {
-                "schema_version": "phase1_runtime_market_data_test",
-                "generated_at": "2026-07-19T12:00:00+00:00",
-                "symbol": symbol,
-                "timeframe": timeframe,
-                "bars": bars,
-                "bar_count": len(bars),
-            }
-        ),
-        encoding="utf-8",
-    )
-
-
-def _bar(index: int) -> dict[str, object]:
-    end = datetime(2026, 7, 19, tzinfo=timezone.utc) + timedelta(minutes=(index + 1) * 5)
-    start = end - timedelta(minutes=5)
-    return {
-        "bar_start": start.isoformat(),
-        "bar_end": end.isoformat(),
-        "open": 100 + index,
-        "high": 101 + index,
-        "low": 99 + index,
-        "close": 100.5 + index,
-        "volume": index,
-        "completed": True,
-        "source_bar_count": 5,
-    }
-
-
-def _one_minute_bar(bar_end: str, open_: float, high: float, low: float, close: float) -> dict[str, object]:
-    return {
-        "bar_start": "2026-07-19T00:10:00+00:00",
-        "bar_end": bar_end,
-        "open": open_,
-        "high": high,
-        "low": low,
-        "close": close,
-        "volume": 1,
-        "completed": True,
-        "source_bar_count": 1,
-    }
+def _trade_time(index: int) -> datetime:
+    return datetime(2026, 7, 19, tzinfo=timezone.utc) + timedelta(minutes=index * 5)
