@@ -1,1 +1,2 @@
 Flask>=2.2,<4
+databento>=0.60

@@ -1,11 +1,10 @@
 #!/usr/bin/env python3
-"""Low-power Flask dashboard for a regime monitor kiosk.
+"""Low-power Flask dashboard and Databento regime monitor.
 
-The server keeps the existing HTTP JSON polling behavior in a background
-worker and exposes the current snapshot through /data. The root route serves a
-small self-contained dashboard that polls /data and updates only changed DOM
-fields. The client update boundary is intentionally isolated so it can later be
-fed by Server-Sent Events without changing the rendering code.
+One process owns Databento ingestion, the current regime state, the /data JSON
+endpoint, and the dashboard served at /. The browser-side update boundary is
+intentionally isolated so it can later be fed by Server-Sent Events without
+changing the rendering code.
 """
 
 from __future__ import annotations
@@ -15,11 +14,11 @@ import json
 import os
 import threading
 import time
-import urllib.error
-import urllib.request
 from dataclasses import asdict, dataclass
+from datetime import datetime
 from pathlib import Path
 from typing import Any
+from zoneinfo import ZoneInfo
 
 from flask import Flask, Response, jsonify
 
@@ -31,6 +30,7 @@ REGIME_COLORS = {
     "NO_TRADE": "#9e9e9e",
     "NO DATA": "#ffcc33",
 }
+EASTERN_TZ = ZoneInfo("America/New_York")
 
 
 @dataclass(frozen=True)
@@ -48,25 +48,76 @@ class RegimeSnapshot:
         return payload
 
 
-class SnapshotStore:
-    def __init__(self) -> None:
+@dataclass(frozen=True)
+class DatabentoFeedConfig:
+    api_key: str | None
+    dataset: str = "GLBX.MDP3"
+    schema: str = "trades"
+    symbols: tuple[str, ...] = ("MBT.FUT",)
+    stype_in: str = "parent"
+    reconnect_interval: float = 5.0
+
+
+class PriceRegimeState:
+    def __init__(self, *, max_prices: int = 20) -> None:
         self._lock = threading.Lock()
-        self._snapshot = RegimeSnapshot(
-            regime="NO DATA",
-            confidence=None,
-            timestamp="",
-            connection_status="STARTING",
-            error=None,
-            received_at=None,
+        self._latest_price: float | None = None
+        self._prices: list[float] = []
+        self._max_prices = max_prices
+        self._connection_status = "STARTING"
+        self._error: str | None = None
+
+    def mark_status(self, status: str, error: str | None = None) -> None:
+        with self._lock:
+            self._connection_status = status
+            self._error = error
+
+    def record_message(self, msg: object) -> None:
+        price_value = getattr(msg, "px", None)
+        if price_value is None:
+            price_value = getattr(msg, "price", None)
+        if price_value is None:
+            return
+
+        price = float(price_value) / 1e9
+        with self._lock:
+            self._latest_price = price
+            self._prices.append(price)
+            if len(self._prices) > self._max_prices:
+                self._prices.pop(0)
+            self._connection_status = "CONNECTED"
+            self._error = None
+
+    def snapshot(self) -> RegimeSnapshot:
+        now = datetime.now(EASTERN_TZ)
+        with self._lock:
+            latest_price = self._latest_price
+            prices = list(self._prices)
+            connection_status = self._connection_status
+            error = self._error
+
+        timestamp = now.strftime("%H:%M:%S")
+        if not latest_price:
+            return RegimeSnapshot(
+                regime="NO_TRADE",
+                confidence=0,
+                timestamp=timestamp,
+                connection_status=connection_status,
+                error=error,
+                received_at=utc_now_text(),
+            )
+
+        ma = sum(prices) / len(prices) if prices else latest_price
+        regime = "LONG" if latest_price > ma else "SHORT"
+        confidence = abs(latest_price - ma) / ma if ma != 0 else 0
+        return RegimeSnapshot(
+            regime=regime,
+            confidence=round(confidence, 4),
+            timestamp=timestamp,
+            connection_status=connection_status,
+            error=error,
+            received_at=utc_now_text(),
         )
-
-    def get(self) -> RegimeSnapshot:
-        with self._lock:
-            return self._snapshot
-
-    def set(self, snapshot: RegimeSnapshot) -> None:
-        with self._lock:
-            self._snapshot = snapshot
 
 
 def utc_now_text() -> str:
@@ -83,78 +134,62 @@ def load_config(path: Path) -> dict[str, object]:
     return payload if isinstance(payload, dict) else {}
 
 
-def normalize_snapshot(payload: object) -> RegimeSnapshot:
-    if not isinstance(payload, dict):
-        raise ValueError("bad JSON")
-    regime = str(payload.get("regime") or "").strip().upper()
-    if regime not in VALID_REGIMES:
-        regime = "NO DATA"
-    confidence_raw = payload.get("confidence")
-    confidence = None
-    if confidence_raw not in (None, ""):
-        try:
-            confidence = float(confidence_raw)
-        except (TypeError, ValueError):
-            confidence = None
-    timestamp = str(payload.get("timestamp") or "").strip()
-    return RegimeSnapshot(
-        regime=regime,
-        confidence=confidence,
-        timestamp=timestamp,
-        connection_status="CONNECTED",
-        error=None,
-        received_at=utc_now_text(),
-    )
-
-
-def fetch_snapshot(url: str, timeout: float) -> RegimeSnapshot:
-    request = urllib.request.Request(
-        url,
-        headers={
-            "Accept": "application/json",
-            "User-Agent": "regime-monitor-antix/2.0",
-        },
-    )
-    with urllib.request.urlopen(request, timeout=timeout) as response:
-        raw = response.read(1024 * 64)
-    return normalize_snapshot(json.loads(raw.decode("utf-8")))
-
-
-def polling_worker(
+def run_databento_feed(
     *,
-    url: str | None,
-    interval: float,
-    timeout: float,
-    store: SnapshotStore,
+    config: DatabentoFeedConfig,
+    state: PriceRegimeState,
     stop: threading.Event,
 ) -> None:
+    if not config.api_key:
+        state.mark_status("NO_API_KEY", "DATABENTO_API_KEY is not configured")
+        return
+
     while not stop.is_set():
-        if not url:
-            snapshot = RegimeSnapshot(
-                regime="NO DATA",
-                confidence=None,
-                timestamp=utc_now_text(),
-                connection_status="NO_ENDPOINT",
-                error="REGIME_MONITOR_URL is not configured",
-                received_at=utc_now_text(),
+        client: Any | None = None
+        try:
+            import databento as db  # type: ignore[import-not-found]
+
+            state.mark_status("CONNECTING")
+            client = db.Live(key=config.api_key)
+            client.subscribe(
+                dataset=config.dataset,
+                schema=config.schema,
+                symbols=list(config.symbols),
+                stype_in=config.stype_in,
             )
-        else:
-            try:
-                snapshot = fetch_snapshot(url, timeout)
-            except (OSError, urllib.error.URLError, json.JSONDecodeError, ValueError) as exc:
-                snapshot = RegimeSnapshot(
-                    regime="NO DATA",
-                    confidence=None,
-                    timestamp=utc_now_text(),
-                    connection_status="DISCONNECTED",
-                    error=str(exc),
-                    received_at=utc_now_text(),
-                )
-        store.set(snapshot)
-        stop.wait(interval)
+            state.mark_status("CONNECTED")
+            for msg in client:
+                if stop.is_set():
+                    break
+                print(msg, flush=True)
+                state.record_message(msg)
+            if not stop.is_set():
+                state.mark_status("DISCONNECTED", "Databento live feed ended")
+        except ModuleNotFoundError as exc:
+            if exc.name == "databento":
+                state.mark_status("DATABENTO_PACKAGE_MISSING", "Install the databento Python package")
+                return
+            raise
+        except Exception as exc:
+            state.mark_status("DISCONNECTED", str(exc))
+        finally:
+            close = getattr(client, "close", None)
+            stop_client = getattr(client, "stop", None)
+            if callable(close):
+                try:
+                    close()
+                except Exception:
+                    pass
+            elif callable(stop_client):
+                try:
+                    stop_client()
+                except Exception:
+                    pass
+
+        stop.wait(max(1.0, config.reconnect_interval))
 
 
-def create_app(*, store: SnapshotStore) -> Flask:
+def create_app(*, state: PriceRegimeState) -> Flask:
     app = Flask(__name__)
 
     @app.get("/")
@@ -163,7 +198,7 @@ def create_app(*, store: SnapshotStore) -> Flask:
 
     @app.get("/data")
     def data() -> Response:
-        response = jsonify(store.get().to_payload())
+        response = jsonify(state.snapshot().to_payload())
         response.headers["Cache-Control"] = "no-store"
         return response
 
@@ -239,8 +274,10 @@ DASHBOARD_HTML = """<!doctype html>
       line-height: 1.25;
     }
     #connection[data-state="CONNECTED"] { color: var(--long); }
+    #connection[data-state="CONNECTING"] { color: #ddd; }
     #connection[data-state="DISCONNECTED"],
-    #connection[data-state="NO_ENDPOINT"],
+    #connection[data-state="NO_API_KEY"],
+    #connection[data-state="DATABENTO_PACKAGE_MISSING"],
     #connection[data-state="STARTING"] { color: var(--no-data); }
     .hidden { display: none; }
   </style>
@@ -344,38 +381,61 @@ DASHBOARD_HTML = """<!doctype html>
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Flask-served regime monitor dashboard")
-    parser.add_argument("--url", help="HTTP JSON endpoint. Overrides config/env.")
     parser.add_argument("--config", default="~/.config/regime-monitor/config.json")
-    parser.add_argument("--interval", type=float, default=1.0, help="Upstream endpoint polling interval.")
-    parser.add_argument("--timeout", type=float, default=0.8, help="Upstream endpoint timeout.")
+    parser.add_argument("--api-key-env", help="Environment variable containing the Databento API key.")
+    parser.add_argument("--dataset", help="Databento dataset.")
+    parser.add_argument("--schema", help="Databento schema.")
+    parser.add_argument("--symbols", help="Comma-separated Databento symbols.")
+    parser.add_argument("--stype-in", help="Databento input symbol type.")
+    parser.add_argument("--reconnect-interval", type=float, help="Databento reconnect interval in seconds.")
     parser.add_argument("--host", default="0.0.0.0")
     parser.add_argument("--port", type=int, default=5000)
     return parser.parse_args()
 
 
+def _symbols_from_config(value: object) -> tuple[str, ...]:
+    if isinstance(value, str):
+        symbols = [part.strip() for part in value.split(",")]
+    elif isinstance(value, list):
+        symbols = [str(part).strip() for part in value]
+    else:
+        symbols = []
+    return tuple(symbol for symbol in symbols if symbol) or ("MBT.FUT",)
+
+
 def main() -> int:
     args = parse_args()
     config = load_config(Path(args.config).expanduser())
-    url = args.url or os.environ.get("REGIME_MONITOR_URL") or str(config.get("url") or "").strip() or None
-    interval = float(config.get("interval", args.interval))
-    timeout = float(config.get("timeout", args.timeout))
+    api_key_env = str(args.api_key_env or config.get("api_key_env") or "DATABENTO_API_KEY").strip()
+    api_key = os.environ.get(api_key_env) or str(config.get("api_key") or "").strip() or None
+    dataset = str(args.dataset or config.get("dataset") or "GLBX.MDP3").strip()
+    schema = str(args.schema or config.get("schema") or "trades").strip()
+    symbol_value = args.symbols if args.symbols is not None else config.get("symbols")
+    symbols = _symbols_from_config(symbol_value)
+    stype_in = str(args.stype_in or config.get("stype_in") or "parent").strip()
+    reconnect_interval = float(args.reconnect_interval or config.get("reconnect_interval", 5.0))
     host = str(config.get("host") or args.host)
     port = int(config.get("port") or args.port)
-    store = SnapshotStore()
+    state = PriceRegimeState()
     stop_event = threading.Event()
     worker = threading.Thread(
-        target=polling_worker,
+        target=run_databento_feed,
         kwargs={
-            "url": url,
-            "interval": max(0.2, interval),
-            "timeout": max(0.2, timeout),
-            "store": store,
+            "config": DatabentoFeedConfig(
+                api_key=api_key,
+                dataset=dataset,
+                schema=schema,
+                symbols=symbols,
+                stype_in=stype_in,
+                reconnect_interval=reconnect_interval,
+            ),
+            "state": state,
             "stop": stop_event,
         },
         daemon=True,
     )
     worker.start()
-    app = create_app(store=store)
+    app = create_app(state=state)
     try:
         app.run(host=host, port=port, debug=False, use_reloader=False, threaded=True)
     finally:

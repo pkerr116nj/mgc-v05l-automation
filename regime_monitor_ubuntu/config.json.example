@@ -1,7 +1,10 @@
 {
-  "url": "http://example.local:8080/regime.json",
-  "interval": 1.0,
-  "timeout": 0.8,
+  "api_key_env": "DATABENTO_API_KEY",
+  "dataset": "GLBX.MDP3",
+  "schema": "trades",
+  "symbols": ["MBT.FUT"],
+  "stype_in": "parent",
+  "reconnect_interval": 5.0,
   "host": "0.0.0.0",
   "port": 5000
 }
