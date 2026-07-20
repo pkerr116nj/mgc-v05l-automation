@@ -64,6 +64,14 @@ FRESHNESS_SECONDS_BY_TIMEFRAME = {
     "3m": 360.0,
     "5m": 600.0,
 }
+DEFAULT_RESTART_REPLAY_OVERLAP_MINUTES = 15
+DEFAULT_RESTART_MAX_DURABLE_STATE_AGE_SECONDS = 2 * 60 * 60
+DEFAULT_REPLAY_CURRENT_LAG_THRESHOLD_SECONDS = 180
+REPLAY_STATUS_STARTING = "STARTING"
+REPLAY_STATUS_REPLAY_CATCHUP = "REPLAY_CATCHUP"
+REPLAY_STATUS_CURRENT = "CURRENT"
+REPLAY_STATUS_STALE = "STALE"
+REPLAY_STATUS_DEGRADED = "DEGRADED"
 
 
 @dataclass(frozen=True)
@@ -174,6 +182,9 @@ class Phase1DatabentoLiveListenerConfig:
     max_bars: int = 90
     min_bars: int = 8
     max_latest_1m_age_seconds: int = 180
+    restart_replay_overlap_minutes: int = DEFAULT_RESTART_REPLAY_OVERLAP_MINUTES
+    restart_max_durable_state_age_seconds: int = DEFAULT_RESTART_MAX_DURABLE_STATE_AGE_SECONDS
+    replay_current_lag_threshold_seconds: int = DEFAULT_REPLAY_CURRENT_LAG_THRESHOLD_SECONDS
     run_seconds: float | None = None
     intraday_replay_start: str | None = None
     run_id: str | None = None
@@ -185,6 +196,45 @@ class Phase1DatabentoLiveListenerResult:
     status: dict[str, Any]
     raw_dbn_path: Path
     artifacts_written: list[Path]
+
+
+@dataclass(frozen=True)
+class Phase1DurableRestartSnapshot:
+    symbol: str
+    timeframe: str
+    path: Path
+    generated_at: datetime
+    last_completed_bar_ts: datetime
+    bar_count: int
+
+
+@dataclass(frozen=True)
+class Phase1RestartReplayAnchor:
+    selected_replay_anchor: datetime
+    anchor_source: str
+    overlap_minutes: int
+    latest_durable_completed_bar_ts: datetime | None
+    current_lag_seconds: float | None
+    replay_catchup_status: str
+    current_readiness_blocked_reason: str | None
+    durable_snapshots: tuple[Phase1DurableRestartSnapshot, ...]
+    rejected_state_reasons: tuple[str, ...]
+
+    def as_status_dict(self) -> dict[str, Any]:
+        return {
+            "selected_replay_anchor": self.selected_replay_anchor.isoformat(),
+            "anchor_source": self.anchor_source,
+            "restart_replay_overlap_minutes": self.overlap_minutes,
+            "latest_durable_completed_bar_ts": None
+            if self.latest_durable_completed_bar_ts is None
+            else self.latest_durable_completed_bar_ts.isoformat(),
+            "current_lag_seconds": None if self.current_lag_seconds is None else round(self.current_lag_seconds, 3),
+            "replay_catchup_status": self.replay_catchup_status,
+            "current_readiness_blocked_reason": self.current_readiness_blocked_reason,
+            "durable_state_snapshot_count": len(self.durable_snapshots),
+            "durable_state_symbols": sorted({snapshot.symbol for snapshot in self.durable_snapshots}),
+            "rejected_durable_state_reasons": list(self.rejected_state_reasons[-20:]),
+        }
 
 
 def build_phase1_databento_live_runtime_candles(
@@ -305,12 +355,14 @@ def run_phase1_databento_live_listener(
     run_id = config.run_id or f"phase1_databento_live_listener_{uuid.uuid4().hex}"
     raw_dbn_path = _resolve_path(config.repo_root, config.raw_dbn_root) / f"{run_id}.dbn"
     raw_dbn_path.parent.mkdir(parents=True, exist_ok=True)
+    replay_anchor = select_phase1_restart_replay_anchor(config=config, selection=selection, now=started_at)
     state = _LiveListenerState(
         config=config,
         selection=selection,
         raw_dbn_path=raw_dbn_path,
         started_at=started_at,
         clock=clock,
+        replay_anchor=replay_anchor,
     )
 
     api_key, credential_status, credential_source = _load_databento_api_key(config.env_file)
@@ -329,16 +381,12 @@ def run_phase1_databento_live_listener(
         client = _create_phase1_live_client(api_key=api_key, live_client_factory=live_client_factory)
         client.add_callback(state.on_record, state.on_error)
         client.add_stream(raw_dbn_path, exception_callback=state.on_error)
-        intraday_replay_start = _phase1_databento_live_replay_start(
-            requested_start=config.intraday_replay_start,
-            started_at=started_at,
-        )
         subscribe_kwargs: dict[str, Any] = {
             "dataset": _single_dataset(selection=selection, fallback=config.dataset),
             "schema": _single_schema(selection=selection, fallback=config.schema),
             "symbols": requested_symbols,
             "stype_in": config.stype_in,
-            "start": intraday_replay_start,
+            "start": replay_anchor.selected_replay_anchor.isoformat(),
         }
         client.subscribe(**subscribe_kwargs)
         state.subscription_status = "SUBSCRIBED"
@@ -398,6 +446,7 @@ class _LiveListenerState:
         raw_dbn_path: Path,
         started_at: datetime,
         clock: Callable[[], datetime],
+        replay_anchor: Phase1RestartReplayAnchor,
     ) -> None:
         self.config = config
         self.selection = selection
@@ -406,6 +455,7 @@ class _LiveListenerState:
         self.raw_dbn_path = raw_dbn_path
         self.started_at = started_at
         self.clock = clock
+        self.replay_anchor = replay_anchor
         self.lock = threading.Lock()
         self.bars_by_symbol: dict[str, list[dict[str, Any]]] = {symbol: [] for symbol in self.symbols}
         self.instrument_id_to_symbol: dict[str, str] = {}
@@ -474,28 +524,22 @@ class _LiveListenerState:
             self._write_status_locked(provider_status="ERROR")
 
     def confirmed_symbol_count(self) -> int:
-        return sum(
-            1
-            for symbol in self.symbols
-            if _all_timeframes_confirmed(
-                config=self.config,
-                live_symbol=self.live_symbol_by_symbol[symbol],
-                symbol=symbol,
-                now=_coerce_now(self.clock()),
-            )
+        status = self.status(
+            provider_status="RUNNING" if self.listener_alive else "STOPPED",
+            credential_status="AVAILABLE",
+            credential_source=None,
+            final_classification="PHASE1_DATABENTO_LIVE_LISTENER_RUNNING",
         )
+        return int(status.get("realtime_feed_confirmed_count") or 0)
 
     def required_confirmed_symbol_count(self) -> int:
-        return sum(
-            1
-            for symbol in self.selection.required_symbols
-            if _all_timeframes_confirmed(
-                config=self.config,
-                live_symbol=self.live_symbol_by_symbol[symbol],
-                symbol=symbol,
-                now=_coerce_now(self.clock()),
-            )
+        status = self.status(
+            provider_status="RUNNING" if self.listener_alive else "STOPPED",
+            credential_status="AVAILABLE",
+            credential_source=None,
+            final_classification="PHASE1_DATABENTO_LIVE_LISTENER_RUNNING",
         )
+        return int(status.get("readiness_required_confirmed_count") or 0)
 
     def status(
         self,
@@ -534,6 +578,20 @@ class _LiveListenerState:
         rows = []
         for symbol in self.symbols:
             live_symbol = self.live_symbol_by_symbol[symbol]
+            artifact_confirmed = _all_timeframes_confirmed(
+                config=self.config,
+                live_symbol=live_symbol,
+                symbol=symbol,
+                now=generated_at,
+            )
+            stream_latest = _parse_datetime(self.latest_completed_bar_by_symbol.get(symbol))
+            stream_lag_seconds = None if stream_latest is None else max(0.0, (generated_at - stream_latest).total_seconds())
+            stream_caught_up = _stream_symbol_caught_up(
+                live_symbol=live_symbol,
+                latest_completed_bar_ts=stream_latest,
+                now=generated_at,
+            )
+            realtime_confirmed = artifact_confirmed and stream_caught_up
             rows.append(
                 {
                     "symbol": symbol,
@@ -547,16 +605,45 @@ class _LiveListenerState:
                         _intraday_backfill_path_for_listener(config=self.config, symbol=symbol, timeframe="1m")
                     ),
                     "latest_completed_bar_ts": self.latest_completed_bar_by_symbol.get(symbol),
-                    "realtime_feed_confirmed": _all_timeframes_confirmed(
-                        config=self.config,
-                        live_symbol=live_symbol,
-                        symbol=symbol,
-                        now=generated_at,
+                    "artifact_realtime_feed_confirmed": artifact_confirmed,
+                    "stream_caught_up": stream_caught_up,
+                    "stream_lag_seconds": None if stream_lag_seconds is None else round(stream_lag_seconds, 3),
+                    "realtime_feed_confirmed": realtime_confirmed,
+                    "realtime_feed_block_reason": "READY"
+                    if realtime_confirmed
+                    else _listener_row_block_reason(
+                        artifact_confirmed=artifact_confirmed,
+                        stream_caught_up=stream_caught_up,
+                        latest_completed_bar_ts=stream_latest,
                     ),
                 }
             )
         required_confirmed_count = sum(
             1 for row in rows if row["required_for_readiness"] is True and row["realtime_feed_confirmed"]
+        )
+        replay_status = _listener_replay_status(
+            rows=rows,
+            required_symbol_count=len(self.selection.required_symbols),
+            provider_status=provider_status,
+            listener_alive=self.listener_alive,
+            latest_record_at=self.latest_record_at,
+            now=generated_at,
+            current_lag_threshold_seconds=self.config.replay_current_lag_threshold_seconds,
+        )
+        latest_durable_completed = _latest_durable_completed_bar_ts(
+            config=self.config,
+            selection=self.selection,
+            now=generated_at,
+        )
+        current_lag_seconds = _listener_current_lag_seconds(
+            rows=rows,
+            required_symbols=self.selection.required_symbols,
+            now=generated_at,
+        )
+        current_readiness_blocked_reason = _listener_current_readiness_blocked_reason(
+            rows=rows,
+            required_symbol_count=len(self.selection.required_symbols),
+            replay_status=replay_status,
         )
         return {
             "schema_version": "phase1_databento_live_listener_status_v1",
@@ -578,6 +665,16 @@ class _LiveListenerState:
             "provider_status": provider_status,
             "subscription_status": self.subscription_status,
             "listener_alive": self.listener_alive,
+            "replay_catchup_status": replay_status,
+            "selected_replay_anchor": self.replay_anchor.selected_replay_anchor.isoformat(),
+            "replay_anchor_source": self.replay_anchor.anchor_source,
+            "restart_replay_overlap_minutes": self.replay_anchor.overlap_minutes,
+            "latest_durable_completed_bar_ts": None
+            if latest_durable_completed is None
+            else latest_durable_completed.isoformat(),
+            "current_lag_seconds": None if current_lag_seconds is None else round(current_lag_seconds, 3),
+            "current_readiness_blocked_reason": current_readiness_blocked_reason,
+            "restart_anchor": self.replay_anchor.as_status_dict(),
             "raw_dbn_path": str(self.raw_dbn_path),
             "shared_ohlcv_db_path": (
                 None
@@ -628,6 +725,145 @@ def _create_phase1_live_client(*, api_key: str, live_client_factory: LiveClientF
         return db.Live(key=api_key, ts_out=True)
     except TypeError:
         return db.Live(api_key, ts_out=True)
+
+
+def select_phase1_restart_replay_anchor(
+    *,
+    config: Phase1DatabentoLiveListenerConfig,
+    selection: _Phase1LiveSymbolSelection,
+    now: datetime,
+) -> Phase1RestartReplayAnchor:
+    """Choose a bounded replay start from durable validated Phase-1 state."""
+
+    now = _coerce_now(now)
+    overlap_minutes = max(int(config.restart_replay_overlap_minutes), 1)
+    if config.intraday_replay_start:
+        selected = _phase1_databento_live_replay_start(
+            requested_start=config.intraday_replay_start,
+            started_at=now,
+        )
+        selected_dt = _parse_datetime(selected) or _current_futures_session_start_utc(now)
+        return Phase1RestartReplayAnchor(
+            selected_replay_anchor=selected_dt,
+            anchor_source="OPERATOR_REQUESTED_INTRADAY_REPLAY_START",
+            overlap_minutes=overlap_minutes,
+            latest_durable_completed_bar_ts=None,
+            current_lag_seconds=None,
+            replay_catchup_status=REPLAY_STATUS_STARTING,
+            current_readiness_blocked_reason="operator_requested_replay_start",
+            durable_snapshots=(),
+            rejected_state_reasons=(),
+        )
+
+    snapshots: list[Phase1DurableRestartSnapshot] = []
+    rejected: list[str] = []
+    for row in selection.rows:
+        snapshot, reason = _durable_restart_snapshot_for_symbol(
+            config=config,
+            live_symbol=row,
+            symbol=row.symbol,
+            now=now,
+        )
+        if snapshot is None:
+            if reason:
+                rejected.append(reason)
+            continue
+        snapshots.append(snapshot)
+
+    recent_snapshots = tuple(
+        snapshot
+        for snapshot in snapshots
+        if max((now - snapshot.generated_at).total_seconds(), 0.0) <= float(config.restart_max_durable_state_age_seconds)
+        and max((now - snapshot.last_completed_bar_ts).total_seconds(), 0.0)
+        <= float(config.restart_max_durable_state_age_seconds)
+    )
+    latest_completed = max((snapshot.last_completed_bar_ts for snapshot in recent_snapshots), default=None)
+    current_lag = None if latest_completed is None else max((now - latest_completed).total_seconds(), 0.0)
+    required_symbols = set(selection.required_symbols)
+    recent_by_symbol = {snapshot.symbol: snapshot for snapshot in recent_snapshots}
+    required_recent = [recent_by_symbol[symbol] for symbol in selection.required_symbols if symbol in recent_by_symbol]
+    if required_symbols and len(required_recent) == len(required_symbols):
+        anchor_basis = min(snapshot.last_completed_bar_ts for snapshot in required_recent)
+        source = "DURABLE_REQUIRED_SYMBOLS_MIN_1M"
+        blocked_reason = "starting_from_recent_required_durable_state"
+    elif recent_snapshots:
+        anchor_basis = min(snapshot.last_completed_bar_ts for snapshot in recent_snapshots)
+        source = "DURABLE_PARTIAL_RECENT_1M"
+        missing_required = sorted(required_symbols - set(recent_by_symbol))
+        blocked_reason = "missing_recent_required_durable_state"
+        if missing_required:
+            blocked_reason = f"{blocked_reason}:{','.join(missing_required)}"
+    else:
+        anchor_basis = _current_futures_session_start_utc(now)
+        source = "COLD_START_NO_TRUSTWORTHY_DURABLE_STATE"
+        blocked_reason = "no_recent_valid_durable_phase1_state"
+
+    selected_start = anchor_basis if source == "COLD_START_NO_TRUSTWORTHY_DURABLE_STATE" else anchor_basis - timedelta(minutes=overlap_minutes)
+    selected = _phase1_databento_live_replay_start(
+        requested_start=selected_start.isoformat(),
+        started_at=now,
+    )
+    selected_dt = _parse_datetime(selected) or _current_futures_session_start_utc(now)
+    return Phase1RestartReplayAnchor(
+        selected_replay_anchor=selected_dt,
+        anchor_source=source,
+        overlap_minutes=overlap_minutes,
+        latest_durable_completed_bar_ts=latest_completed,
+        current_lag_seconds=current_lag,
+        replay_catchup_status=REPLAY_STATUS_STARTING,
+        current_readiness_blocked_reason=blocked_reason,
+        durable_snapshots=recent_snapshots,
+        rejected_state_reasons=tuple(rejected),
+    )
+
+
+def _durable_restart_snapshot_for_symbol(
+    *,
+    config: Phase1DatabentoLiveListenerConfig,
+    live_symbol: TrackBLiveMarketDataSymbol,
+    symbol: str,
+    now: datetime,
+) -> tuple[Phase1DurableRestartSnapshot | None, str | None]:
+    path = _runtime_candle_path_for_listener(config=config, symbol=symbol, timeframe="1m")
+    payload = _read_json(path)
+    if not isinstance(payload, Mapping):
+        return None, f"{symbol}:missing_or_malformed_1m_artifact"
+    if str(payload.get("source") or "").strip() != SOURCE_ID:
+        return None, f"{symbol}:invalid_source"
+    if str(payload.get("symbol") or "").strip().upper() != symbol:
+        return None, f"{symbol}:symbol_mismatch"
+    if str(payload.get("timeframe") or "").strip() != "1m":
+        return None, f"{symbol}:timeframe_mismatch"
+    if str(payload.get("schema") or "").strip() != live_symbol.schema:
+        return None, f"{symbol}:schema_mismatch"
+    if payload.get("historical_seed_ready") is True or payload.get("research_artifact_used") is True or payload.get("archive_artifact_used") is True:
+        return None, f"{symbol}:forbidden_provenance"
+    if payload.get("realtime_feed_confirmed") is not True:
+        return None, f"{symbol}:not_realtime_confirmed"
+    generated_at = _parse_datetime(payload.get("generated_at"))
+    last_completed = _parse_datetime(payload.get("last_completed_bar_ts"))
+    if generated_at is None or last_completed is None:
+        return None, f"{symbol}:missing_timestamps"
+    bars = payload.get("bars")
+    if not isinstance(bars, list) or not bars:
+        return None, f"{symbol}:missing_bars"
+    if _parse_datetime((bars[-1] or {}).get("bar_end") if isinstance(bars[-1], Mapping) else None) is None:
+        return None, f"{symbol}:invalid_latest_bar"
+    if max((now - generated_at).total_seconds(), 0.0) > float(config.restart_max_durable_state_age_seconds):
+        return None, f"{symbol}:generated_at_too_old"
+    if max((now - last_completed).total_seconds(), 0.0) > float(config.restart_max_durable_state_age_seconds):
+        return None, f"{symbol}:latest_completed_too_old"
+    return (
+        Phase1DurableRestartSnapshot(
+            symbol=symbol,
+            timeframe="1m",
+            path=path,
+            generated_at=generated_at,
+            last_completed_bar_ts=last_completed,
+            bar_count=int(payload.get("bar_count") or len(bars)),
+        ),
+        None,
+    )
 
 
 def _block_for_bounded_smoke(*, client: DatabentoLiveSession, timeout: float) -> None:
@@ -697,6 +933,115 @@ def _readiness_confirmed(
     if selection.required_symbols:
         return required_confirmed_count == len(selection.required_symbols)
     return confirmed_count == len(selection.symbols)
+
+
+def _stream_symbol_caught_up(
+    *,
+    live_symbol: TrackBLiveMarketDataSymbol,
+    latest_completed_bar_ts: datetime | None,
+    now: datetime,
+) -> bool:
+    if latest_completed_bar_ts is None:
+        return False
+    lag_seconds = max((now - latest_completed_bar_ts).total_seconds(), 0.0)
+    threshold = _latest_bar_freshness_seconds_for_timeframe(live_symbol=live_symbol, timeframe="1m")
+    return lag_seconds <= threshold
+
+
+def _listener_row_block_reason(
+    *,
+    artifact_confirmed: bool,
+    stream_caught_up: bool,
+    latest_completed_bar_ts: datetime | None,
+) -> str:
+    if latest_completed_bar_ts is None:
+        return "STARTING_NO_LIVE_COMPLETED_BAR"
+    if not stream_caught_up:
+        return "REPLAY_CATCHUP_LIVE_STREAM_BEHIND"
+    if not artifact_confirmed:
+        return "DURABLE_ARTIFACT_NOT_CURRENT"
+    return "REALTIME_FEED_NOT_CONFIRMED"
+
+
+def _listener_replay_status(
+    *,
+    rows: Sequence[Mapping[str, Any]],
+    required_symbol_count: int,
+    provider_status: str,
+    listener_alive: bool,
+    latest_record_at: datetime | None,
+    now: datetime,
+    current_lag_threshold_seconds: int,
+) -> str:
+    if provider_status in {"ERROR", "STOPPED_WITH_ERRORS"}:
+        return REPLAY_STATUS_STALE
+    if not listener_alive or provider_status.startswith("BLOCKED"):
+        return REPLAY_STATUS_STARTING
+    if latest_record_at is not None and max((now - latest_record_at).total_seconds(), 0.0) > max(int(current_lag_threshold_seconds), 1):
+        return REPLAY_STATUS_STALE
+    if not rows or all(row.get("latest_completed_bar_ts") in {None, ""} for row in rows):
+        return REPLAY_STATUS_STARTING
+    required_rows = [row for row in rows if row.get("required_for_readiness") is True]
+    required_confirmed = sum(1 for row in required_rows if row.get("realtime_feed_confirmed") is True)
+    if required_symbol_count and required_confirmed < required_symbol_count:
+        return REPLAY_STATUS_REPLAY_CATCHUP
+    optional_degraded = any(row.get("required_for_readiness") is not True and row.get("realtime_feed_confirmed") is not True for row in rows)
+    return REPLAY_STATUS_DEGRADED if optional_degraded else REPLAY_STATUS_CURRENT
+
+
+def _listener_current_lag_seconds(
+    *,
+    rows: Sequence[Mapping[str, Any]],
+    required_symbols: Sequence[str],
+    now: datetime,
+) -> float | None:
+    required_set = set(required_symbols)
+    candidate_rows = [row for row in rows if not required_set or row.get("symbol") in required_set]
+    lags = [
+        max((now - parsed).total_seconds(), 0.0)
+        for row in candidate_rows
+        for parsed in [_parse_datetime(row.get("latest_completed_bar_ts"))]
+        if parsed is not None
+    ]
+    return max(lags) if lags else None
+
+
+def _listener_current_readiness_blocked_reason(
+    *,
+    rows: Sequence[Mapping[str, Any]],
+    required_symbol_count: int,
+    replay_status: str,
+) -> str | None:
+    if replay_status in {REPLAY_STATUS_CURRENT, REPLAY_STATUS_DEGRADED}:
+        return None
+    if replay_status == REPLAY_STATUS_STARTING:
+        return "listener_starting_no_caught_up_live_bars"
+    if replay_status == REPLAY_STATUS_STALE:
+        return "listener_or_records_stale"
+    required_rows = [row for row in rows if row.get("required_for_readiness") is True]
+    blocked = [str(row.get("symbol")) for row in required_rows if row.get("realtime_feed_confirmed") is not True]
+    if required_symbol_count and blocked:
+        return f"required_symbols_not_current:{','.join(blocked)}"
+    return "replay_catchup_not_current"
+
+
+def _latest_durable_completed_bar_ts(
+    *,
+    config: Phase1DatabentoLiveListenerConfig,
+    selection: _Phase1LiveSymbolSelection,
+    now: datetime,
+) -> datetime | None:
+    latest: datetime | None = None
+    for row in selection.rows:
+        snapshot, _reason = _durable_restart_snapshot_for_symbol(
+            config=config,
+            live_symbol=row,
+            symbol=row.symbol,
+            now=now,
+        )
+        if snapshot is not None and (latest is None or snapshot.last_completed_bar_ts > latest):
+            latest = snapshot.last_completed_bar_ts
+    return latest
 
 
 def _symbol_mapping_from_record(*, record: Any, symbols: Sequence[str]) -> tuple[str, str] | None:
@@ -1734,6 +2079,17 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--intraday-replay-start", help="Optional Databento Live API replay start passed to subscribe(start=...).")
     parser.add_argument("--max-bars", type=int, default=90)
     parser.add_argument("--min-bars", type=int, default=8)
+    parser.add_argument("--restart-replay-overlap-minutes", type=int, default=DEFAULT_RESTART_REPLAY_OVERLAP_MINUTES)
+    parser.add_argument(
+        "--restart-max-durable-state-age-seconds",
+        type=int,
+        default=DEFAULT_RESTART_MAX_DURABLE_STATE_AGE_SECONDS,
+    )
+    parser.add_argument(
+        "--replay-current-lag-threshold-seconds",
+        type=int,
+        default=DEFAULT_REPLAY_CURRENT_LAG_THRESHOLD_SECONDS,
+    )
     parser.add_argument("--max-records", type=int, default=90)
     parser.add_argument("--max-seconds-per-symbol", type=float, default=75.0)
     parser.add_argument("--max-accumulation-attempts", type=int, default=8)
@@ -1768,6 +2124,9 @@ def main(argv: Sequence[str] | None = None) -> int:
                 env_file=args.env_file,
                 max_bars=args.max_bars,
                 min_bars=args.min_bars,
+                restart_replay_overlap_minutes=args.restart_replay_overlap_minutes,
+                restart_max_durable_state_age_seconds=args.restart_max_durable_state_age_seconds,
+                replay_current_lag_threshold_seconds=args.replay_current_lag_threshold_seconds,
                 run_seconds=args.run_seconds,
                 intraday_replay_start=args.intraday_replay_start,
             )

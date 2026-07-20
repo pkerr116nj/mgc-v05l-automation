@@ -12,6 +12,9 @@ from mgc_v05l.execution_core.phase1_databento_live_runtime_candles import (
     Phase1DatabentoLiveRuntimeCandlesConfig,
     build_phase1_databento_live_runtime_candles,
     run_phase1_databento_live_listener,
+    select_phase1_restart_replay_anchor,
+    _dedupe_phase1_bars,
+    _phase1_databento_live_replay_start,
 )
 from mgc_v05l.execution_core.phase1_runtime_data_readiness import (
     Phase1RuntimeDataReadinessConfig,
@@ -238,6 +241,7 @@ def _write_existing_phase1_payloads(root: Path, symbol: str, *, generated_at: da
                     "instrument": symbol,
                     "root": symbol,
                     "timeframe": timeframe,
+                    "schema": "ohlcv-1m",
                     "bar_count": count,
                     "first_bar_ts": bars[0]["bar_end"],
                     "last_completed_bar_ts": bars[-1]["bar_end"],
@@ -582,6 +586,103 @@ def test_listener_default_selection_uses_shared_namelist_crypto_symbols(tmp_path
     assert {"MBT.v.0", "MET.v.0", "MSL.v.0"}.issubset(set(client.subscribe_kwargs["symbols"]))
 
 
+def test_listener_restart_anchor_uses_recent_durable_required_state_with_overlap(tmp_path: Path) -> None:
+    _write_existing_phase1_payloads(tmp_path, "GC", generated_at=NOW)
+    config = _listener_config(tmp_path, symbols=("GC",), restart_replay_overlap_minutes=15)
+    selection = load_track_b_live_market_data_symbols().enabled_symbols()
+    gc_selection = next(row for row in selection if row.symbol == "GC")
+    live_selection = type("_Selection", (), {})()
+    live_selection.rows = (gc_selection,)
+    live_selection.required_symbols = ("GC",)
+
+    anchor = select_phase1_restart_replay_anchor(config=config, selection=live_selection, now=NOW)  # type: ignore[arg-type]
+
+    assert anchor.anchor_source == "DURABLE_REQUIRED_SYMBOLS_MIN_1M"
+    assert anchor.latest_durable_completed_bar_ts == NOW - timedelta(minutes=1)
+    assert anchor.selected_replay_anchor == NOW - timedelta(minutes=16)
+    assert anchor.current_readiness_blocked_reason == "starting_from_recent_required_durable_state"
+
+
+def test_listener_restart_anchor_cold_starts_without_trustworthy_state(tmp_path: Path) -> None:
+    config = _listener_config(tmp_path, symbols=("GC",))
+    selection = load_track_b_live_market_data_symbols().enabled_symbols()
+    gc_selection = next(row for row in selection if row.symbol == "GC")
+    live_selection = type("_Selection", (), {})()
+    live_selection.rows = (gc_selection,)
+    live_selection.required_symbols = ("GC",)
+
+    anchor = select_phase1_restart_replay_anchor(config=config, selection=live_selection, now=NOW)  # type: ignore[arg-type]
+
+    assert anchor.anchor_source == "COLD_START_NO_TRUSTWORTHY_DURABLE_STATE"
+    assert anchor.latest_durable_completed_bar_ts is None
+    assert anchor.current_readiness_blocked_reason == "no_recent_valid_durable_phase1_state"
+    assert anchor.selected_replay_anchor == datetime(2026, 5, 10, 22, 0, tzinfo=timezone.utc)
+
+
+def test_listener_restart_anchor_rejects_malformed_and_stale_durable_state(tmp_path: Path) -> None:
+    _write_existing_phase1_payloads(tmp_path, "GC", generated_at=NOW - timedelta(hours=3))
+    config = _listener_config(tmp_path, symbols=("GC",), restart_max_durable_state_age_seconds=60)
+    selection = load_track_b_live_market_data_symbols().enabled_symbols()
+    gc_selection = next(row for row in selection if row.symbol == "GC")
+    live_selection = type("_Selection", (), {})()
+    live_selection.rows = (gc_selection,)
+    live_selection.required_symbols = ("GC",)
+
+    stale = select_phase1_restart_replay_anchor(config=config, selection=live_selection, now=NOW)  # type: ignore[arg-type]
+
+    assert stale.anchor_source == "COLD_START_NO_TRUSTWORTHY_DURABLE_STATE"
+    assert any("generated_at_too_old" in reason for reason in stale.rejected_state_reasons)
+
+    path = tmp_path / "outputs" / "track_b_execution_core" / "phase1_runtime_market_data" / "GC" / "1m" / "latest_runtime_candles.json"
+    path.write_text("{", encoding="utf-8")
+    malformed = select_phase1_restart_replay_anchor(config=_listener_config(tmp_path, symbols=("GC",)), selection=live_selection, now=NOW)  # type: ignore[arg-type]
+
+    assert malformed.anchor_source == "COLD_START_NO_TRUSTWORTHY_DURABLE_STATE"
+    assert any("missing_or_malformed_1m_artifact" in reason for reason in malformed.rejected_state_reasons)
+
+
+def test_listener_subscribes_from_selected_restart_anchor(tmp_path: Path) -> None:
+    _write_existing_phase1_payloads(tmp_path, "GC", generated_at=NOW)
+    client = FakeLiveClient([])
+
+    run_phase1_databento_live_listener(
+        config=_listener_config(tmp_path, symbols=("GC",), restart_replay_overlap_minutes=10),
+        live_client_factory=lambda _: client,
+        now_func=lambda: NOW,
+    )
+
+    assert client.subscribe_kwargs is not None
+    assert client.subscribe_kwargs["start"] == (NOW - timedelta(minutes=11)).isoformat()
+
+
+def test_phase1_bar_deduplication_keeps_latest_duplicate_without_extra_volume() -> None:
+    end = NOW - timedelta(minutes=1)
+    rows = [
+        {
+            "bar_end": end.isoformat(),
+            "open": 1,
+            "high": 1,
+            "low": 1,
+            "close": 1,
+            "volume": 10,
+        },
+        {
+            "bar_end": end.isoformat(),
+            "open": 2,
+            "high": 2,
+            "low": 2,
+            "close": 2,
+            "volume": 11,
+        },
+    ]
+
+    deduped = _dedupe_phase1_bars(rows)
+
+    assert len(deduped) == 1
+    assert deduped[0]["close"] == 2
+    assert deduped[0]["volume"] == 11
+
+
 def test_multi_symbol_subscriptions_run_concurrently(tmp_path: Path) -> None:
     configured_symbols = _configured_live_symbols()
     barrier = threading.Barrier(len(configured_symbols))
@@ -818,7 +919,7 @@ def test_live_listener_restart_merges_existing_hot_1m_before_derived_rollups(tmp
         ),
         encoding="utf-8",
     )
-    client = FakeLiveClient([FakeOhlcvRecord(symbol="ZT", ts_event=datetime(2026, 6, 19, 2, 45, tzinfo=timezone.utc))])
+    client = FakeLiveClient([FakeOhlcvRecord(symbol="ZT", ts_event=now - timedelta(minutes=1))])
 
     result = run_phase1_databento_live_listener(
         config=_listener_config(tmp_path, symbols=("ZT",), now=now),

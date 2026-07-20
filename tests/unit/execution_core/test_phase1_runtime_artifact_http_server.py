@@ -151,3 +151,40 @@ def test_phase1_runtime_artifact_http_health_reports_stale_or_blocked_inputs(tmp
     assert payload["classification"] == "STALE_OR_BLOCKED"
     assert "latest_artifact_stale" in payload["blockers"]
     assert "listener_status_missing" in payload["blockers"]
+
+
+def test_phase1_runtime_artifact_http_health_reports_replay_catchup(tmp_path: Path) -> None:
+    root = tmp_path / "phase1_runtime_market_data"
+    status_path = tmp_path / "latest_phase1_databento_live_listener_status.json"
+    now = datetime.now(timezone.utc).isoformat()
+    _write_artifact(root, generated_at=now)
+    status_path.write_text(
+        json.dumps(
+            {
+                "generated_at": now,
+                "latest_record_at": now,
+                "provider_status": "RUNNING",
+                "listener_alive": True,
+                "realtime_feed_confirmed_count": 0,
+                "readiness_required_confirmed_count": 0,
+                "replay_catchup_status": "REPLAY_CATCHUP",
+                "selected_replay_anchor": "2026-05-18T11:45:00+00:00",
+                "replay_anchor_source": "DURABLE_REQUIRED_SYMBOLS_MIN_1M",
+                "current_lag_seconds": 900,
+                "latest_durable_completed_bar_ts": "2026-05-18T12:00:00+00:00",
+                "current_readiness_blocked_reason": "required_symbols_not_current:GC",
+            }
+        ),
+        encoding="utf-8",
+    )
+    server = _Server(root, listener_status_path=status_path)
+    try:
+        with urlopen(f"{server.base_url}/health", timeout=2) as response:  # noqa: S310
+            payload = json.loads(response.read().decode("utf-8"))
+    finally:
+        server.close()
+
+    assert payload["classification"] == "REPLAY_CATCHUP"
+    assert "listener_replay_replay_catchup" in payload["blockers"]
+    assert payload["listener_status"]["replay_catchup_status"] == "REPLAY_CATCHUP"
+    assert payload["listener_status"]["current_readiness_blocked_reason"] == "required_symbols_not_current:GC"

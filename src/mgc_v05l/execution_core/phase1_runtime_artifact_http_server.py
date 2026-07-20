@@ -297,7 +297,15 @@ def _health_payload(
             blockers.append("listener_status_missing")
         elif listener_status_age is None or listener_status_age > stale_seconds:
             blockers.append("listener_status_stale")
-    classification = "HEALTHY" if not blockers else "STALE_OR_BLOCKED"
+    listener_replay_status = str(listener_status.get("replay_catchup_status") or "") if listener_status else ""
+    if listener_status and listener_replay_status in {"STARTING", "REPLAY_CATCHUP", "STALE"}:
+        blockers.append(f"listener_replay_{listener_replay_status.lower()}")
+    if blockers:
+        classification = listener_replay_status if listener_replay_status in {"STARTING", "REPLAY_CATCHUP", "STALE"} else "STALE_OR_BLOCKED"
+    elif listener_replay_status in {"CURRENT", "DEGRADED"}:
+        classification = listener_replay_status
+    else:
+        classification = "HEALTHY"
     return {
         "schema_version": "phase1_runtime_artifact_http_health_v1",
         "generated_at": now.isoformat(),
@@ -368,6 +376,13 @@ def _listener_status_snapshot(path: Path | None) -> dict[str, Any] | None:
         "provider_status": payload.get("provider_status"),
         "listener_alive": payload.get("listener_alive"),
         "realtime_feed_confirmed_count": payload.get("realtime_feed_confirmed_count"),
+        "readiness_required_confirmed_count": payload.get("readiness_required_confirmed_count"),
+        "replay_catchup_status": payload.get("replay_catchup_status"),
+        "selected_replay_anchor": payload.get("selected_replay_anchor"),
+        "replay_anchor_source": payload.get("replay_anchor_source"),
+        "current_lag_seconds": payload.get("current_lag_seconds"),
+        "latest_durable_completed_bar_ts": payload.get("latest_durable_completed_bar_ts"),
+        "current_readiness_blocked_reason": payload.get("current_readiness_blocked_reason"),
     }
 
 
