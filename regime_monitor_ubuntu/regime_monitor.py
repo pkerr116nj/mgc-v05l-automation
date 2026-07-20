@@ -1351,14 +1351,20 @@ DASHBOARD_HTML = """<!doctype html>
     :root {
       color-scheme: dark;
       --bg: #000;
-      --panel: #030303;
-      --panel-border: #171717;
-      --text: #f4f4f4;
-      --muted: #8c8c8c;
-      --long: #00e676;
-      --short: #ff3333;
-      --no-trade: #9e9e9e;
-      --no-data: #ffcc33;
+      --panel: #020809;
+      --panel-border: #183033;
+      --grid: rgba(83, 113, 118, 0.18);
+      --text: #f7f7f7;
+      --muted: #a5abad;
+      --dim: #697174;
+      --cyan: #00e6c3;
+      --long: #38d430;
+      --short: #ff3434;
+      --no-trade: #ffb000;
+      --no-data: #ffb000;
+      --warn: #ffb000;
+      --blue: #2f83ff;
+      --magenta: #d948ff;
     }
     * { box-sizing: border-box; }
     html, body {
@@ -1373,7 +1379,7 @@ DASHBOARD_HTML = """<!doctype html>
     }
     main {
       width: 100vw;
-      height: 100vh;
+      height: calc(100vh - 32px);
       display: grid;
       grid-template-columns: repeat(2, minmax(0, 1fr));
       grid-template-rows: repeat(2, minmax(0, 1fr));
@@ -1385,67 +1391,193 @@ DASHBOARD_HTML = """<!doctype html>
       min-width: 0;
       min-height: 0;
       display: grid;
-      grid-template-rows: auto auto minmax(0, 1fr) auto;
-      gap: 4px;
+      grid-template-rows: auto minmax(0, 1fr) auto;
+      gap: 8px;
       padding: 10px 12px 8px;
       background: var(--panel);
       border: 1px solid var(--panel-border);
+      border-radius: 4px;
+      box-shadow: inset 0 0 18px rgba(0, 230, 195, 0.04);
       overflow: hidden;
     }
-    .instrument {
-      display: flex;
-      align-items: baseline;
-      justify-content: space-between;
-      gap: 1rem;
+    .top {
+      display: grid;
+      grid-template-columns: minmax(0, 0.9fr) minmax(0, 1.7fr);
+      gap: 14px;
       min-width: 0;
+      padding-bottom: 5px;
+      border-bottom: 1px solid rgba(125, 153, 158, 0.18);
+    }
+    .identity {
+      min-width: 0;
+      display: grid;
+      gap: 5px;
+      border-right: 1px solid rgba(125, 153, 158, 0.22);
+      padding-right: 14px;
     }
     .name {
       margin: 0;
-      font-size: clamp(1.4rem, 2.1vw, 2.3rem);
+      font-size: clamp(1.55rem, 2.55vw, 3.1rem);
       line-height: 1;
-      font-weight: 700;
+      font-weight: 820;
       letter-spacing: 0;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
     }
     .symbol {
       color: var(--muted);
-      font-size: clamp(1rem, 1.35vw, 1.45rem);
-      font-weight: 600;
+      font-size: clamp(0.92rem, 1.35vw, 1.45rem);
+      line-height: 1;
+      font-weight: 720;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+    .last-price {
+      font-size: clamp(1.55rem, 2.55vw, 3.05rem);
+      line-height: 0.95;
+      font-weight: 780;
+      color: var(--long);
+      font-variant-numeric: tabular-nums;
       white-space: nowrap;
     }
-    .regime {
-      margin: 0;
-      font-size: clamp(3.2rem, 6.2vw, 7.2rem);
-      line-height: 0.92;
-      letter-spacing: 0;
-      font-weight: 800;
-      color: var(--no-data);
-      text-align: center;
-      overflow-wrap: anywhere;
-    }
-    .confidence {
-      margin: 0;
-      color: #ddd;
-      font-size: clamp(1.2rem, 2vw, 2.4rem);
+    .last-price[data-tone="short"] { color: var(--short); }
+    .last-price[data-tone="flat"] { color: var(--muted); }
+    .change {
+      color: var(--long);
+      font-size: clamp(0.95rem, 1.45vw, 1.55rem);
       line-height: 1;
-      font-weight: 550;
-      text-align: center;
+      font-weight: 760;
+      font-variant-numeric: tabular-nums;
+      white-space: nowrap;
     }
+    .change[data-tone="short"] { color: var(--short); }
+    .change[data-tone="flat"] { color: var(--muted); }
+    .signal-table {
+      min-width: 0;
+      display: grid;
+      grid-template-columns: minmax(7rem, 0.55fr) minmax(0, 1fr);
+      align-content: start;
+      color: var(--text);
+    }
+    .metric-label,
+    .metric-value {
+      min-width: 0;
+      padding: 6px 0;
+      border-bottom: 1px solid rgba(125, 153, 158, 0.13);
+      font-size: clamp(0.82rem, 1.05vw, 1.18rem);
+      line-height: 1;
+      font-weight: 760;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+    .metric-label {
+      color: var(--muted);
+      text-transform: uppercase;
+    }
+    .metric-label.primary { color: var(--cyan); }
+    .metric-value {
+      color: var(--long);
+      font-size: clamp(0.9rem, 1.22vw, 1.32rem);
+      font-weight: 820;
+      font-variant-numeric: tabular-nums;
+    }
+    .metric-value[data-tone="short"] { color: var(--short); }
+    .metric-value[data-tone="flat"] { color: var(--warn); }
+    .chart-wrap {
+      min-width: 0;
+      min-height: 0;
+      position: relative;
+      display: block;
+      border-top: 1px solid rgba(125, 153, 158, 0.12);
+      border-bottom: 1px solid rgba(125, 153, 158, 0.12);
+      background: #010606;
+    }
+    .overlay {
+      position: absolute;
+      left: 14px;
+      top: 12px;
+      display: grid;
+      gap: 4px;
+      font-size: clamp(0.72rem, 1vw, 1.05rem);
+      line-height: 1;
+      font-weight: 650;
+      pointer-events: none;
+      z-index: 2;
+    }
+    .overlay .vwap { color: var(--magenta); }
+    .overlay .ma { color: var(--blue); }
+    .volume-label {
+      position: absolute;
+      left: 14px;
+      bottom: 42px;
+      color: var(--long);
+      font-size: clamp(0.72rem, 0.95vw, 1rem);
+      line-height: 1;
+      font-weight: 700;
+      pointer-events: none;
+      z-index: 2;
+    }
+    .price-badge {
+      position: absolute;
+      right: 6px;
+      padding: 4px 6px;
+      border-radius: 2px;
+      color: #fff;
+      background: var(--long);
+      font-size: clamp(0.72rem, 0.95vw, 1rem);
+      line-height: 1;
+      font-weight: 760;
+      font-variant-numeric: tabular-nums;
+      pointer-events: none;
+      z-index: 3;
+    }
+    .price-badge[data-kind="vwap"] { background: #8f33d8; }
+    .price-badge[data-tone="short"] { background: var(--short); }
+    .price-badge.hidden { display: none; }
+    .indicators {
+      display: grid;
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+      gap: 10px;
+      min-width: 0;
+    }
+    .indicator {
+      min-width: 0;
+      display: grid;
+      gap: 4px;
+      padding: 7px 8px;
+      border: 1px solid rgba(125, 153, 158, 0.16);
+      background: rgba(8, 18, 20, 0.68);
+      text-align: center;
+      overflow: hidden;
+    }
+    .indicator-label {
+      color: var(--text);
+      font-size: clamp(0.72rem, 1vw, 1rem);
+      line-height: 1;
+      white-space: nowrap;
+    }
+    .indicator-value {
+      color: var(--warn);
+      font-size: clamp(1rem, 1.72vw, 2rem);
+      line-height: 1;
+      font-weight: 820;
+      font-variant-numeric: tabular-nums;
+      white-space: nowrap;
+    }
+    .indicator-value[data-tone="long"] { color: var(--long); }
+    .indicator-value[data-tone="short"] { color: var(--short); }
     .chart {
       display: block;
       width: 100%;
       height: 100%;
-      min-height: 190px;
-      background: #020202;
+      min-height: 0;
+      background: #010606;
     }
     .status {
-      display: grid;
-      grid-template-columns: minmax(0, 1fr) auto;
-      gap: 0.4rem 1rem;
-      color: var(--muted);
-      font-size: clamp(0.9rem, 1.1vw, 1.2rem);
-      line-height: 1.1;
-      font-weight: 500;
-      min-width: 0;
+      display: none;
     }
     .connection[data-state="CONNECTED"] { color: var(--long); }
     .connection[data-state="CONNECTING"] { color: #ddd; }
@@ -1466,27 +1598,68 @@ DASHBOARD_HTML = """<!doctype html>
     .route {
       grid-column: 1 / -1;
       min-height: 1.1em;
-      color: #5f5f5f;
+      color: var(--dim);
       overflow: hidden;
       text-overflow: ellipsis;
       white-space: nowrap;
     }
     .hidden { visibility: hidden; }
+    .dashboard-footer {
+      height: 32px;
+      padding: 0 16px;
+      display: grid;
+      grid-template-columns: auto auto auto minmax(0, 1fr) auto;
+      gap: 28px;
+      align-items: center;
+      color: var(--muted);
+      background: #010606;
+      border-top: 1px solid rgba(125, 153, 158, 0.18);
+      font-size: clamp(0.8rem, 1.15vw, 1.2rem);
+      font-weight: 720;
+      line-height: 1;
+      white-space: nowrap;
+    }
+    .dashboard-footer .live { color: var(--long); }
+    .dashboard-footer .stale { color: var(--warn); }
+    .dashboard-footer .offline { color: var(--short); }
   </style>
 </head>
 <body>
   <main id="dashboard" aria-live="polite" aria-atomic="false"></main>
   <template id="panel-template">
     <article class="panel">
-      <header class="instrument">
-        <h2 class="name"></h2>
-        <div class="symbol"></div>
+      <header class="top">
+        <div class="identity">
+          <h2 class="name"></h2>
+          <div class="symbol"></div>
+          <div class="last-price">--</div>
+          <div class="change" data-tone="flat">--</div>
+        </div>
+        <div class="signal-table">
+          <div class="metric-label primary">Trend</div>
+          <div class="metric-value trend">--</div>
+          <div class="metric-label">Confidence</div>
+          <div class="metric-value confidence">--</div>
+          <div class="metric-label">Bias</div>
+          <div class="metric-value bias">--</div>
+        </div>
       </header>
-      <section>
-        <h1 class="regime">NO DATA</h1>
-        <p class="confidence">Confidence: --</p>
+      <section class="chart-wrap">
+        <div class="overlay">
+          <div class="vwap">VWAP&nbsp;&nbsp;<span class="vwap-value">--</span></div>
+          <div class="ma">MA20&nbsp;&nbsp;<span class="ma-value">--</span></div>
+        </div>
+        <canvas class="chart"></canvas>
+        <div class="volume-label">Vol --</div>
+        <div class="price-badge latest-badge">--</div>
+        <div class="price-badge vwap-badge" data-kind="vwap">--</div>
       </section>
-      <canvas class="chart"></canvas>
+      <section class="indicators">
+        <div class="indicator"><div class="indicator-label">RSI(14)</div><div class="indicator-value rsi">--</div></div>
+        <div class="indicator"><div class="indicator-label">ADX(14)</div><div class="indicator-value adx">--</div></div>
+        <div class="indicator"><div class="indicator-label">MOM(10)</div><div class="indicator-value mom">--</div></div>
+        <div class="indicator"><div class="indicator-label">ATR(14)</div><div class="indicator-value atr">--</div></div>
+      </section>
       <footer class="status">
         <div class="connection" data-state="STARTING">STARTING</div>
         <div class="timestamp">--:--:--</div>
@@ -1495,6 +1668,13 @@ DASHBOARD_HTML = """<!doctype html>
       </footer>
     </article>
   </template>
+  <footer class="dashboard-footer">
+    <span id="footer-market">MARKET --</span>
+    <span>SESSION: <span id="footer-session">--</span></span>
+    <span>TIME: <span id="footer-time">--:--:-- ET</span></span>
+    <span>DATA: <span id="footer-data">--</span></span>
+    <span>ALL TIMES EASTERN</span>
+  </footer>
   <script>
     const DATA_ENDPOINT = "/data";
     const POLL_INTERVAL_MS = 250;
@@ -1503,19 +1683,25 @@ DASHBOARD_HTML = """<!doctype html>
       LONG: "var(--long)",
       SHORT: "var(--short)",
       NO_TRADE: "var(--no-trade)",
+      UNAVAILABLE: "var(--no-data)",
+      STALE: "var(--no-data)",
+      CALCULATION_ERROR: "var(--no-data)",
       "NO DATA": "var(--no-data)",
     };
     const chartAxis = {
-      yLabelFont: "500 22px system-ui, sans-serif",
-      xLabelFont: "500 20px system-ui, sans-serif",
-      yLabelWidth: 94,
-      rightPadding: 72,
-      topPadding: 14,
-      bottomPadding: 44,
-      yLabelGap: 12,
-      xLabelBottomGap: 11,
-      minXLabelGap: 132,
-      fallbackLabelFont: "500 20px system-ui, sans-serif",
+      yLabelFont: "560 17px system-ui, sans-serif",
+      xLabelFont: "560 15px system-ui, sans-serif",
+      yLabelWidth: 76,
+      leftPadding: 14,
+      rightPadding: 92,
+      topPadding: 34,
+      bottomPadding: 62,
+      yLabelGap: 10,
+      xLabelBottomGap: 14,
+      minXLabelGap: 100,
+      priceRangePaddingRatio: 0.16,
+      minPriceRangePixels: 20,
+      fallbackLabelFont: "560 17px system-ui, sans-serif",
     };
     const dashboard = document.getElementById("dashboard");
     const template = document.getElementById("panel-template");
@@ -1529,8 +1715,20 @@ DASHBOARD_HTML = """<!doctype html>
         panel,
         name: fragment.querySelector(".name"),
         symbol: fragment.querySelector(".symbol"),
-        regime: fragment.querySelector(".regime"),
+        lastPrice: fragment.querySelector(".last-price"),
+        change: fragment.querySelector(".change"),
+        trend: fragment.querySelector(".trend"),
         confidence: fragment.querySelector(".confidence"),
+        bias: fragment.querySelector(".bias"),
+        vwapValue: fragment.querySelector(".vwap-value"),
+        maValue: fragment.querySelector(".ma-value"),
+        volumeLabel: fragment.querySelector(".volume-label"),
+        latestBadge: fragment.querySelector(".latest-badge"),
+        vwapBadge: fragment.querySelector(".vwap-badge"),
+        rsi: fragment.querySelector(".rsi"),
+        adx: fragment.querySelector(".adx"),
+        mom: fragment.querySelector(".mom"),
+        atr: fragment.querySelector(".atr"),
         canvas: fragment.querySelector(".chart"),
         connection: fragment.querySelector(".connection"),
         timestamp: fragment.querySelector(".timestamp"),
@@ -1539,8 +1737,8 @@ DASHBOARD_HTML = """<!doctype html>
         current: {},
       };
       panel.dataset.instrument = key;
-      nodes.name.textContent = payload.name || key;
-      nodes.symbol.textContent = payload.symbol || key;
+      nodes.name.textContent = instrumentCode(payload.symbol || key, key);
+      nodes.symbol.textContent = payload.name || payload.symbol || key;
       dashboard.appendChild(fragment);
       panels.set(key, nodes);
       return nodes;
@@ -1555,37 +1753,244 @@ DASHBOARD_HTML = """<!doctype html>
 
     function updatePanel(key, payload) {
       const nodes = ensurePanel(key, payload);
-      updateText(nodes, "name", payload.name || key);
-      updateText(nodes, "symbol", payload.symbol || key);
+      updateText(nodes, "name", instrumentCode(payload.symbol || key, key));
+      updateText(nodes, "symbol", payload.name || payload.symbol || key);
       const calculation = payload.regime_calculation || null;
       const regime = payload.regime || (calculation && calculation.decision) || "UNAVAILABLE";
-      updateText(nodes, "regime", regime);
+      const view = directionView(regime);
+      updateText(nodes, "trend", view.trend);
+      updateText(nodes, "bias", view.bias);
+      nodes.trend.dataset.tone = view.tone;
+      nodes.bias.dataset.tone = view.tone;
       const color = colors[regime] || colors["NO DATA"];
       if (nodes.current.regimeColor !== color) {
         nodes.current.regimeColor = color;
-        nodes.regime.style.color = color;
       }
       const confidence = typeof payload.confidence === "number"
-        ? `Confidence: ${(payload.confidence * 100).toFixed(1)}%`
-        : "Confidence: --";
+        ? `${(payload.confidence * 100).toFixed(1)}%`
+        : "--";
       updateText(nodes, "confidence", confidence);
+      nodes.confidence.dataset.tone = view.tone;
+      const metrics = chartMetrics(payload.chart || null);
+      updateText(nodes, "lastPrice", metrics.lastPriceText);
+      updateText(nodes, "change", metrics.changeText);
+      nodes.change.dataset.tone = metrics.tone;
+      nodes.lastPrice.dataset.tone = metrics.tone;
+      updateText(nodes, "vwapValue", metrics.vwapText);
+      updateText(nodes, "maValue", metrics.ma20Text);
+      updateText(nodes, "volumeLabel", metrics.volumeText);
+      updateText(nodes, "latestBadge", metrics.lastPriceText);
+      updateText(nodes, "vwapBadge", metrics.vwapText);
+      nodes.latestBadge.dataset.tone = metrics.tone;
+      nodes.vwapBadge.classList.toggle("hidden", metrics.vwap == null);
+      updateText(nodes, "rsi", metrics.rsiText);
+      updateText(nodes, "adx", metrics.adxText);
+      updateText(nodes, "mom", metrics.momText);
+      updateText(nodes, "atr", metrics.atrText);
+      nodes.rsi.dataset.tone = metrics.rsiTone;
+      nodes.adx.dataset.tone = metrics.adxTone;
+      nodes.mom.dataset.tone = metrics.momTone;
       const status = payload.connection_status || "UNKNOWN";
       if (nodes.current.connectionStatus !== status) {
         nodes.current.connectionStatus = status;
         nodes.connection.dataset.state = status;
         nodes.connection.textContent = status;
       }
-      updateText(nodes, "timestamp", payload.timestamp || "--:--:--");
-      const route = `id: ${payload.resolved_instrument_id ?? "--"} source: ${payload.last_source_symbol || "--"}`;
+      updateText(nodes, "timestamp", formatSourceTime(payload.regime_source_bar_timestamp || metrics.latestTime));
+      const source = payload.chart && payload.chart.source === "track_b_shared_live_ohlcv_store" ? "SQLite 5m" : "local 5m";
+      const route = `${source} - ${status}`;
       updateText(nodes, "route", route);
       const error = payload.error || payload.regime_error_reason || payload.regime_stale_reason || "";
       updateText(nodes, "error", error);
       nodes.error.classList.toggle("hidden", error === "");
-      updateChart(nodes, payload.chart || null);
+      updateChart(nodes, payload.chart || null, metrics);
+    }
+
+    function directionView(regime) {
+      if (regime === "LONG") return { trend: "LONG", bias: "BULLISH", tone: "long" };
+      if (regime === "SHORT") return { trend: "SHORT", bias: "BEARISH", tone: "short" };
+      if (regime === "NO_TRADE") return { trend: "FLAT", bias: "NEUTRAL", tone: "flat" };
+      if (regime === "STALE") return { trend: "STALE", bias: "STALE", tone: "flat" };
+      if (regime === "CALCULATION_ERROR") return { trend: "ERROR", bias: "ERROR", tone: "flat" };
+      return { trend: "UNAVAILABLE", bias: "UNAVAILABLE", tone: "flat" };
+    }
+
+    function chartMetrics(chart) {
+      const bars = chart && Array.isArray(chart.bars) ? chart.bars : [];
+      const valid = bars.filter((bar) => Number.isFinite(bar.close));
+      if (valid.length === 0) {
+        return {
+          lastPriceText: "--",
+          changeText: "--",
+          tone: "flat",
+          lastPrice: null,
+          latestTime: null,
+          vwap: null,
+          vwapText: "--",
+          ma20: null,
+          ma20Text: "--",
+          volumeText: "Vol --",
+          rsiText: "--",
+          adxText: "--",
+          momText: "--",
+          atrText: "--",
+          rsiTone: "flat",
+          adxTone: "flat",
+          momTone: "flat",
+        };
+      }
+      const latest = valid[valid.length - 1];
+      const previous = valid.length > 1 ? valid[valid.length - 2] : null;
+      const latestClose = latest.close;
+      const delta = previous ? latestClose - previous.close : 0;
+      const pct = previous && previous.close !== 0 ? delta / previous.close : 0;
+      const tone = delta > 0 ? "long" : delta < 0 ? "short" : "flat";
+      const sign = delta > 0 ? "+" : "";
+      const ma20 = movingAverage(valid, 20);
+      const vwap = currentVwap(valid);
+      const technicals = calculateTechnicalMetrics(valid);
+      return {
+        lastPriceText: formatPrice(latestClose),
+        lastPrice: latestClose,
+        changeText: `${sign}${formatDelta(delta)} / ${sign}${(pct * 100).toFixed(2)}%`,
+        tone,
+        latestTime: latest.time || latest.bar_end || chart.latest_bar_ts || null,
+        vwap,
+        vwapText: vwap == null ? "--" : formatPrice(vwap),
+        ma20,
+        ma20Text: ma20 == null ? "--" : formatPrice(ma20),
+        volumeText: `Vol ${formatVolume(latest.volume)}`,
+        rsiText: technicals.rsi == null ? "--" : technicals.rsi.toFixed(1),
+        adxText: technicals.adx == null ? "--" : technicals.adx.toFixed(1),
+        momText: technicals.mom == null ? "--" : `${technicals.mom >= 0 ? "+" : ""}${(technicals.mom * 100).toFixed(2)}%`,
+        atrText: technicals.atr == null ? "--" : formatDelta(technicals.atr),
+        rsiTone: technicals.rsi == null ? "flat" : technicals.rsi >= 50 ? "long" : "short",
+        adxTone: technicals.adx == null ? "flat" : technicals.adx >= 25 ? "long" : "flat",
+        momTone: technicals.mom == null ? "flat" : technicals.mom > 0 ? "long" : technicals.mom < 0 ? "short" : "flat",
+      };
+    }
+
+    function movingAverage(bars, period) {
+      if (bars.length < period) return null;
+      const window = bars.slice(-period);
+      return window.reduce((sum, bar) => sum + bar.close, 0) / period;
+    }
+
+    function movingAverageSeries(bars, period) {
+      return bars.map((bar, index) => {
+        if (index + 1 < period) return null;
+        const window = bars.slice(index + 1 - period, index + 1);
+        return window.reduce((sum, item) => sum + item.close, 0) / period;
+      });
+    }
+
+    function currentVwap(bars) {
+      const series = vwapSeries(bars);
+      return series.length ? series[series.length - 1] : null;
+    }
+
+    function vwapSeries(bars) {
+      let valueVolume = 0;
+      let volume = 0;
+      return bars.map((bar) => {
+        const barVolume = Number.isFinite(bar.volume) && bar.volume > 0 ? bar.volume : 0;
+        if (barVolume === 0) return volume > 0 ? valueVolume / volume : null;
+        const typical = (bar.high + bar.low + bar.close) / 3;
+        valueVolume += typical * barVolume;
+        volume += barVolume;
+        return valueVolume / volume;
+      });
+    }
+
+    function calculateTechnicalMetrics(bars) {
+      const period = 14;
+      const latest = bars[bars.length - 1];
+      const previous = bars.length > 10 ? bars[bars.length - 11] : null;
+      const mom = previous && previous.close !== 0 ? (latest.close - previous.close) / previous.close : null;
+      if (bars.length < period + 1) {
+        return { rsi: null, adx: null, mom, atr: null };
+      }
+      let gains = 0;
+      let losses = 0;
+      let trueRange = 0;
+      for (let index = bars.length - period; index < bars.length; index += 1) {
+        const current = bars[index];
+        const prior = bars[index - 1];
+        const change = current.close - prior.close;
+        gains += Math.max(change, 0);
+        losses += Math.max(-change, 0);
+        trueRange += Math.max(
+          current.high - current.low,
+          Math.abs(current.high - prior.close),
+          Math.abs(current.low - prior.close)
+        );
+      }
+      const avgGain = gains / period;
+      const avgLoss = losses / period;
+      const rsi = avgLoss === 0 ? 100 : 100 - (100 / (1 + avgGain / avgLoss));
+      const atr = trueRange / period;
+      const adx = calculateAdx(bars, period);
+      return { rsi, adx, mom, atr };
+    }
+
+    function calculateAdx(bars, period) {
+      const ranges = [];
+      const plusMoves = [];
+      const minusMoves = [];
+      for (let index = 1; index < bars.length; index += 1) {
+        const current = bars[index];
+        const prior = bars[index - 1];
+        const upMove = current.high - prior.high;
+        const downMove = prior.low - current.low;
+        ranges.push(Math.max(
+          current.high - current.low,
+          Math.abs(current.high - prior.close),
+          Math.abs(current.low - prior.close)
+        ));
+        plusMoves.push(upMove > downMove && upMove > 0 ? upMove : 0);
+        minusMoves.push(downMove > upMove && downMove > 0 ? downMove : 0);
+      }
+      if (ranges.length < period * 2 - 1) return null;
+      let smoothedRange = ranges.slice(0, period).reduce((sum, value) => sum + value, 0);
+      let smoothedPlus = plusMoves.slice(0, period).reduce((sum, value) => sum + value, 0);
+      let smoothedMinus = minusMoves.slice(0, period).reduce((sum, value) => sum + value, 0);
+      const dxValues = [];
+      for (let index = period; index < ranges.length; index += 1) {
+        smoothedRange = smoothedRange - (smoothedRange / period) + ranges[index];
+        smoothedPlus = smoothedPlus - (smoothedPlus / period) + plusMoves[index];
+        smoothedMinus = smoothedMinus - (smoothedMinus / period) + minusMoves[index];
+        if (smoothedRange === 0) {
+          dxValues.push(0);
+          continue;
+        }
+        const plusDi = 100 * (smoothedPlus / smoothedRange);
+        const minusDi = 100 * (smoothedMinus / smoothedRange);
+        const diSum = plusDi + minusDi;
+        dxValues.push(diSum === 0 ? 0 : 100 * Math.abs(plusDi - minusDi) / diSum);
+      }
+      if (dxValues.length < period) return null;
+      let adx = dxValues.slice(0, period).reduce((sum, value) => sum + value, 0) / period;
+      for (let index = period; index < dxValues.length; index += 1) {
+        adx = ((adx * (period - 1)) + dxValues[index]) / period;
+      }
+      return Math.min(100, Math.max(0, adx));
+    }
+
+    function formatSourceTime(value) {
+      if (!value) return "--:--";
+      const date = new Date(value);
+      if (Number.isNaN(date.getTime())) return "--:--";
+      return date.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+    }
+
+    function instrumentCode(symbol, fallback) {
+      const root = String(symbol || fallback || "").split(".")[0].replace(/[^A-Za-z]/g, "");
+      return root ? `/${root}` : `/${fallback}`;
     }
 
     function updateDashboard(payload) {
       const instruments = payload && payload.instruments ? payload.instruments : { MBT: payload || {} };
+      updateFooterStatus(instruments);
       const orderedKeys = PANEL_ORDER.filter((key) => instruments[key]).concat(
         Object.keys(instruments).filter((key) => !PANEL_ORDER.includes(key)).sort()
       );
@@ -1623,13 +2028,17 @@ DASHBOARD_HTML = """<!doctype html>
       }
     }
 
-    function updateChart(nodes, chart) {
+    function updateChart(nodes, chart, metrics) {
       const bars = chart && Array.isArray(chart.bars) ? chart.bars : [];
       const key = JSON.stringify(bars);
       if (nodes.current.chartKey === key) return;
       nodes.current.chartKey = key;
       nodes.current.lastChartPayload = chart || { bars: [] };
+      nodes.current.lastChartMetrics = metrics || null;
       drawChart(nodes.canvas, nodes.current.lastChartPayload);
+      const scale = nodes.canvas._lastPriceScale || null;
+      positionPriceBadge(nodes.latestBadge, scale, metrics ? metrics.lastPrice : null);
+      positionPriceBadge(nodes.vwapBadge, scale, metrics ? metrics.vwap : null);
     }
 
     function resizeChartCanvas(canvas) {
@@ -1649,7 +2058,7 @@ DASHBOARD_HTML = """<!doctype html>
     function drawChart(canvas, chart) {
       const { context, width, height } = resizeChartCanvas(canvas);
       context.clearRect(0, 0, width, height);
-      context.fillStyle = "#020202";
+      context.fillStyle = "#010606";
       context.fillRect(0, 0, width, height);
 
       const bars = chart && Array.isArray(chart.bars) ? chart.bars : [];
@@ -1659,51 +2068,78 @@ DASHBOARD_HTML = """<!doctype html>
         Number.isFinite(bar.low) &&
         Number.isFinite(bar.close)
       );
-      const left = chartAxis.yLabelWidth;
+      const left = chartAxis.leftPadding;
       const right = chartAxis.rightPadding;
       const top = chartAxis.topPadding;
       const bottom = chartAxis.bottomPadding;
       const plotWidth = Math.max(1, width - left - right);
       const plotHeight = Math.max(1, height - top - bottom);
+      const pricePlotHeight = Math.max(1, Math.floor(plotHeight * 0.76));
+      const volumeTop = top + pricePlotHeight + 10;
+      const volumeHeight = Math.max(14, height - bottom - volumeTop);
 
-      context.strokeStyle = "#151515";
+      context.strokeStyle = "rgba(83, 113, 118, 0.18)";
       context.lineWidth = 1;
       for (let i = 0; i <= 4; i += 1) {
-        const y = top + (plotHeight * i / 4);
+        const y = top + (pricePlotHeight * i / 4);
         context.beginPath();
         context.moveTo(left, y);
         context.lineTo(width - right, y);
         context.stroke();
       }
+      for (let i = 0; i <= 5; i += 1) {
+        const x = left + (plotWidth * i / 5);
+        context.beginPath();
+        context.moveTo(x, top);
+        context.lineTo(x, height - bottom + 4);
+        context.stroke();
+      }
 
       if (valid.length === 0) {
-        context.fillStyle = "#555";
+        canvas._lastPriceScale = null;
+        context.fillStyle = "#697174";
         context.font = chartAxis.fallbackLabelFont;
         context.textAlign = "center";
         context.fillText("Waiting for live 5m candles", width / 2, height / 2);
         return;
       }
 
+      const ma20 = movingAverageSeries(valid, 20);
+      const vwap = vwapSeries(valid);
       const highs = valid.map((bar) => bar.high);
       const lows = valid.map((bar) => bar.low);
+      ma20.forEach((value) => {
+        if (value != null) {
+          highs.push(value);
+          lows.push(value);
+        }
+      });
+      vwap.forEach((value) => {
+        if (value != null) {
+          highs.push(value);
+          lows.push(value);
+        }
+      });
       let minPrice = Math.min(...lows);
       let maxPrice = Math.max(...highs);
       const span = Math.max(maxPrice - minPrice, Math.abs(maxPrice) * 0.0005, 1);
-      const padding = span * 0.08;
+      const padding = Math.max(span * chartAxis.priceRangePaddingRatio, span / Math.max(pricePlotHeight, 1) * chartAxis.minPriceRangePixels);
       minPrice -= padding;
       maxPrice += padding;
-      const priceToY = (price) => top + ((maxPrice - price) / (maxPrice - minPrice)) * plotHeight;
+      const priceToY = (price) => top + ((maxPrice - price) / (maxPrice - minPrice)) * pricePlotHeight;
+      canvas._lastPriceScale = { minPrice, maxPrice, top, plotHeight: pricePlotHeight };
       const candleStep = plotWidth / Math.max(valid.length, 1);
       const bodyWidth = Math.max(2, Math.min(12, candleStep * 0.58));
 
       context.font = chartAxis.yLabelFont;
       context.textAlign = "right";
-      context.fillStyle = "#777";
+      context.fillStyle = "#f0f0f0";
       for (let i = 0; i <= 4; i += 1) {
         const price = maxPrice - ((maxPrice - minPrice) * i / 4);
-        context.fillText(formatPrice(price), left - chartAxis.yLabelGap, top + (plotHeight * i / 4) + 7);
+        context.fillText(formatPrice(price), width - 12, top + (pricePlotHeight * i / 4) + 7);
       }
 
+      const maxVolume = Math.max(...valid.map((bar) => Number.isFinite(bar.volume) ? bar.volume : 0), 1);
       const timeLabelIndices = calculateTimeLabelIndices(valid.length, plotWidth);
       valid.forEach((bar, index) => {
         const x = left + candleStep * index + candleStep / 2;
@@ -1723,15 +2159,59 @@ DASHBOARD_HTML = """<!doctype html>
         const bodyTop = Math.min(openY, closeY);
         const bodyHeight = Math.max(2, Math.abs(closeY - openY));
         context.fillRect(x - bodyWidth / 2, bodyTop, bodyWidth, bodyHeight);
+        const volume = Number.isFinite(bar.volume) ? bar.volume : 0;
+        const volumeBarHeight = Math.max(1, (volume / maxVolume) * volumeHeight);
+        context.globalAlpha = bar.completed === false ? 0.25 : 0.45;
+        context.fillRect(
+          x - bodyWidth / 2,
+          volumeTop + volumeHeight - volumeBarHeight,
+          bodyWidth,
+          volumeBarHeight
+        );
         context.globalAlpha = 1;
 
         if (timeLabelIndices.has(index)) {
-          context.fillStyle = "#777";
+          context.fillStyle = "#f0f0f0";
           context.font = chartAxis.xLabelFont;
-          context.textAlign = index === valid.length - 1 ? "right" : "center";
-          context.fillText(formatTimeLabel(bar.time), x, height - chartAxis.xLabelBottomGap);
+          const first = index === 0;
+          const last = index === valid.length - 1;
+          context.textAlign = first ? "left" : last ? "right" : "center";
+          context.fillText(formatTimeLabel(bar.time), first ? left : x, height - chartAxis.xLabelBottomGap);
         }
       });
+      drawLine(context, valid, ma20, priceToY, left, candleStep, "#2f83ff", 1.5);
+      drawLine(context, valid, vwap, priceToY, left, candleStep, "#d948ff", 1.5);
+    }
+
+    function drawLine(context, bars, values, priceToY, left, candleStep, color, width) {
+      context.strokeStyle = color;
+      context.lineWidth = width;
+      context.beginPath();
+      let started = false;
+      values.forEach((value, index) => {
+        if (value == null || !Number.isFinite(value)) return;
+        const x = left + candleStep * index + candleStep / 2;
+        const y = priceToY(value);
+        if (!started) {
+          context.moveTo(x, y);
+          started = true;
+        } else {
+          context.lineTo(x, y);
+        }
+      });
+      if (started) context.stroke();
+    }
+
+    function positionPriceBadge(element, scale, price) {
+      if (!element) return;
+      if (!scale || price == null || !Number.isFinite(price)) {
+        element.classList.add("hidden");
+        return;
+      }
+      const rawY = scale.top + ((scale.maxPrice - price) / (scale.maxPrice - scale.minPrice)) * scale.plotHeight;
+      const clamped = Math.max(scale.top + 4, Math.min(scale.top + scale.plotHeight - 20, rawY - 10));
+      element.style.top = `${clamped}px`;
+      element.classList.remove("hidden");
     }
 
     function calculateTimeLabelIndices(barCount, plotWidth) {
@@ -1763,6 +2243,17 @@ DASHBOARD_HTML = """<!doctype html>
       return Math.abs(value) >= 1000 ? value.toFixed(0) : value.toFixed(2);
     }
 
+    function formatDelta(value) {
+      return Math.abs(value) >= 100 ? value.toFixed(0) : value.toFixed(2);
+    }
+
+    function formatVolume(value) {
+      if (!Number.isFinite(value)) return "--";
+      if (Math.abs(value) >= 1000000) return `${(value / 1000000).toFixed(1)}M`;
+      if (Math.abs(value) >= 1000) return `${(value / 1000).toFixed(1)}K`;
+      return value.toFixed(0);
+    }
+
     function formatTimeLabel(value) {
       const date = new Date(value);
       if (Number.isNaN(date.getTime())) return "";
@@ -1772,8 +2263,38 @@ DASHBOARD_HTML = """<!doctype html>
     window.addEventListener("resize", () => {
       for (const nodes of panels.values()) {
         drawChart(nodes.canvas, nodes.current.lastChartPayload || { bars: [] });
+        const scale = nodes.canvas._lastPriceScale || null;
+        const metrics = nodes.current.lastChartMetrics || null;
+        positionPriceBadge(nodes.latestBadge, scale, metrics ? metrics.lastPrice : null);
+        positionPriceBadge(nodes.vwapBadge, scale, metrics ? metrics.vwap : null);
       }
     });
+    function updateFooterTime() {
+      const node = document.getElementById("footer-time");
+      if (!node) return;
+      node.textContent = `${new Date().toLocaleTimeString("en-US", {
+        timeZone: "America/New_York",
+        hour12: false,
+        hour: "2-digit",
+        minute: "2-digit",
+        second: "2-digit",
+      })} ET`;
+    }
+
+    function updateFooterStatus(instruments) {
+      const values = Object.values(instruments || {});
+      const dataNode = document.getElementById("footer-data");
+      if (!dataNode) return;
+      const hasBars = values.some((item) => item.chart && Array.isArray(item.chart.bars) && item.chart.bars.length > 0);
+      const hasError = values.some((item) =>
+        item.error || item.regime_error_reason || item.regime_stale_reason || item.connection_status === "DASHBOARD_DISCONNECTED"
+      );
+      const label = hasError ? "STALE" : hasBars ? "LIVE" : "--";
+      dataNode.textContent = label;
+      dataNode.className = hasError ? "stale" : hasBars ? "live" : "";
+    }
+    setInterval(updateFooterTime, 1000);
+    updateFooterTime();
     setInterval(pollOnce, POLL_INTERVAL_MS);
     pollOnce();
   </script>

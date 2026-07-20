@@ -785,22 +785,45 @@ def test_dashboard_axis_labels_are_kiosk_readable_and_spaced() -> None:
     assert "grid-template-rows: repeat(2, minmax(0, 1fr))" in html
     assert 'const PANEL_ORDER = ["MNQ", "MES", "MGC", "MBT"]' in html
     assert html.count('class="chart"') == 1
-    assert 'yLabelFont: "500 22px system-ui, sans-serif"' in html
-    assert 'xLabelFont: "500 20px system-ui, sans-serif"' in html
+    assert 'yLabelFont: "560 17px system-ui, sans-serif"' in html
+    assert 'xLabelFont: "560 15px system-ui, sans-serif"' in html
     assert "calculateTimeLabelIndices(valid.length, plotWidth)" in html
+    assert 'context.textAlign = first ? "left" : last ? "right" : "center"' in html
+    assert "context.fillText(formatTimeLabel(bar.time), first ? left : x, height - chartAxis.xLabelBottomGap)" in html
     assert "return new Set(indices)" in html
+    assert 'class="top"' in html
+    assert 'class="last-price"' in html
+    assert 'class="change" data-tone="flat"' in html
+    assert 'class="signal-table"' in html
+    assert 'class="chart-wrap"' in html
+    assert 'class="indicators"' in html
+    assert 'id="footer-market">MARKET --' in html
+    assert 'id="footer-session">--' in html
+    assert 'id="footer-data">--' in html
+    assert "function updateFooterStatus(instruments)" in html
+    assert "VWAP&nbsp;&nbsp;" in html
+    assert "MA20&nbsp;&nbsp;" in html
+    assert "bottom: 42px;" in html
+    assert "RSI(14)" in html
+    assert "ADX(14)" in html
+    assert "MOM(10)" in html
+    assert "ATR(14)" in html
+    assert "function instrumentCode(symbol, fallback)" in html
+    assert "const regime = payload.regime || (calculation && calculation.decision) || \"UNAVAILABLE\"" in html
+    assert "typeof payload.confidence === \"number\"" in html
+    assert "const metrics = chartMetrics(payload.chart || null)" in html
 
     antix_panel_width = (1920 - 24) / 2
-    plot_width = antix_panel_width - 24 - 94 - 72
+    plot_width = antix_panel_width - 28 - 14 - 92
     candle_step = plot_width / 72
-    max_labels = max(2, int(plot_width // 132))
+    max_labels = max(2, int(plot_width // 100))
     tick_every = max(1, (72 + max_labels - 1) // max_labels)
     label_indices = []
     for index in range(0, 72, tick_every):
         distance_to_final = (71 - index) * candle_step
-        if index == 0 or distance_to_final >= 132:
+        if index == 0 or distance_to_final >= 100:
             label_indices.append(index)
-    if (71 - label_indices[-1]) * candle_step >= 132:
+    if (71 - label_indices[-1]) * candle_step >= 100:
         label_indices.append(71)
     else:
         label_indices[-1] = 71
@@ -808,7 +831,83 @@ def test_dashboard_axis_labels_are_kiosk_readable_and_spaced() -> None:
     assert tick_every >= 6
     assert len(label_indices) <= max_labels
     assert label_indices[-1] == 71
-    assert min((b - a) * candle_step for a, b in zip(label_indices, label_indices[1:])) >= 132
+    assert min((b - a) * candle_step for a, b in zip(label_indices, label_indices[1:])) >= 100
+
+
+def test_dashboard_chart_geometry_keeps_latest_mnq_mes_candles_inside_panel() -> None:
+    left = 14
+    right = 92
+    top = 34
+    bottom = 62
+    width = 612
+    height = 320
+    bar_count = 72
+    plot_width = width - left - right
+    plot_height = height - top - bottom
+    price_plot_height = int(plot_height * 0.76)
+    candle_step = plot_width / bar_count
+    body_width = max(2, min(12, candle_step * 0.58))
+    latest_x = left + candle_step * (bar_count - 1) + candle_step / 2
+
+    assert latest_x + body_width / 2 < width - right
+    assert latest_x - body_width / 2 > left
+
+    span = 40.0
+    padding = max(span * 0.16, span / price_plot_height * 20)
+    high_y = top + (padding / (span + 2 * padding)) * price_plot_height
+    low_y = top + ((span + padding) / (span + 2 * padding)) * price_plot_height
+
+    assert high_y - top >= 20
+    assert (top + price_plot_height) - low_y >= 20
+
+    raw_badge_y = high_y - 10
+    clamped_badge_y = max(top + 4, min(top + price_plot_height - 20, raw_badge_y))
+    assert top <= clamped_badge_y <= top + price_plot_height - 20
+
+
+def test_dashboard_panels_prevent_overflow_at_supported_sizes() -> None:
+    html = regime_monitor.DASHBOARD_HTML
+
+    assert ".panel {" in html
+    assert "min-width: 0;" in html
+    assert "min-height: 0;" in html
+    assert "overflow: hidden;" in html
+    assert "grid-template-columns: minmax(0, 0.9fr) minmax(0, 1.7fr)" in html
+    assert "grid-template-columns: repeat(4, minmax(0, 1fr))" in html
+    assert "white-space: nowrap;" in html
+    assert "text-overflow: ellipsis;" in html
+    assert "font-variant-numeric: tabular-nums;" in html
+    assert ".price-badge.hidden { display: none; }" in html
+
+
+def test_dashboard_preserves_runtime_field_mapping_for_direction_and_chart() -> None:
+    html = regime_monitor.DASHBOARD_HTML
+
+    assert "payload.regime" in html
+    assert "payload.regime_calculation" in html
+    assert "payload.confidence" in html
+    assert "payload.chart || null" in html
+    assert "chartMetrics(payload.chart || null)" in html
+    assert "payload.regime_source_bar_timestamp || metrics.latestTime" in html
+    assert 'if (regime === "LONG") return { trend: "LONG", bias: "BULLISH", tone: "long" }' in html
+    assert 'if (regime === "SHORT") return { trend: "SHORT", bias: "BEARISH", tone: "short" }' in html
+    assert 'if (regime === "NO_TRADE") return { trend: "FLAT", bias: "NEUTRAL", tone: "flat" }' in html
+
+
+def test_dashboard_mockup_indicators_are_derived_from_chart_bars() -> None:
+    html = regime_monitor.DASHBOARD_HTML
+
+    assert "function movingAverageSeries(bars, period)" in html
+    assert "function vwapSeries(bars)" in html
+    assert "function calculateTechnicalMetrics(bars)" in html
+    assert "function calculateAdx(bars, period)" in html
+    assert "const ma20 = movingAverage(valid, 20)" in html
+    assert "const vwap = currentVwap(valid)" in html
+    assert "const technicals = calculateTechnicalMetrics(valid)" in html
+    assert "updateText(nodes, \"rsi\", metrics.rsiText)" in html
+    assert "updateText(nodes, \"adx\", metrics.adxText)" in html
+    assert "updateText(nodes, \"mom\", metrics.momText)" in html
+    assert "updateText(nodes, \"atr\", metrics.atrText)" in html
 
 
 def test_monitor_files_do_not_hard_code_patrick_home_or_magic_output_paths() -> None:
