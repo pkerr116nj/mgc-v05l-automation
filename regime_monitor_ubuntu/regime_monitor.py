@@ -13,6 +13,7 @@ import argparse
 import json
 import logging
 import os
+import sys
 import tempfile
 import threading
 import time
@@ -39,6 +40,10 @@ DEFAULT_STATE_DIR = Path("/var/lib/regime-monitor")
 DEFAULT_STATE_FILE_NAME = "candle_state.json"
 MULTI_CANDLE_STATE_SCHEMA_VERSION = "regime_monitor_multi_candle_state_v2"
 ROUTING_RECORD_DIAGNOSTIC_LIMIT = 20
+DEFAULT_SHARED_OHLCV_DB_PATH = Path("var") / "track_b_shared_live_ohlcv.sqlite3"
+DEFAULT_TRACK_B_MONITOR_INSTRUMENT_KEYS = ("MNQ", "MES", "MGC")
+MONITOR_ONLY_TRACK_B_INSTRUMENT_KEYS = ("MBT",)
+DEFAULT_MONITOR_INSTRUMENT_KEYS = DEFAULT_TRACK_B_MONITOR_INSTRUMENT_KEYS + MONITOR_ONLY_TRACK_B_INSTRUMENT_KEYS
 
 
 @dataclass(frozen=True)
@@ -57,28 +62,114 @@ class RegimeSnapshot:
 
 
 @dataclass(frozen=True)
-class DatabentoFeedConfig:
-    api_key: str | None
-    dataset: str = "GLBX.MDP3"
-    schema: str = "trades"
-    symbols: tuple[str, ...] = ("MNQ.v.0", "MES.v.0", "MGC.v.0", "MBT.v.0")
-    stype_in: str = "continuous"
-    reconnect_interval: float = 5.0
-
-
-@dataclass(frozen=True)
 class InstrumentConfig:
     key: str
     name: str
     symbol: str
 
 
-DEFAULT_INSTRUMENTS: tuple[InstrumentConfig, ...] = (
-    InstrumentConfig("MNQ", "Micro Nasdaq", "MNQ.v.0"),
-    InstrumentConfig("MES", "Micro S&P", "MES.v.0"),
-    InstrumentConfig("MGC", "Micro Gold", "MGC.v.0"),
-    InstrumentConfig("MBT", "Micro Bitcoin", "MBT.v.0"),
-)
+def load_default_instruments_from_catalog(
+    *,
+    catalog_path: Path | str | None = None,
+    instrument_keys: tuple[str, ...] = DEFAULT_MONITOR_INSTRUMENT_KEYS,
+) -> tuple[InstrumentConfig, ...]:
+    namelist = _load_track_b_live_market_data_symbols(catalog_path=catalog_path)
+    if namelist is None:
+        return ()
+    by_symbol = namelist.by_symbol()
+    instruments: list[InstrumentConfig] = []
+    missing: list[str] = []
+    missing_labels: list[str] = []
+    for key in instrument_keys:
+        row = by_symbol.get(key)
+        if row is None or not row.enabled or not row.databento_symbol:
+            missing.append(key)
+            continue
+        display_label = str(getattr(row, "display_label", "") or "").strip()
+        if not display_label:
+            missing_labels.append(key)
+            continue
+        instruments.append(InstrumentConfig(key=key, name=display_label, symbol=row.databento_symbol))
+    if missing:
+        raise ValueError(
+            "Regime monitor default instruments are missing enabled Track B catalog rows: "
+            + ", ".join(missing)
+            + "."
+        )
+    if missing_labels:
+        raise ValueError(
+            "Regime monitor default instruments are missing Track B display labels: "
+            + ", ".join(missing_labels)
+            + "."
+        )
+    return tuple(instruments)
+
+
+def _load_track_b_live_market_data_symbols(*, catalog_path: Path | str | None = None) -> Any | None:
+    try:
+        from mgc_v05l.execution_core.track_b_live_market_data_symbols import (
+            DEFAULT_TRACK_B_LIVE_MARKET_DATA_SYMBOLS_PATH,
+            load_track_b_live_market_data_symbols,
+        )
+    except ModuleNotFoundError as exc:
+        if exc.name != "mgc_v05l":
+            raise
+        repo_source_root = Path(__file__).resolve().parents[1] / "src"
+        if not repo_source_root.exists():
+            return None
+        sys.path.insert(0, str(repo_source_root))
+        from mgc_v05l.execution_core.track_b_live_market_data_symbols import (
+            DEFAULT_TRACK_B_LIVE_MARKET_DATA_SYMBOLS_PATH,
+            load_track_b_live_market_data_symbols,
+        )
+
+    return load_track_b_live_market_data_symbols(catalog_path or DEFAULT_TRACK_B_LIVE_MARKET_DATA_SYMBOLS_PATH)
+
+
+def _shared_ohlcv_chart_payload(
+    *,
+    path: Path | None,
+    symbol: str,
+    timeframe: str,
+    limit: int,
+) -> dict[str, Any] | None:
+    if path is None:
+        return None
+    try:
+        from mgc_v05l.market_data.shared_live_ohlcv_store import shared_live_ohlcv_chart_payload
+    except ModuleNotFoundError as exc:
+        if exc.name != "mgc_v05l":
+            raise
+        repo_source_root = Path(__file__).resolve().parents[1] / "src"
+        if not repo_source_root.exists():
+            return None
+        if str(repo_source_root) not in sys.path:
+            sys.path.insert(0, str(repo_source_root))
+        from mgc_v05l.market_data.shared_live_ohlcv_store import shared_live_ohlcv_chart_payload
+
+    try:
+        return shared_live_ohlcv_chart_payload(path=path, symbol=symbol, timeframe=timeframe, limit=limit)
+    except Exception as exc:  # noqa: BLE001 - monitor dashboard should degrade to its in-process chart.
+        LOGGER.warning("shared_ohlcv_chart_payload_unavailable symbol=%s path=%s error=%s", symbol, path, exc)
+        return None
+
+
+DEFAULT_INSTRUMENTS: tuple[InstrumentConfig, ...] = load_default_instruments_from_catalog()
+DEFAULT_DATABENTO_SYMBOLS: tuple[str, ...] = tuple(config.symbol for config in DEFAULT_INSTRUMENTS)
+
+
+@dataclass(frozen=True)
+class DatabentoFeedConfig:
+    api_key: str | None
+    dataset: str = "GLBX.MDP3"
+    schema: str = "trades"
+    symbols: tuple[str, ...] = ()
+    stype_in: str = "continuous"
+    reconnect_interval: float = 5.0
+
+    def __post_init__(self) -> None:
+        if not self.symbols:
+            object.__setattr__(self, "symbols", DEFAULT_DATABENTO_SYMBOLS)
 
 
 @dataclass(frozen=True)
@@ -503,11 +594,13 @@ class MultiInstrumentMonitorState:
         state_dir: Path,
         bar_limit: int = DEFAULT_CHART_BAR_LIMIT,
         persist_interval: float = 1.0,
+        shared_ohlcv_db_path: Path | None = None,
     ) -> None:
         self.instruments = instruments
         self.state_dir = state_dir
         self.state_path = state_dir / DEFAULT_STATE_FILE_NAME
         self.bar_limit = bar_limit
+        self.shared_ohlcv_db_path = shared_ohlcv_db_path
         self.persist_interval = max(0.0, float(persist_interval))
         self._last_persist_monotonic = 0.0
         self._lock = threading.Lock()
@@ -619,9 +712,27 @@ class MultiInstrumentMonitorState:
         return None
 
     def payload(self) -> dict[str, Any]:
+        instruments_payload: dict[str, Any] = {}
+        for config in self.instruments:
+            item = self._instrument_by_key[config.key].payload()
+            shared_chart = _shared_ohlcv_chart_payload(
+                path=self.shared_ohlcv_db_path,
+                symbol=config.key,
+                timeframe="5m",
+                limit=self.bar_limit,
+            )
+            if shared_chart is not None:
+                item["chart"] = shared_chart
+            instruments_payload[config.key] = item
         return {
             "schema_version": "regime_monitor_multi_instrument_v1",
             "generated_at": utc_now_text(),
+            "chart_source": {
+                "preferred_source": "shared_live_ohlcv_store",
+                "shared_ohlcv_db_path": None if self.shared_ohlcv_db_path is None else str(self.shared_ohlcv_db_path),
+                "timeframe": "5m",
+                "bar_limit": self.bar_limit,
+            },
             "routing": {
                 "schema_version": "regime_monitor_databento_routing_v1",
                 "instrument_id_map": {
@@ -633,10 +744,7 @@ class MultiInstrumentMonitorState:
                 "last_unmapped_at": self._last_unmapped_at,
                 **self._routing_diagnostics.payload(instrument_map=self._instrument_id_to_key),
             },
-            "instruments": {
-                config.key: self._instrument_by_key[config.key].payload()
-                for config in self.instruments
-            },
+            "instruments": instruments_payload,
         }
 
     def persist(self) -> None:
@@ -1555,6 +1663,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--stype-in", help="Databento input symbol type.")
     parser.add_argument("--reconnect-interval", type=float, help="Databento reconnect interval in seconds.")
     parser.add_argument("--chart-bar-limit", type=int, help="Maximum five-minute candles to display.")
+    parser.add_argument("--shared-ohlcv-db-path", type=Path, help="Bounded local OHLCV SQLite source for charts.")
     parser.add_argument("--state-dir", type=Path, help="Directory for bounded persisted runtime state.")
     parser.add_argument("--host", default="0.0.0.0")
     parser.add_argument("--port", type=int, default=5000)
@@ -1592,6 +1701,19 @@ def resolve_state_dir(*, config: dict[str, object], state_dir_override: object =
     return Path(str(state_dir_value or DEFAULT_STATE_DIR)).expanduser()
 
 
+def resolve_shared_ohlcv_db_path(
+    *,
+    config: dict[str, object],
+    shared_ohlcv_db_path_override: object = None,
+) -> Path | None:
+    if config.get("shared_ohlcv_db_enabled") is False:
+        return None
+    env_name = str(config.get("shared_ohlcv_db_path_env") or "REGIME_MONITOR_SHARED_OHLCV_DB_PATH").strip()
+    value = shared_ohlcv_db_path_override or os.environ.get(env_name) or config.get("shared_ohlcv_db_path")
+    path = Path(str(value or DEFAULT_SHARED_OHLCV_DB_PATH)).expanduser()
+    return path
+
+
 def main() -> int:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
     args = parse_args()
@@ -1607,12 +1729,17 @@ def main() -> int:
     reconnect_interval = float(args.reconnect_interval or config.get("reconnect_interval", 5.0))
     chart_bar_limit = int(args.chart_bar_limit or config.get("chart_bar_limit", DEFAULT_CHART_BAR_LIMIT))
     state_dir = resolve_state_dir(config=config, state_dir_override=args.state_dir)
+    shared_ohlcv_db_path = resolve_shared_ohlcv_db_path(
+        config=config,
+        shared_ohlcv_db_path_override=args.shared_ohlcv_db_path,
+    )
     host = str(config.get("host") or args.host)
     port = int(config.get("port") or args.port)
     state = MultiInstrumentMonitorState(
         instruments=instruments,
         state_dir=state_dir,
         bar_limit=chart_bar_limit,
+        shared_ohlcv_db_path=shared_ohlcv_db_path,
     )
     stop_event = threading.Event()
     worker = threading.Thread(

@@ -45,6 +45,11 @@ from mgc_v05l.market_data.phase1_market_session import (
     phase1_symbol_allows_stale_trade_bars,
     phase1_symbol_market_freshness_policy,
 )
+from mgc_v05l.market_data.shared_live_ohlcv_store import (
+    DEFAULT_SHARED_LIVE_OHLCV_DB_PATH,
+    DEFAULT_SHARED_LIVE_OHLCV_MAX_BARS_PER_KEY,
+    SharedLiveOhlcvStore,
+)
 from mgc_v05l.session_phase_labels import NEW_YORK, label_session_phase, session_restriction_matches_timestamp
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
@@ -157,6 +162,8 @@ class Phase1DatabentoLiveListenerConfig:
     intraday_backfill_root: Path = DEFAULT_INTRADAY_BACKFILL_ROOT
     report_dir: Path = DEFAULT_REPORT_DIR
     raw_dbn_root: Path = DEFAULT_RAW_DBN_ROOT
+    shared_ohlcv_db_path: Path | None = DEFAULT_SHARED_LIVE_OHLCV_DB_PATH
+    shared_ohlcv_max_bars_per_symbol_timeframe: int = DEFAULT_SHARED_LIVE_OHLCV_MAX_BARS_PER_KEY
     live_market_data_symbols_path: Path = DEFAULT_TRACK_B_LIVE_MARKET_DATA_SYMBOLS_PATH
     symbols: tuple[str, ...] | None = None
     dataset: str = DEFAULT_DATABENTO_DATASET
@@ -572,6 +579,12 @@ class _LiveListenerState:
             "subscription_status": self.subscription_status,
             "listener_alive": self.listener_alive,
             "raw_dbn_path": str(self.raw_dbn_path),
+            "shared_ohlcv_db_path": (
+                None
+                if self.config.shared_ohlcv_db_path is None
+                else str(_resolve_path(self.config.repo_root, self.config.shared_ohlcv_db_path))
+            ),
+            "shared_ohlcv_max_bars_per_symbol_timeframe": self.config.shared_ohlcv_max_bars_per_symbol_timeframe,
             "latest_record_at": None if self.latest_record_at is None else self.latest_record_at.isoformat(),
             "records_received": self.records_received,
             "ohlcv_records_received": self.ohlcv_records_received,
@@ -833,6 +846,14 @@ def _write_symbol_runtime_artifacts_from_bars(
     )
     timeframe_bars = _timeframe_bars(one_minute, live_symbol=live_symbol)
     written: list[Path] = []
+    shared_ohlcv_path = _write_shared_ohlcv_store_from_timeframe_bars(
+        config=config,
+        live_symbol=live_symbol,
+        symbol=symbol,
+        timeframe_bars=timeframe_bars,
+        generated_at=generated_at,
+        raw_dbn_path=raw_dbn_path,
+    )
     for timeframe in PHASE1_RUNTIME_TIMEFRAMES:
         payload = _runtime_payload_for_service(
             config=config,
@@ -842,6 +863,7 @@ def _write_symbol_runtime_artifacts_from_bars(
             generated_at=generated_at,
             bars=timeframe_bars.get(timeframe, []),
             raw_dbn_path=raw_dbn_path,
+            shared_ohlcv_db_path=shared_ohlcv_path,
         )
         path = _runtime_candle_path_for_listener(config=config, symbol=symbol, timeframe=timeframe)
         existing = _read_json(path)
@@ -860,6 +882,7 @@ def _write_symbol_runtime_artifacts_from_bars(
             generated_at=generated_at,
             bars=_timeframe_bars(source_one_minute, live_symbol=live_symbol).get(timeframe, []),
             raw_dbn_path=raw_dbn_path,
+            shared_ohlcv_db_path=shared_ohlcv_path,
         )
         if existing_confirmed:
             if payload["realtime_feed_confirmed"] is not True or source_payload["realtime_feed_confirmed"] is not True:
@@ -922,6 +945,7 @@ def _write_intraday_backfill_artifacts_from_bars(
             generated_at=generated_at,
             bars=timeframe_bars.get(timeframe, []),
             raw_dbn_path=raw_dbn_path,
+            shared_ohlcv_db_path=None,
         )
         payload.update(
             {
@@ -952,6 +976,7 @@ def _runtime_payload_for_service(
     generated_at: datetime,
     bars: Sequence[Mapping[str, Any]],
     raw_dbn_path: Path,
+    shared_ohlcv_db_path: Path | None = None,
 ) -> dict[str, Any]:
     generated_at = _coerce_now(generated_at)
     normalized_bars = [dict(bar) for bar in bars]
@@ -994,12 +1019,50 @@ def _runtime_payload_for_service(
         "sunday_session_label": label_session_phase(generated_at),
         "sunday_globex_session_supported": session_restriction_matches_timestamp(generated_at, "ASIA"),
         "raw_dbn_evidence_path": str(raw_dbn_path),
+        "shared_ohlcv_db_path": None if shared_ohlcv_db_path is None else str(shared_ohlcv_db_path),
+        "shared_ohlcv_retention_policy": (
+            None
+            if shared_ohlcv_db_path is None
+            else f"BOUNDED_RECENT_BARS_PER_SYMBOL_TIMEFRAME_{config.shared_ohlcv_max_bars_per_symbol_timeframe}"
+        ),
         "databento_live_api_replay": bool(config.intraday_replay_start),
         "can_submit": False,
         "paper_trade_allowed": False,
         "live_money_eligible": False,
         "bars": normalized_bars,
     }
+
+
+def _write_shared_ohlcv_store_from_timeframe_bars(
+    *,
+    config: Phase1DatabentoLiveListenerConfig,
+    live_symbol: TrackBLiveMarketDataSymbol,
+    symbol: str,
+    timeframe_bars: Mapping[str, Sequence[Mapping[str, Any]]],
+    generated_at: datetime,
+    raw_dbn_path: Path,
+) -> Path | None:
+    if config.shared_ohlcv_db_path is None:
+        return None
+    path = _resolve_path(config.repo_root, config.shared_ohlcv_db_path)
+    store = SharedLiveOhlcvStore(
+        path,
+        max_bars_per_symbol_timeframe=config.shared_ohlcv_max_bars_per_symbol_timeframe,
+    )
+    for timeframe in PHASE1_RUNTIME_TIMEFRAMES:
+        store.upsert_mapping_bars(
+            symbol=symbol,
+            timeframe=timeframe,
+            bars=timeframe_bars.get(timeframe, []),
+            source=SOURCE_ID,
+            generated_at=generated_at,
+            dataset=live_symbol.dataset,
+            schema=live_symbol.schema,
+            request_symbol=live_symbol.databento_symbol,
+            source_id=f"{config.source_id}_{symbol.lower()}",
+            raw_dbn_path=raw_dbn_path,
+        )
+    return path
 
 
 def _all_timeframes_confirmed(
@@ -1655,6 +1718,13 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--intraday-backfill-root", default=str(DEFAULT_INTRADAY_BACKFILL_ROOT))
     parser.add_argument("--report-dir", default=str(DEFAULT_REPORT_DIR))
     parser.add_argument("--raw-dbn-root", default=str(DEFAULT_RAW_DBN_ROOT))
+    parser.add_argument("--shared-ohlcv-db-path", default=str(DEFAULT_SHARED_LIVE_OHLCV_DB_PATH))
+    parser.add_argument(
+        "--shared-ohlcv-max-bars-per-symbol-timeframe",
+        type=int,
+        default=DEFAULT_SHARED_LIVE_OHLCV_MAX_BARS_PER_KEY,
+    )
+    parser.add_argument("--disable-shared-ohlcv-db", action="store_true")
     parser.add_argument("--legacy-live-output-root", default=str(DEFAULT_TRACK_B_DATABENTO_LIVE_RUNTIME_FEED_OUTPUT_ROOT))
     parser.add_argument("--dataset", default=DEFAULT_DATABENTO_DATASET)
     parser.add_argument("--schema", default="ohlcv-1m")
@@ -1686,6 +1756,10 @@ def main(argv: Sequence[str] | None = None) -> int:
                 intraday_backfill_root=Path(args.intraday_backfill_root),
                 report_dir=Path(args.report_dir),
                 raw_dbn_root=Path(args.raw_dbn_root),
+                shared_ohlcv_db_path=None
+                if args.disable_shared_ohlcv_db
+                else Path(args.shared_ohlcv_db_path),
+                shared_ohlcv_max_bars_per_symbol_timeframe=args.shared_ohlcv_max_bars_per_symbol_timeframe,
                 live_market_data_symbols_path=Path(args.live_market_data_symbols_path),
                 symbols=symbols,
                 dataset=args.dataset,

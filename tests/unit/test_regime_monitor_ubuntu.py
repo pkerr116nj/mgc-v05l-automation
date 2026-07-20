@@ -9,6 +9,9 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
 
+from mgc_v05l.execution_core.track_b_live_market_data_symbols import load_track_b_live_market_data_symbols
+from mgc_v05l.market_data.shared_live_ohlcv_store import SharedLiveOhlcvStore
+
 
 class _FakeFlask:
     def __init__(self, *_args: object, **_kwargs: object) -> None:
@@ -126,6 +129,62 @@ def test_default_instruments_use_verified_continuous_front_month_symbols() -> No
         ("MBT", "MBT.v.0"),
     ]
     assert regime_monitor.DatabentoFeedConfig(api_key="x").stype_in == "continuous"
+
+
+def test_default_instruments_are_loaded_from_shared_track_b_catalog() -> None:
+    catalog = load_track_b_live_market_data_symbols().by_symbol()
+    expected = [
+        (key, catalog[key].display_label, catalog[key].databento_symbol)
+        for key in regime_monitor.DEFAULT_MONITOR_INSTRUMENT_KEYS
+    ]
+
+    assert regime_monitor.MONITOR_ONLY_TRACK_B_INSTRUMENT_KEYS == ("MBT",)
+    assert [(item.key, item.name, item.symbol) for item in regime_monitor.DEFAULT_INSTRUMENTS] == expected
+    assert regime_monitor.DatabentoFeedConfig(api_key="x").symbols == tuple(symbol for _, _, symbol in expected)
+
+
+def test_multi_instrument_monitor_charts_prefer_shared_ohlcv_store_and_catalog_labels(tmp_path: Path) -> None:
+    db_path = tmp_path / "shared.sqlite3"
+    store = SharedLiveOhlcvStore(db_path)
+    bars = [
+        {
+            "bar_start": "2026-07-20T06:00:00+00:00",
+            "bar_end": "2026-07-20T06:05:00+00:00",
+            "open": "22000",
+            "high": "22010",
+            "low": "21990",
+            "close": "22005",
+            "volume": 100,
+            "completed": True,
+        },
+        {
+            "bar_start": "2026-07-20T06:05:00+00:00",
+            "bar_end": "2026-07-20T06:10:00+00:00",
+            "open": "22005",
+            "high": "22015",
+            "low": "22000",
+            "close": "22012",
+            "volume": 110,
+            "completed": True,
+        },
+    ]
+    store.upsert_mapping_bars(symbol="MNQ", timeframe="5m", bars=bars, source="DATABENTO_REALTIME_PHASE1")
+
+    state = regime_monitor.MultiInstrumentMonitorState(
+        instruments=regime_monitor.DEFAULT_INSTRUMENTS,
+        state_dir=tmp_path,
+        bar_limit=72,
+        shared_ohlcv_db_path=db_path,
+    )
+    payload = state.payload()
+    mnq = payload["instruments"]["MNQ"]
+    catalog_row = load_track_b_live_market_data_symbols().by_symbol()["MNQ"]
+
+    assert payload["chart_source"]["shared_ohlcv_db_path"] == str(db_path)
+    assert mnq["name"] == catalog_row.display_label
+    assert mnq["symbol"] == catalog_row.databento_symbol
+    assert mnq["chart"]["source"] == "track_b_shared_live_ohlcv_store"
+    assert [row["time"] for row in mnq["chart"]["bars"]] == [bar["bar_end"] for bar in bars]
 
 
 def test_successful_databento_stream_clears_package_missing_status() -> None:

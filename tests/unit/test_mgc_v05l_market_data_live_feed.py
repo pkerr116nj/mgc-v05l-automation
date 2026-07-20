@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import json
+import socket
+import threading
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from decimal import Decimal
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -15,13 +18,18 @@ from mgc_v05l.market_data.live_feed import (
     databento_live_auth_response,
     HistoricalPollingLiveClient,
     LivePollingService,
+    Phase1RuntimeArtifactMalformedResponseError,
     Phase1RuntimeArtifactMarketClosedError,
     Phase1RuntimeArtifactPollingClient,
     Phase1RuntimeArtifactStaleError,
+    Phase1RuntimeArtifactTransportError,
     databento_live_effective_end,
     databento_live_format_timestamp,
     phase1_runtime_artifact_poll_cache,
     _DatabentoRawLiveSession,
+)
+from mgc_v05l.execution_core.phase1_runtime_artifact_http_server import (
+    build_phase1_runtime_artifact_http_handler,
 )
 from mgc_v05l.market_data.phase1_market_session import (
     MARKET_CLOSED_NO_FRESH_BARS,
@@ -163,6 +171,7 @@ def _write_phase1_runtime_artifact(
         "symbol": symbol,
         "instrument": symbol,
         "timeframe": timeframe,
+        "schema": "ohlcv-1m",
         "freshness_seconds": 180,
         "historical_seed_ready": False,
         "research_artifact_used": False,
@@ -186,6 +195,55 @@ def _write_phase1_runtime_artifact(
     payload.update(overrides)
     path.write_text(json.dumps(payload, sort_keys=True, indent=2) + "\n", encoding="utf-8")
     return path
+
+
+class _StartedHttpServer:
+    def __init__(self, server: ThreadingHTTPServer, thread: threading.Thread) -> None:
+        self.server = server
+        self.thread = thread
+
+    @property
+    def base_url(self) -> str:
+        host, port = self.server.server_address
+        return f"http://{host}:{port}/"
+
+    def stop(self) -> None:
+        self.server.shutdown()
+        self.server.server_close()
+        self.thread.join(timeout=5)
+
+
+def _start_artifact_http_server(root: Path) -> _StartedHttpServer:
+    handler = build_phase1_runtime_artifact_http_handler(artifact_root=root)
+    server = ThreadingHTTPServer(("127.0.0.1", 0), handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    return _StartedHttpServer(server, thread)
+
+
+def _unused_local_port() -> int:
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        sock.bind(("127.0.0.1", 0))
+        return int(sock.getsockname()[1])
+
+
+def _bar_fingerprint(bars: list[Bar]) -> list[tuple[object, ...]]:
+    return [
+        (
+            bar.bar_id,
+            bar.symbol,
+            bar.timeframe,
+            bar.start_ts,
+            bar.end_ts,
+            bar.open,
+            bar.high,
+            bar.low,
+            bar.close,
+            bar.volume,
+            bar.is_final,
+        )
+        for bar in bars
+    ]
 
 
 def test_phase1_runtime_artifact_polling_client_reads_fresh_completed_bars_and_filters_since(
@@ -254,6 +312,167 @@ def test_phase1_runtime_artifact_polling_client_reads_fresh_completed_bars_and_f
     assert [bar.end_ts.isoformat() for bar in bars] == ["2026-05-18T12:00:00+00:00"]
     assert bars[0].symbol == "MNQ"
     assert bars[0].bar_id.startswith("MNQ|1m|")
+
+
+def test_phase1_runtime_artifact_http_transport_matches_filesystem_results(tmp_path: Path) -> None:
+    root = tmp_path / "phase1_runtime_market_data"
+    _write_phase1_runtime_artifact(
+        root,
+        bars=[
+            {
+                "bar_start": "2026-05-18T11:58:00+00:00",
+                "bar_end": "2026-05-18T11:59:00+00:00",
+                "open": 100,
+                "high": 101,
+                "low": 99,
+                "close": 100,
+                "volume": 10,
+                "completed": True,
+            },
+            {
+                "bar_start": "2026-05-18T11:59:00+00:00",
+                "bar_end": "2026-05-18T12:00:00+00:00",
+                "open": 100,
+                "high": 102,
+                "low": 99,
+                "close": 101,
+                "volume": 11,
+                "completed": True,
+            },
+        ],
+    )
+    server = _start_artifact_http_server(root)
+    cache_dir = tmp_path / "cache"
+    try:
+        now_fn = lambda: datetime.fromisoformat("2026-05-18T12:00:20+00:00")
+        fs_client = Phase1RuntimeArtifactPollingClient(artifact_root=root, now_fn=now_fn)
+        http_client = Phase1RuntimeArtifactPollingClient(
+            transport="http",
+            base_url=server.base_url,
+            now_fn=now_fn,
+            cache_dir=cache_dir,
+        )
+
+        request = SchwabLivePollRequest(
+            internal_symbol="MNQ",
+            since=datetime.fromisoformat("2026-05-18T11:59:00+00:00"),
+        )
+        fs_bars = fs_client.poll_live_bars(None, "1m", request)
+        http_bars = http_client.poll_live_bars(None, "1m", request)
+    finally:
+        server.stop()
+
+    assert _bar_fingerprint(http_bars) == _bar_fingerprint(fs_bars)
+    assert (cache_dir / "MNQ" / "1m" / "latest_runtime_candles.json").exists()
+
+
+def test_phase1_runtime_artifact_http_transport_preserves_stale_gate(tmp_path: Path) -> None:
+    root = tmp_path / "phase1_runtime_market_data"
+    _write_phase1_runtime_artifact(root, generated_at="2026-05-18T11:00:00+00:00")
+    server = _start_artifact_http_server(root)
+    try:
+        client = Phase1RuntimeArtifactPollingClient(
+            transport="http",
+            base_url=server.base_url,
+            now_fn=lambda: datetime.fromisoformat("2026-05-18T12:00:20+00:00"),
+        )
+        with pytest.raises(Phase1RuntimeArtifactStaleError, match="stale"):
+            client.poll_live_bars(None, "1m", SchwabLivePollRequest(internal_symbol="MNQ"))
+    finally:
+        server.stop()
+
+
+def test_phase1_runtime_artifact_http_transport_reports_missing_artifact(tmp_path: Path) -> None:
+    server = _start_artifact_http_server(tmp_path / "phase1_runtime_market_data")
+    try:
+        client = Phase1RuntimeArtifactPollingClient(
+            transport="http",
+            base_url=server.base_url,
+            now_fn=lambda: datetime.fromisoformat("2026-05-18T12:00:20+00:00"),
+        )
+        with pytest.raises(live_feed_module.Phase1RuntimeArtifactMissingError, match="missing artifact"):
+            client.poll_live_bars(None, "1m", SchwabLivePollRequest(internal_symbol="MNQ"))
+    finally:
+        server.stop()
+
+
+def test_phase1_runtime_artifact_http_transport_reports_malformed_response(tmp_path: Path) -> None:
+    class _MalformedHandler(BaseHTTPRequestHandler):
+        def do_GET(self) -> None:  # noqa: N802
+            body = b"{"
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, _format: str, *_args: object) -> None:
+            return
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), _MalformedHandler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        host, port = server.server_address
+        client = Phase1RuntimeArtifactPollingClient(
+            transport="http",
+            base_url=f"http://{host}:{port}/",
+            now_fn=lambda: datetime.fromisoformat("2026-05-18T12:00:20+00:00"),
+        )
+        with pytest.raises(Phase1RuntimeArtifactMalformedResponseError, match="not valid JSON"):
+            client.poll_live_bars(None, "1m", SchwabLivePollRequest(internal_symbol="MNQ"))
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
+
+
+def test_phase1_runtime_artifact_http_transport_reports_unavailable_server(tmp_path: Path) -> None:
+    port = _unused_local_port()
+    client = Phase1RuntimeArtifactPollingClient(
+        transport="http",
+        base_url=f"http://127.0.0.1:{port}/",
+        now_fn=lambda: datetime.fromisoformat("2026-05-18T12:00:20+00:00"),
+        http_timeout_seconds=0.25,
+    )
+
+    with pytest.raises(Phase1RuntimeArtifactTransportError, match="HTTP request failed"):
+        client.poll_live_bars(None, "1m", SchwabLivePollRequest(internal_symbol="MNQ"))
+
+
+def test_phase1_runtime_artifact_http_transport_rejects_wrong_symbol_or_timeframe(tmp_path: Path) -> None:
+    root = tmp_path / "phase1_runtime_market_data"
+    artifact_path = _write_phase1_runtime_artifact(root, symbol="MNQ", timeframe="1m")
+    payload = json.loads(artifact_path.read_text(encoding="utf-8"))
+    payload["symbol"] = "MES"
+    artifact_path.write_text(json.dumps(payload), encoding="utf-8")
+    server = _start_artifact_http_server(root)
+    try:
+        client = Phase1RuntimeArtifactPollingClient(
+            transport="http",
+            base_url=server.base_url,
+            now_fn=lambda: datetime.fromisoformat("2026-05-18T12:00:20+00:00"),
+        )
+        with pytest.raises(Phase1RuntimeArtifactMalformedResponseError, match="PHASE1_RUNTIME_ARTIFACT_WRONG_SYMBOL"):
+            client.poll_live_bars(None, "1m", SchwabLivePollRequest(internal_symbol="MNQ"))
+    finally:
+        server.stop()
+
+    artifact_path = _write_phase1_runtime_artifact(root, symbol="MNQ", timeframe="1m")
+    payload = json.loads(artifact_path.read_text(encoding="utf-8"))
+    payload["timeframe"] = "3m"
+    artifact_path.write_text(json.dumps(payload), encoding="utf-8")
+    server = _start_artifact_http_server(root)
+    try:
+        client = Phase1RuntimeArtifactPollingClient(
+            transport="http",
+            base_url=server.base_url,
+            now_fn=lambda: datetime.fromisoformat("2026-05-18T12:00:20+00:00"),
+        )
+        with pytest.raises(Phase1RuntimeArtifactMalformedResponseError, match="PHASE1_RUNTIME_ARTIFACT_WRONG_TIMEFRAME"):
+            client.poll_live_bars(None, "1m", SchwabLivePollRequest(internal_symbol="MNQ"))
+    finally:
+        server.stop()
 
 
 def test_phase1_runtime_artifact_poll_cache_is_per_cycle(tmp_path: Path) -> None:
@@ -517,6 +736,29 @@ def test_live_polling_service_persists_phase1_artifact_bars_without_duplicate_in
     service.poll_bars(SchwabLivePollRequest(internal_symbol="MNQ"), internal_timeframe="1m")
 
     assert repositories.bars.count() == 1
+
+
+def test_live_polling_service_can_skip_lane_persistence_for_shared_phase1_source(tmp_path: Path) -> None:
+    repositories = RepositorySet(build_engine(f"sqlite:///{tmp_path / 'lane.sqlite3'}"))
+    client = _RecoveryClient([[_bar_at("2026-05-01T00:02:00+00:00", symbol="MNQ")]])
+    service = LivePollingService(
+        adapter=None,
+        client=client,
+        repositories=repositories,
+        data_source="phase1_runtime_artifact",
+        provider="databento_phase1_runtime_artifact",
+        persist_polled_bars=False,
+    )
+    original_datetime = live_feed_module.datetime
+    _FixedDateTime.fixed_now = datetime.fromisoformat("2026-05-01T00:02:30+00:00")
+    live_feed_module.datetime = _FixedDateTime
+    try:
+        bars = service.poll_bars(SchwabLivePollRequest(internal_symbol="MNQ"), internal_timeframe="1m")
+    finally:
+        live_feed_module.datetime = original_datetime
+
+    assert [bar.symbol for bar in bars] == ["MNQ"]
+    assert repositories.bars.count() == 0
 
 
 def test_historical_polling_live_client_caps_stale_since_window() -> None:

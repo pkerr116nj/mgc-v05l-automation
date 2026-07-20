@@ -16,6 +16,9 @@ from decimal import Decimal
 from pathlib import Path
 from collections.abc import Iterable, Mapping, Sequence
 from typing import Any, Callable, Optional
+from urllib.error import HTTPError, URLError
+from urllib.parse import quote, urljoin
+from urllib.request import Request, urlopen
 
 from ..domain.models import Bar
 from .bar_models import build_bar_id
@@ -48,6 +51,8 @@ _MARKET_DATA_RECOVERY_WINDOW_SECONDS = 300.0
 _MARKET_DATA_RECOVERY_MAX_ATTEMPTS_PER_WINDOW = 3
 _PHASE1_RUNTIME_ARTIFACT_SOURCE = "DATABENTO_REALTIME_PHASE1"
 _PHASE1_RUNTIME_ARTIFACT_FRESHNESS_DEFAULT_SECONDS = 180.0
+_PHASE1_RUNTIME_ARTIFACT_HTTP_DEFAULT_TIMEOUT_SECONDS = 2.0
+_PHASE1_RUNTIME_ARTIFACT_HTTP_MAX_RESPONSE_BYTES = 1_048_576
 _PHASE1_RUNTIME_ARTIFACT_DEFAULT_ROOT = (
     Path(__file__).resolve().parents[3] / "outputs" / "track_b_execution_core" / "phase1_runtime_market_data"
 )
@@ -114,14 +119,55 @@ def phase1_runtime_artifact_poll_cache() -> Iterable[Phase1RuntimeArtifactPollCa
 
 def _read_phase1_runtime_artifact_payload(path: Path) -> dict[str, Any]:
     try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
+        with path.open("rb") as handle:
+            raw = handle.read(_PHASE1_RUNTIME_ARTIFACT_HTTP_MAX_RESPONSE_BYTES + 1)
     except FileNotFoundError as exc:
         raise Phase1RuntimeArtifactMissingError(f"Phase-1 runtime candle artifact is missing: {path}") from exc
+    except OSError as exc:
+        raise Phase1RuntimeArtifactError(f"Phase-1 runtime candle artifact could not be read: {path}") from exc
+    if len(raw) > _PHASE1_RUNTIME_ARTIFACT_HTTP_MAX_RESPONSE_BYTES:
+        raise Phase1RuntimeArtifactMalformedResponseError(
+            f"Phase-1 runtime candle artifact exceeds byte limit: {path}"
+        )
+    try:
+        payload = json.loads(raw.decode("utf-8"))
+    except UnicodeDecodeError as exc:
+        raise Phase1RuntimeArtifactError(f"Phase-1 runtime candle artifact is not valid UTF-8: {path}") from exc
     except json.JSONDecodeError as exc:
         raise Phase1RuntimeArtifactError(f"Phase-1 runtime candle artifact is not valid JSON: {path}") from exc
     if not isinstance(payload, dict):
         raise Phase1RuntimeArtifactError(f"Phase-1 runtime candle artifact must contain a JSON object: {path}")
     return payload
+
+
+def _normalize_phase1_artifact_base_url(value: str | None) -> str:
+    text = str(value or "").strip()
+    if not text:
+        raise ValueError("Phase-1 runtime artifact HTTP base_url is required.")
+    return text if text.endswith("/") else f"{text}/"
+
+
+def _phase1_http_error_detail(error: HTTPError, *, max_response_bytes: int) -> str:
+    try:
+        raw = error.read(max_response_bytes + 1)
+    except Exception:
+        return ""
+    if len(raw) > max_response_bytes:
+        return "classification=PHASE1_RUNTIME_ARTIFACT_HTTP_ERROR_TOO_LARGE"
+    try:
+        payload = json.loads(raw.decode("utf-8"))
+    except Exception:
+        return ""
+    if not isinstance(payload, Mapping):
+        return ""
+    classification = str(payload.get("classification") or "").strip()
+    message = str(payload.get("error") or "").strip()
+    parts = []
+    if classification:
+        parts.append(f"classification={classification}")
+    if message:
+        parts.append(f"detail={message}")
+    return " ".join(parts)
 
 
 def databento_live_effective_end(
@@ -409,6 +455,14 @@ class Phase1RuntimeArtifactMarketClosedError(Phase1RuntimeArtifactStaleError):
     """Phase-1 artifact is stale because the futures market is closed."""
 
 
+class Phase1RuntimeArtifactTransportError(Phase1RuntimeArtifactRecoverableError):
+    """Phase-1 runtime artifact transport failed before a usable payload was received."""
+
+
+class Phase1RuntimeArtifactMalformedResponseError(Phase1RuntimeArtifactError):
+    """Phase-1 runtime artifact transport returned a malformed or oversized response."""
+
+
 class _DatabentoRawLiveSession:
     def __init__(
         self,
@@ -671,17 +725,41 @@ class Phase1RuntimeArtifactPollingClient:
         self,
         *,
         artifact_root: str | Path | None = None,
+        transport: str = "filesystem",
+        base_url: str | None = None,
         required_source: str = _PHASE1_RUNTIME_ARTIFACT_SOURCE,
         now_fn: Callable[[], datetime] | None = None,
+        http_timeout_seconds: float = _PHASE1_RUNTIME_ARTIFACT_HTTP_DEFAULT_TIMEOUT_SECONDS,
+        max_response_bytes: int = _PHASE1_RUNTIME_ARTIFACT_HTTP_MAX_RESPONSE_BYTES,
+        cache_dir: str | Path | None = None,
     ) -> None:
         self._artifact_root = Path(artifact_root) if artifact_root is not None else _PHASE1_RUNTIME_ARTIFACT_DEFAULT_ROOT
+        requested_transport = str(transport or "").strip().lower()
+        if base_url and requested_transport == "filesystem":
+            requested_transport = "http"
+        if requested_transport not in {"filesystem", "http"}:
+            raise ValueError("Phase1RuntimeArtifactPollingClient transport must be 'filesystem' or 'http'.")
+        if requested_transport == "http" and not str(base_url or "").strip():
+            raise ValueError("Phase1RuntimeArtifactPollingClient HTTP transport requires base_url.")
+        self._transport = requested_transport
+        self._base_url = _normalize_phase1_artifact_base_url(base_url) if base_url else None
         self._required_source = str(required_source)
         self._now_fn = now_fn
+        self._http_timeout_seconds = max(0.1, float(http_timeout_seconds))
+        self._max_response_bytes = max(1, int(max_response_bytes))
+        self._cache_dir = Path(cache_dir) if cache_dir is not None else None
 
     def artifact_path(self, *, internal_symbol: str, internal_timeframe: str) -> Path:
         symbol = str(internal_symbol or "").strip().upper()
         timeframe = normalize_timeframe_label(internal_timeframe)
         return self._artifact_root / symbol / timeframe / "latest_runtime_candles.json"
+
+    def artifact_url(self, *, internal_symbol: str, internal_timeframe: str) -> str:
+        if self._base_url is None:
+            raise ValueError("Phase1RuntimeArtifactPollingClient artifact_url requires HTTP transport base_url.")
+        symbol = quote(str(internal_symbol or "").strip().upper(), safe="")
+        timeframe = quote(normalize_timeframe_label(internal_timeframe), safe="")
+        return urljoin(self._base_url, f"phase1/runtime-market-data/{symbol}/{timeframe}/latest")
 
     def poll_live_bars(
         self,
@@ -696,6 +774,12 @@ class Phase1RuntimeArtifactPollingClient:
         self._validate_payload(payload, internal_symbol=internal_symbol, internal_timeframe=internal_timeframe, path=path)
         bars = self._bars_from_payload(payload, internal_symbol=internal_symbol, internal_timeframe=internal_timeframe)
         self._validate_freshness(payload, bars=bars, path=path, internal_symbol=internal_symbol)
+        if self._transport == "http":
+            self._write_validated_http_cache(
+                payload,
+                internal_symbol=internal_symbol,
+                internal_timeframe=internal_timeframe,
+            )
         if request.since is not None:
             since = request.since.astimezone(UTC)
             bars = [bar for bar in bars if bar.end_ts.astimezone(UTC) > since]
@@ -720,11 +804,56 @@ class Phase1RuntimeArtifactPollingClient:
         }
 
     @staticmethod
-    def _read_payload(path: Path) -> dict[str, Any]:
+    def _read_filesystem_payload(path: Path) -> dict[str, Any]:
         cache = _PHASE1_RUNTIME_ARTIFACT_POLL_CACHE.get()
         if cache is not None:
             return cache.read_payload(path)
         return _read_phase1_runtime_artifact_payload(path)
+
+    def _read_payload(self, path: Path) -> dict[str, Any]:
+        if self._transport == "filesystem":
+            return self._read_filesystem_payload(path)
+        return self._read_http_payload(
+            internal_symbol=path.parents[1].name,
+            internal_timeframe=path.parent.name,
+        )
+
+    def _read_http_payload(self, *, internal_symbol: str, internal_timeframe: str) -> dict[str, Any]:
+        url = self.artifact_url(internal_symbol=internal_symbol, internal_timeframe=internal_timeframe)
+        request = Request(url, headers={"Accept": "application/json"}, method="GET")
+        try:
+            with urlopen(request, timeout=self._http_timeout_seconds) as response:  # noqa: S310 - operator-configured source.
+                raw = response.read(self._max_response_bytes + 1)
+        except HTTPError as exc:
+            error_detail = _phase1_http_error_detail(exc, max_response_bytes=self._max_response_bytes)
+            if exc.code == 404:
+                raise Phase1RuntimeArtifactMissingError(
+                    f"Phase-1 runtime artifact HTTP endpoint reported missing artifact: status={exc.code} url={url} {error_detail}"
+                ) from exc
+            if exc.code in {400, 413, 422, 502}:
+                raise Phase1RuntimeArtifactMalformedResponseError(
+                    f"Phase-1 runtime artifact HTTP endpoint rejected or could not serve artifact: status={exc.code} url={url} {error_detail}"
+                ) from exc
+            raise Phase1RuntimeArtifactTransportError(
+                f"Phase-1 runtime artifact HTTP request failed: status={exc.code} url={url} {error_detail}"
+            ) from exc
+        except (TimeoutError, URLError, OSError) as exc:
+            raise Phase1RuntimeArtifactTransportError(f"Phase-1 runtime artifact HTTP request failed: url={url}: {exc}") from exc
+        if len(raw) > self._max_response_bytes:
+            raise Phase1RuntimeArtifactMalformedResponseError(
+                f"Phase-1 runtime artifact HTTP response exceeds byte limit: url={url} limit={self._max_response_bytes}"
+            )
+        try:
+            payload = json.loads(raw.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise Phase1RuntimeArtifactMalformedResponseError(
+                f"Phase-1 runtime artifact HTTP response is not valid JSON: url={url}"
+            ) from exc
+        if not isinstance(payload, dict):
+            raise Phase1RuntimeArtifactMalformedResponseError(
+                f"Phase-1 runtime artifact HTTP response must contain a JSON object: url={url}"
+            )
+        return payload
 
     def _validate_payload(
         self,
@@ -750,6 +879,13 @@ class Phase1RuntimeArtifactPollingClient:
         if payload_timeframe != internal_timeframe:
             raise Phase1RuntimeArtifactError(
                 f"Phase-1 runtime candle artifact timeframe mismatch: expected {internal_timeframe}, found {payload_timeframe}: {path}"
+            )
+        if _parse_optional_datetime(payload.get("generated_at")) is None:
+            raise Phase1RuntimeArtifactError(f"Phase-1 runtime candle artifact is missing valid generated_at metadata: {path}")
+        schema = str(payload.get("schema") or "").strip()
+        if schema != "ohlcv-1m":
+            raise Phase1RuntimeArtifactError(
+                f"Phase-1 runtime candle artifact schema mismatch: expected ohlcv-1m, found {schema or '<missing>'}: {path}"
             )
 
     def _validate_freshness(
@@ -860,6 +996,21 @@ class Phase1RuntimeArtifactPollingClient:
         value = self._now_fn() if self._now_fn is not None else datetime.now(UTC)
         return _ensure_datetime_utc(value)
 
+    def _write_validated_http_cache(
+        self,
+        payload: Mapping[str, Any],
+        *,
+        internal_symbol: str,
+        internal_timeframe: str,
+    ) -> None:
+        if self._cache_dir is None:
+            return
+        path = self._cache_dir / internal_symbol / internal_timeframe / "latest_runtime_candles.json"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp_path = path.with_name(f".{path.name}.tmp")
+        tmp_path.write_text(json.dumps(dict(payload), indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        tmp_path.replace(path)
+
 
 class LivePollingService:
     """Polls live bar data and normalizes it into the shared internal bar model."""
@@ -875,6 +1026,7 @@ class LivePollingService:
         provenance_tag: str = "schwab_market_data_live_poll",
         dataset: str | None = "schwab_pricehistory_live_poll",
         schema_name: str | None = "ohlcv-1m",
+        persist_polled_bars: bool = True,
     ) -> None:
         self._adapter = adapter
         self._client = client
@@ -885,6 +1037,7 @@ class LivePollingService:
         self._provenance_tag = provenance_tag
         self._dataset = dataset
         self._schema_name = schema_name
+        self._persist_polled_bars = bool(persist_polled_bars)
         self._market_data_recovery: dict[tuple[str, str], dict[str, Any]] = {}
         self._market_data_recovery_event_logger: Callable[[dict[str, Any]], Any] | None = None
 
@@ -1007,6 +1160,8 @@ class LivePollingService:
         return filtered
 
     def _persist_bars(self, bars: list[Bar]) -> None:
+        if not self._persist_polled_bars:
+            return
         if self._repositories is None:
             return
         for bar in bars:

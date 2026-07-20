@@ -88,6 +88,8 @@ def test_build_live_polling_service_selects_phase1_artifact_source_for_configure
     assert service._data_source == "phase1_runtime_artifact"  # noqa: SLF001
     assert service._provider == "databento_phase1_runtime_artifact"  # noqa: SLF001
     assert service._provenance_tag == "DATABENTO_REALTIME_PHASE1"  # noqa: SLF001
+    assert service._canonical_maintenance is None  # noqa: SLF001
+    assert service._persist_polled_bars is False  # noqa: SLF001
 
 
 def test_ibkr_paper_bridge_lane_uses_phase1_artifacts_even_when_profile_is_provider_live_poll(tmp_path: Path) -> None:

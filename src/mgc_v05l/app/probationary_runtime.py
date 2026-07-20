@@ -18389,12 +18389,13 @@ def _build_live_polling_service(
                 / "phase1_runtime_market_data",
             ),
             repositories=repositories,
-            canonical_maintenance=CanonicalMarketDataMaintenanceService(database_url=settings.database_url),
+            canonical_maintenance=None,
             data_source="phase1_runtime_artifact",
             provider="databento_phase1_runtime_artifact",
             provenance_tag="DATABENTO_REALTIME_PHASE1",
             dataset="GLBX.MDP3",
             schema_name="ohlcv-1m",
+            persist_polled_bars=False,
         )
     if settings.market_data_provider is MarketDataProvider.DATABENTO:
         provider = DatabentoMarketDataProvider(

@@ -28,6 +28,7 @@ from mgc_v05l.execution_core.track_b_databento_live_runtime_feed import (
     TrackBDatabentoLiveFeedVerdict,
 )
 from mgc_v05l.execution_core.track_b_live_market_data_symbols import load_track_b_live_market_data_symbols
+from mgc_v05l.market_data.shared_live_ohlcv_store import SharedLiveOhlcvStore
 
 NOW = datetime(2026, 5, 11, 0, 13, tzinfo=timezone.utc)
 
@@ -690,14 +691,16 @@ def test_live_listener_default_symbols_come_from_enabled_namelist_rows(tmp_path:
 
 def test_live_listener_rolls_1m_3m_5m_artifacts_from_live_records(tmp_path: Path) -> None:
     client = FakeLiveClient(_live_records(10))
+    shared_db_path = Path("var") / "shared_ohlcv.sqlite3"
 
     result = run_phase1_databento_live_listener(
-        config=_listener_config(tmp_path),
+        config=_listener_config(tmp_path, shared_ohlcv_db_path=shared_db_path),
         live_client_factory=lambda _key: client,
         now_func=lambda: NOW,
     )
 
     assert result.status["realtime_feed_confirmed_count"] == 1
+    assert result.status["shared_ohlcv_db_path"] == str(tmp_path / shared_db_path)
     for timeframe in ("1m", "3m", "5m"):
         path = (
             tmp_path
@@ -717,6 +720,13 @@ def test_live_listener_rolls_1m_3m_5m_artifacts_from_live_records(tmp_path: Path
         assert payload["archive_artifact_used"] is False
         assert payload["can_submit"] is False
         assert payload["live_money_eligible"] is False
+        assert payload["shared_ohlcv_db_path"] == str(tmp_path / shared_db_path)
+        stored = SharedLiveOhlcvStore(tmp_path / shared_db_path).load_recent_bars(
+            symbol="GC",
+            timeframe=timeframe,
+            limit=90,
+        )
+        assert [bar.bar_end.isoformat() for bar in stored] == [row["bar_end"] for row in payload["bars"]]
 
 
 def test_live_listener_gap_fills_sparse_rates_ohlcv_for_derived_timeframes(tmp_path: Path) -> None:

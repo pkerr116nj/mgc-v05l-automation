@@ -81,8 +81,11 @@ def test_loads_default_track_b_live_market_data_symbols_config() -> None:
     ]
     assert "MNQ.v.0" in namelist.enabled_databento_symbols()
     assert namelist.by_symbol()["MGC"].execution_symbol == "MGC"
+    assert namelist.by_symbol()["MGC"].display_label == "Micro Gold"
     assert namelist.by_symbol()["MGC"].reference_symbol == "GC"
+    assert namelist.by_symbol()["MES"].display_label == "Micro S&P"
     assert namelist.by_symbol()["MES"].reference_symbol == "ES"
+    assert namelist.by_symbol()["MNQ"].display_label == "Micro Nasdaq"
     assert namelist.by_symbol()["MNQ"].reference_symbol == "NQ"
     assert namelist.by_symbol()["MNQ"].session_calendar == SESSION_CALENDAR_GLOBEX_FUTURES
     assert namelist.by_symbol()["MNQ"].market_freshness_policy == MARKET_FRESHNESS_POLICY_LIQUID_TRADE_BARS
@@ -91,6 +94,7 @@ def test_loads_default_track_b_live_market_data_symbols_config() -> None:
         assert row.session_calendar == SESSION_CALENDAR_CME_CRYPTO_FUTURES
         assert row.market_freshness_policy == MARKET_FRESHNESS_POLICY_THIN_QUOTE_FEED
         assert row.latest_bar_freshness_seconds == 3600
+    assert namelist.by_symbol()["MBT"].display_label == "Micro Bitcoin"
     assert namelist.by_symbol()["PL"].session_calendar == SESSION_CALENDAR_GLOBEX_FUTURES
     assert namelist.by_symbol()["PL"].market_freshness_policy == MARKET_FRESHNESS_POLICY_THIN_QUOTE_FEED
     assert namelist.by_symbol()["PL"].latest_bar_freshness_seconds == 3600

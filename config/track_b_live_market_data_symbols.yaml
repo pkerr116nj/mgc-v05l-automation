@@ -21,6 +21,7 @@ symbols:
     execution_symbol: MGC
     reference_symbol: GC
     databento_symbol: MGC.v.0
+    display_label: Micro Gold
     dataset: GLBX.MDP3
     schema: ohlcv-1m
     venue: CME Globex
@@ -49,6 +50,7 @@ symbols:
     execution_symbol: MES
     reference_symbol: ES
     databento_symbol: MES.v.0
+    display_label: Micro S&P
     dataset: GLBX.MDP3
     schema: ohlcv-1m
     venue: CME Globex
@@ -77,6 +79,7 @@ symbols:
     execution_symbol: MNQ
     reference_symbol: NQ
     databento_symbol: MNQ.v.0
+    display_label: Micro Nasdaq
     dataset: GLBX.MDP3
     schema: ohlcv-1m
     venue: CME Globex
@@ -178,6 +181,7 @@ symbols:
     execution_symbol: MBT
     reference_symbol: MBT
     databento_symbol: MBT.v.0
+    display_label: Micro Bitcoin
     dataset: GLBX.MDP3
     schema: ohlcv-1m
     venue: CME Globex

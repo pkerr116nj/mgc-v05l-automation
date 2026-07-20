@@ -36,6 +36,7 @@ _REQUIRED_ROW_FIELDS = (
     "notes",
 )
 _OPTIONAL_ROW_FIELDS = (
+    "display_label",
     "session_calendar",
     "market_freshness_policy",
     "latest_bar_freshness_seconds",
@@ -76,6 +77,7 @@ class TrackBLiveMarketDataSymbol:
     min_confirmed_bars: int
     freshness_threshold_seconds: int
     notes: str
+    display_label: str = ""
     session_calendar: str = SESSION_CALENDAR_GLOBEX_FUTURES
     market_freshness_policy: str = MARKET_FRESHNESS_POLICY_LIQUID_TRADE_BARS
     latest_bar_freshness_seconds: int | None = None
@@ -206,6 +208,7 @@ def _parse_symbol_row(raw_symbol: Any, *, index: int) -> TrackBLiveMarketDataSym
         min_confirmed_bars=_required_positive_int(raw_symbol, "min_confirmed_bars", index=index),
         freshness_threshold_seconds=_required_positive_int(raw_symbol, "freshness_threshold_seconds", index=index),
         notes=_optional_text(raw_symbol, "notes"),
+        display_label=_optional_text(raw_symbol, "display_label"),
         session_calendar=_optional_choice(
             raw_symbol,
             "session_calendar",
