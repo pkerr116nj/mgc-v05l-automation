@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import sqlite3
+from contextlib import closing
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
@@ -113,57 +114,58 @@ class SharedLiveOhlcvStore:
             return 0
         self.path.parent.mkdir(parents=True, exist_ok=True)
         now_text = _utc_text(datetime.now(UTC))
-        with sqlite3.connect(self.path) as conn:
-            _ensure_schema(conn)
-            rows = [
-                (
-                    bar.symbol,
-                    bar.timeframe,
-                    _utc_text(bar.bar_start),
-                    _utc_text(bar.bar_end),
-                    str(bar.open),
-                    str(bar.high),
-                    str(bar.low),
-                    str(bar.close),
-                    int(bar.volume),
-                    bar.source,
-                    bar.dataset,
-                    bar.schema,
-                    bar.request_symbol,
-                    bar.source_id,
-                    bar.raw_dbn_path,
-                    now_text,
-                    now_text,
+        with closing(sqlite3.connect(self.path)) as conn:
+            with conn:
+                _ensure_schema(conn)
+                rows = [
+                    (
+                        bar.symbol,
+                        bar.timeframe,
+                        _utc_text(bar.bar_start),
+                        _utc_text(bar.bar_end),
+                        str(bar.open),
+                        str(bar.high),
+                        str(bar.low),
+                        str(bar.close),
+                        int(bar.volume),
+                        bar.source,
+                        bar.dataset,
+                        bar.schema,
+                        bar.request_symbol,
+                        bar.source_id,
+                        bar.raw_dbn_path,
+                        now_text,
+                        now_text,
+                    )
+                    for bar in bars
+                ]
+                conn.executemany(
+                    """
+                    INSERT INTO live_ohlcv_bars (
+                        symbol, timeframe, bar_start, bar_end, open, high, low, close, volume,
+                        source, dataset, schema, request_symbol, source_id, raw_dbn_path,
+                        created_at, updated_at
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(symbol, timeframe, bar_end) DO UPDATE SET
+                        bar_start = excluded.bar_start,
+                        open = excluded.open,
+                        high = excluded.high,
+                        low = excluded.low,
+                        close = excluded.close,
+                        volume = excluded.volume,
+                        source = excluded.source,
+                        dataset = excluded.dataset,
+                        schema = excluded.schema,
+                        request_symbol = excluded.request_symbol,
+                        source_id = excluded.source_id,
+                        raw_dbn_path = excluded.raw_dbn_path,
+                        updated_at = excluded.updated_at
+                    """,
+                    rows,
                 )
-                for bar in bars
-            ]
-            conn.executemany(
-                """
-                INSERT INTO live_ohlcv_bars (
-                    symbol, timeframe, bar_start, bar_end, open, high, low, close, volume,
-                    source, dataset, schema, request_symbol, source_id, raw_dbn_path,
-                    created_at, updated_at
-                )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT(symbol, timeframe, bar_end) DO UPDATE SET
-                    bar_start = excluded.bar_start,
-                    open = excluded.open,
-                    high = excluded.high,
-                    low = excluded.low,
-                    close = excluded.close,
-                    volume = excluded.volume,
-                    source = excluded.source,
-                    dataset = excluded.dataset,
-                    schema = excluded.schema,
-                    request_symbol = excluded.request_symbol,
-                    source_id = excluded.source_id,
-                    raw_dbn_path = excluded.raw_dbn_path,
-                    updated_at = excluded.updated_at
-                """,
-                rows,
-            )
-            for symbol, timeframe in {(bar.symbol, bar.timeframe) for bar in bars}:
-                _trim(conn, symbol=symbol, timeframe=timeframe, limit=self.max_bars_per_symbol_timeframe)
+                for symbol, timeframe in {(bar.symbol, bar.timeframe) for bar in bars}:
+                    _trim(conn, symbol=symbol, timeframe=timeframe, limit=self.max_bars_per_symbol_timeframe)
         return len(rows)
 
     def load_recent_bars(self, *, symbol: str, timeframe: str, limit: int) -> list[SharedLiveOhlcvBar]:
@@ -171,7 +173,7 @@ class SharedLiveOhlcvStore:
         timeframe = normalize_timeframe_label(timeframe)
         if not symbol or not self.path.exists():
             return []
-        with sqlite3.connect(self.path) as conn:
+        with closing(sqlite3.connect(self.path)) as conn:
             _ensure_schema(conn)
             rows = conn.execute(
                 """
