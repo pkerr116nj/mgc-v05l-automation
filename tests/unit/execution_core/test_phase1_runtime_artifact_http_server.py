@@ -134,6 +134,8 @@ def test_phase1_runtime_artifact_http_health_reports_process_and_fresh_inputs(tm
     assert payload["artifact_root"]["readable"] is True
     assert payload["latest_artifact"]["symbol"] == "MNQ"
     assert payload["listener_status"]["listener_alive"] is True
+    assert payload["market_data_authority"]["eligible"] is False
+    assert "authority_cutover_not_enabled" in payload["market_data_authority"]["blocked_reasons"]
     assert payload["can_submit"] is False
     assert payload["live_money_eligible"] is False
 
@@ -188,3 +190,57 @@ def test_phase1_runtime_artifact_http_health_reports_replay_catchup(tmp_path: Pa
     assert "listener_replay_replay_catchup" in payload["blockers"]
     assert payload["listener_status"]["replay_catchup_status"] == "REPLAY_CATCHUP"
     assert payload["listener_status"]["current_readiness_blocked_reason"] == "required_symbols_not_current:GC"
+
+
+def test_phase1_runtime_artifact_http_health_reports_degraded_reason_and_authority_block(tmp_path: Path) -> None:
+    root = tmp_path / "phase1_runtime_market_data"
+    status_path = tmp_path / "latest_phase1_databento_live_listener_status.json"
+    now = datetime.now(timezone.utc).isoformat()
+    _write_artifact(root, generated_at=now)
+    status_path.write_text(
+        json.dumps(
+            {
+                "generated_at": now,
+                "latest_record_at": now,
+                "provider_status": "RUNNING",
+                "listener_alive": True,
+                "realtime_feed_confirmed_count": 16,
+                "readiness_required_confirmed_count": 6,
+                "replay_catchup_status": "DEGRADED",
+                "selected_replay_anchor": "2026-05-18T11:45:00+00:00",
+                "replay_anchor_source": "DURABLE_REQUIRED_SYMBOLS_MIN_1M",
+                "current_lag_seconds": 66,
+                "latest_durable_completed_bar_ts": "2026-05-18T12:00:00+00:00",
+                "current_readiness_blocked_reason": None,
+                "required_symbol_readiness_status": "READY",
+                "optional_symbol_readiness_status": "DEGRADED",
+                "required_for_readiness_blocked_symbols": [],
+                "optional_degraded_symbols": ["MSL"],
+                "optional_symbol_degraded_reason": "optional_symbols_not_current:MSL",
+                "market_data_authority_eligible": False,
+                "market_data_authority_blocked_reasons": [
+                    "replay_status_degraded",
+                    "optional_symbols_not_current:MSL",
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    server = _Server(root, listener_status_path=status_path)
+    try:
+        with urlopen(f"{server.base_url}/health", timeout=2) as response:  # noqa: S310
+            payload = json.loads(response.read().decode("utf-8"))
+    finally:
+        server.close()
+
+    assert payload["classification"] == "DEGRADED"
+    assert payload["blockers"] == []
+    assert payload["degraded_reasons"] == ["optional_symbols_not_current:MSL"]
+    assert payload["required_symbol_readiness"]["status"] == "READY"
+    assert payload["required_symbol_readiness"]["blocked_symbols"] == []
+    assert payload["optional_symbol_readiness"]["status"] == "DEGRADED"
+    assert payload["optional_symbol_readiness"]["degraded_symbols"] == ["MSL"]
+    assert payload["market_data_authority"]["eligible"] is False
+    assert "service_health_degraded" in payload["market_data_authority"]["blocked_reasons"]
+    assert "optional_symbols_not_current:MSL" in payload["market_data_authority"]["blocked_reasons"]
+    assert "authority_cutover_not_enabled" in payload["market_data_authority"]["blocked_reasons"]

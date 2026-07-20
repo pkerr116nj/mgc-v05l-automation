@@ -300,17 +300,42 @@ def _health_payload(
     listener_replay_status = str(listener_status.get("replay_catchup_status") or "") if listener_status else ""
     if listener_status and listener_replay_status in {"STARTING", "REPLAY_CATCHUP", "STALE"}:
         blockers.append(f"listener_replay_{listener_replay_status.lower()}")
+    degraded_reasons = _health_degraded_reasons(listener_status=listener_status, listener_replay_status=listener_replay_status)
     if blockers:
         classification = listener_replay_status if listener_replay_status in {"STARTING", "REPLAY_CATCHUP", "STALE"} else "STALE_OR_BLOCKED"
     elif listener_replay_status in {"CURRENT", "DEGRADED"}:
         classification = listener_replay_status
     else:
         classification = "HEALTHY"
+    if classification == "DEGRADED" and not degraded_reasons:
+        degraded_reasons.append("listener_replay_degraded_without_detail")
+    required_readiness = _required_symbol_readiness(listener_status)
+    optional_readiness = _optional_symbol_readiness(listener_status)
+    authority = _market_data_authority(listener_status=listener_status, classification=classification, blockers=blockers, degraded_reasons=degraded_reasons)
     return {
         "schema_version": "phase1_runtime_artifact_http_health_v1",
         "generated_at": now.isoformat(),
         "classification": classification,
         "blockers": blockers,
+        "degraded_reasons": degraded_reasons,
+        "required_symbol_readiness": required_readiness,
+        "optional_symbol_readiness": optional_readiness,
+        "replay_catchup": {
+            "status": listener_replay_status or None,
+            "selected_replay_anchor": None if listener_status is None else listener_status.get("selected_replay_anchor"),
+            "anchor_source": None if listener_status is None else listener_status.get("replay_anchor_source"),
+            "current_lag_seconds": None if listener_status is None else listener_status.get("current_lag_seconds"),
+            "latest_durable_completed_bar_ts": None
+            if listener_status is None
+            else listener_status.get("latest_durable_completed_bar_ts"),
+            "blocked_reason": None if listener_status is None else listener_status.get("current_readiness_blocked_reason"),
+        },
+        "service_health": {
+            "status": classification,
+            "blockers": blockers,
+            "degraded_reasons": degraded_reasons,
+        },
+        "market_data_authority": authority,
         "process": {
             "generation_id": generation_id,
             "started_at": started_at.isoformat(),
@@ -327,6 +352,89 @@ def _health_payload(
         "stale_threshold_seconds": stale_seconds,
         "can_submit": False,
         "live_money_eligible": False,
+    }
+
+
+def _health_degraded_reasons(*, listener_status: Mapping[str, Any] | None, listener_replay_status: str) -> list[str]:
+    if listener_status is None:
+        return []
+    reasons = []
+    explicit_optional = str(listener_status.get("optional_symbol_degraded_reason") or "").strip()
+    if explicit_optional:
+        reasons.append(explicit_optional)
+    optional_symbols = listener_status.get("optional_degraded_symbols")
+    if not explicit_optional and isinstance(optional_symbols, list) and optional_symbols:
+        reasons.append(f"optional_symbols_not_current:{','.join(str(symbol) for symbol in optional_symbols)}")
+    if listener_replay_status == "DEGRADED" and not reasons:
+        authority_reasons = listener_status.get("market_data_authority_blocked_reasons")
+        if isinstance(authority_reasons, list):
+            reasons.extend(str(reason) for reason in authority_reasons if str(reason).strip())
+    return reasons
+
+
+def _required_symbol_readiness(listener_status: Mapping[str, Any] | None) -> dict[str, Any]:
+    if listener_status is None:
+        return {
+            "status": "UNKNOWN",
+            "confirmed_count": None,
+            "blocked_symbols": [],
+            "blocked_reason": "listener_status_missing",
+        }
+    blocked = listener_status.get("required_for_readiness_blocked_symbols")
+    blocked_symbols = [str(symbol) for symbol in blocked] if isinstance(blocked, list) else []
+    status = str(listener_status.get("required_symbol_readiness_status") or ("READY" if not blocked_symbols else "BLOCKED"))
+    return {
+        "status": status,
+        "confirmed_count": listener_status.get("readiness_required_confirmed_count"),
+        "blocked_symbols": blocked_symbols,
+        "blocked_reason": listener_status.get("current_readiness_blocked_reason"),
+    }
+
+
+def _optional_symbol_readiness(listener_status: Mapping[str, Any] | None) -> dict[str, Any]:
+    if listener_status is None:
+        return {
+            "status": "UNKNOWN",
+            "degraded_symbols": [],
+            "degraded_reason": "listener_status_missing",
+        }
+    degraded = listener_status.get("optional_degraded_symbols")
+    degraded_symbols = [str(symbol) for symbol in degraded] if isinstance(degraded, list) else []
+    status = str(listener_status.get("optional_symbol_readiness_status") or ("DEGRADED" if degraded_symbols else "READY"))
+    reason = listener_status.get("optional_symbol_degraded_reason")
+    if reason in {None, ""} and degraded_symbols:
+        reason = f"optional_symbols_not_current:{','.join(degraded_symbols)}"
+    return {
+        "status": status,
+        "degraded_symbols": degraded_symbols,
+        "degraded_reason": reason,
+    }
+
+
+def _market_data_authority(
+    *,
+    listener_status: Mapping[str, Any] | None,
+    classification: str,
+    blockers: Sequence[str],
+    degraded_reasons: Sequence[str],
+) -> dict[str, Any]:
+    reasons: list[str] = []
+    if blockers:
+        reasons.extend(str(blocker) for blocker in blockers)
+    if degraded_reasons:
+        reasons.extend(str(reason) for reason in degraded_reasons)
+    if classification != "CURRENT":
+        reasons.append(f"service_health_{classification.lower()}")
+    if os.environ.get("PHASE1_MARKET_DATA_AUTHORITY_ENABLED") != "1":
+        reasons.append("authority_cutover_not_enabled")
+    if listener_status is not None:
+        authority_reasons = listener_status.get("market_data_authority_blocked_reasons")
+        if isinstance(authority_reasons, list):
+            reasons.extend(str(reason) for reason in authority_reasons if str(reason).strip())
+    deduped_reasons = list(dict.fromkeys(reasons))
+    return {
+        "eligible": not deduped_reasons,
+        "blocked_reasons": deduped_reasons,
     }
 
 
@@ -383,6 +491,13 @@ def _listener_status_snapshot(path: Path | None) -> dict[str, Any] | None:
         "current_lag_seconds": payload.get("current_lag_seconds"),
         "latest_durable_completed_bar_ts": payload.get("latest_durable_completed_bar_ts"),
         "current_readiness_blocked_reason": payload.get("current_readiness_blocked_reason"),
+        "required_symbol_readiness_status": payload.get("required_symbol_readiness_status"),
+        "optional_symbol_readiness_status": payload.get("optional_symbol_readiness_status"),
+        "required_for_readiness_blocked_symbols": payload.get("required_for_readiness_blocked_symbols"),
+        "optional_degraded_symbols": payload.get("optional_degraded_symbols"),
+        "optional_symbol_degraded_reason": payload.get("optional_symbol_degraded_reason"),
+        "market_data_authority_eligible": payload.get("market_data_authority_eligible"),
+        "market_data_authority_blocked_reasons": payload.get("market_data_authority_blocked_reasons"),
     }
 
 

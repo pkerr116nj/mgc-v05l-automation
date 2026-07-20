@@ -645,6 +645,32 @@ class _LiveListenerState:
             required_symbol_count=len(self.selection.required_symbols),
             replay_status=replay_status,
         )
+        required_blocked_symbols = [
+            row["symbol"]
+            for row in rows
+            if row["required_for_readiness"] is True and row["realtime_feed_confirmed"] is not True
+        ]
+        optional_degraded_symbols = [
+            row["symbol"]
+            for row in rows
+            if row["required_for_readiness"] is not True and row["realtime_feed_confirmed"] is not True
+        ]
+        optional_degraded_reason = (
+            f"optional_symbols_not_current:{','.join(optional_degraded_symbols)}"
+            if optional_degraded_symbols
+            else None
+        )
+        market_data_authority_blocked_reasons = []
+        if replay_status != REPLAY_STATUS_CURRENT:
+            market_data_authority_blocked_reasons.append(f"replay_status_{replay_status.lower()}")
+        if required_blocked_symbols:
+            market_data_authority_blocked_reasons.append(
+                f"required_symbols_not_current:{','.join(required_blocked_symbols)}"
+            )
+        if optional_degraded_symbols:
+            market_data_authority_blocked_reasons.append(optional_degraded_reason)
+        if os.environ.get("PHASE1_MARKET_DATA_AUTHORITY_ENABLED") != "1":
+            market_data_authority_blocked_reasons.append("authority_cutover_not_enabled")
         return {
             "schema_version": "phase1_databento_live_listener_status_v1",
             "generated_at": generated_at.isoformat(),
@@ -674,6 +700,11 @@ class _LiveListenerState:
             else latest_durable_completed.isoformat(),
             "current_lag_seconds": None if current_lag_seconds is None else round(current_lag_seconds, 3),
             "current_readiness_blocked_reason": current_readiness_blocked_reason,
+            "required_symbol_readiness_status": "READY" if not required_blocked_symbols else "BLOCKED",
+            "optional_symbol_readiness_status": "DEGRADED" if optional_degraded_symbols else "READY",
+            "optional_symbol_degraded_reason": optional_degraded_reason,
+            "market_data_authority_eligible": not market_data_authority_blocked_reasons,
+            "market_data_authority_blocked_reasons": market_data_authority_blocked_reasons,
             "restart_anchor": self.replay_anchor.as_status_dict(),
             "raw_dbn_path": str(self.raw_dbn_path),
             "shared_ohlcv_db_path": (
@@ -691,16 +722,8 @@ class _LiveListenerState:
             "credential_source": credential_source,
             "realtime_feed_confirmed_count": sum(1 for row in rows if row["realtime_feed_confirmed"]),
             "readiness_required_confirmed_count": required_confirmed_count,
-            "required_for_readiness_blocked_symbols": [
-                row["symbol"]
-                for row in rows
-                if row["required_for_readiness"] is True and row["realtime_feed_confirmed"] is not True
-            ],
-            "optional_degraded_symbols": [
-                row["symbol"]
-                for row in rows
-                if row["required_for_readiness"] is not True and row["realtime_feed_confirmed"] is not True
-            ],
+            "required_for_readiness_blocked_symbols": required_blocked_symbols,
+            "optional_degraded_symbols": optional_degraded_symbols,
             "rows": rows,
             "historical_seed_ready": False,
             "research_artifact_used": False,
