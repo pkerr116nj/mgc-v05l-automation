@@ -421,6 +421,58 @@ def test_unknown_databento_instrument_id_updates_no_panel(tmp_path: Path) -> Non
     assert all(item["chart"]["bar_count"] == 0 for item in payload["instruments"].values())
 
 
+def test_routing_diagnostics_expose_subscription_and_record_decisions(tmp_path: Path) -> None:
+    state = _mapped_multi_state(tmp_path)
+    state.record_subscription(
+        regime_monitor.DatabentoFeedConfig(
+            api_key="test",
+            dataset="GLBX.MDP3",
+            schema="trades",
+            symbols=("MNQ.v.0", "MES.v.0"),
+            stype_in="continuous",
+        )
+    )
+
+    assert state.record_message(_db_trade(101, 100, "2026-07-19T00:00:05+00:00")) == "MNQ"
+    assert state.record_message(_db_trade(999, 200, "2026-07-19T00:00:06+00:00")) is None
+
+    routing = state.payload()["routing"]
+    assert routing["subscriptions"][0]["dataset"] == "GLBX.MDP3"
+    assert routing["subscriptions"][0]["schema"] == "trades"
+    assert routing["subscriptions"][0]["symbols"] == ["MNQ.v.0", "MES.v.0"]
+    assert routing["subscriptions"][0]["stype_in"] == "continuous"
+    assert routing["instrument_map"]["101"] == "MNQ"
+    assert routing["unknown_instrument_ids"] == [999]
+    assert routing["records_seen"] == 2
+    assert routing["records_routed"] == 1
+    assert routing["records_rejected"] == 1
+    assert routing["first_records"][0]["accepted"] is True
+    assert routing["first_records"][0]["resolved_symbol"] == "MNQ"
+    assert routing["first_records"][1]["accepted"] is False
+    assert routing["first_records"][1]["rejection_reason"] == "UNMAPPED_INSTRUMENT_ID"
+
+
+def test_routing_diagnostics_keep_only_first_twenty_record_decisions(tmp_path: Path) -> None:
+    state = _mapped_multi_state(tmp_path)
+
+    for index in range(21):
+        state.record_message(
+            _db_trade(
+                101,
+                100 + index,
+                f"2026-07-19T00:00:{index:02d}+00:00",
+            )
+        )
+
+    routing = state.payload()["routing"]
+    assert routing["records_seen"] == 21
+    assert routing["records_routed"] == 21
+    assert routing["records_rejected"] == 0
+    assert len(routing["first_records"]) == 20
+    assert routing["first_records"][0]["resolved_symbol"] == "MNQ"
+    assert routing["first_records"][-1]["accepted"] is True
+
+
 def test_multi_instrument_state_keeps_72_bars_per_instrument(tmp_path: Path) -> None:
     state = regime_monitor.MultiInstrumentMonitorState(
         instruments=regime_monitor.DEFAULT_INSTRUMENTS,

@@ -34,6 +34,25 @@ the Ubuntu dashboard in Chromium kiosk mode.
 {
   "schema_version": "regime_monitor_multi_instrument_v1",
   "generated_at": "2026-07-19T18:30:04Z",
+  "routing": {
+    "subscriptions": [
+      {
+        "requested_at": "2026-07-19T18:30:01Z",
+        "dataset": "GLBX.MDP3",
+        "schema": "trades",
+        "symbols": ["MNQ.v.0", "MES.v.0", "MGC.v.0", "MBT.v.0"],
+        "stype_in": "continuous"
+      }
+    ],
+    "instrument_map": {
+      "123456": "MNQ"
+    },
+    "unknown_instrument_ids": [],
+    "records_seen": 12,
+    "records_routed": 12,
+    "records_rejected": 0,
+    "first_records": []
+  },
   "instruments": {
     "MNQ": {
       "instrument": "MNQ",

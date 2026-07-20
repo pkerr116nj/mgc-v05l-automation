@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
 import os
 import tempfile
 import threading
@@ -24,6 +25,7 @@ from zoneinfo import ZoneInfo
 from flask import Flask, Response, jsonify
 
 
+LOGGER = logging.getLogger("regime_monitor")
 VALID_REGIMES = {"LONG", "SHORT", "NO_TRADE"}
 REGIME_COLORS = {
     "LONG": "#00e676",
@@ -36,6 +38,7 @@ DEFAULT_CHART_BAR_LIMIT = 72
 DEFAULT_STATE_DIR = Path("/var/lib/regime-monitor")
 DEFAULT_STATE_FILE_NAME = "candle_state.json"
 MULTI_CANDLE_STATE_SCHEMA_VERSION = "regime_monitor_multi_candle_state_v2"
+ROUTING_RECORD_DIAGNOSTIC_LIMIT = 20
 
 
 @dataclass(frozen=True)
@@ -404,6 +407,94 @@ class InstrumentMonitorState:
         }
 
 
+class RoutingDiagnostics:
+    def __init__(self, *, record_limit: int = ROUTING_RECORD_DIAGNOSTIC_LIMIT) -> None:
+        self.record_limit = record_limit
+        self._lock = threading.Lock()
+        self.subscriptions: list[dict[str, Any]] = []
+        self.unknown_instrument_ids: list[int] = []
+        self.records_seen = 0
+        self.records_routed = 0
+        self.records_rejected = 0
+        self.first_records: list[dict[str, Any]] = []
+
+    def record_subscription(self, *, dataset: str, schema: str, symbols: list[str], stype_in: str) -> None:
+        entry = {
+            "requested_at": utc_now_text(),
+            "dataset": dataset,
+            "schema": schema,
+            "symbols": symbols,
+            "stype_in": stype_in,
+        }
+        with self._lock:
+            self.subscriptions.append(entry)
+        LOGGER.info("databento_subscription_requested %s", json.dumps(entry, sort_keys=True))
+
+    def log_symbol_mapping_message(self, msg: object, *, instrument_id: int, candidates: list[str]) -> None:
+        entry = {
+            "received_at": utc_now_text(),
+            "record_type": _message_record_type(msg),
+            "instrument_id": instrument_id,
+            "symbol_candidates": candidates,
+        }
+        LOGGER.info("databento_symbol_mapping_message %s", json.dumps(entry, sort_keys=True))
+
+    def log_mapping_created(self, *, instrument_id: int, key: str, source_symbol: str) -> None:
+        entry = {
+            "mapped_at": utc_now_text(),
+            "instrument_id": instrument_id,
+            "instrument": key,
+            "source_symbol": source_symbol,
+        }
+        LOGGER.info("databento_instrument_mapping_created %s", json.dumps(entry, sort_keys=True))
+
+    def record_price_decision(
+        self,
+        *,
+        msg: object,
+        instrument_id: int | None,
+        resolved_symbol: str | None,
+        accepted: bool,
+        rejection_reason: str | None,
+    ) -> None:
+        entry = {
+            "received_at": utc_now_text(),
+            "record_type": _message_record_type(msg),
+            "instrument_id": instrument_id,
+            "resolved_symbol": resolved_symbol,
+            "accepted": accepted,
+            "rejection_reason": rejection_reason,
+        }
+        with self._lock:
+            self.records_seen += 1
+            if accepted:
+                self.records_routed += 1
+            else:
+                self.records_rejected += 1
+                if instrument_id is not None and instrument_id not in self.unknown_instrument_ids:
+                    self.unknown_instrument_ids.append(instrument_id)
+            should_log_record = len(self.first_records) < self.record_limit
+            if should_log_record:
+                self.first_records.append(entry)
+        if should_log_record:
+            LOGGER.info("databento_price_record_routing_decision %s", json.dumps(entry, sort_keys=True))
+
+    def payload(self, *, instrument_map: dict[int, str]) -> dict[str, Any]:
+        with self._lock:
+            return {
+                "subscriptions": list(self.subscriptions),
+                "instrument_map": {
+                    str(instrument_id): key
+                    for instrument_id, key in sorted(instrument_map.items())
+                },
+                "unknown_instrument_ids": list(self.unknown_instrument_ids),
+                "records_seen": self.records_seen,
+                "records_routed": self.records_routed,
+                "records_rejected": self.records_rejected,
+                "first_records": list(self.first_records),
+            }
+
+
 class MultiInstrumentMonitorState:
     def __init__(
         self,
@@ -425,6 +516,7 @@ class MultiInstrumentMonitorState:
         self._unmapped_record_count = 0
         self._last_unmapped_instrument_id: int | None = None
         self._last_unmapped_at: str | None = None
+        self._routing_diagnostics = RoutingDiagnostics()
         persisted = self._load_persisted_state()
         persisted_instruments = persisted.get("instruments") if isinstance(persisted, dict) else {}
         for config in instruments:
@@ -447,6 +539,14 @@ class MultiInstrumentMonitorState:
         if instrument is not None:
             instrument.mark_status(status, error)
 
+    def record_subscription(self, config: DatabentoFeedConfig) -> None:
+        self._routing_diagnostics.record_subscription(
+            dataset=config.dataset,
+            schema=config.schema,
+            symbols=list(config.symbols),
+            stype_in=config.stype_in,
+        )
+
     def record_message(self, msg: object) -> str | None:
         mapping_key = self.record_symbol_mapping(msg)
         if mapping_key is not None and not _message_has_price(msg):
@@ -454,14 +554,22 @@ class MultiInstrumentMonitorState:
         key = self.resolve_message_key(msg)
         if key is None:
             self._record_unmapped(msg)
+            self._record_price_routing_decision(msg, key=None, accepted=False, rejection_reason=_unresolved_record_reason(msg))
             return None
         instrument = self._instrument_by_key.get(key)
         if instrument is None:
             self._record_unmapped(msg)
+            self._record_price_routing_decision(
+                msg,
+                key=key,
+                accepted=False,
+                rejection_reason="RESOLVED_INSTRUMENT_NOT_CONFIGURED",
+            )
             return None
         instrument_id = _message_instrument_id(msg)
         source_symbol = _message_primary_source_symbol(msg)
         instrument.record_message(msg, instrument_id=instrument_id, source_symbol=source_symbol)
+        self._record_price_routing_decision(msg, key=key, accepted=True, rejection_reason=None)
         if self.persist_interval == 0 or time.monotonic() - self._last_persist_monotonic >= self.persist_interval:
             self.persist()
         return key
@@ -470,10 +578,24 @@ class MultiInstrumentMonitorState:
         instrument_id = _message_instrument_id(msg)
         if instrument_id is None:
             return None
-        for candidate in _message_symbol_candidates(msg):
+        candidates = _message_symbol_candidates(msg)
+        if not _message_has_price(msg):
+            self._routing_diagnostics.log_symbol_mapping_message(
+                msg,
+                instrument_id=instrument_id,
+                candidates=candidates,
+            )
+        for candidate in candidates:
             key = _lookup_symbol_key(self._symbol_to_key, candidate)
             if key is not None:
+                previous_key = self._instrument_id_to_key.get(instrument_id)
                 self._instrument_id_to_key[instrument_id] = key
+                if previous_key != key:
+                    self._routing_diagnostics.log_mapping_created(
+                        instrument_id=instrument_id,
+                        key=key,
+                        source_symbol=candidate,
+                    )
                 instrument = self._instrument_by_key.get(key)
                 if instrument is not None:
                     instrument.bind_route(instrument_id=instrument_id, source_symbol=candidate)
@@ -509,6 +631,7 @@ class MultiInstrumentMonitorState:
                 "unmapped_record_count": self._unmapped_record_count,
                 "last_unmapped_instrument_id": self._last_unmapped_instrument_id,
                 "last_unmapped_at": self._last_unmapped_at,
+                **self._routing_diagnostics.payload(instrument_map=self._instrument_id_to_key),
             },
             "instruments": {
                 config.key: self._instrument_by_key[config.key].payload()
@@ -555,6 +678,24 @@ class MultiInstrumentMonitorState:
             self._unmapped_record_count += 1
             self._last_unmapped_instrument_id = instrument_id
             self._last_unmapped_at = utc_now_text()
+
+    def _record_price_routing_decision(
+        self,
+        msg: object,
+        *,
+        key: str | None,
+        accepted: bool,
+        rejection_reason: str | None,
+    ) -> None:
+        if not _message_has_price(msg):
+            return
+        self._routing_diagnostics.record_price_decision(
+            msg=msg,
+            instrument_id=_message_instrument_id(msg),
+            resolved_symbol=key,
+            accepted=accepted,
+            rejection_reason=rejection_reason,
+        )
 
 
 def utc_now_text() -> str:
@@ -658,6 +799,18 @@ def _message_instrument_id(msg: object) -> int | None:
 def _message_primary_source_symbol(msg: object) -> str | None:
     candidates = _message_symbol_candidates(msg)
     return candidates[0] if candidates else None
+
+
+def _message_record_type(msg: object) -> str:
+    return type(msg).__name__
+
+
+def _unresolved_record_reason(msg: object) -> str:
+    if _message_instrument_id(msg) is not None:
+        return "UNMAPPED_INSTRUMENT_ID"
+    if _message_symbol_candidates(msg):
+        return "UNRESOLVED_SYMBOL"
+    return "MISSING_INSTRUMENT_ID_OR_SYMBOL"
 
 
 def _message_symbol_candidates(msg: object) -> list[str]:
@@ -881,6 +1034,8 @@ def run_databento_feed(
             _mark_feed_state(state, "CONNECTING")
             client = live_factory(key=config.api_key)
             _mark_feed_state(state, "CONNECTING")
+            if isinstance(state, MultiInstrumentMonitorState):
+                state.record_subscription(config)
             client.subscribe(
                 dataset=config.dataset,
                 schema=config.schema,
@@ -1438,6 +1593,7 @@ def resolve_state_dir(*, config: dict[str, object], state_dir_override: object =
 
 
 def main() -> int:
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
     args = parse_args()
     config = load_config(Path(args.config).expanduser())
     api_key_env = str(args.api_key_env or config.get("api_key_env") or "DATABENTO_API_KEY").strip()
