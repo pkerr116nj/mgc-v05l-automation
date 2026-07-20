@@ -338,6 +338,89 @@ def test_multi_instrument_state_isolates_updates_and_rollovers(tmp_path: Path) -
     assert instruments["MBT"]["chart"]["bars"] == []
 
 
+def test_databento_instrument_id_mapping_routes_mnq_only(tmp_path: Path) -> None:
+    state = _mapped_multi_state(tmp_path)
+
+    state.record_message(_db_trade(101, 100, "2026-07-19T00:00:05+00:00"))
+
+    payload = state.payload()
+    assert payload["instruments"]["MNQ"]["chart"]["bar_count"] == 1
+    assert payload["instruments"]["MNQ"]["resolved_instrument_id"] == 101
+    assert payload["instruments"]["MNQ"]["last_source_symbol"] == "MNQ.v.0"
+    assert payload["instruments"]["MES"]["chart"]["bar_count"] == 0
+    assert payload["instruments"]["MGC"]["chart"]["bar_count"] == 0
+    assert payload["instruments"]["MBT"]["chart"]["bar_count"] == 0
+
+
+def test_databento_instrument_id_mapping_routes_mes_only(tmp_path: Path) -> None:
+    state = _mapped_multi_state(tmp_path)
+
+    state.record_message(_db_trade(102, 200, "2026-07-19T00:00:05+00:00"))
+
+    payload = state.payload()
+    assert payload["instruments"]["MES"]["chart"]["bar_count"] == 1
+    assert payload["instruments"]["MNQ"]["chart"]["bar_count"] == 0
+    assert payload["instruments"]["MGC"]["chart"]["bar_count"] == 0
+    assert payload["instruments"]["MBT"]["chart"]["bar_count"] == 0
+
+
+def test_databento_instrument_id_mapping_routes_mgc_only(tmp_path: Path) -> None:
+    state = _mapped_multi_state(tmp_path)
+
+    state.record_message(_db_trade(103, 300, "2026-07-19T00:00:05+00:00"))
+
+    payload = state.payload()
+    assert payload["instruments"]["MGC"]["chart"]["bar_count"] == 1
+    assert payload["instruments"]["MNQ"]["chart"]["bar_count"] == 0
+    assert payload["instruments"]["MES"]["chart"]["bar_count"] == 0
+    assert payload["instruments"]["MBT"]["chart"]["bar_count"] == 0
+
+
+def test_databento_instrument_id_mapping_routes_mbt_only(tmp_path: Path) -> None:
+    state = _mapped_multi_state(tmp_path)
+
+    state.record_message(_db_trade(104, 64_000, "2026-07-19T00:00:05+00:00"))
+
+    payload = state.payload()
+    assert payload["instruments"]["MBT"]["chart"]["bar_count"] == 1
+    assert payload["instruments"]["MNQ"]["chart"]["bar_count"] == 0
+    assert payload["instruments"]["MES"]["chart"]["bar_count"] == 0
+    assert payload["instruments"]["MGC"]["chart"]["bar_count"] == 0
+
+
+def test_interleaved_databento_instrument_ids_remain_isolated(tmp_path: Path) -> None:
+    state = _mapped_multi_state(tmp_path)
+
+    state.record_message(_db_trade(104, 64_000, "2026-07-19T00:00:05+00:00"))
+    state.record_message(_db_trade(101, 100, "2026-07-19T00:00:06+00:00"))
+    state.record_message(_db_trade(102, 200, "2026-07-19T00:00:07+00:00"))
+    state.record_message(_db_trade(103, 300, "2026-07-19T00:00:08+00:00"))
+    state.record_message(_db_trade(101, 101, "2026-07-19T00:00:09+00:00"))
+
+    payload = state.payload()
+    assert _latest_close(payload, "MNQ") == 101.0
+    assert _latest_close(payload, "MES") == 200.0
+    assert _latest_close(payload, "MGC") == 300.0
+    assert _latest_close(payload, "MBT") == 64000.0
+    assert {key: item["chart"]["bar_count"] for key, item in payload["instruments"].items()} == {
+        "MNQ": 1,
+        "MES": 1,
+        "MGC": 1,
+        "MBT": 1,
+    }
+
+
+def test_unknown_databento_instrument_id_updates_no_panel(tmp_path: Path) -> None:
+    state = _mapped_multi_state(tmp_path)
+
+    assert state.record_message(_db_trade(999, 64_000, "2026-07-19T00:00:05+00:00")) is None
+
+    payload = state.payload()
+    assert payload["routing"]["unmapped_record_count"] == 1
+    assert payload["routing"]["last_unmapped_instrument_id"] == 999
+    assert all(item["chart"]["bar_count"] == 0 for item in payload["instruments"].values())
+
+
 def test_multi_instrument_state_keeps_72_bars_per_instrument(tmp_path: Path) -> None:
     state = regime_monitor.MultiInstrumentMonitorState(
         instruments=regime_monitor.DEFAULT_INSTRUMENTS,
@@ -388,6 +471,40 @@ def test_multi_instrument_persistence_recovers_all_four_instruments(tmp_path: Pa
         "MGC": 1,
         "MBT": 1,
     }
+    assert _latest_close({"instruments": payload}, "MNQ") == 100.0
+    assert _latest_close({"instruments": payload}, "MES") == 101.0
+    assert _latest_close({"instruments": payload}, "MGC") == 102.0
+    assert _latest_close({"instruments": payload}, "MBT") == 103.0
+
+
+def test_legacy_multi_instrument_state_schema_is_ignored_on_migration(tmp_path: Path) -> None:
+    contaminated = {
+        "schema_version": "regime_monitor_multi_candle_state_v1",
+        "instruments": {
+            key: {
+                "candles": {
+                    "completed_5m": [],
+                    "current_5m": {
+                        "time": "2026-07-19T00:05:00+00:00",
+                        "start": "2026-07-19T00:00:00+00:00",
+                        "open": 64000,
+                        "high": 64000,
+                        "low": 64000,
+                        "close": 64000,
+                    },
+                }
+            }
+            for key in ("MNQ", "MES", "MGC", "MBT")
+        },
+    }
+    (tmp_path / "candle_state.json").write_text(json.dumps(contaminated), encoding="utf-8")
+
+    state = regime_monitor.MultiInstrumentMonitorState(
+        instruments=regime_monitor.DEFAULT_INSTRUMENTS,
+        state_dir=tmp_path,
+    )
+
+    assert all(item["chart"]["bar_count"] == 0 for item in state.payload()["instruments"].values())
 
 
 def test_one_instrument_error_does_not_affect_other_panels(tmp_path: Path) -> None:
@@ -511,3 +628,39 @@ def test_monitor_files_do_not_hard_code_patrick_home_or_magic_output_paths() -> 
 
 def _trade_time(index: int) -> datetime:
     return datetime(2026, 7, 19, tzinfo=timezone.utc) + timedelta(minutes=index * 5)
+
+
+def _mapped_multi_state(tmp_path: Path) -> object:
+    state = regime_monitor.MultiInstrumentMonitorState(
+        instruments=regime_monitor.DEFAULT_INSTRUMENTS,
+        state_dir=tmp_path,
+        persist_interval=0,
+    )
+    for instrument_id, symbol, raw_symbol in (
+        (101, "MNQ.v.0", "MNQU6"),
+        (102, "MES.v.0", "MESU6"),
+        (103, "MGC.v.0", "MGCQ6"),
+        (104, "MBT.v.0", "MBTN6"),
+    ):
+        state.record_message(
+            SimpleNamespace(
+                hd=SimpleNamespace(instrument_id=instrument_id),
+                stype_in_symbol=symbol,
+                stype_out_symbol=raw_symbol,
+            )
+        )
+    return state
+
+
+def _db_trade(instrument_id: int, price: float, ts_event: str) -> object:
+    return SimpleNamespace(
+        hd=SimpleNamespace(instrument_id=instrument_id),
+        px=price * 1_000_000_000,
+        ts_event=ts_event,
+    )
+
+
+def _latest_close(payload: dict[str, object], key: str) -> float:
+    instruments = payload["instruments"]
+    bars = instruments[key]["chart"]["bars"]
+    return bars[-1]["close"]

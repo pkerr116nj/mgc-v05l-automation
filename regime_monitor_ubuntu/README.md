@@ -43,6 +43,10 @@ the Ubuntu dashboard in Chromium kiosk mode.
       "confidence": 0.0031,
       "timestamp": "14:30:04",
       "connection_status": "CONNECTED",
+      "resolved_instrument_id": 123456,
+      "last_source_symbol": "MNQ.v.0",
+      "routing_status": "MAPPED",
+      "routing_error": null,
       "error": null,
       "chart": {
         "schema_version": "regime_monitor_in_process_5m_chart_v1",
@@ -78,6 +82,13 @@ client.subscribe(
 The monitor uses Databento continuous front-month futures symbology. `MBT` is
 the CME Micro Bitcoin futures root, so the Bitcoin panel subscribes to
 `MBT.v.0`.
+
+Databento symbol-mapping messages are handled before price records. The service
+maintains a stable `instrument_id` to panel mapping, and an incoming price
+record with an unknown or unmapped `instrument_id` is ignored instead of being
+assigned to a fallback panel. Each `/data` panel includes the current
+`resolved_instrument_id` and `last_source_symbol` so routing can be checked
+from the kiosk browser.
 
 The service preserves the current message handling:
 
@@ -115,6 +126,10 @@ forming bars for all four instruments. It is used only for restart continuity,
 so service restart or browser reload does not reset the charts to empty when
 recent state exists. There is no general logging or historical archive
 subsystem.
+
+The persisted multi-instrument candle schema is versioned. Deploying the
+instrument-id routing repair ignores older multi-panel candle state so a prior
+cross-contaminated series is not reloaded into all four panels.
 
 For local development only, the state directory can be overridden with
 `REGIME_MONITOR_STATE_DIR` or the `state_dir` config value. Production should

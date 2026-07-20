@@ -35,6 +35,7 @@ EASTERN_TZ = ZoneInfo("America/New_York")
 DEFAULT_CHART_BAR_LIMIT = 72
 DEFAULT_STATE_DIR = Path("/var/lib/regime-monitor")
 DEFAULT_STATE_FILE_NAME = "candle_state.json"
+MULTI_CANDLE_STATE_SCHEMA_VERSION = "regime_monitor_multi_candle_state_v2"
 
 
 @dataclass(frozen=True)
@@ -346,18 +347,52 @@ class InstrumentMonitorState:
             persist_interval=9999,
         )
         self.regime = PriceRegimeState(candle_state=self.candles)
+        self._lock = threading.Lock()
+        self._resolved_instrument_id: int | None = None
+        self._last_source_symbol: str | None = None
+        self._last_routed_at: str | None = None
+        self._routing_status = "AWAITING_MAPPING"
+        self._routing_error: str | None = None
 
     def mark_status(self, status: str, error: str | None = None) -> None:
         self.regime.mark_status(status, error)
 
-    def record_message(self, msg: object) -> None:
+    def bind_route(self, *, instrument_id: int | None, source_symbol: str | None) -> None:
+        with self._lock:
+            if instrument_id is not None:
+                self._resolved_instrument_id = instrument_id
+            if source_symbol:
+                self._last_source_symbol = source_symbol
+            self._routing_status = "MAPPED"
+            self._routing_error = None
+
+    def mark_routing_error(self, status: str, error: str) -> None:
+        with self._lock:
+            self._routing_status = status
+            self._routing_error = error
+
+    def record_message(self, msg: object, *, instrument_id: int | None, source_symbol: str | None) -> None:
+        self.bind_route(instrument_id=instrument_id, source_symbol=source_symbol)
         self.regime.record_message(msg, persist_candle=False)
+        with self._lock:
+            self._last_routed_at = utc_now_text()
 
     def payload(self) -> dict[str, Any]:
         snapshot = self.regime.snapshot().to_payload()
+        with self._lock:
+            resolved_instrument_id = self._resolved_instrument_id
+            last_source_symbol = self._last_source_symbol
+            last_routed_at = self._last_routed_at
+            routing_status = self._routing_status
+            routing_error = self._routing_error
         snapshot["instrument"] = self.config.key
         snapshot["name"] = self.config.name
         snapshot["symbol"] = self.config.symbol
+        snapshot["resolved_instrument_id"] = resolved_instrument_id
+        snapshot["last_source_symbol"] = last_source_symbol
+        snapshot["routing_status"] = routing_status
+        snapshot["routing_error"] = routing_error
+        snapshot["last_routed_at"] = last_routed_at
         snapshot["chart"] = self.candles.payload()
         return snapshot
 
@@ -386,6 +421,10 @@ class MultiInstrumentMonitorState:
         self._last_persist_monotonic = 0.0
         self._lock = threading.Lock()
         self._instrument_by_key: dict[str, InstrumentMonitorState] = {}
+        self._instrument_id_to_key: dict[int, str] = {}
+        self._unmapped_record_count = 0
+        self._last_unmapped_instrument_id: int | None = None
+        self._last_unmapped_at: str | None = None
         persisted = self._load_persisted_state()
         persisted_instruments = persisted.get("instruments") if isinstance(persisted, dict) else {}
         for config in instruments:
@@ -409,20 +448,50 @@ class MultiInstrumentMonitorState:
             instrument.mark_status(status, error)
 
     def record_message(self, msg: object) -> str | None:
+        mapping_key = self.record_symbol_mapping(msg)
+        if mapping_key is not None and not _message_has_price(msg):
+            return None
         key = self.resolve_message_key(msg)
         if key is None:
+            self._record_unmapped(msg)
             return None
         instrument = self._instrument_by_key.get(key)
         if instrument is None:
+            self._record_unmapped(msg)
             return None
-        instrument.record_message(msg)
+        instrument_id = _message_instrument_id(msg)
+        source_symbol = _message_primary_source_symbol(msg)
+        instrument.record_message(msg, instrument_id=instrument_id, source_symbol=source_symbol)
         if self.persist_interval == 0 or time.monotonic() - self._last_persist_monotonic >= self.persist_interval:
             self.persist()
         return key
 
-    def resolve_message_key(self, msg: object) -> str | None:
+    def record_symbol_mapping(self, msg: object) -> str | None:
+        instrument_id = _message_instrument_id(msg)
+        if instrument_id is None:
+            return None
         for candidate in _message_symbol_candidates(msg):
-            key = self._symbol_to_key.get(candidate.upper())
+            key = _lookup_symbol_key(self._symbol_to_key, candidate)
+            if key is not None:
+                self._instrument_id_to_key[instrument_id] = key
+                instrument = self._instrument_by_key.get(key)
+                if instrument is not None:
+                    instrument.bind_route(instrument_id=instrument_id, source_symbol=candidate)
+                return key
+        return None
+
+    def resolve_message_key(self, msg: object) -> str | None:
+        instrument_id = _message_instrument_id(msg)
+        if instrument_id is not None:
+            key = self._instrument_id_to_key.get(instrument_id)
+            if key is not None:
+                return key
+            mapped_key = self.record_symbol_mapping(msg)
+            if mapped_key is not None:
+                return mapped_key
+            return None
+        for candidate in _message_symbol_candidates(msg):
+            key = _lookup_symbol_key(self._symbol_to_key, candidate)
             if key is not None:
                 return key
         return None
@@ -431,6 +500,16 @@ class MultiInstrumentMonitorState:
         return {
             "schema_version": "regime_monitor_multi_instrument_v1",
             "generated_at": utc_now_text(),
+            "routing": {
+                "schema_version": "regime_monitor_databento_routing_v1",
+                "instrument_id_map": {
+                    str(instrument_id): key
+                    for instrument_id, key in sorted(self._instrument_id_to_key.items())
+                },
+                "unmapped_record_count": self._unmapped_record_count,
+                "last_unmapped_instrument_id": self._last_unmapped_instrument_id,
+                "last_unmapped_at": self._last_unmapped_at,
+            },
             "instruments": {
                 config.key: self._instrument_by_key[config.key].payload()
                 for config in self.instruments
@@ -440,9 +519,13 @@ class MultiInstrumentMonitorState:
     def persist(self) -> None:
         with self._lock:
             payload = {
-                "schema_version": "regime_monitor_multi_candle_state_v1",
+                "schema_version": MULTI_CANDLE_STATE_SCHEMA_VERSION,
                 "generated_at": utc_now_text(),
                 "bar_limit": self.bar_limit,
+                "configured_symbols": {
+                    config.key: config.symbol
+                    for config in self.instruments
+                },
                 "instruments": {
                     key: state.export_state()
                     for key, state in self._instrument_by_key.items()
@@ -456,7 +539,22 @@ class MultiInstrumentMonitorState:
             payload = json.loads(self.state_path.read_text(encoding="utf-8"))
         except (FileNotFoundError, OSError, json.JSONDecodeError):
             return {}
-        return payload if isinstance(payload, dict) else {}
+        if not isinstance(payload, dict):
+            return {}
+        if payload.get("schema_version") != MULTI_CANDLE_STATE_SCHEMA_VERSION:
+            return {}
+        configured_symbols = payload.get("configured_symbols")
+        expected_symbols = {config.key: config.symbol for config in self.instruments}
+        if configured_symbols != expected_symbols:
+            return {}
+        return payload
+
+    def _record_unmapped(self, msg: object) -> None:
+        instrument_id = _message_instrument_id(msg)
+        with self._lock:
+            self._unmapped_record_count += 1
+            self._last_unmapped_instrument_id = instrument_id
+            self._last_unmapped_at = utc_now_text()
 
 
 def utc_now_text() -> str:
@@ -512,21 +610,82 @@ def _build_symbol_lookup(instruments: tuple[InstrumentConfig, ...]) -> dict[str,
     return lookup
 
 
+def _lookup_symbol_key(lookup: dict[str, str], symbol: object) -> str | None:
+    text = str(symbol or "").strip().upper()
+    if not text:
+        return None
+    direct = lookup.get(text)
+    if direct is not None:
+        return direct
+    root = _symbol_root_candidate(text)
+    return lookup.get(root)
+
+
+def _symbol_root_candidate(symbol: str) -> str:
+    text = symbol.strip().upper()
+    if "." in text:
+        return text.split(".", 1)[0]
+    for index, char in enumerate(text):
+        if index > 0 and char in "FGHJKMNQUVXZ" and index + 1 < len(text) and text[index + 1].isdigit():
+            return text[:index]
+    return text
+
+
+def _message_has_price(msg: object) -> bool:
+    return getattr(msg, "px", None) is not None or getattr(msg, "price", None) is not None
+
+
+def _message_instrument_id(msg: object) -> int | None:
+    for value in (
+        getattr(msg, "instrument_id", None),
+        getattr(getattr(msg, "hd", None), "instrument_id", None),
+        getattr(getattr(msg, "header", None), "instrument_id", None),
+    ):
+        parsed = _int_or_none(value)
+        if parsed is not None:
+            return parsed
+    text = str(msg)
+    for marker in ("instrument_id=", "instrument_id:"):
+        if marker in text:
+            tail = text.split(marker, 1)[1]
+            token = tail.split(",", 1)[0].split(")", 1)[0].strip().strip("'\"")
+            parsed = _int_or_none(token)
+            if parsed is not None:
+                return parsed
+    return None
+
+
+def _message_primary_source_symbol(msg: object) -> str | None:
+    candidates = _message_symbol_candidates(msg)
+    return candidates[0] if candidates else None
+
+
 def _message_symbol_candidates(msg: object) -> list[str]:
     candidates: list[str] = []
     for attr in (
         "symbol",
         "raw_symbol",
         "stype_in_symbol",
+        "stype_out_symbol",
         "continuous_symbol",
         "parent_symbol",
         "instrument_symbol",
+        "local_symbol",
+        "localSymbol",
+        "native_symbol",
     ):
         value = getattr(msg, attr, None)
         if value not in (None, ""):
             candidates.append(str(value).strip())
     text = str(msg)
-    for marker in ("symbol=", "raw_symbol=", "stype_in_symbol="):
+    for marker in (
+        "symbol=",
+        "raw_symbol=",
+        "stype_in_symbol=",
+        "stype_out_symbol=",
+        "local_symbol=",
+        "localSymbol=",
+    ):
         if marker in text:
             tail = text.split(marker, 1)[1]
             token = tail.split(",", 1)[0].split(")", 1)[0].strip().strip("'\"")
@@ -682,6 +841,15 @@ def _float_or_none(value: object) -> float | None:
         return None
     try:
         return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _int_or_none(value: object) -> int | None:
+    if value in (None, ""):
+        return None
+    try:
+        return int(value)
     except (TypeError, ValueError):
         return None
 
@@ -904,6 +1072,14 @@ DASHBOARD_HTML = """<!doctype html>
       text-overflow: ellipsis;
       white-space: nowrap;
     }
+    .route {
+      grid-column: 1 / -1;
+      min-height: 1.1em;
+      color: #5f5f5f;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
     .hidden { visibility: hidden; }
   </style>
 </head>
@@ -923,6 +1099,7 @@ DASHBOARD_HTML = """<!doctype html>
       <footer class="status">
         <div class="connection" data-state="STARTING">STARTING</div>
         <div class="timestamp">--:--:--</div>
+        <div class="route">id: -- source: --</div>
         <div class="error hidden"></div>
       </footer>
     </article>
@@ -966,6 +1143,7 @@ DASHBOARD_HTML = """<!doctype html>
         canvas: fragment.querySelector(".chart"),
         connection: fragment.querySelector(".connection"),
         timestamp: fragment.querySelector(".timestamp"),
+        route: fragment.querySelector(".route"),
         error: fragment.querySelector(".error"),
         current: {},
       };
@@ -1006,6 +1184,8 @@ DASHBOARD_HTML = """<!doctype html>
         nodes.connection.textContent = status;
       }
       updateText(nodes, "timestamp", payload.timestamp || "--:--:--");
+      const route = `id: ${payload.resolved_instrument_id ?? "--"} source: ${payload.last_source_symbol || "--"}`;
+      updateText(nodes, "route", route);
       const error = payload.error || "";
       updateText(nodes, "error", error);
       nodes.error.classList.toggle("hidden", error === "");
