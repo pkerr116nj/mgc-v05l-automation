@@ -184,7 +184,16 @@ def test_multi_instrument_monitor_charts_prefer_shared_ohlcv_store_and_catalog_l
     assert mnq["name"] == catalog_row.display_label
     assert mnq["symbol"] == catalog_row.databento_symbol
     assert mnq["chart"]["source"] == "track_b_shared_live_ohlcv_store"
+    assert mnq["chart"]["latest_bar_age_seconds"] >= 0
+    assert mnq["chart"]["generated_at"]
     assert [row["time"] for row in mnq["chart"]["bars"]] == [bar["bar_end"] for bar in bars]
+
+
+def test_databento_feed_can_be_disabled_for_shared_store_display_cutover() -> None:
+    assert regime_monitor.resolve_databento_feed_enabled(config={}) is True
+    assert regime_monitor.resolve_databento_feed_enabled(config={"databento_feed_enabled": False}) is False
+    assert regime_monitor.resolve_databento_feed_enabled(config={"databento_feed_enabled": "off"}) is False
+    assert regime_monitor.resolve_databento_feed_enabled(config={"databento_feed_enabled": "true"}) is True
 
 
 def test_successful_databento_stream_clears_package_missing_status() -> None:

@@ -1714,6 +1714,15 @@ def resolve_shared_ohlcv_db_path(
     return path
 
 
+def resolve_databento_feed_enabled(*, config: dict[str, object]) -> bool:
+    value = config.get("databento_feed_enabled", True)
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        return value.strip().lower() not in {"0", "false", "no", "off", "disabled"}
+    return bool(value)
+
+
 def main() -> int:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
     args = parse_args()
@@ -1742,23 +1751,26 @@ def main() -> int:
         shared_ohlcv_db_path=shared_ohlcv_db_path,
     )
     stop_event = threading.Event()
-    worker = threading.Thread(
-        target=run_databento_feed,
-        kwargs={
-            "config": DatabentoFeedConfig(
-                api_key=api_key,
-                dataset=dataset,
-                schema=schema,
-                symbols=symbols,
-                stype_in=stype_in,
-                reconnect_interval=reconnect_interval,
-            ),
-            "state": state,
-            "stop": stop_event,
-        },
-        daemon=True,
-    )
-    worker.start()
+    if resolve_databento_feed_enabled(config=config):
+        worker = threading.Thread(
+            target=run_databento_feed,
+            kwargs={
+                "config": DatabentoFeedConfig(
+                    api_key=api_key,
+                    dataset=dataset,
+                    schema=schema,
+                    symbols=symbols,
+                    stype_in=stype_in,
+                    reconnect_interval=reconnect_interval,
+                ),
+                "state": state,
+                "stop": stop_event,
+            },
+            daemon=True,
+        )
+        worker.start()
+    else:
+        state.mark_all("SHARED_OHLCV_DISPLAY_ONLY")
     app = create_app(state=state)
     try:
         app.run(host=host, port=port, debug=False, use_reloader=False, threaded=True)

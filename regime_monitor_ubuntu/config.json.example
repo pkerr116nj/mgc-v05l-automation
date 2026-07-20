@@ -11,6 +11,8 @@
   ],
   "reconnect_interval": 5.0,
   "chart_bar_limit": 72,
+  "shared_ohlcv_db_path": "/var/lib/mgc-v05l/phase1/shared_live_ohlcv.sqlite3",
+  "databento_feed_enabled": false,
   "state_dir_env": "REGIME_MONITOR_STATE_DIR",
   "state_dir": "/var/lib/regime-monitor",
   "host": "0.0.0.0",

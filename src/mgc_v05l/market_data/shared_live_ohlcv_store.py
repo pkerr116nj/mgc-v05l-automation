@@ -238,6 +238,8 @@ def shared_live_ohlcv_chart_payload(
     bars = SharedLiveOhlcvStore(path).load_recent_bars(symbol=symbol, timeframe=timeframe, limit=limit)
     if not bars:
         return None
+    generated_at = datetime.now(UTC)
+    latest_bar_ts = bars[-1].bar_end
     return {
         "schema_version": "shared_live_ohlcv_chart_v1",
         "source": SHARED_LIVE_OHLCV_SOURCE,
@@ -246,7 +248,9 @@ def shared_live_ohlcv_chart_payload(
         "timeframe": normalize_timeframe_label(timeframe),
         "bar_limit": max(1, int(limit)),
         "bar_count": len(bars),
-        "latest_bar_ts": bars[-1].bar_end.isoformat(),
+        "generated_at": generated_at.isoformat(),
+        "latest_bar_ts": latest_bar_ts.isoformat(),
+        "latest_bar_age_seconds": round(max(0.0, (generated_at - latest_bar_ts).total_seconds()), 3),
         "bars": [bar.to_chart_payload() for bar in bars],
     }
 
