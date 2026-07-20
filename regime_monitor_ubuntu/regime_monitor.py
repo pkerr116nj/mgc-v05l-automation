@@ -27,15 +27,20 @@ from flask import Flask, Response, jsonify
 
 
 LOGGER = logging.getLogger("regime_monitor")
-VALID_REGIMES = {"LONG", "SHORT", "NO_TRADE"}
+VALID_REGIMES = {"LONG", "SHORT", "NO_TRADE", "UNAVAILABLE", "STALE", "CALCULATION_ERROR"}
 REGIME_COLORS = {
     "LONG": "#00e676",
     "SHORT": "#ff3333",
     "NO_TRADE": "#9e9e9e",
+    "UNAVAILABLE": "#ffcc33",
+    "STALE": "#ffcc33",
+    "CALCULATION_ERROR": "#ffcc33",
     "NO DATA": "#ffcc33",
 }
 EASTERN_TZ = ZoneInfo("America/New_York")
 DEFAULT_CHART_BAR_LIMIT = 72
+DEFAULT_REGIME_PRICE_WINDOW = 20
+DEFAULT_SHARED_CHART_STALE_AFTER_SECONDS = 900.0
 DEFAULT_STATE_DIR = Path("/var/lib/regime-monitor")
 DEFAULT_STATE_FILE_NAME = "candle_state.json"
 MULTI_CANDLE_STATE_SCHEMA_VERSION = "regime_monitor_multi_candle_state_v2"
@@ -58,6 +63,22 @@ class RegimeSnapshot:
     def to_payload(self) -> dict[str, Any]:
         payload = asdict(self)
         payload["colors"] = REGIME_COLORS
+        return payload
+
+
+@dataclass(frozen=True)
+class RegimeCalculation:
+    decision: str
+    confidence: float | None
+    reason: str
+    calculated_at: str
+    source_bar_timestamp: str | None
+    stale_reason: str | None = None
+    error_reason: str | None = None
+
+    def to_payload(self) -> dict[str, Any]:
+        payload = asdict(self)
+        payload["regime"] = self.decision
         return payload
 
 
@@ -410,17 +431,113 @@ class PriceRegimeState:
                 received_at=utc_now_text(),
             )
 
-        ma = sum(prices) / len(prices) if prices else latest_price
-        regime = "LONG" if latest_price > ma else "SHORT"
-        confidence = abs(latest_price - ma) / ma if ma != 0 else 0
+        regime, confidence, _reason = calculate_price_window_regime(prices, latest_price=latest_price)
         return RegimeSnapshot(
             regime=regime,
-            confidence=round(confidence, 4),
+            confidence=confidence,
             timestamp=timestamp,
             connection_status=connection_status,
             error=error,
             received_at=utc_now_text(),
         )
+
+
+def calculate_price_window_regime(
+    prices: list[float],
+    *,
+    latest_price: float | None = None,
+) -> tuple[str, float, str]:
+    clean_prices = [float(price) for price in prices if _float_or_none(price) is not None]
+    if not clean_prices and latest_price is None:
+        return "UNAVAILABLE", 0.0, "PRICE_WINDOW_EMPTY"
+    latest = float(latest_price if latest_price is not None else clean_prices[-1])
+    window = clean_prices or [latest]
+    average_price = sum(window) / len(window)
+    if average_price == 0:
+        return "UNAVAILABLE", 0.0, "PRICE_WINDOW_AVERAGE_ZERO"
+    if latest > average_price:
+        decision = "LONG"
+    elif latest < average_price:
+        decision = "SHORT"
+    else:
+        decision = "NO_TRADE"
+    confidence = round(abs(latest - average_price) / average_price, 4)
+    return decision, confidence, f"latest_close_vs_{len(window)}_value_average"
+
+
+def calculate_regime_from_chart_payload(
+    chart: dict[str, Any] | None,
+    *,
+    now: datetime | None = None,
+    price_window: int = DEFAULT_REGIME_PRICE_WINDOW,
+    stale_after_seconds: float = DEFAULT_SHARED_CHART_STALE_AFTER_SECONDS,
+) -> RegimeCalculation:
+    calculated_at_dt = now or datetime.now(timezone.utc)
+    calculated_at = calculated_at_dt.isoformat()
+    if not isinstance(chart, dict):
+        return RegimeCalculation(
+            decision="UNAVAILABLE",
+            confidence=None,
+            reason="shared_chart_unavailable",
+            calculated_at=calculated_at,
+            source_bar_timestamp=None,
+            error_reason="MISSING_SHARED_CHART",
+        )
+    bars = chart.get("bars")
+    if not isinstance(bars, list) or not bars:
+        return RegimeCalculation(
+            decision="UNAVAILABLE",
+            confidence=None,
+            reason="shared_chart_has_no_bars",
+            calculated_at=calculated_at,
+            source_bar_timestamp=None,
+            error_reason="NO_SHARED_CHART_BARS",
+        )
+    source_bar_timestamp = str(chart.get("latest_bar_ts") or bars[-1].get("time") or "")
+    latest_bar_dt = _parse_datetime_or_none(source_bar_timestamp)
+    if latest_bar_dt is None:
+        return RegimeCalculation(
+            decision="CALCULATION_ERROR",
+            confidence=None,
+            reason="shared_chart_latest_timestamp_invalid",
+            calculated_at=calculated_at,
+            source_bar_timestamp=source_bar_timestamp or None,
+            error_reason="INVALID_SOURCE_BAR_TIMESTAMP",
+        )
+    age_seconds = max(0.0, (calculated_at_dt.astimezone(timezone.utc) - latest_bar_dt).total_seconds())
+    if age_seconds > stale_after_seconds:
+        return RegimeCalculation(
+            decision="STALE",
+            confidence=None,
+            reason="shared_chart_latest_bar_stale",
+            calculated_at=calculated_at,
+            source_bar_timestamp=latest_bar_dt.isoformat(),
+            stale_reason=f"latest_bar_age_seconds={round(age_seconds, 3)} exceeds {stale_after_seconds}",
+        )
+    prices: list[float] = []
+    try:
+        for bar in bars[-max(1, int(price_window)) :]:
+            close = _float_or_none(bar.get("close") if isinstance(bar, dict) else None)
+            if close is None:
+                raise ValueError("bar close is missing or invalid")
+            prices.append(close)
+        decision, confidence, reason = calculate_price_window_regime(prices)
+    except Exception as exc:  # noqa: BLE001 - expose monitor calculation failure without killing /data.
+        return RegimeCalculation(
+            decision="CALCULATION_ERROR",
+            confidence=None,
+            reason="shared_chart_calculation_failed",
+            calculated_at=calculated_at,
+            source_bar_timestamp=latest_bar_dt.isoformat(),
+            error_reason=str(exc),
+        )
+    return RegimeCalculation(
+        decision=decision,
+        confidence=confidence,
+        reason=reason,
+        calculated_at=calculated_at,
+        source_bar_timestamp=latest_bar_dt.isoformat(),
+    )
 
 
 class InstrumentMonitorState:
@@ -723,6 +840,16 @@ class MultiInstrumentMonitorState:
             )
             if shared_chart is not None:
                 item["chart"] = shared_chart
+            if self.shared_ohlcv_db_path is not None:
+                calculation = calculate_regime_from_chart_payload(shared_chart)
+                item["regime"] = calculation.decision
+                item["confidence"] = calculation.confidence
+                item["regime_calculation"] = calculation.to_payload()
+                item["regime_reason"] = calculation.reason
+                item["regime_calculated_at"] = calculation.calculated_at
+                item["regime_source_bar_timestamp"] = calculation.source_bar_timestamp
+                item["regime_stale_reason"] = calculation.stale_reason
+                item["regime_error_reason"] = calculation.error_reason
             instruments_payload[config.key] = item
         return {
             "schema_version": "regime_monitor_multi_instrument_v1",
@@ -1325,6 +1452,7 @@ DASHBOARD_HTML = """<!doctype html>
     .connection[data-state="DISCONNECTED"],
     .connection[data-state="NO_API_KEY"],
     .connection[data-state="DATABENTO_PACKAGE_MISSING"],
+    .connection[data-state="SHARED_OHLCV_DISPLAY_ONLY"],
     .connection[data-state="STARTING"],
     .connection[data-state="DASHBOARD_DISCONNECTED"] { color: var(--no-data); }
     .error {
@@ -1429,7 +1557,8 @@ DASHBOARD_HTML = """<!doctype html>
       const nodes = ensurePanel(key, payload);
       updateText(nodes, "name", payload.name || key);
       updateText(nodes, "symbol", payload.symbol || key);
-      const regime = payload.regime || "NO DATA";
+      const calculation = payload.regime_calculation || null;
+      const regime = payload.regime || (calculation && calculation.decision) || "UNAVAILABLE";
       updateText(nodes, "regime", regime);
       const color = colors[regime] || colors["NO DATA"];
       if (nodes.current.regimeColor !== color) {
@@ -1449,7 +1578,7 @@ DASHBOARD_HTML = """<!doctype html>
       updateText(nodes, "timestamp", payload.timestamp || "--:--:--");
       const route = `id: ${payload.resolved_instrument_id ?? "--"} source: ${payload.last_source_symbol || "--"}`;
       updateText(nodes, "route", route);
-      const error = payload.error || "";
+      const error = payload.error || payload.regime_error_reason || payload.regime_stale_reason || "";
       updateText(nodes, "error", error);
       nodes.error.classList.toggle("hidden", error === "");
       updateChart(nodes, payload.chart || null);

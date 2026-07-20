@@ -189,6 +189,92 @@ def test_multi_instrument_monitor_charts_prefer_shared_ohlcv_store_and_catalog_l
     assert [row["time"] for row in mnq["chart"]["bars"]] == [bar["bar_end"] for bar in bars]
 
 
+def test_shared_store_regime_calculation_matches_prior_direct_feed_price_window() -> None:
+    prices = [100.0, 102.0]
+    direct_state = regime_monitor.PriceRegimeState()
+    direct_state.record_message(SimpleNamespace(px=prices[0] * 1_000_000_000))
+    direct_state.record_message(SimpleNamespace(px=prices[1] * 1_000_000_000))
+    direct_snapshot = direct_state.snapshot()
+    now = datetime(2026, 7, 20, 12, 10, tzinfo=timezone.utc)
+    chart = {
+        "source": "track_b_shared_live_ohlcv_store",
+        "timeframe": "5m",
+        "latest_bar_ts": "2026-07-20T12:10:00+00:00",
+        "bars": [
+            {"time": "2026-07-20T12:05:00+00:00", "close": prices[0]},
+            {"time": "2026-07-20T12:10:00+00:00", "close": prices[1]},
+        ],
+    }
+
+    calculation = regime_monitor.calculate_regime_from_chart_payload(chart, now=now)
+
+    assert calculation.decision == direct_snapshot.regime == "LONG"
+    assert calculation.confidence == direct_snapshot.confidence == 0.0099
+    assert calculation.reason == "latest_close_vs_2_value_average"
+    assert calculation.source_bar_timestamp == "2026-07-20T12:10:00+00:00"
+    assert calculation.stale_reason is None
+    assert calculation.error_reason is None
+
+
+def test_shared_store_regime_calculation_exposes_unavailable_and_stale_states() -> None:
+    now = datetime(2026, 7, 20, 12, 30, tzinfo=timezone.utc)
+
+    missing = regime_monitor.calculate_regime_from_chart_payload(None, now=now)
+    stale = regime_monitor.calculate_regime_from_chart_payload(
+        {
+            "source": "track_b_shared_live_ohlcv_store",
+            "timeframe": "5m",
+            "latest_bar_ts": "2026-07-20T12:00:00+00:00",
+            "bars": [{"time": "2026-07-20T12:00:00+00:00", "close": 100.0}],
+        },
+        now=now,
+    )
+
+    assert missing.decision == "UNAVAILABLE"
+    assert missing.confidence is None
+    assert missing.error_reason == "MISSING_SHARED_CHART"
+    assert stale.decision == "STALE"
+    assert stale.confidence is None
+    assert stale.stale_reason is not None
+
+
+def test_multi_instrument_monitor_calculates_regime_from_fresh_shared_store(tmp_path: Path) -> None:
+    db_path = tmp_path / "shared.sqlite3"
+    store = SharedLiveOhlcvStore(db_path)
+    now = datetime.now(timezone.utc).replace(second=0, microsecond=0)
+    bars = []
+    for index, close in enumerate([100.0, 102.0]):
+        end = now - timedelta(minutes=5 * (1 - index))
+        bars.append(
+            {
+                "bar_start": (end - timedelta(minutes=5)).isoformat(),
+                "bar_end": end.isoformat(),
+                "open": str(close),
+                "high": str(close + 1),
+                "low": str(close - 1),
+                "close": str(close),
+                "volume": 100 + index,
+                "completed": True,
+            }
+        )
+    store.upsert_mapping_bars(symbol="MNQ", timeframe="5m", bars=bars, source="DATABENTO_REALTIME_PHASE1")
+    state = regime_monitor.MultiInstrumentMonitorState(
+        instruments=regime_monitor.DEFAULT_INSTRUMENTS,
+        state_dir=tmp_path,
+        bar_limit=72,
+        shared_ohlcv_db_path=db_path,
+    )
+
+    mnq = state.payload()["instruments"]["MNQ"]
+
+    assert mnq["chart"]["source"] == "track_b_shared_live_ohlcv_store"
+    assert mnq["chart"]["bar_count"] == 2
+    assert mnq["regime"] == "LONG"
+    assert mnq["confidence"] == 0.0099
+    assert mnq["regime_calculation"]["decision"] == "LONG"
+    assert mnq["regime_source_bar_timestamp"] == bars[-1]["bar_end"]
+
+
 def test_databento_feed_can_be_disabled_for_shared_store_display_cutover() -> None:
     assert regime_monitor.resolve_databento_feed_enabled(config={}) is True
     assert regime_monitor.resolve_databento_feed_enabled(config={"databento_feed_enabled": False}) is False
