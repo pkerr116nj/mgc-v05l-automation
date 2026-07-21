@@ -119,6 +119,32 @@ The service preserves the current message handling:
   `SHORT`
 - confidence is `abs(latest_price - average) / average`, rounded to 4 decimals
 
+## Display Confidence
+
+The dashboard Confidence row does not display the legacy price-window
+`confidence` value above. It displays `directional_agreement_score`, an
+auditable 0-100 score answering: "How strongly do the currently displayed
+indicators agree with the displayed directional trend?"
+
+This score is not a probability of profit, win rate, or execution signal. It is
+computed only for displayed `LONG` and `SHORT` trends; non-directional or
+unavailable trends render the score as unavailable. Missing indicator inputs are
+not fabricated. The score renormalizes over available components:
+
+```text
+round(points_awarded / points_available * 100)
+```
+
+The weighted components are:
+
+- Trend alignment, 35 points: price vs VWAP, price vs MA20, MA20 slope, VWAP slope.
+- Momentum alignment, 25 points: RSI level/direction, MOM sign and normalized magnitude.
+- Trend strength, 25 points: ADX level, ADX rising or already strong.
+- Persistence/separation, 15 points: distance from VWAP/MA20 normalized by ATR, recent bars remaining on the trend side.
+
+Bands are `0-24 WEAK`, `25-44 DEVELOPING`, `45-64 MODERATE`,
+`65-79 STRONG`, and `80-100 VERY STRONG`.
+
 ## Candlestick Chart State
 
 The chart state is built from the monitor's own Databento stream. Each accepted

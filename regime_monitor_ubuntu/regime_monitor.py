@@ -49,6 +49,13 @@ DEFAULT_SHARED_OHLCV_DB_PATH = Path("var") / "track_b_shared_live_ohlcv.sqlite3"
 DEFAULT_TRACK_B_MONITOR_INSTRUMENT_KEYS = ("MNQ", "MES", "MGC")
 MONITOR_ONLY_TRACK_B_INSTRUMENT_KEYS = ("MBT",)
 DEFAULT_MONITOR_INSTRUMENT_KEYS = DEFAULT_TRACK_B_MONITOR_INSTRUMENT_KEYS + MONITOR_ONLY_TRACK_B_INSTRUMENT_KEYS
+DIRECTIONAL_AGREEMENT_BANDS: tuple[tuple[int, int, str], ...] = (
+    (0, 24, "WEAK"),
+    (25, 44, "DEVELOPING"),
+    (45, 64, "MODERATE"),
+    (65, 79, "STRONG"),
+    (80, 100, "VERY STRONG"),
+)
 
 
 @dataclass(frozen=True)
@@ -80,6 +87,49 @@ class RegimeCalculation:
         payload = asdict(self)
         payload["regime"] = self.decision
         return payload
+
+
+@dataclass(frozen=True)
+class DirectionalAgreementComponent:
+    name: str
+    category: str
+    points: float
+    max_points: float
+    reason: str
+    value: float | int | str | None = None
+
+    def to_payload(self) -> dict[str, Any]:
+        return {
+            "name": self.name,
+            "category": self.category,
+            "points": round(self.points, 4),
+            "max_points": round(self.max_points, 4),
+            "reason": self.reason,
+            "value": self.value,
+        }
+
+
+@dataclass(frozen=True)
+class DirectionalAgreementScore:
+    score: int | None
+    band: str
+    points_awarded: float
+    points_available: float
+    scoring_rule: str
+    components: tuple[DirectionalAgreementComponent, ...]
+    unavailable_reason: str | None = None
+
+    def to_payload(self) -> dict[str, Any]:
+        return {
+            "schema_version": "regime_monitor_directional_agreement_score_v1",
+            "score": self.score,
+            "band": self.band,
+            "points_awarded": round(self.points_awarded, 4),
+            "points_available": round(self.points_available, 4),
+            "scoring_rule": self.scoring_rule,
+            "components": [component.to_payload() for component in self.components],
+            "unavailable_reason": self.unavailable_reason,
+        }
 
 
 @dataclass(frozen=True)
@@ -540,6 +590,507 @@ def calculate_regime_from_chart_payload(
     )
 
 
+def calculate_directional_agreement_score(
+    chart: dict[str, Any] | None,
+    *,
+    trend: str,
+) -> DirectionalAgreementScore:
+    scoring_rule = "weighted_indicator_agreement_v1_renormalized_available_components"
+    direction = 1 if trend == "LONG" else -1 if trend == "SHORT" else 0
+    if direction == 0:
+        return DirectionalAgreementScore(
+            score=None,
+            band="UNAVAILABLE",
+            points_awarded=0.0,
+            points_available=0.0,
+            scoring_rule=scoring_rule,
+            components=(),
+            unavailable_reason="directional_agreement_requires_LONG_or_SHORT_trend",
+        )
+    bars = _clean_chart_bars(chart)
+    if not bars:
+        return DirectionalAgreementScore(
+            score=None,
+            band="UNAVAILABLE",
+            points_awarded=0.0,
+            points_available=0.0,
+            scoring_rule=scoring_rule,
+            components=(),
+            unavailable_reason="chart_bars_unavailable",
+        )
+
+    closes = [bar["close"] for bar in bars]
+    latest = bars[-1]
+    ma20_series = _moving_average_series(closes, 20)
+    vwap_series_values = _chart_vwap_series(bars)
+    rsi_series_values = _rsi_series(closes, 14)
+    atr_series_values = _atr_series(bars, 14)
+    adx_series_values = _adx_series(bars, 14)
+    ma20 = _last_not_none(ma20_series)
+    ma20_previous = _previous_not_none(ma20_series)
+    vwap = _last_not_none(vwap_series_values)
+    vwap_previous = _previous_not_none(vwap_series_values)
+    rsi = _last_not_none(rsi_series_values)
+    rsi_previous = _previous_not_none(rsi_series_values)
+    atr = _last_not_none(atr_series_values)
+    adx = _last_not_none(adx_series_values)
+    adx_previous = _previous_not_none(adx_series_values)
+    momentum_reference = bars[-11]["close"] if len(bars) >= 11 else None
+    momentum = (latest["close"] - momentum_reference) / momentum_reference if momentum_reference else None
+
+    components: list[DirectionalAgreementComponent] = []
+
+    _append_signed_component(
+        components,
+        name="price_vs_vwap",
+        category="trend_alignment",
+        max_points=10.0,
+        signed_value=None if vwap is None else latest["close"] - vwap,
+        direction=direction,
+        value=vwap,
+    )
+    _append_signed_component(
+        components,
+        name="price_vs_ma20",
+        category="trend_alignment",
+        max_points=10.0,
+        signed_value=None if ma20 is None else latest["close"] - ma20,
+        direction=direction,
+        value=ma20,
+    )
+    _append_signed_component(
+        components,
+        name="ma20_slope",
+        category="trend_alignment",
+        max_points=7.5,
+        signed_value=None if ma20 is None or ma20_previous is None else ma20 - ma20_previous,
+        direction=direction,
+        value=None if ma20 is None or ma20_previous is None else ma20 - ma20_previous,
+    )
+    _append_signed_component(
+        components,
+        name="vwap_slope",
+        category="trend_alignment",
+        max_points=7.5,
+        signed_value=None if vwap is None or vwap_previous is None else vwap - vwap_previous,
+        direction=direction,
+        value=None if vwap is None or vwap_previous is None else vwap - vwap_previous,
+    )
+    _append_rsi_component(
+        components,
+        rsi=rsi,
+        rsi_previous=rsi_previous,
+        direction=direction,
+    )
+    _append_momentum_component(
+        components,
+        momentum=momentum,
+        atr=atr,
+        close=latest["close"],
+        direction=direction,
+    )
+    _append_adx_level_component(components, adx=adx)
+    _append_adx_direction_component(components, adx=adx, adx_previous=adx_previous)
+    _append_separation_component(
+        components,
+        close=latest["close"],
+        vwap=vwap,
+        ma20=ma20,
+        atr=atr,
+        direction=direction,
+    )
+    _append_persistence_component(
+        components,
+        bars=bars,
+        ma20_series=ma20_series,
+        vwap_series_values=vwap_series_values,
+        direction=direction,
+    )
+
+    points_available = sum(component.max_points for component in components)
+    points_awarded = sum(component.points for component in components)
+    if points_available <= 0:
+        return DirectionalAgreementScore(
+            score=None,
+            band="UNAVAILABLE",
+            points_awarded=0.0,
+            points_available=0.0,
+            scoring_rule=scoring_rule,
+            components=tuple(components),
+            unavailable_reason="no_scored_components_available",
+        )
+    score = max(0, min(100, int(round(points_awarded / points_available * 100))))
+    return DirectionalAgreementScore(
+        score=score,
+        band=directional_agreement_band(score),
+        points_awarded=points_awarded,
+        points_available=points_available,
+        scoring_rule=scoring_rule,
+        components=tuple(components),
+    )
+
+
+def directional_agreement_band(score: int | None) -> str:
+    if score is None:
+        return "UNAVAILABLE"
+    bounded = max(0, min(100, int(score)))
+    for lower, upper, label in DIRECTIONAL_AGREEMENT_BANDS:
+        if lower <= bounded <= upper:
+            return label
+    return "UNAVAILABLE"
+
+
+def _clean_chart_bars(chart: dict[str, Any] | None) -> list[dict[str, float]]:
+    if not isinstance(chart, dict):
+        return []
+    bars = chart.get("bars")
+    if not isinstance(bars, list):
+        return []
+    clean: list[dict[str, float]] = []
+    for bar in bars:
+        if not isinstance(bar, dict):
+            continue
+        open_ = _float_or_none(bar.get("open"))
+        high = _float_or_none(bar.get("high"))
+        low = _float_or_none(bar.get("low"))
+        close = _float_or_none(bar.get("close"))
+        volume = _float_or_none(bar.get("volume"))
+        if open_ is None or high is None or low is None or close is None:
+            continue
+        clean.append(
+            {
+                "open": open_,
+                "high": high,
+                "low": low,
+                "close": close,
+                "volume": 0.0 if volume is None else max(0.0, volume),
+            }
+        )
+    return clean
+
+
+def _append_signed_component(
+    components: list[DirectionalAgreementComponent],
+    *,
+    name: str,
+    category: str,
+    max_points: float,
+    signed_value: float | None,
+    direction: int,
+    value: float | int | str | None,
+) -> None:
+    if signed_value is None:
+        return
+    alignment = _sign(signed_value) * direction
+    points = max_points if alignment > 0 else 0.0
+    reason = "aligned" if alignment > 0 else "contradictory" if alignment < 0 else "neutral"
+    components.append(
+        DirectionalAgreementComponent(
+            name=name,
+            category=category,
+            points=points,
+            max_points=max_points,
+            reason=reason,
+            value=None if value is None else round(float(value), 6),
+        )
+    )
+
+
+def _append_rsi_component(
+    components: list[DirectionalAgreementComponent],
+    *,
+    rsi: float | None,
+    rsi_previous: float | None,
+    direction: int,
+) -> None:
+    if rsi is None:
+        return
+    level_points = _scale_positive((rsi - 50.0) / 20.0) * 8.0 if direction > 0 else _scale_positive((50.0 - rsi) / 20.0) * 8.0
+    if rsi_previous is None:
+        direction_points = 0.0
+    else:
+        rsi_change = rsi - rsi_previous
+        already_confirmed = (direction > 0 and rsi >= 70.0) or (direction < 0 and rsi <= 30.0)
+        direction_points = 4.5 if rsi_change * direction > 0 or (rsi_change == 0 and already_confirmed) else 0.0
+    components.append(
+        DirectionalAgreementComponent(
+            name="rsi_level_direction",
+            category="momentum_alignment",
+            points=level_points + direction_points,
+            max_points=12.5,
+            reason="rsi_level_and_direction_alignment",
+            value=round(rsi, 4),
+        )
+    )
+
+
+def _append_momentum_component(
+    components: list[DirectionalAgreementComponent],
+    *,
+    momentum: float | None,
+    atr: float | None,
+    close: float,
+    direction: int,
+) -> None:
+    if momentum is None:
+        return
+    magnitude = abs(momentum)
+    if atr is not None and close:
+        magnitude = abs(momentum) / max(atr / abs(close), 0.000001)
+    aligned = momentum * direction > 0
+    points = 0.0 if not aligned else min(12.5, 12.5 * magnitude)
+    components.append(
+        DirectionalAgreementComponent(
+            name="mom_sign_magnitude",
+            category="momentum_alignment",
+            points=points,
+            max_points=12.5,
+            reason="aligned_normalized_magnitude" if aligned else "contradictory",
+            value=round(momentum, 6),
+        )
+    )
+
+
+def _append_adx_level_component(components: list[DirectionalAgreementComponent], *, adx: float | None) -> None:
+    if adx is None:
+        return
+    points = _scale_positive((adx - 10.0) / 20.0) * 17.0
+    components.append(
+        DirectionalAgreementComponent(
+            name="adx_level",
+            category="trend_strength",
+            points=points,
+            max_points=17.0,
+            reason="trend_strength_level",
+            value=round(adx, 4),
+        )
+    )
+
+
+def _append_adx_direction_component(
+    components: list[DirectionalAgreementComponent],
+    *,
+    adx: float | None,
+    adx_previous: float | None,
+) -> None:
+    if adx is None or adx_previous is None:
+        return
+    change = adx - adx_previous
+    points = 8.0 if change > 0 or (change == 0 and adx >= 30.0) else 0.0
+    components.append(
+        DirectionalAgreementComponent(
+            name="adx_direction",
+            category="trend_strength",
+            points=points,
+            max_points=8.0,
+            reason="rising_or_already_strong" if points else "falling_or_weak",
+            value=round(change, 6),
+        )
+    )
+
+
+def _append_separation_component(
+    components: list[DirectionalAgreementComponent],
+    *,
+    close: float,
+    vwap: float | None,
+    ma20: float | None,
+    atr: float | None,
+    direction: int,
+) -> None:
+    if atr is None or atr <= 0:
+        return
+    distances = []
+    for reference in (vwap, ma20):
+        if reference is not None and (close - reference) * direction > 0:
+            distances.append(abs(close - reference) / atr)
+    normalized = min(1.0, sum(distances) / 2.0) if distances else 0.0
+    components.append(
+        DirectionalAgreementComponent(
+            name="atr_normalized_separation",
+            category="persistence_separation",
+            points=normalized * 8.0,
+            max_points=8.0,
+            reason="distance_from_vwap_ma20_normalized_by_atr",
+            value=round(normalized, 6),
+        )
+    )
+
+
+def _append_persistence_component(
+    components: list[DirectionalAgreementComponent],
+    *,
+    bars: list[dict[str, float]],
+    ma20_series: list[float | None],
+    vwap_series_values: list[float | None],
+    direction: int,
+) -> None:
+    checks = 0
+    aligned = 0
+    start = max(0, len(bars) - 5)
+    for index in range(start, len(bars)):
+        references = [ma20_series[index], vwap_series_values[index]]
+        available = [reference for reference in references if reference is not None]
+        if not available:
+            continue
+        checks += 1
+        if all((bars[index]["close"] - reference) * direction > 0 for reference in available):
+            aligned += 1
+    if checks == 0:
+        return
+    ratio = aligned / checks
+    components.append(
+        DirectionalAgreementComponent(
+            name="recent_side_persistence",
+            category="persistence_separation",
+            points=ratio * 7.0,
+            max_points=7.0,
+            reason="recent_bars_remaining_on_trend_side",
+            value=round(ratio, 4),
+        )
+    )
+
+
+def _moving_average_series(values: list[float], period: int) -> list[float | None]:
+    series: list[float | None] = []
+    for index in range(len(values)):
+        if index + 1 < period:
+            series.append(None)
+            continue
+        window = values[index + 1 - period : index + 1]
+        series.append(sum(window) / period)
+    return series
+
+
+def _chart_vwap_series(bars: list[dict[str, float]]) -> list[float | None]:
+    value_volume = 0.0
+    volume = 0.0
+    series: list[float | None] = []
+    for bar in bars:
+        bar_volume = max(0.0, bar["volume"])
+        if bar_volume <= 0:
+            series.append(value_volume / volume if volume > 0 else None)
+            continue
+        typical = (bar["high"] + bar["low"] + bar["close"]) / 3
+        value_volume += typical * bar_volume
+        volume += bar_volume
+        series.append(value_volume / volume)
+    return series
+
+
+def _rsi_series(values: list[float], period: int) -> list[float | None]:
+    series: list[float | None] = [None] * len(values)
+    for index in range(period, len(values)):
+        gains = 0.0
+        losses = 0.0
+        for inner in range(index + 1 - period, index + 1):
+            change = values[inner] - values[inner - 1]
+            gains += max(change, 0.0)
+            losses += max(-change, 0.0)
+        avg_gain = gains / period
+        avg_loss = losses / period
+        series[index] = 100.0 if avg_loss == 0 else 100.0 - (100.0 / (1.0 + avg_gain / avg_loss))
+    return series
+
+
+def _atr_series(bars: list[dict[str, float]], period: int) -> list[float | None]:
+    series: list[float | None] = [None] * len(bars)
+    ranges: list[float] = []
+    for index in range(1, len(bars)):
+        current = bars[index]
+        prior = bars[index - 1]
+        ranges.append(
+            max(
+                current["high"] - current["low"],
+                abs(current["high"] - prior["close"]),
+                abs(current["low"] - prior["close"]),
+            )
+        )
+        if len(ranges) >= period:
+            series[index] = sum(ranges[-period:]) / period
+    return series
+
+
+def _adx_series(bars: list[dict[str, float]], period: int) -> list[float | None]:
+    series: list[float | None] = [None] * len(bars)
+    ranges: list[float] = []
+    plus_moves: list[float] = []
+    minus_moves: list[float] = []
+    for index in range(1, len(bars)):
+        current = bars[index]
+        prior = bars[index - 1]
+        up_move = current["high"] - prior["high"]
+        down_move = prior["low"] - current["low"]
+        ranges.append(
+            max(
+                current["high"] - current["low"],
+                abs(current["high"] - prior["close"]),
+                abs(current["low"] - prior["close"]),
+            )
+        )
+        plus_moves.append(up_move if up_move > down_move and up_move > 0 else 0.0)
+        minus_moves.append(down_move if down_move > up_move and down_move > 0 else 0.0)
+    if len(ranges) < period * 2:
+        return series
+    smoothed_range = sum(ranges[:period])
+    smoothed_plus = sum(plus_moves[:period])
+    smoothed_minus = sum(minus_moves[:period])
+    dx_values: list[tuple[int, float]] = []
+    for index in range(period, len(ranges)):
+        smoothed_range = smoothed_range - (smoothed_range / period) + ranges[index]
+        smoothed_plus = smoothed_plus - (smoothed_plus / period) + plus_moves[index]
+        smoothed_minus = smoothed_minus - (smoothed_minus / period) + minus_moves[index]
+        if smoothed_range == 0:
+            dx_values.append((index + 1, 0.0))
+            continue
+        plus_di = 100.0 * (smoothed_plus / smoothed_range)
+        minus_di = 100.0 * (smoothed_minus / smoothed_range)
+        di_sum = plus_di + minus_di
+        dx_values.append((index + 1, 0.0 if di_sum == 0 else 100.0 * abs(plus_di - minus_di) / di_sum))
+    if len(dx_values) < period:
+        return series
+    adx = sum(value for _, value in dx_values[:period]) / period
+    first_bar_index = dx_values[period - 1][0]
+    if first_bar_index < len(series):
+        series[first_bar_index] = adx
+    for bar_index, dx in dx_values[period:]:
+        adx = ((adx * (period - 1)) + dx) / period
+        if bar_index < len(series):
+            series[bar_index] = adx
+    return series
+
+
+def _last_not_none(values: list[float | None]) -> float | None:
+    for value in reversed(values):
+        if value is not None:
+            return value
+    return None
+
+
+def _previous_not_none(values: list[float | None]) -> float | None:
+    seen_latest = False
+    for value in reversed(values):
+        if value is None:
+            continue
+        if not seen_latest:
+            seen_latest = True
+            continue
+        return value
+    return None
+
+
+def _sign(value: float) -> int:
+    if value > 0:
+        return 1
+    if value < 0:
+        return -1
+    return 0
+
+
+def _scale_positive(value: float) -> float:
+    return max(0.0, min(1.0, value))
+
+
 class InstrumentMonitorState:
     def __init__(
         self,
@@ -850,6 +1401,8 @@ class MultiInstrumentMonitorState:
                 item["regime_source_bar_timestamp"] = calculation.source_bar_timestamp
                 item["regime_stale_reason"] = calculation.stale_reason
                 item["regime_error_reason"] = calculation.error_reason
+            agreement = calculate_directional_agreement_score(item.get("chart"), trend=str(item.get("regime") or ""))
+            item["directional_agreement_score"] = agreement.to_payload()
             instruments_payload[config.key] = item
         return {
             "schema_version": "regime_monitor_multi_instrument_v1",
@@ -1766,9 +2319,7 @@ DASHBOARD_HTML = """<!doctype html>
       if (nodes.current.regimeColor !== color) {
         nodes.current.regimeColor = color;
       }
-      const confidence = typeof payload.confidence === "number"
-        ? `${(payload.confidence * 100).toFixed(1)}%`
-        : "--";
+      const confidence = directionalAgreementDisplay(payload.directional_agreement_score);
       updateText(nodes, "confidence", confidence);
       nodes.confidence.dataset.tone = view.tone;
       const metrics = chartMetrics(payload.chart || null);
@@ -1813,6 +2364,11 @@ DASHBOARD_HTML = """<!doctype html>
       if (regime === "STALE") return { trend: "STALE", bias: "STALE", tone: "flat" };
       if (regime === "CALCULATION_ERROR") return { trend: "ERROR", bias: "ERROR", tone: "flat" };
       return { trend: "UNAVAILABLE", bias: "UNAVAILABLE", tone: "flat" };
+    }
+
+    function directionalAgreementDisplay(score) {
+      if (!score || !Number.isInteger(score.score) || !score.band) return "--";
+      return `${score.score} - ${score.band}`;
     }
 
     function chartMetrics(chart) {

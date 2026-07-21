@@ -42,6 +42,29 @@ sys.modules[SPEC.name] = regime_monitor
 SPEC.loader.exec_module(regime_monitor)
 
 
+def _agreement_chart_from_closes(closes: list[float]) -> dict[str, object]:
+    base = datetime(2026, 7, 21, 12, 0, tzinfo=timezone.utc)
+    bars: list[dict[str, object]] = []
+    previous = closes[0]
+    for index, close in enumerate(closes):
+        bars.append(
+            {
+                "time": (base + timedelta(minutes=5 * index)).isoformat(),
+                "open": previous,
+                "high": max(previous, close) + 1.0,
+                "low": min(previous, close) - 1.0,
+                "close": close,
+                "volume": 100 + index,
+            }
+        )
+        previous = close
+    return {"bars": bars}
+
+
+def _component(score: object, name: str) -> object:
+    return next(component for component in score.components if component.name == name)
+
+
 def test_no_databento_price_reports_no_trade() -> None:
     state = regime_monitor.PriceRegimeState()
 
@@ -273,6 +296,98 @@ def test_multi_instrument_monitor_calculates_regime_from_fresh_shared_store(tmp_
     assert mnq["confidence"] == 0.0099
     assert mnq["regime_calculation"]["decision"] == "LONG"
     assert mnq["regime_source_bar_timestamp"] == bars[-1]["bar_end"]
+    assert mnq["directional_agreement_score"]["schema_version"] == "regime_monitor_directional_agreement_score_v1"
+
+
+def test_directional_agreement_score_strong_bullish_alignment() -> None:
+    chart = _agreement_chart_from_closes([100.0 + index * 2.0 for index in range(60)])
+
+    score = regime_monitor.calculate_directional_agreement_score(chart, trend="LONG")
+
+    assert score.score == 100
+    assert score.band == "VERY STRONG"
+    assert score.points_awarded == score.points_available == 100.0
+
+
+def test_directional_agreement_score_strong_bearish_alignment() -> None:
+    chart = _agreement_chart_from_closes([200.0 - index * 2.0 for index in range(60)])
+
+    score = regime_monitor.calculate_directional_agreement_score(chart, trend="SHORT")
+
+    assert score.score == 100
+    assert score.band == "VERY STRONG"
+    assert score.points_awarded == score.points_available == 100.0
+
+
+def test_directional_agreement_score_conflicting_indicators_reduce_score() -> None:
+    bullish_chart = _agreement_chart_from_closes([100.0 + index * 2.0 for index in range(60)])
+
+    score = regime_monitor.calculate_directional_agreement_score(bullish_chart, trend="SHORT")
+
+    assert score.score == 25
+    assert score.band == "DEVELOPING"
+    assert _component(score, "price_vs_vwap").points == 0
+    assert _component(score, "price_vs_ma20").points == 0
+    assert _component(score, "mom_sign_magnitude").points == 0
+
+
+def test_directional_agreement_score_low_adx_caps_strength_component() -> None:
+    closes = [100.0 + (((index % 4) - 1.5) * 0.1) for index in range(60)]
+    score = regime_monitor.calculate_directional_agreement_score(_agreement_chart_from_closes(closes), trend="LONG")
+
+    assert score.score == 51
+    assert score.band == "MODERATE"
+    assert _component(score, "adx_level").points == 0
+    assert _component(score, "adx_level").value < 10
+
+
+def test_directional_agreement_score_missing_inputs_renormalizes_available_components() -> None:
+    score = regime_monitor.calculate_directional_agreement_score(
+        _agreement_chart_from_closes([100.0, 101.0, 102.0]),
+        trend="LONG",
+    )
+
+    assert score.score == 90
+    assert score.band == "VERY STRONG"
+    assert score.points_available == 24.5
+    assert {component.name for component in score.components} == {
+        "price_vs_vwap",
+        "vwap_slope",
+        "recent_side_persistence",
+    }
+
+
+def test_directional_agreement_score_exact_zero_and_hundred_bounds() -> None:
+    zero = regime_monitor.calculate_directional_agreement_score(
+        _agreement_chart_from_closes([100.0] * 60),
+        trend="SHORT",
+    )
+    hundred = regime_monitor.calculate_directional_agreement_score(
+        _agreement_chart_from_closes([100.0 + index * 2.0 for index in range(60)]),
+        trend="LONG",
+    )
+
+    assert zero.score == 0
+    assert zero.band == "WEAK"
+    assert hundred.score == 100
+    assert hundred.band == "VERY STRONG"
+
+
+def test_directional_agreement_score_long_short_symmetry() -> None:
+    bullish_chart = _agreement_chart_from_closes([100.0 + index * 2.0 for index in range(60)])
+    bearish_chart = _agreement_chart_from_closes([200.0 - index * 2.0 for index in range(60)])
+
+    long_score = regime_monitor.calculate_directional_agreement_score(bullish_chart, trend="LONG")
+    short_score = regime_monitor.calculate_directional_agreement_score(bearish_chart, trend="SHORT")
+
+    assert long_score.score == short_score.score == 100
+    assert [
+        (component.name, component.points, component.max_points)
+        for component in long_score.components
+    ] == [
+        (component.name, component.points, component.max_points)
+        for component in short_score.components
+    ]
 
 
 def test_databento_feed_can_be_disabled_for_shared_store_display_cutover() -> None:
@@ -810,7 +925,8 @@ def test_dashboard_axis_labels_are_kiosk_readable_and_spaced() -> None:
     assert "ATR(14)" in html
     assert "function instrumentCode(symbol, fallback)" in html
     assert "const regime = payload.regime || (calculation && calculation.decision) || \"UNAVAILABLE\"" in html
-    assert "typeof payload.confidence === \"number\"" in html
+    assert "directionalAgreementDisplay(payload.directional_agreement_score)" in html
+    assert "function directionalAgreementDisplay(score)" in html
     assert "const metrics = chartMetrics(payload.chart || null)" in html
 
     antix_panel_width = (1920 - 24) / 2
@@ -885,7 +1001,7 @@ def test_dashboard_preserves_runtime_field_mapping_for_direction_and_chart() -> 
 
     assert "payload.regime" in html
     assert "payload.regime_calculation" in html
-    assert "payload.confidence" in html
+    assert "payload.directional_agreement_score" in html
     assert "payload.chart || null" in html
     assert "chartMetrics(payload.chart || null)" in html
     assert "payload.regime_source_bar_timestamp || metrics.latestTime" in html
