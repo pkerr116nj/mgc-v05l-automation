@@ -1110,19 +1110,19 @@ def test_dashboard_latest_source_timestamp_matches_age_candidates() -> None:
     values = _run_dashboard_js(
         """
         (() => {
-          const payload = { generated_at: "2026-07-21T12:00:01Z" };
+          const payload = { generated_at: "2026-07-21T12:00:09Z" };
           const instruments = {
-            MNQ: { chart: { generated_at: "2026-07-21T12:00:06Z" } },
-            MES: { received_at: "2026-07-21T12:00:08Z" },
+            MNQ: { chart: { latest_bar_ts: "2026-07-21T12:00:00Z", generated_at: "2026-07-21T12:00:10Z" } },
+            MES: { regime_source_bar_timestamp: "2026-07-21T12:05:00Z", received_at: "2026-07-21T12:00:08Z" },
             MGC: { regime_calculated_at: "2026-07-21T12:00:05Z" }
           };
           return latestSourceTimestamp(payload, instruments);
         })()
         """,
-        functions=("latestSourceTimestamp",),
+        functions=("newestTimestampValue", "latestSourceTimestamp"),
     )
 
-    assert values == "2026-07-21T12:00:08Z"
+    assert values == "2026-07-21T12:05:00Z"
 
 
 def test_dashboard_chart_geometry_keeps_latest_mnq_mes_candles_inside_panel() -> None:
@@ -1272,19 +1272,28 @@ def test_dashboard_footer_age_uses_latest_source_timestamp() -> None:
         (() => {
           window.__REGIME_MONITOR_NOW_OVERRIDE = "2026-07-21T12:00:10Z";
           return [
-            latestSourceAgeSeconds({}, { MNQ: { chart: { generated_at: "2026-07-21T12:00:09.600Z" } } }),
+            latestSourceAgeSeconds({}, { MNQ: { chart: { latest_bar_ts: "2026-07-21T12:00:00Z", generated_at: "2026-07-21T12:00:09.600Z" } } }),
             latestSourceAgeSeconds({ generated_at: "2026-07-21T12:00:01Z" }, {
-              MNQ: { chart: { generated_at: "2026-07-21T12:00:06Z" } },
-              MES: { received_at: "2026-07-21T12:00:08Z" }
+              MNQ: { chart: { latest_bar_ts: "2026-07-21T11:55:00Z", generated_at: "2026-07-21T12:00:06Z" } },
+              MES: { regime_source_bar_timestamp: "2026-07-21T12:00:00Z", received_at: "2026-07-21T12:00:08Z" }
             }),
             latestSourceAgeSeconds({}, {})
           ];
         })()
         """,
-        functions=("currentDashboardDate", "latestSourceAgeSeconds"),
+        functions=("currentDashboardDate", "newestTimestampValue", "latestSourceTimestamp", "latestSourceAgeSeconds"),
     )
 
-    assert ages == [0.4, 2, None]
+    assert ages == [10, 10, None]
+
+
+def test_dashboard_footer_source_market_age_state_uses_five_minute_bar_tolerance() -> None:
+    states = _run_dashboard_js(
+        "[0, 389.9, 390, 390.1, 900, 900.1, null].map(sourceMarketAgeState)",
+        functions=("sourceMarketAgeState",),
+    )
+
+    assert states == ["fresh", "fresh", "fresh", "degraded", "degraded", "stale", "stale"]
 
 
 def test_dashboard_vwap_delta_tile_displays_signed_atr_distance() -> None:

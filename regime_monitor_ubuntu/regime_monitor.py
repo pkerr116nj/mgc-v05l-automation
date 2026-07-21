@@ -3407,10 +3407,11 @@ DASHBOARD_HTML = """<!doctype html>
       const age = latestSourceAgeSeconds(payload, instruments);
       let label = "--";
       let dataClass = "";
-      if (hasError || (age != null && age > 10)) {
+      const ageState = sourceMarketAgeState(age);
+      if (hasError || ageState === "stale") {
         label = "STALE";
         dataClass = "offline";
-      } else if (age != null && age > 2) {
+      } else if (ageState === "degraded") {
         label = "DEGRADED";
         dataClass = "stale";
       } else if (hasBars) {
@@ -3426,9 +3427,16 @@ DASHBOARD_HTML = """<!doctype html>
           ageNode.className = "offline";
         } else {
           ageNode.textContent = `${age.toFixed(age < 10 ? 1 : 0)}s`;
-          ageNode.className = age <= 2 ? "live" : age <= 10 ? "stale" : "offline";
+          ageNode.className = ageState === "fresh" ? "live" : ageState === "degraded" ? "stale" : "offline";
         }
       }
+    }
+
+    function sourceMarketAgeState(age) {
+      if (!Number.isFinite(age)) return "stale";
+      if (age <= 390) return "fresh";
+      if (age <= 900) return "degraded";
+      return "stale";
     }
 
     function pulseHeartbeat(status) {
@@ -3472,13 +3480,27 @@ DASHBOARD_HTML = """<!doctype html>
     }
 
     function latestSourceTimestamp(payload, instruments) {
-      const candidates = [];
+      const marketCandidates = [];
+      const fallbackCandidates = [];
       for (const item of Object.values(instruments || {})) {
-        candidates.push(item && item.chart && item.chart.generated_at);
-        candidates.push(item && item.received_at);
-        candidates.push(item && item.regime_calculated_at);
+        marketCandidates.push(item && item.regime_source_bar_timestamp);
+        marketCandidates.push(item && item.regime_calculation && item.regime_calculation.source_bar_timestamp);
+        marketCandidates.push(item && item.chart && item.chart.latest_bar_ts);
+        const bars = item && item.chart && Array.isArray(item.chart.bars) ? item.chart.bars : [];
+        if (bars.length) {
+          const latestBar = bars[bars.length - 1];
+          marketCandidates.push(latestBar && (latestBar.time || latestBar.bar_end));
+        }
+        fallbackCandidates.push(item && item.chart && item.chart.generated_at);
+        fallbackCandidates.push(item && item.received_at);
+        fallbackCandidates.push(item && item.regime_calculated_at);
       }
-      candidates.push(payload && payload.generated_at);
+      fallbackCandidates.push(payload && payload.generated_at);
+      const marketTimestamp = newestTimestampValue(marketCandidates);
+      return marketTimestamp || newestTimestampValue(fallbackCandidates);
+    }
+
+    function newestTimestampValue(candidates) {
       const timestamps = candidates
         .map((value) => ({ value, millis: Date.parse(value) }))
         .filter((item) => Number.isFinite(item.millis));
@@ -3488,18 +3510,9 @@ DASHBOARD_HTML = """<!doctype html>
     }
 
     function latestSourceAgeSeconds(payload, instruments) {
-      const candidates = [];
-      for (const item of Object.values(instruments || {})) {
-        candidates.push(item && item.chart && item.chart.generated_at);
-        candidates.push(item && item.received_at);
-        candidates.push(item && item.regime_calculated_at);
-      }
-      candidates.push(payload && payload.generated_at);
-      const timestamps = candidates
-        .map((value) => Date.parse(value))
-        .filter((value) => Number.isFinite(value));
-      if (!timestamps.length) return null;
-      const newest = Math.max(...timestamps);
+      const timestamp = latestSourceTimestamp(payload, instruments);
+      const newest = Date.parse(timestamp);
+      if (!Number.isFinite(newest)) return null;
       return Math.max(0, (currentDashboardDate().getTime() - newest) / 1000);
     }
     window.__REGIME_MONITOR_DEBUG = {
