@@ -133,6 +133,28 @@ class DirectionalAgreementScore:
 
 
 @dataclass(frozen=True)
+class TradeQualityScore:
+    score: int | None
+    components: tuple[DirectionalAgreementComponent, ...]
+    freshness_state: str
+    unavailable_reason: str | None = None
+
+    def to_payload(self) -> dict[str, Any]:
+        points_awarded = sum(component.points for component in self.components)
+        points_available = sum(component.max_points for component in self.components)
+        return {
+            "schema_version": "regime_monitor_trade_quality_score_v1",
+            "score": self.score,
+            "points_awarded": round(points_awarded, 4),
+            "points_available": round(points_available, 4),
+            "scoring_rule": "confidence_adx_vwap_distance_freshness_v1",
+            "freshness_state": self.freshness_state,
+            "components": [component.to_payload() for component in self.components],
+            "unavailable_reason": self.unavailable_reason,
+        }
+
+
+@dataclass(frozen=True)
 class InstrumentConfig:
     key: str
     name: str
@@ -648,6 +670,7 @@ def calculate_directional_agreement_score(
         signed_value=None if vwap is None else latest["close"] - vwap,
         direction=direction,
         value=vwap,
+        strength=None if atr is None or atr <= 0 or vwap is None else abs(latest["close"] - vwap) / atr / 0.25,
     )
     _append_signed_component(
         components,
@@ -657,6 +680,7 @@ def calculate_directional_agreement_score(
         signed_value=None if ma20 is None else latest["close"] - ma20,
         direction=direction,
         value=ma20,
+        strength=None if atr is None or atr <= 0 or ma20 is None else abs(latest["close"] - ma20) / atr / 0.25,
     )
     _append_signed_component(
         components,
@@ -666,6 +690,7 @@ def calculate_directional_agreement_score(
         signed_value=None if ma20 is None or ma20_previous is None else ma20 - ma20_previous,
         direction=direction,
         value=None if ma20 is None or ma20_previous is None else ma20 - ma20_previous,
+        strength=None if atr is None or atr <= 0 or ma20 is None or ma20_previous is None else abs(ma20 - ma20_previous) / atr / 0.10,
     )
     _append_signed_component(
         components,
@@ -675,6 +700,7 @@ def calculate_directional_agreement_score(
         signed_value=None if vwap is None or vwap_previous is None else vwap - vwap_previous,
         direction=direction,
         value=None if vwap is None or vwap_previous is None else vwap - vwap_previous,
+        strength=None if atr is None or atr <= 0 or vwap is None or vwap_previous is None else abs(vwap - vwap_previous) / atr / 0.10,
     )
     _append_rsi_component(
         components,
@@ -704,6 +730,7 @@ def calculate_directional_agreement_score(
         bars=bars,
         ma20_series=ma20_series,
         vwap_series_values=vwap_series_values,
+        atr=atr,
         direction=direction,
     )
 
@@ -738,6 +765,93 @@ def directional_agreement_band(score: int | None) -> str:
         if lower <= bounded <= upper:
             return label
     return "UNAVAILABLE"
+
+
+def calculate_trade_quality_score(
+    chart: dict[str, Any] | None,
+    *,
+    directional_agreement: DirectionalAgreementScore,
+    now: datetime | None = None,
+) -> TradeQualityScore:
+    if directional_agreement.score is None:
+        return TradeQualityScore(
+            score=None,
+            components=(),
+            freshness_state=_chart_freshness_state(chart, now=now),
+            unavailable_reason="directional_agreement_unavailable",
+        )
+    bars = _clean_chart_bars(chart)
+    if not bars:
+        return TradeQualityScore(
+            score=None,
+            components=(),
+            freshness_state=_chart_freshness_state(chart, now=now),
+            unavailable_reason="chart_bars_unavailable",
+        )
+
+    atr = _last_not_none(_atr_series(bars, 14))
+    adx = _last_not_none(_adx_series(bars, 14))
+    vwap = _last_not_none(_chart_vwap_series(bars))
+    latest_close = bars[-1]["close"]
+    freshness_state = _chart_freshness_state(chart, now=now)
+    freshness_points = {"fresh": 5.0, "degraded": 2.0, "stale": 0.0}.get(freshness_state, 0.0)
+    confidence_points = directional_agreement.score / 100.0 * 60.0
+    adx_points = 0.0 if adx is None else _scale_positive((adx - 15.0) / 25.0) * 20.0
+    vwap_distance_atr = None
+    if atr is not None and atr > 0 and vwap is not None:
+        vwap_distance_atr = abs(latest_close - vwap) / atr
+    movement_points = 0.0 if vwap_distance_atr is None else _scale_positive(vwap_distance_atr / 0.50) * 15.0
+    components = (
+        DirectionalAgreementComponent(
+            name="directional_agreement",
+            category="trade_quality",
+            points=confidence_points,
+            max_points=60.0,
+            reason="confidence_score_normalized_to_60",
+            value=directional_agreement.score,
+        ),
+        DirectionalAgreementComponent(
+            name="adx_strength",
+            category="trade_quality",
+            points=adx_points,
+            max_points=20.0,
+            reason="adx_scaled_15_to_40",
+            value=None if adx is None else round(adx, 4),
+        ),
+        DirectionalAgreementComponent(
+            name="vwap_distance_atr",
+            category="trade_quality",
+            points=movement_points,
+            max_points=15.0,
+            reason="absolute_vwap_distance_scaled_to_half_atr",
+            value=None if vwap_distance_atr is None else round(vwap_distance_atr, 6),
+        ),
+        DirectionalAgreementComponent(
+            name="data_freshness",
+            category="trade_quality",
+            points=freshness_points,
+            max_points=5.0,
+            reason=freshness_state,
+            value=freshness_state,
+        ),
+    )
+    score = max(0, min(100, int(round(sum(component.points for component in components)))))
+    return TradeQualityScore(score=score, components=components, freshness_state=freshness_state)
+
+
+def _chart_freshness_state(chart: dict[str, Any] | None, *, now: datetime | None = None) -> str:
+    if not isinstance(chart, dict):
+        return "stale"
+    source_time = _parse_datetime_or_none(chart.get("generated_at") or chart.get("received_at"))
+    if source_time is None:
+        return "stale"
+    reference = _ensure_utc(now or datetime.now(timezone.utc))
+    age_seconds = max(0.0, (reference - source_time).total_seconds())
+    if age_seconds <= 2.0:
+        return "fresh"
+    if age_seconds <= 10.0:
+        return "degraded"
+    return "stale"
 
 
 def _clean_chart_bars(chart: dict[str, Any] | None) -> list[dict[str, float]]:
@@ -778,12 +892,17 @@ def _append_signed_component(
     signed_value: float | None,
     direction: int,
     value: float | int | str | None,
+    strength: float | None = None,
 ) -> None:
     if signed_value is None:
         return
     alignment = _sign(signed_value) * direction
-    points = max_points if alignment > 0 else 0.0
-    reason = "aligned" if alignment > 0 else "contradictory" if alignment < 0 else "neutral"
+    strength_scale = 1.0 if strength is None else _scale_positive(strength)
+    points = max_points * strength_scale if alignment > 0 else 0.0
+    if alignment > 0:
+        reason = "aligned_scaled_by_magnitude" if strength is not None else "aligned"
+    else:
+        reason = "contradictory" if alignment < 0 else "neutral"
     components.append(
         DirectionalAgreementComponent(
             name=name,
@@ -923,10 +1042,12 @@ def _append_persistence_component(
     bars: list[dict[str, float]],
     ma20_series: list[float | None],
     vwap_series_values: list[float | None],
+    atr: float | None,
     direction: int,
 ) -> None:
     checks = 0
     aligned = 0
+    strengths: list[float] = []
     start = max(0, len(bars) - 5)
     for index in range(start, len(bars)):
         references = [ma20_series[index], vwap_series_values[index]]
@@ -936,16 +1057,19 @@ def _append_persistence_component(
         checks += 1
         if all((bars[index]["close"] - reference) * direction > 0 for reference in available):
             aligned += 1
+            if atr is not None and atr > 0:
+                strengths.append(min(abs(bars[index]["close"] - reference) / atr for reference in available) / 0.25)
     if checks == 0:
         return
     ratio = aligned / checks
+    strength_scale = 1.0 if not strengths else _scale_positive(sum(strengths) / len(strengths))
     components.append(
         DirectionalAgreementComponent(
             name="recent_side_persistence",
             category="persistence_separation",
-            points=ratio * 7.0,
+            points=ratio * strength_scale * 7.0,
             max_points=7.0,
-            reason="recent_bars_remaining_on_trend_side",
+            reason="recent_bars_remaining_on_trend_side_scaled_by_separation",
             value=round(ratio, 4),
         )
     )
@@ -1381,6 +1505,7 @@ class MultiInstrumentMonitorState:
 
     def payload(self) -> dict[str, Any]:
         instruments_payload: dict[str, Any] = {}
+        now = datetime.now(timezone.utc)
         for config in self.instruments:
             item = self._instrument_by_key[config.key].payload()
             shared_chart = _shared_ohlcv_chart_payload(
@@ -1403,6 +1528,11 @@ class MultiInstrumentMonitorState:
                 item["regime_error_reason"] = calculation.error_reason
             agreement = calculate_directional_agreement_score(item.get("chart"), trend=str(item.get("regime") or ""))
             item["directional_agreement_score"] = agreement.to_payload()
+            item["trade_quality_score"] = calculate_trade_quality_score(
+                item.get("chart"),
+                directional_agreement=agreement,
+                now=now,
+            ).to_payload()
             instruments_payload[config.key] = item
         return {
             "schema_version": "regime_monitor_multi_instrument_v1",
@@ -1916,6 +2046,8 @@ DASHBOARD_HTML = """<!doctype html>
       --no-trade: #ffb000;
       --no-data: #ffb000;
       --warn: #ffb000;
+      --orange: #ff8a20;
+      --lime: #9af36c;
       --blue: #2f83ff;
       --magenta: #d948ff;
     }
@@ -1968,6 +2100,13 @@ DASHBOARD_HTML = """<!doctype html>
       border-right: 1px solid rgba(125, 153, 158, 0.22);
       padding-right: 14px;
     }
+    .identity-head {
+      min-width: 0;
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto;
+      align-items: start;
+      gap: 8px;
+    }
     .name {
       margin: 0;
       font-size: clamp(1.55rem, 2.55vw, 3.1rem);
@@ -1977,6 +2116,23 @@ DASHBOARD_HTML = """<!doctype html>
       white-space: nowrap;
       overflow: hidden;
       text-overflow: ellipsis;
+    }
+    .rank-marker {
+      align-self: start;
+      padding: 4px 7px;
+      border: 1px solid rgba(247, 247, 247, 0.24);
+      border-radius: 3px;
+      color: var(--text);
+      background: rgba(247, 247, 247, 0.06);
+      font-size: clamp(0.78rem, 1.05vw, 1.16rem);
+      line-height: 1;
+      font-weight: 860;
+      font-variant-numeric: tabular-nums;
+    }
+    .rank-marker[data-rank="1"] {
+      border-color: rgba(0, 230, 195, 0.65);
+      color: var(--cyan);
+      background: rgba(0, 230, 195, 0.10);
     }
     .symbol {
       color: var(--muted);
@@ -2007,6 +2163,21 @@ DASHBOARD_HTML = """<!doctype html>
     }
     .change[data-tone="short"] { color: var(--short); }
     .change[data-tone="flat"] { color: var(--muted); }
+    .quality {
+      color: var(--muted);
+      font-size: clamp(0.72rem, 1vw, 1.02rem);
+      line-height: 1;
+      font-weight: 800;
+      font-variant-numeric: tabular-nums;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+    .quality[data-tone="weak"] { color: var(--dim); }
+    .quality[data-tone="developing"] { color: var(--warn); }
+    .quality[data-tone="moderate"] { color: var(--orange); }
+    .quality[data-tone="strong"] { color: var(--lime); }
+    .quality[data-tone="very-strong"] { color: var(--long); }
     .signal-table {
       min-width: 0;
       display: grid;
@@ -2037,8 +2208,22 @@ DASHBOARD_HTML = """<!doctype html>
       font-weight: 820;
       font-variant-numeric: tabular-nums;
     }
+    .metric-value.trend {
+      color: var(--text);
+      font-weight: 760;
+    }
+    .metric-value.confidence {
+      font-size: clamp(1.08rem, 1.55vw, 1.72rem);
+      font-weight: 900;
+    }
     .metric-value[data-tone="short"] { color: var(--short); }
     .metric-value[data-tone="flat"] { color: var(--warn); }
+    .metric-value[data-tone="neutral"] { color: var(--text); }
+    .metric-value[data-tone="weak"] { color: var(--dim); }
+    .metric-value[data-tone="developing"] { color: var(--warn); }
+    .metric-value[data-tone="moderate"] { color: var(--orange); }
+    .metric-value[data-tone="strong"] { color: var(--lime); }
+    .metric-value[data-tone="very-strong"] { color: var(--long); }
     .chart-wrap {
       min-width: 0;
       min-height: 0;
@@ -2122,6 +2307,10 @@ DASHBOARD_HTML = """<!doctype html>
     }
     .indicator-value[data-tone="long"] { color: var(--long); }
     .indicator-value[data-tone="short"] { color: var(--short); }
+    .indicator-value[data-tone="orange"] { color: var(--orange); }
+    .indicator-value[data-tone="yellow"] { color: var(--warn); }
+    .indicator-value[data-tone="lime"] { color: var(--lime); }
+    .indicator-value[data-tone="neutral"] { color: var(--muted); }
     .chart {
       display: block;
       width: 100%;
@@ -2161,8 +2350,8 @@ DASHBOARD_HTML = """<!doctype html>
       height: 32px;
       padding: 0 16px;
       display: grid;
-      grid-template-columns: auto auto auto minmax(0, 1fr) auto;
-      gap: 28px;
+      grid-template-columns: auto auto auto auto minmax(0, 1fr) auto;
+      gap: 22px;
       align-items: center;
       color: var(--muted);
       background: #010606;
@@ -2183,17 +2372,21 @@ DASHBOARD_HTML = """<!doctype html>
     <article class="panel">
       <header class="top">
         <div class="identity">
-          <h2 class="name"></h2>
+          <div class="identity-head">
+            <h2 class="name"></h2>
+            <div class="rank-marker">#--</div>
+          </div>
           <div class="symbol"></div>
           <div class="last-price">--</div>
           <div class="change" data-tone="flat">--</div>
+          <div class="quality">QUALITY --</div>
         </div>
         <div class="signal-table">
           <div class="metric-label primary">Trend</div>
           <div class="metric-value trend">--</div>
           <div class="metric-label">Confidence</div>
           <div class="metric-value confidence">--</div>
-          <div class="metric-label">Bias</div>
+          <div class="metric-label">Regime</div>
           <div class="metric-value bias">--</div>
         </div>
       </header>
@@ -2211,7 +2404,7 @@ DASHBOARD_HTML = """<!doctype html>
         <div class="indicator"><div class="indicator-label">RSI(14)</div><div class="indicator-value rsi">--</div></div>
         <div class="indicator"><div class="indicator-label">ADX(14)</div><div class="indicator-value adx">--</div></div>
         <div class="indicator"><div class="indicator-label">MOM(10)</div><div class="indicator-value mom">--</div></div>
-        <div class="indicator"><div class="indicator-label">ATR(14)</div><div class="indicator-value atr">--</div></div>
+        <div class="indicator"><div class="indicator-label">VWAP Δ</div><div class="indicator-value vwap-delta">--</div></div>
       </section>
       <footer class="status">
         <div class="connection" data-state="STARTING">STARTING</div>
@@ -2225,6 +2418,7 @@ DASHBOARD_HTML = """<!doctype html>
     <span>Market: <span id="footer-market">--</span></span>
     <span>Session: <span id="footer-session">--</span></span>
     <span>TIME: <span id="footer-time">--:--:-- ET</span></span>
+    <span>AGE: <span id="footer-age">--</span></span>
     <span>DATA: <span id="footer-data">--</span></span>
     <span>ALL TIMES EASTERN</span>
   </footer>
@@ -2247,12 +2441,12 @@ DASHBOARD_HTML = """<!doctype html>
       xLabelFont: "560 15px system-ui, sans-serif",
       yLabelWidth: 76,
       leftPadding: 14,
-      rightPadding: 92,
+      rightPadding: 108,
       topPadding: 34,
       bottomPadding: 62,
       yLabelGap: 10,
       xLabelBottomGap: 14,
-      minXLabelGap: 78,
+      minXLabelGap: 110,
       priceRangePaddingRatio: 0.16,
       minPriceRangePixels: 20,
       fallbackLabelFont: "560 17px system-ui, sans-serif",
@@ -2268,9 +2462,11 @@ DASHBOARD_HTML = """<!doctype html>
       const nodes = {
         panel,
         name: fragment.querySelector(".name"),
+        rankMarker: fragment.querySelector(".rank-marker"),
         symbol: fragment.querySelector(".symbol"),
         lastPrice: fragment.querySelector(".last-price"),
         change: fragment.querySelector(".change"),
+        quality: fragment.querySelector(".quality"),
         trend: fragment.querySelector(".trend"),
         confidence: fragment.querySelector(".confidence"),
         bias: fragment.querySelector(".bias"),
@@ -2282,7 +2478,7 @@ DASHBOARD_HTML = """<!doctype html>
         rsi: fragment.querySelector(".rsi"),
         adx: fragment.querySelector(".adx"),
         mom: fragment.querySelector(".mom"),
-        atr: fragment.querySelector(".atr"),
+        vwapDelta: fragment.querySelector(".vwap-delta"),
         canvas: fragment.querySelector(".chart"),
         connection: fragment.querySelector(".connection"),
         timestamp: fragment.querySelector(".timestamp"),
@@ -2305,16 +2501,21 @@ DASHBOARD_HTML = """<!doctype html>
       nodes[field].textContent = next;
     }
 
-    function updatePanel(key, payload) {
+    function updatePanel(key, payload, rankInfo) {
       const nodes = ensurePanel(key, payload);
       updateText(nodes, "name", instrumentCode(payload.symbol || key, key));
       updateText(nodes, "symbol", payload.name || payload.symbol || key);
+      const quality = tradeQualityDisplay(payload.trade_quality_score);
+      updateText(nodes, "rankMarker", rankInfo && rankInfo.rank ? `#${rankInfo.rank}` : "#--");
+      updateText(nodes, "quality", quality);
+      nodes.rankMarker.dataset.rank = rankInfo && rankInfo.rank ? String(rankInfo.rank) : "";
+      nodes.quality.dataset.tone = tradeQualityTone(payload.trade_quality_score && payload.trade_quality_score.score);
       const calculation = payload.regime_calculation || null;
       const regime = payload.regime || (calculation && calculation.decision) || "UNAVAILABLE";
       const view = directionView(regime);
       updateText(nodes, "trend", view.trend);
       updateText(nodes, "bias", view.bias);
-      nodes.trend.dataset.tone = view.tone;
+      nodes.trend.dataset.tone = "neutral";
       nodes.bias.dataset.tone = view.tone;
       const color = colors[regime] || colors["NO DATA"];
       if (nodes.current.regimeColor !== color) {
@@ -2322,7 +2523,7 @@ DASHBOARD_HTML = """<!doctype html>
       }
       const confidence = directionalAgreementDisplay(payload.directional_agreement_score);
       updateText(nodes, "confidence", confidence);
-      nodes.confidence.dataset.tone = view.tone;
+      nodes.confidence.dataset.tone = confidenceTone(payload.directional_agreement_score && payload.directional_agreement_score.score);
       const metrics = chartMetrics(payload.chart || null);
       updateText(nodes, "lastPrice", metrics.lastPriceText);
       updateText(nodes, "change", metrics.changeText);
@@ -2338,10 +2539,11 @@ DASHBOARD_HTML = """<!doctype html>
       updateText(nodes, "rsi", metrics.rsiText);
       updateText(nodes, "adx", metrics.adxText);
       updateText(nodes, "mom", metrics.momText);
-      updateText(nodes, "atr", metrics.atrText);
+      updateText(nodes, "vwapDelta", metrics.vwapDeltaText);
       nodes.rsi.dataset.tone = metrics.rsiTone;
       nodes.adx.dataset.tone = metrics.adxTone;
       nodes.mom.dataset.tone = metrics.momTone;
+      nodes.vwapDelta.dataset.tone = metrics.vwapDeltaTone;
       const status = payload.connection_status || "UNKNOWN";
       if (nodes.current.connectionStatus !== status) {
         nodes.current.connectionStatus = status;
@@ -2359,8 +2561,8 @@ DASHBOARD_HTML = """<!doctype html>
     }
 
     function directionView(regime) {
-      if (regime === "LONG") return { trend: "LONG", bias: "BULLISH", tone: "long" };
-      if (regime === "SHORT") return { trend: "SHORT", bias: "BEARISH", tone: "short" };
+      if (regime === "LONG") return { trend: "LONG \\u2191", bias: "BULLISH", tone: "long" };
+      if (regime === "SHORT") return { trend: "SHORT \\u2193", bias: "BEARISH", tone: "short" };
       if (regime === "NO_TRADE") return { trend: "FLAT", bias: "NEUTRAL", tone: "flat" };
       if (regime === "STALE") return { trend: "STALE", bias: "STALE", tone: "flat" };
       if (regime === "CALCULATION_ERROR") return { trend: "ERROR", bias: "ERROR", tone: "flat" };
@@ -2369,7 +2571,29 @@ DASHBOARD_HTML = """<!doctype html>
 
     function directionalAgreementDisplay(score) {
       if (!score || !Number.isInteger(score.score) || !score.band) return "--";
-      return `${score.score} - ${score.band}`;
+      return `${score.score} \\u2014 ${score.band}`;
+    }
+
+    function confidenceTone(score) {
+      return scoreBandTone(score);
+    }
+
+    function tradeQualityDisplay(score) {
+      if (!score || !Number.isInteger(score.score)) return "QUALITY --";
+      return `QUALITY ${score.score}`;
+    }
+
+    function tradeQualityTone(score) {
+      return scoreBandTone(score);
+    }
+
+    function scoreBandTone(score) {
+      if (!Number.isFinite(score)) return "weak";
+      if (score <= 24) return "weak";
+      if (score <= 44) return "developing";
+      if (score <= 64) return "moderate";
+      if (score <= 79) return "strong";
+      return "very-strong";
     }
 
     function chartMetrics(chart) {
@@ -2390,10 +2614,11 @@ DASHBOARD_HTML = """<!doctype html>
           rsiText: "--",
           adxText: "--",
           momText: "--",
-          atrText: "--",
+          vwapDeltaText: "N/A",
           rsiTone: "flat",
           adxTone: "flat",
           momTone: "flat",
+          vwapDeltaTone: "neutral",
         };
       }
       const latest = valid[valid.length - 1];
@@ -2406,6 +2631,7 @@ DASHBOARD_HTML = """<!doctype html>
       const ma20 = movingAverage(valid, 20);
       const vwap = currentVwap(valid);
       const technicals = calculateTechnicalMetrics(valid);
+      const vwapDeltaAtr = technicals.atr != null && technicals.atr > 0 && vwap != null ? (latestClose - vwap) / technicals.atr : null;
       return {
         lastPriceText: formatPrice(latestClose),
         lastPrice: latestClose,
@@ -2420,10 +2646,11 @@ DASHBOARD_HTML = """<!doctype html>
         rsiText: technicals.rsi == null ? "--" : technicals.rsi.toFixed(1),
         adxText: technicals.adx == null ? "--" : technicals.adx.toFixed(1),
         momText: technicals.mom == null ? "--" : `${technicals.mom >= 0 ? "+" : ""}${(technicals.mom * 100).toFixed(2)}%`,
-        atrText: technicals.atr == null ? "--" : formatDelta(technicals.atr),
+        vwapDeltaText: vwapDeltaAtr == null ? "N/A" : `${vwapDeltaAtr >= 0 ? "+" : ""}${vwapDeltaAtr.toFixed(2)} ATR`,
         rsiTone: rsiTone(technicals.rsi),
         adxTone: technicals.adx == null ? "flat" : technicals.adx >= 25 ? "long" : "flat",
         momTone: technicals.mom == null ? "flat" : technicals.mom > 0 ? "long" : technicals.mom < 0 ? "short" : "flat",
+        vwapDeltaTone: vwapDeltaAtr == null ? "neutral" : Math.abs(vwapDeltaAtr) < 0.10 ? "yellow" : vwapDeltaAtr > 0 ? "long" : "short",
       };
     }
 
@@ -2542,9 +2769,11 @@ DASHBOARD_HTML = """<!doctype html>
 
     function rsiTone(value) {
       if (!Number.isFinite(value)) return "flat";
-      if (value > 80) return "long";
       if (value < 20) return "short";
-      return "flat";
+      if (value < 40) return "orange";
+      if (value < 60) return "yellow";
+      if (value <= 80) return "lime";
+      return "long";
     }
 
     function instrumentCode(symbol, fallback) {
@@ -2554,13 +2783,40 @@ DASHBOARD_HTML = """<!doctype html>
 
     function updateDashboard(payload) {
       const instruments = payload && payload.instruments ? payload.instruments : { MBT: payload || {} };
-      updateFooterStatus(instruments);
+      updateFooterStatus(payload || {}, instruments);
+      const ranks = rankInstruments(instruments);
       const orderedKeys = PANEL_ORDER.filter((key) => instruments[key]).concat(
         Object.keys(instruments).filter((key) => !PANEL_ORDER.includes(key)).sort()
       );
       for (const key of orderedKeys) {
-        updatePanel(key, instruments[key] || {});
+        updatePanel(key, instruments[key] || {}, ranks.get(key) || null);
       }
+    }
+
+    function rankInstruments(instruments) {
+      const rows = Object.entries(instruments || {}).map(([key, payload]) => ({
+        key,
+        quality: numericScore(payload && payload.trade_quality_score),
+        confidence: numericScore(payload && payload.directional_agreement_score),
+        adx: tradeQualityComponentValue(payload && payload.trade_quality_score, "adx_strength"),
+      }));
+      rows.sort((left, right) => {
+        if (right.quality !== left.quality) return right.quality - left.quality;
+        if (right.confidence !== left.confidence) return right.confidence - left.confidence;
+        if (right.adx !== left.adx) return right.adx - left.adx;
+        return left.key.localeCompare(right.key);
+      });
+      return new Map(rows.map((row, index) => [row.key, { rank: index + 1, quality: row.quality }]));
+    }
+
+    function numericScore(score) {
+      return score && Number.isInteger(score.score) ? score.score : -1;
+    }
+
+    function tradeQualityComponentValue(score, name) {
+      if (!score || !Array.isArray(score.components)) return -1;
+      const component = score.components.find((item) => item.name === name);
+      return component && Number.isFinite(component.value) ? component.value : -1;
     }
 
     // Future SSE migration point: EventSource messages can call this function
@@ -2927,17 +3183,55 @@ DASHBOARD_HTML = """<!doctype html>
       return { market, session };
     }
 
-    function updateFooterStatus(instruments) {
+    function updateFooterStatus(payload, instruments) {
       const values = Object.values(instruments || {});
       const dataNode = document.getElementById("footer-data");
+      const ageNode = document.getElementById("footer-age");
       if (!dataNode) return;
       const hasBars = values.some((item) => item.chart && Array.isArray(item.chart.bars) && item.chart.bars.length > 0);
       const hasError = values.some((item) =>
         item.error || item.regime_error_reason || item.regime_stale_reason || item.connection_status === "DASHBOARD_DISCONNECTED"
       );
-      const label = hasError ? "STALE" : hasBars ? "LIVE" : "--";
+      const age = latestSourceAgeSeconds(payload, instruments);
+      let label = "--";
+      let dataClass = "";
+      if (hasError || (age != null && age > 10)) {
+        label = "STALE";
+        dataClass = "offline";
+      } else if (age != null && age > 2) {
+        label = "DEGRADED";
+        dataClass = "stale";
+      } else if (hasBars) {
+        label = "LIVE";
+        dataClass = "live";
+      }
       dataNode.textContent = label;
-      dataNode.className = hasError ? "stale" : hasBars ? "live" : "";
+      dataNode.className = dataClass;
+      if (ageNode) {
+        if (age == null) {
+          ageNode.textContent = "--";
+          ageNode.className = "offline";
+        } else {
+          ageNode.textContent = `${age.toFixed(age < 10 ? 1 : 0)}s`;
+          ageNode.className = age <= 2 ? "live" : age <= 10 ? "stale" : "offline";
+        }
+      }
+    }
+
+    function latestSourceAgeSeconds(payload, instruments) {
+      const candidates = [];
+      for (const item of Object.values(instruments || {})) {
+        candidates.push(item && item.chart && item.chart.generated_at);
+        candidates.push(item && item.received_at);
+        candidates.push(item && item.regime_calculated_at);
+      }
+      candidates.push(payload && payload.generated_at);
+      const timestamps = candidates
+        .map((value) => Date.parse(value))
+        .filter((value) => Number.isFinite(value));
+      if (!timestamps.length) return null;
+      const newest = Math.max(...timestamps);
+      return Math.max(0, (currentDashboardDate().getTime() - newest) / 1000);
     }
     setInterval(updateFooterTime, 1000);
     updateFooterTime();

@@ -99,8 +99,9 @@ def _extract_dashboard_function(name: str) -> str:
 def _run_dashboard_js(expression: str, *, functions: tuple[str, ...]) -> object:
     source = "\n".join(
         [
+            "const window = globalThis.window = {};",
             'const DASHBOARD_TIME_ZONE = "America/New_York";',
-            "const chartAxis = { minXLabelGap: 78 };",
+            "const chartAxis = { minXLabelGap: 110 };",
             *(_extract_dashboard_function(name) for name in functions),
             f"console.log(JSON.stringify({expression}));",
         ]
@@ -384,10 +385,12 @@ def test_directional_agreement_score_low_adx_caps_strength_component() -> None:
     closes = [100.0 + (((index % 4) - 1.5) * 0.1) for index in range(60)]
     score = regime_monitor.calculate_directional_agreement_score(_agreement_chart_from_closes(closes), trend="LONG")
 
-    assert score.score == 51
-    assert score.band == "MODERATE"
+    assert score.score == 18
+    assert score.band == "WEAK"
     assert _component(score, "adx_level").points == 0
     assert _component(score, "adx_level").value < 10
+    assert _component(score, "ma20_slope").reason == "aligned_scaled_by_magnitude"
+    assert _component(score, "ma20_slope").points < _component(score, "ma20_slope").max_points
 
 
 def test_directional_agreement_score_missing_inputs_renormalizes_available_components() -> None:
@@ -437,6 +440,51 @@ def test_directional_agreement_score_long_short_symmetry() -> None:
         (component.name, component.points, component.max_points)
         for component in short_score.components
     ]
+
+
+def test_directional_agreement_score_flat_market_earns_low_scaled_alignment() -> None:
+    chart = _agreement_chart_from_closes([100.0 + index * 0.001 for index in range(60)])
+
+    score = regime_monitor.calculate_directional_agreement_score(chart, trend="LONG")
+
+    assert score.score < 45
+    assert _component(score, "price_vs_vwap").points < _component(score, "price_vs_vwap").max_points
+    assert _component(score, "vwap_slope").points < _component(score, "vwap_slope").max_points
+
+
+def test_trade_quality_score_formula_and_freshness_components() -> None:
+    now = datetime(2026, 7, 21, 12, 0, tzinfo=timezone.utc)
+    chart = _agreement_chart_from_closes([100.0 + index * 2.0 for index in range(60)])
+    chart["generated_at"] = now.isoformat()
+    agreement = regime_monitor.calculate_directional_agreement_score(chart, trend="LONG")
+
+    score = regime_monitor.calculate_trade_quality_score(chart, directional_agreement=agreement, now=now)
+
+    assert score.score == 100
+    assert score.freshness_state == "fresh"
+    assert _component(score, "directional_agreement").points == 60.0
+    assert _component(score, "adx_strength").points == 20.0
+    assert _component(score, "vwap_distance_atr").points == 15.0
+    assert _component(score, "data_freshness").points == 5.0
+
+
+def test_trade_quality_score_degraded_stale_and_missing_data_behavior() -> None:
+    now = datetime(2026, 7, 21, 12, 0, tzinfo=timezone.utc)
+    chart = _agreement_chart_from_closes([100.0 + index * 2.0 for index in range(60)])
+    agreement = regime_monitor.calculate_directional_agreement_score(chart, trend="LONG")
+
+    chart["generated_at"] = (now - timedelta(seconds=5)).isoformat()
+    degraded = regime_monitor.calculate_trade_quality_score(chart, directional_agreement=agreement, now=now)
+    chart["generated_at"] = (now - timedelta(seconds=11)).isoformat()
+    stale = regime_monitor.calculate_trade_quality_score(chart, directional_agreement=agreement, now=now)
+    unavailable = regime_monitor.calculate_trade_quality_score({}, directional_agreement=agreement, now=now)
+
+    assert degraded.freshness_state == "degraded"
+    assert _component(degraded, "data_freshness").points == 2.0
+    assert stale.freshness_state == "stale"
+    assert _component(stale, "data_freshness").points == 0.0
+    assert unavailable.score is None
+    assert unavailable.unavailable_reason == "chart_bars_unavailable"
 
 
 def test_databento_feed_can_be_disabled_for_shared_store_display_cutover() -> None:
@@ -963,33 +1011,38 @@ def test_dashboard_axis_labels_are_kiosk_readable_and_spaced() -> None:
     assert 'class="indicators"' in html
     assert 'Market: <span id="footer-market">--' in html
     assert 'id="footer-session">--' in html
+    assert 'AGE: <span id="footer-age">--' in html
     assert 'id="footer-data">--' in html
-    assert "function updateFooterStatus(instruments)" in html
+    assert "function updateFooterStatus(payload, instruments)" in html
     assert "VWAP&nbsp;&nbsp;" in html
     assert "MA20&nbsp;&nbsp;" in html
     assert "bottom: 42px;" in html
+    assert 'class="rank-marker"' in html
+    assert 'class="quality">QUALITY --' in html
     assert "RSI(14)" in html
     assert "ADX(14)" in html
     assert "MOM(10)" in html
-    assert "ATR(14)" in html
+    assert "VWAP Δ" in html
     assert "function instrumentCode(symbol, fallback)" in html
     assert "const regime = payload.regime || (calculation && calculation.decision) || \"UNAVAILABLE\"" in html
     assert "directionalAgreementDisplay(payload.directional_agreement_score)" in html
+    assert "tradeQualityDisplay(payload.trade_quality_score)" in html
+    assert "rankInstruments(instruments)" in html
     assert "function directionalAgreementDisplay(score)" in html
     assert "const metrics = chartMetrics(payload.chart || null)" in html
 
     antix_panel_width = (1920 - 24) / 2
-    plot_width = antix_panel_width - 28 - 14 - 92
+    plot_width = antix_panel_width - 28 - 14 - 108
     candle_step = plot_width / 72
     hourly_indices = list(range(12, 72, 12))
 
-    assert candle_step * 12 >= 78
-    assert min((b - a) * candle_step for a, b in zip(hourly_indices, hourly_indices[1:])) >= 78
+    assert candle_step * 12 >= 110
+    assert min((b - a) * candle_step for a, b in zip(hourly_indices, hourly_indices[1:])) >= 110
 
 
 def test_dashboard_chart_geometry_keeps_latest_mnq_mes_candles_inside_panel() -> None:
     left = 14
-    right = 92
+    right = 108
     top = 34
     bottom = 62
     width = 612
@@ -1026,6 +1079,7 @@ def test_dashboard_panels_prevent_overflow_at_supported_sizes() -> None:
     assert "min-height: 0;" in html
     assert "overflow: hidden;" in html
     assert "grid-template-columns: minmax(0, 0.9fr) minmax(0, 1.7fr)" in html
+    assert "grid-template-columns: minmax(0, 1fr) auto" in html
     assert "grid-template-columns: repeat(4, minmax(0, 1fr))" in html
     assert "white-space: nowrap;" in html
     assert "text-overflow: ellipsis;" in html
@@ -1039,12 +1093,14 @@ def test_dashboard_preserves_runtime_field_mapping_for_direction_and_chart() -> 
     assert "payload.regime" in html
     assert "payload.regime_calculation" in html
     assert "payload.directional_agreement_score" in html
+    assert "payload.trade_quality_score" in html
     assert "payload.chart || null" in html
     assert "chartMetrics(payload.chart || null)" in html
     assert "payload.regime_source_bar_timestamp || metrics.latestTime" in html
-    assert 'if (regime === "LONG") return { trend: "LONG", bias: "BULLISH", tone: "long" }' in html
-    assert 'if (regime === "SHORT") return { trend: "SHORT", bias: "BEARISH", tone: "short" }' in html
+    assert 'if (regime === "LONG") return { trend: "LONG \\\\u2191", bias: "BULLISH", tone: "long" }'.replace("\\\\", "\\") in html
+    assert 'if (regime === "SHORT") return { trend: "SHORT \\\\u2193", bias: "BEARISH", tone: "short" }'.replace("\\\\", "\\") in html
     assert 'if (regime === "NO_TRADE") return { trend: "FLAT", bias: "NEUTRAL", tone: "flat" }' in html
+    assert '<div class="metric-label">Regime</div>' in html
 
 
 def test_dashboard_mockup_indicators_are_derived_from_chart_bars() -> None:
@@ -1060,7 +1116,8 @@ def test_dashboard_mockup_indicators_are_derived_from_chart_bars() -> None:
     assert "updateText(nodes, \"rsi\", metrics.rsiText)" in html
     assert "updateText(nodes, \"adx\", metrics.adxText)" in html
     assert "updateText(nodes, \"mom\", metrics.momText)" in html
-    assert "updateText(nodes, \"atr\", metrics.atrText)" in html
+    assert "updateText(nodes, \"vwapDelta\", metrics.vwapDeltaText)" in html
+    assert "(latestClose - vwap) / technicals.atr" in html
 
 
 def test_dashboard_formats_display_prices_with_two_decimals_and_separators() -> None:
@@ -1074,11 +1131,126 @@ def test_dashboard_formats_display_prices_with_two_decimals_and_separators() -> 
 
 def test_dashboard_rsi_boundary_colors_use_numeric_thresholds() -> None:
     tones = _run_dashboard_js(
-        "[19.9, 20.0, 50.0, 80.0, 80.1].map(rsiTone)",
+        "[19.9, 20.0, 39.9, 40.0, 59.9, 60.0, 80.0, 80.1].map(rsiTone)",
         functions=("rsiTone",),
     )
 
-    assert tones == ["short", "flat", "flat", "flat", "long"]
+    assert tones == ["short", "orange", "orange", "yellow", "yellow", "lime", "lime", "long"]
+
+
+def test_dashboard_score_tones_and_rank_tie_breakers_are_deterministic() -> None:
+    result = _run_dashboard_js(
+        """
+        ({
+          tones: [0, 24, 25, 44, 45, 64, 65, 79, 80, 100].map(scoreBandTone),
+          ranks: Array.from(rankInstruments({
+            MES: {
+              trade_quality_score: { score: 80, components: [{ name: "adx_strength", value: 25 }] },
+              directional_agreement_score: { score: 70 }
+            },
+            MNQ: {
+              trade_quality_score: { score: 80, components: [{ name: "adx_strength", value: 25 }] },
+              directional_agreement_score: { score: 75 }
+            },
+            MGC: {
+              trade_quality_score: { score: 80, components: [{ name: "adx_strength", value: 30 }] },
+              directional_agreement_score: { score: 75 }
+            },
+            MBT: {
+              trade_quality_score: { score: null, components: [] },
+              directional_agreement_score: { score: null }
+            }
+          }).entries()).map(([key, value]) => [key, value.rank])
+        })
+        """,
+        functions=("scoreBandTone", "numericScore", "tradeQualityComponentValue", "rankInstruments"),
+    )
+
+    assert result["tones"] == [
+        "weak",
+        "weak",
+        "developing",
+        "developing",
+        "moderate",
+        "moderate",
+        "strong",
+        "strong",
+        "very-strong",
+        "very-strong",
+    ]
+    assert result["ranks"] == [["MGC", 1], ["MNQ", 2], ["MES", 3], ["MBT", 4]]
+
+
+def test_dashboard_footer_age_uses_latest_source_timestamp() -> None:
+    ages = _run_dashboard_js(
+        """
+        (() => {
+          window.__REGIME_MONITOR_NOW_OVERRIDE = "2026-07-21T12:00:10Z";
+          return [
+            latestSourceAgeSeconds({}, { MNQ: { chart: { generated_at: "2026-07-21T12:00:09.600Z" } } }),
+            latestSourceAgeSeconds({ generated_at: "2026-07-21T12:00:01Z" }, {
+              MNQ: { chart: { generated_at: "2026-07-21T12:00:06Z" } },
+              MES: { received_at: "2026-07-21T12:00:08Z" }
+            }),
+            latestSourceAgeSeconds({}, {})
+          ];
+        })()
+        """,
+        functions=("currentDashboardDate", "latestSourceAgeSeconds"),
+    )
+
+    assert ages == [0.4, 2, None]
+
+
+def test_dashboard_vwap_delta_tile_displays_signed_atr_distance() -> None:
+    result = _run_dashboard_js(
+        """
+        (() => {
+          const upBars = Array.from({ length: 30 }, (_, index) => ({
+            time: new Date(Date.parse("2026-07-21T12:00:00Z") + index * 300000).toISOString(),
+            open: 100 + index,
+            high: 101 + index,
+            low: 99 + index,
+            close: 100 + index,
+            volume: 100
+          }));
+          const flatBars = Array.from({ length: 30 }, (_, index) => ({
+            time: new Date(Date.parse("2026-07-21T12:00:00Z") + index * 300000).toISOString(),
+            open: 100,
+            high: 100,
+            low: 100,
+            close: 100,
+            volume: 100
+          }));
+          const up = chartMetrics({ bars: upBars });
+          const flat = chartMetrics({ bars: flatBars });
+          return {
+            upText: up.vwapDeltaText,
+            upTone: up.vwapDeltaTone,
+            flatText: flat.vwapDeltaText,
+            flatTone: flat.vwapDeltaTone
+          };
+        })()
+        """,
+        functions=(
+            "chartMetrics",
+            "movingAverage",
+            "currentVwap",
+            "vwapSeries",
+            "calculateTechnicalMetrics",
+            "calculateAdx",
+            "formatPrice",
+            "formatDelta",
+            "formatVolume",
+            "rsiTone",
+        ),
+    )
+
+    assert result["upText"].startswith("+")
+    assert result["upText"].endswith(" ATR")
+    assert result["upTone"] == "long"
+    assert result["flatText"] == "N/A"
+    assert result["flatTone"] == "neutral"
 
 
 def test_dashboard_hourly_tick_labels_stay_on_clock_hours_when_window_shifts() -> None:

@@ -142,8 +142,33 @@ The weighted components are:
 - Trend strength, 25 points: ADX level, ADX rising or already strong.
 - Persistence/separation, 15 points: distance from VWAP/MA20 normalized by ATR, recent bars remaining on the trend side.
 
+Aligned price/reference distance, MA20 slope, VWAP slope, and recent-side
+persistence are scaled continuously by ATR-normalized magnitude. This prevents
+nearly flat movements from receiving full alignment credit just because they are
+slightly on the displayed trend side.
+
 Bands are `0-24 WEAK`, `25-44 DEVELOPING`, `45-64 MODERATE`,
 `65-79 STRONG`, and `80-100 VERY STRONG`.
+
+## Trade Quality Rank
+
+Each panel exposes and displays `trade_quality_score`, a comparative display
+score used only to rank the four visible monitor panels. It is not expected
+return, probability of profit, a trade recommendation, or an execution signal.
+
+The initial formula is:
+
+```text
+trade_quality =
+    directional_agreement_score / 100 * 60
+    + ADX component, scaled 15 to 40 into 0 to 20
+    + abs(price - VWAP) / ATR component, scaled 0 to 0.50 ATR into 0 to 15
+    + freshness component, 5 fresh, 2 degraded, 0 stale
+```
+
+The score is rounded to the nearest integer and bounded to `0-100`. Panel rank
+ties resolve deterministically by higher directional agreement, then higher ADX,
+then alphabetical symbol.
 
 ## Footer Market And Session
 
