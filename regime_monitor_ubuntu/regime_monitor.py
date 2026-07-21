@@ -2222,8 +2222,8 @@ DASHBOARD_HTML = """<!doctype html>
     </article>
   </template>
   <footer class="dashboard-footer">
-    <span id="footer-market">MARKET --</span>
-    <span>SESSION: <span id="footer-session">--</span></span>
+    <span>Market: <span id="footer-market">--</span></span>
+    <span>Session: <span id="footer-session">--</span></span>
     <span>TIME: <span id="footer-time">--:--:-- ET</span></span>
     <span>DATA: <span id="footer-data">--</span></span>
     <span>ALL TIMES EASTERN</span>
@@ -2231,6 +2231,7 @@ DASHBOARD_HTML = """<!doctype html>
   <script>
     const DATA_ENDPOINT = "/data";
     const POLL_INTERVAL_MS = 250;
+    const DASHBOARD_TIME_ZONE = "America/New_York";
     const PANEL_ORDER = ["MNQ", "MES", "MGC", "MBT"];
     const colors = {
       LONG: "var(--long)",
@@ -2251,7 +2252,7 @@ DASHBOARD_HTML = """<!doctype html>
       bottomPadding: 62,
       yLabelGap: 10,
       xLabelBottomGap: 14,
-      minXLabelGap: 100,
+      minXLabelGap: 78,
       priceRangePaddingRatio: 0.16,
       minPriceRangePixels: 20,
       fallbackLabelFont: "560 17px system-ui, sans-serif",
@@ -2401,7 +2402,7 @@ DASHBOARD_HTML = """<!doctype html>
       const delta = previous ? latestClose - previous.close : 0;
       const pct = previous && previous.close !== 0 ? delta / previous.close : 0;
       const tone = delta > 0 ? "long" : delta < 0 ? "short" : "flat";
-      const sign = delta > 0 ? "+" : "";
+      const sign = delta > 0 ? "+" : delta < 0 ? "-" : "";
       const ma20 = movingAverage(valid, 20);
       const vwap = currentVwap(valid);
       const technicals = calculateTechnicalMetrics(valid);
@@ -2420,7 +2421,7 @@ DASHBOARD_HTML = """<!doctype html>
         adxText: technicals.adx == null ? "--" : technicals.adx.toFixed(1),
         momText: technicals.mom == null ? "--" : `${technicals.mom >= 0 ? "+" : ""}${(technicals.mom * 100).toFixed(2)}%`,
         atrText: technicals.atr == null ? "--" : formatDelta(technicals.atr),
-        rsiTone: technicals.rsi == null ? "flat" : technicals.rsi >= 50 ? "long" : "short",
+        rsiTone: rsiTone(technicals.rsi),
         adxTone: technicals.adx == null ? "flat" : technicals.adx >= 25 ? "long" : "flat",
         momTone: technicals.mom == null ? "flat" : technicals.mom > 0 ? "long" : technicals.mom < 0 ? "short" : "flat",
       };
@@ -2536,7 +2537,14 @@ DASHBOARD_HTML = """<!doctype html>
       if (!value) return "--:--";
       const date = new Date(value);
       if (Number.isNaN(date.getTime())) return "--:--";
-      return date.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+      return date.toLocaleTimeString("en-US", { timeZone: DASHBOARD_TIME_ZONE, hour: "2-digit", minute: "2-digit" });
+    }
+
+    function rsiTone(value) {
+      if (!Number.isFinite(value)) return "flat";
+      if (value > 80) return "long";
+      if (value < 20) return "short";
+      return "flat";
     }
 
     function instrumentCode(symbol, fallback) {
@@ -2643,14 +2651,6 @@ DASHBOARD_HTML = """<!doctype html>
         context.lineTo(width - right, y);
         context.stroke();
       }
-      for (let i = 0; i <= 5; i += 1) {
-        const x = left + (plotWidth * i / 5);
-        context.beginPath();
-        context.moveTo(x, top);
-        context.lineTo(x, height - bottom + 4);
-        context.stroke();
-      }
-
       if (valid.length === 0) {
         canvas._lastPriceScale = null;
         context.fillStyle = "#697174";
@@ -2686,6 +2686,17 @@ DASHBOARD_HTML = """<!doctype html>
       canvas._lastPriceScale = { minPrice, maxPrice, top, plotHeight: pricePlotHeight };
       const candleStep = plotWidth / Math.max(valid.length, 1);
       const bodyWidth = Math.max(2, Math.min(12, candleStep * 0.58));
+      const timeLabelIndices = calculateTimeLabelIndices(valid, plotWidth);
+
+      context.strokeStyle = "rgba(83, 113, 118, 0.18)";
+      context.lineWidth = 1;
+      timeLabelIndices.forEach((index) => {
+        const x = left + candleStep * index + candleStep / 2;
+        context.beginPath();
+        context.moveTo(x, top);
+        context.lineTo(x, height - bottom + 4);
+        context.stroke();
+      });
 
       context.font = chartAxis.yLabelFont;
       context.textAlign = "right";
@@ -2696,7 +2707,6 @@ DASHBOARD_HTML = """<!doctype html>
       }
 
       const maxVolume = Math.max(...valid.map((bar) => Number.isFinite(bar.volume) ? bar.volume : 0), 1);
-      const timeLabelIndices = calculateTimeLabelIndices(valid.length, plotWidth);
       valid.forEach((bar, index) => {
         const x = left + candleStep * index + candleStep / 2;
         const openY = priceToY(bar.open);
@@ -2770,37 +2780,44 @@ DASHBOARD_HTML = """<!doctype html>
       element.classList.remove("hidden");
     }
 
-    function calculateTimeLabelIndices(barCount, plotWidth) {
+    function calculateTimeLabelIndices(bars, plotWidth) {
+      const barCount = Array.isArray(bars) ? bars.length : 0;
       if (barCount <= 0) return new Set();
       if (barCount === 1) return new Set([0]);
       const candleStep = plotWidth / barCount;
-      const maxLabels = Math.max(2, Math.floor(plotWidth / chartAxis.minXLabelGap));
-      const tickEvery = Math.max(1, Math.ceil(barCount / maxLabels));
-      const indices = [];
-      for (let index = 0; index < barCount; index += tickEvery) {
-        const distanceToFinal = (barCount - 1 - index) * candleStep;
-        if (index === 0 || distanceToFinal >= chartAxis.minXLabelGap) {
-          indices.push(index);
+      const candidates = [];
+      let previousHourKey = null;
+      const seenHourKeys = new Set();
+      bars.forEach((bar, index) => {
+        const parts = zonedTimeParts(bar.time || bar.bar_end || bar.start);
+        if (!parts) return;
+        if (parts.minute === 0) {
+          candidates.push({ index, hourKey: parts.hourKey, exact: true });
+          seenHourKeys.add(parts.hourKey);
+        } else if (previousHourKey != null && parts.hourKey !== previousHourKey && !seenHourKeys.has(parts.hourKey)) {
+          candidates.push({ index, hourKey: parts.hourKey, exact: false });
+          seenHourKeys.add(parts.hourKey);
         }
-      }
-      const finalIndex = barCount - 1;
-      const previousIndex = indices[indices.length - 1];
-      if (previousIndex == null) {
-        indices.push(finalIndex);
-      } else if ((finalIndex - previousIndex) * candleStep >= chartAxis.minXLabelGap) {
-        indices.push(finalIndex);
-      } else {
-        indices[indices.length - 1] = finalIndex;
-      }
+        previousHourKey = parts.hourKey;
+      });
+      const indices = [];
+      candidates.forEach((candidate) => {
+        const previousIndex = indices[indices.length - 1];
+        if (previousIndex == null || (candidate.index - previousIndex) * candleStep >= chartAxis.minXLabelGap) {
+          indices.push(candidate.index);
+        }
+      });
       return new Set(indices);
     }
 
     function formatPrice(value) {
-      return Math.abs(value) >= 1000 ? value.toFixed(0) : value.toFixed(2);
+      if (!Number.isFinite(value)) return "--";
+      return value.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
     }
 
     function formatDelta(value) {
-      return Math.abs(value) >= 100 ? value.toFixed(0) : value.toFixed(2);
+      if (!Number.isFinite(value)) return "--";
+      return Math.abs(value).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
     }
 
     function formatVolume(value) {
@@ -2811,9 +2828,44 @@ DASHBOARD_HTML = """<!doctype html>
     }
 
     function formatTimeLabel(value) {
+      const parts = zonedTimeParts(value);
+      if (!parts) return "";
+      const labelHour = parts.hour % 12 || 12;
+      const suffix = parts.hour >= 12 ? "PM" : "AM";
+      return `${String(labelHour).padStart(2, "0")}:00 ${suffix}`;
+    }
+
+    function zonedTimeParts(value) {
       const date = new Date(value);
-      if (Number.isNaN(date.getTime())) return "";
-      return date.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+      if (Number.isNaN(date.getTime())) return null;
+      const parts = new Intl.DateTimeFormat("en-US", {
+        timeZone: DASHBOARD_TIME_ZONE,
+        weekday: "short",
+        year: "numeric",
+        month: "2-digit",
+        day: "2-digit",
+        hour: "2-digit",
+        minute: "2-digit",
+        hourCycle: "h23",
+      }).formatToParts(date);
+      const byType = Object.fromEntries(parts.map((part) => [part.type, part.value]));
+      const hour = Number(byType.hour);
+      const minute = Number(byType.minute);
+      if (!Number.isFinite(hour) || !Number.isFinite(minute)) return null;
+      return {
+        weekday: byType.weekday,
+        weekdayIndex: { Sun: 0, Mon: 1, Tue: 2, Wed: 3, Thu: 4, Fri: 5, Sat: 6 }[byType.weekday],
+        year: Number(byType.year),
+        month: Number(byType.month),
+        day: Number(byType.day),
+        hour,
+        minute,
+        hourKey: `${byType.year}-${byType.month}-${byType.day}-${String(hour).padStart(2, "0")}`,
+      };
+    }
+
+    function currentDashboardDate() {
+      return window.__REGIME_MONITOR_NOW_OVERRIDE ? new Date(window.__REGIME_MONITOR_NOW_OVERRIDE) : new Date();
     }
 
     window.addEventListener("resize", () => {
@@ -2828,13 +2880,51 @@ DASHBOARD_HTML = """<!doctype html>
     function updateFooterTime() {
       const node = document.getElementById("footer-time");
       if (!node) return;
-      node.textContent = `${new Date().toLocaleTimeString("en-US", {
-        timeZone: "America/New_York",
+      const now = currentDashboardDate();
+      node.textContent = `${now.toLocaleTimeString("en-US", {
+        timeZone: DASHBOARD_TIME_ZONE,
         hour12: false,
         hour: "2-digit",
         minute: "2-digit",
         second: "2-digit",
       })} ET`;
+      updateMarketSessionFooter(now);
+    }
+
+    function updateMarketSessionFooter(now) {
+      const marketNode = document.getElementById("footer-market");
+      const sessionNode = document.getElementById("footer-session");
+      if (!marketNode || !sessionNode) return;
+      const state = marketSessionState(now);
+      marketNode.textContent = state.market;
+      sessionNode.textContent = state.session;
+      marketNode.className = state.market === "OPEN" ? "live" : state.market === "MAINTENANCE" ? "stale" : "offline";
+      sessionNode.className = state.session === "MAINTENANCE" ? "stale" : state.session === "CLOSED" ? "offline" : "live";
+    }
+
+    function marketSessionState(now) {
+      const parts = zonedTimeParts(now);
+      if (!parts || !Number.isFinite(parts.weekdayIndex)) return { market: "CLOSED", session: "CLOSED" };
+      const minuteOfDay = parts.hour * 60 + parts.minute;
+      const maintenanceStart = 17 * 60;
+      const maintenanceEnd = 18 * 60;
+      let market = "OPEN";
+      if (parts.weekdayIndex === 6 || (parts.weekdayIndex === 0 && minuteOfDay < maintenanceEnd) || (parts.weekdayIndex === 5 && minuteOfDay >= maintenanceStart)) {
+        market = "CLOSED";
+      } else if (minuteOfDay >= maintenanceStart && minuteOfDay < maintenanceEnd) {
+        market = "MAINTENANCE";
+      }
+      let session = "CLOSED";
+      if (market === "MAINTENANCE") {
+        session = "MAINTENANCE";
+      } else if (market === "OPEN") {
+        if (minuteOfDay >= 18 * 60 || minuteOfDay < 3 * 60) session = "ASIA";
+        else if (minuteOfDay < 8 * 60) session = "EUROPE";
+        else if (minuteOfDay < 9 * 60 + 30) session = "US PREMARKET";
+        else if (minuteOfDay < 16 * 60) session = "US RTH";
+        else if (minuteOfDay < 17 * 60) session = "US AFTER HOURS";
+      }
+      return { market, session };
     }
 
     function updateFooterStatus(instruments) {

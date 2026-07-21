@@ -145,6 +145,24 @@ The weighted components are:
 Bands are `0-24 WEAK`, `25-44 DEVELOPING`, `45-64 MODERATE`,
 `65-79 STRONG`, and `80-100 VERY STRONG`.
 
+## Footer Market And Session
+
+The footer market/session labels are calculated in Eastern Time from the regular
+weekly futures schedule. `OPEN` covers normal futures trading hours,
+`MAINTENANCE` covers the standard daily 17:00-17:59 ET maintenance break, and
+`CLOSED` covers the weekend closure from Friday 17:00 ET through Sunday before
+18:00 ET. The monitor does not claim exchange-holiday awareness because it does
+not currently carry a reliable holiday calendar in this display path.
+
+Session labels are:
+
+- `ASIA`: 18:00 through 02:59 ET.
+- `EUROPE`: 03:00 through 07:59 ET.
+- `US PREMARKET`: 08:00 through 09:29 ET.
+- `US RTH`: 09:30 through 15:59 ET.
+- `US AFTER HOURS`: 16:00 through 16:59 ET.
+- `MAINTENANCE`: during the daily maintenance break.
+
 ## Candlestick Chart State
 
 The chart state is built from the monitor's own Databento stream. Each accepted

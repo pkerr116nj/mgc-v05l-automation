@@ -3,6 +3,7 @@ from __future__ import annotations
 import builtins
 import importlib.util
 import json
+import subprocess
 import sys
 import threading
 from datetime import datetime, timedelta, timezone
@@ -63,6 +64,54 @@ def _agreement_chart_from_closes(closes: list[float]) -> dict[str, object]:
 
 def _component(score: object, name: str) -> object:
     return next(component for component in score.components if component.name == name)
+
+
+def _extract_dashboard_function(name: str) -> str:
+    html = regime_monitor.DASHBOARD_HTML
+    needle = f"    function {name}("
+    start = html.find(needle)
+    assert start != -1, f"{name} not found"
+    brace = html.index("{", start)
+    depth = 0
+    quote: str | None = None
+    escaped = False
+    for index in range(brace, len(html)):
+        char = html[index]
+        if quote is not None:
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == quote:
+                quote = None
+            continue
+        if char in {'"', "'", "`"}:
+            quote = char
+        elif char == "{":
+            depth += 1
+        elif char == "}":
+            depth -= 1
+            if depth == 0:
+                return html[start : index + 1]
+    raise AssertionError(f"{name} body not closed")
+
+
+def _run_dashboard_js(expression: str, *, functions: tuple[str, ...]) -> object:
+    source = "\n".join(
+        [
+            'const DASHBOARD_TIME_ZONE = "America/New_York";',
+            "const chartAxis = { minXLabelGap: 78 };",
+            *(_extract_dashboard_function(name) for name in functions),
+            f"console.log(JSON.stringify({expression}));",
+        ]
+    )
+    result = subprocess.run(
+        ["node", "-e", source],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    return json.loads(result.stdout)
 
 
 def test_no_databento_price_reports_no_trade() -> None:
@@ -902,7 +951,7 @@ def test_dashboard_axis_labels_are_kiosk_readable_and_spaced() -> None:
     assert html.count('class="chart"') == 1
     assert 'yLabelFont: "560 17px system-ui, sans-serif"' in html
     assert 'xLabelFont: "560 15px system-ui, sans-serif"' in html
-    assert "calculateTimeLabelIndices(valid.length, plotWidth)" in html
+    assert "calculateTimeLabelIndices(valid, plotWidth)" in html
     assert 'context.textAlign = first ? "left" : last ? "right" : "center"' in html
     assert "context.fillText(formatTimeLabel(bar.time), first ? left : x, height - chartAxis.xLabelBottomGap)" in html
     assert "return new Set(indices)" in html
@@ -912,7 +961,7 @@ def test_dashboard_axis_labels_are_kiosk_readable_and_spaced() -> None:
     assert 'class="signal-table"' in html
     assert 'class="chart-wrap"' in html
     assert 'class="indicators"' in html
-    assert 'id="footer-market">MARKET --' in html
+    assert 'Market: <span id="footer-market">--' in html
     assert 'id="footer-session">--' in html
     assert 'id="footer-data">--' in html
     assert "function updateFooterStatus(instruments)" in html
@@ -932,22 +981,10 @@ def test_dashboard_axis_labels_are_kiosk_readable_and_spaced() -> None:
     antix_panel_width = (1920 - 24) / 2
     plot_width = antix_panel_width - 28 - 14 - 92
     candle_step = plot_width / 72
-    max_labels = max(2, int(plot_width // 100))
-    tick_every = max(1, (72 + max_labels - 1) // max_labels)
-    label_indices = []
-    for index in range(0, 72, tick_every):
-        distance_to_final = (71 - index) * candle_step
-        if index == 0 or distance_to_final >= 100:
-            label_indices.append(index)
-    if (71 - label_indices[-1]) * candle_step >= 100:
-        label_indices.append(71)
-    else:
-        label_indices[-1] = 71
+    hourly_indices = list(range(12, 72, 12))
 
-    assert tick_every >= 6
-    assert len(label_indices) <= max_labels
-    assert label_indices[-1] == 71
-    assert min((b - a) * candle_step for a, b in zip(label_indices, label_indices[1:])) >= 100
+    assert candle_step * 12 >= 78
+    assert min((b - a) * candle_step for a, b in zip(hourly_indices, hourly_indices[1:])) >= 78
 
 
 def test_dashboard_chart_geometry_keeps_latest_mnq_mes_candles_inside_panel() -> None:
@@ -1024,6 +1061,78 @@ def test_dashboard_mockup_indicators_are_derived_from_chart_bars() -> None:
     assert "updateText(nodes, \"adx\", metrics.adxText)" in html
     assert "updateText(nodes, \"mom\", metrics.momText)" in html
     assert "updateText(nodes, \"atr\", metrics.atrText)" in html
+
+
+def test_dashboard_formats_display_prices_with_two_decimals_and_separators() -> None:
+    values = _run_dashboard_js(
+        "[23418.25, 6512.75, 3421.8, 117245.5, -117245.5].map(formatPrice)",
+        functions=("formatPrice",),
+    )
+
+    assert values == ["23,418.25", "6,512.75", "3,421.80", "117,245.50", "-117,245.50"]
+
+
+def test_dashboard_rsi_boundary_colors_use_numeric_thresholds() -> None:
+    tones = _run_dashboard_js(
+        "[19.9, 20.0, 50.0, 80.0, 80.1].map(rsiTone)",
+        functions=("rsiTone",),
+    )
+
+    assert tones == ["short", "flat", "flat", "flat", "long"]
+
+
+def test_dashboard_hourly_tick_labels_stay_on_clock_hours_when_window_shifts() -> None:
+    expression = """
+      ["2026-07-21T11:23:00Z", "2026-07-21T11:58:00Z", "2026-07-21T12:00:00Z"].map((start) => {
+        const startMs = Date.parse(start);
+        const bars = Array.from({ length: 36 }, (_, index) => ({ time: new Date(startMs + index * 5 * 60 * 1000).toISOString() }));
+        const indices = Array.from(calculateTimeLabelIndices(bars, 1200));
+        return indices.map((index) => ({ index, label: formatTimeLabel(bars[index].time), minute: zonedTimeParts(bars[index].time).minute }));
+      })
+    """
+    cases = _run_dashboard_js(
+        expression,
+        functions=("zonedTimeParts", "calculateTimeLabelIndices", "formatTimeLabel"),
+    )
+
+    assert cases[0][0]["label"] == "08:00 AM"
+    assert cases[0][0]["minute"] == 3
+    assert cases[1][0]["label"] == "08:00 AM"
+    assert cases[1][0]["minute"] == 3
+    assert cases[2][0] == {"index": 0, "label": "08:00 AM", "minute": 0}
+    for case in cases:
+        assert all(item["label"][3:5] == "00" for item in case)
+
+
+def test_dashboard_market_session_classification_regular_schedule() -> None:
+    states = _run_dashboard_js(
+        """
+        [
+          "2026-07-21T01:30:00-04:00",
+          "2026-07-21T04:00:00-04:00",
+          "2026-07-21T08:30:00-04:00",
+          "2026-07-21T10:00:00-04:00",
+          "2026-07-21T16:30:00-04:00",
+          "2026-07-21T17:30:00-04:00",
+          "2026-07-25T12:00:00-04:00",
+          "2026-07-26T17:30:00-04:00",
+          "2026-07-26T18:00:00-04:00"
+        ].map((value) => marketSessionState(new Date(value)))
+        """,
+        functions=("zonedTimeParts", "marketSessionState"),
+    )
+
+    assert states == [
+        {"market": "OPEN", "session": "ASIA"},
+        {"market": "OPEN", "session": "EUROPE"},
+        {"market": "OPEN", "session": "US PREMARKET"},
+        {"market": "OPEN", "session": "US RTH"},
+        {"market": "OPEN", "session": "US AFTER HOURS"},
+        {"market": "MAINTENANCE", "session": "MAINTENANCE"},
+        {"market": "CLOSED", "session": "CLOSED"},
+        {"market": "CLOSED", "session": "CLOSED"},
+        {"market": "OPEN", "session": "ASIA"},
+    ]
 
 
 def test_monitor_files_do_not_hard_code_patrick_home_or_magic_output_paths() -> None:
