@@ -24,6 +24,12 @@ class _FakeFlask:
 
         return decorator
 
+    def post(self, _path: str) -> object:
+        def decorator(func: object) -> object:
+            return func
+
+        return decorator
+
 
 def _fake_jsonify(payload: object) -> object:
     return SimpleNamespace(headers={}, payload=payload)
@@ -31,7 +37,12 @@ def _fake_jsonify(payload: object) -> object:
 
 sys.modules.setdefault(
     "flask",
-    SimpleNamespace(Flask=_FakeFlask, Response=lambda value, mimetype=None: value, jsonify=_fake_jsonify),
+    SimpleNamespace(
+        Flask=_FakeFlask,
+        Response=lambda value, mimetype=None: value,
+        jsonify=_fake_jsonify,
+        request=SimpleNamespace(remote_addr="127.0.0.1", get_data=lambda **_kwargs: "{}"),
+    ),
 )
 
 MODULE_PATH = Path(__file__).resolve().parents[2] / "regime_monitor_ubuntu" / "regime_monitor.py"
@@ -1038,6 +1049,80 @@ def test_dashboard_axis_labels_are_kiosk_readable_and_spaced() -> None:
 
     assert candle_step * 12 >= 110
     assert min((b - a) * candle_step for a, b in zip(hourly_indices, hourly_indices[1:])) >= 110
+
+
+def test_dashboard_live_polling_is_cache_busted_non_overlapping_and_recovering() -> None:
+    html = regime_monitor.DASHBOARD_HTML
+
+    assert 'const DATA_ENDPOINT = "/data";' in html
+    assert "function dataRequestUrl()" in html
+    assert 'url.searchParams.set("_", String(Date.now()))' in html
+    assert 'url.searchParams.set("seq", String(clientDiagnostics.pollSequence))' in html
+    assert 'fetch(requestUrl, {' in html
+    assert 'cache: "no-store"' in html
+    assert '"Cache-Control": "no-store"' in html
+    assert "clientDiagnostics.requestInFlight" in html
+    assert "clientDiagnostics.skippedOverlapCount += 1" in html
+    assert "window.setTimeout(pollOnce, POLL_INTERVAL_MS)" in html
+    assert "setInterval(pollOnce, POLL_INTERVAL_MS)" not in html
+    assert "finally {" in html
+    assert "clientDiagnostics.requestInFlight = false" in html
+    assert "scheduleNextPoll()" in html
+    poll_start = html.index("    async function pollOnce()")
+    poll_end = html.index("    function scheduleNextPoll()", poll_start)
+    assert "DASHBOARD_DISCONNECTED" not in html[poll_start:poll_end]
+
+
+def test_dashboard_live_polling_has_browser_heartbeat_and_diagnostics() -> None:
+    html = regime_monitor.DASHBOARD_HTML
+
+    assert 'id="footer-data-heartbeat"' in html
+    assert ".data-heartbeat.pulse" in html
+    assert "window.__REGIME_MONITOR_CLIENT_DIAGNOSTICS = clientDiagnostics" in html
+    assert "lastSuccessfulFetchAt" in html
+    assert "lastAcceptedPayloadTimestamp" in html
+    assert "consecutiveFailureCount" in html
+    assert "lastClientRenderError" in html
+    assert "function sendClientDiagnostic(entry)" in html
+    assert 'navigator.sendBeacon("/client-diagnostics"' in html
+    assert "function pulseHeartbeat(status)" in html
+    assert "pulseHeartbeat(clientDiagnostics.lastStatus || \"LIVE\")" in html
+    assert "window.__REGIME_MONITOR_DEBUG" in html
+    assert "simulateFetchFailureOnce()" in html
+    assert "simulateMalformedInstrumentOnce(key = PANEL_ORDER[0])" in html
+
+
+def test_dashboard_render_errors_are_isolated_to_one_panel() -> None:
+    html = regime_monitor.DASHBOARD_HTML
+    update_dashboard = _extract_dashboard_function("updateDashboard")
+
+    assert "try {" in update_dashboard
+    assert "updatePanel(key, instruments[key] || {}, ranks.get(key) || null)" in update_dashboard
+    assert "renderErrors.push({ instrument: key, message: error.message })" in update_dashboard
+    assert "recordRenderError(key, error)" in update_dashboard
+    assert "renderPanelError(key, instruments[key] || {}, error)" in update_dashboard
+    assert "sendClientDiagnostic({ event: \"render\", ...entry })" in update_dashboard
+    assert "payload = {" in _extract_dashboard_function("updatePanel")
+    assert "MALFORMED_INSTRUMENT_PAYLOAD" in _extract_dashboard_function("updatePanel")
+
+
+def test_dashboard_latest_source_timestamp_matches_age_candidates() -> None:
+    values = _run_dashboard_js(
+        """
+        (() => {
+          const payload = { generated_at: "2026-07-21T12:00:01Z" };
+          const instruments = {
+            MNQ: { chart: { generated_at: "2026-07-21T12:00:06Z" } },
+            MES: { received_at: "2026-07-21T12:00:08Z" },
+            MGC: { regime_calculated_at: "2026-07-21T12:00:05Z" }
+          };
+          return latestSourceTimestamp(payload, instruments);
+        })()
+        """,
+        functions=("latestSourceTimestamp",),
+    )
+
+    assert values == "2026-07-21T12:00:08Z"
 
 
 def test_dashboard_chart_geometry_keeps_latest_mnq_mes_candles_inside_panel() -> None:

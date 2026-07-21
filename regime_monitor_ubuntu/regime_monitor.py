@@ -17,13 +17,14 @@ import sys
 import tempfile
 import threading
 import time
+from collections import deque
 from dataclasses import asdict, dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo
 
-from flask import Flask, Response, jsonify
+from flask import Flask, Response, jsonify, request
 
 
 LOGGER = logging.getLogger("regime_monitor")
@@ -45,6 +46,7 @@ DEFAULT_STATE_DIR = Path("/var/lib/regime-monitor")
 DEFAULT_STATE_FILE_NAME = "candle_state.json"
 MULTI_CANDLE_STATE_SCHEMA_VERSION = "regime_monitor_multi_candle_state_v2"
 ROUTING_RECORD_DIAGNOSTIC_LIMIT = 20
+CLIENT_DIAGNOSTIC_LIMIT = 300
 DEFAULT_SHARED_OHLCV_DB_PATH = Path("var") / "track_b_shared_live_ohlcv.sqlite3"
 DEFAULT_TRACK_B_MONITOR_INSTRUMENT_KEYS = ("MNQ", "MES", "MGC")
 MONITOR_ONLY_TRACK_B_INSTRUMENT_KEYS = ("MBT",)
@@ -56,6 +58,7 @@ DIRECTIONAL_AGREEMENT_BANDS: tuple[tuple[int, int, str], ...] = (
     (65, 79, "STRONG"),
     (80, 100, "VERY STRONG"),
 )
+CLIENT_DIAGNOSTICS: deque[dict[str, Any]] = deque(maxlen=CLIENT_DIAGNOSTIC_LIMIT)
 
 
 @dataclass(frozen=True)
@@ -2007,7 +2010,11 @@ def create_app(
 
     @app.get("/")
     def dashboard() -> Response:
-        return Response(DASHBOARD_HTML, mimetype="text/html")
+        response = Response(DASHBOARD_HTML, mimetype="text/html")
+        response.headers["Cache-Control"] = "no-store"
+        response.headers["Pragma"] = "no-cache"
+        response.headers["Expires"] = "0"
+        return response
 
     @app.get("/data")
     def data() -> Response:
@@ -2018,6 +2025,34 @@ def create_app(
         if candle_source is not None and "instruments" not in payload:
             payload["chart"] = candle_source.payload()
         response = jsonify(payload)
+        response.headers["Cache-Control"] = "no-store"
+        response.headers["Pragma"] = "no-cache"
+        response.headers["Expires"] = "0"
+        return response
+
+    @app.post("/client-diagnostics")
+    def client_diagnostics_post() -> tuple[str, int]:
+        raw = request.get_data(cache=False, as_text=True, parse_form_data=False)
+        if len(raw) > 4096:
+            raw = raw[:4096]
+        try:
+            payload = json.loads(raw) if raw else {}
+            if not isinstance(payload, dict):
+                payload = {"value": payload}
+        except json.JSONDecodeError:
+            payload = {"malformed": raw[:512]}
+        CLIENT_DIAGNOSTICS.append(
+            {
+                "received_at": utc_now_text(),
+                "remote_addr": request.remote_addr,
+                "payload": payload,
+            }
+        )
+        return "", 204
+
+    @app.get("/client-diagnostics")
+    def client_diagnostics_get() -> Response:
+        response = jsonify({"diagnostics": list(CLIENT_DIAGNOSTICS)})
         response.headers["Cache-Control"] = "no-store"
         return response
 
@@ -2364,6 +2399,26 @@ DASHBOARD_HTML = """<!doctype html>
     .dashboard-footer .live { color: var(--long); }
     .dashboard-footer .stale { color: var(--warn); }
     .dashboard-footer .offline { color: var(--short); }
+    .data-heartbeat {
+      width: 0.62em;
+      height: 0.62em;
+      margin-right: 7px;
+      display: inline-block;
+      border-radius: 999px;
+      background: var(--dim);
+      vertical-align: 0.02em;
+      opacity: 0.78;
+      transform: scale(0.86);
+      transition: transform 120ms ease, box-shadow 120ms ease, background 120ms ease, opacity 120ms ease;
+    }
+    .data-heartbeat.live { background: var(--long); color: var(--long); }
+    .data-heartbeat.stale { background: var(--warn); color: var(--warn); }
+    .data-heartbeat.offline { background: var(--short); color: var(--short); }
+    .data-heartbeat.pulse {
+      opacity: 1;
+      transform: scale(1.34);
+      box-shadow: 0 0 12px currentColor;
+    }
   </style>
 </head>
 <body>
@@ -2419,7 +2474,7 @@ DASHBOARD_HTML = """<!doctype html>
     <span>Session: <span id="footer-session">--</span></span>
     <span>TIME: <span id="footer-time">--:--:-- ET</span></span>
     <span>AGE: <span id="footer-age">--</span></span>
-    <span>DATA: <span id="footer-data">--</span></span>
+    <span>DATA: <span id="footer-data-heartbeat" class="data-heartbeat offline" title="Browser payload receipt/render heartbeat"></span><span id="footer-data">--</span></span>
     <span>ALL TIMES EASTERN</span>
   </footer>
   <script>
@@ -2454,6 +2509,27 @@ DASHBOARD_HTML = """<!doctype html>
     const dashboard = document.getElementById("dashboard");
     const template = document.getElementById("panel-template");
     const panels = new Map();
+    const clientDiagnostics = {
+      pollIntervalMs: POLL_INTERVAL_MS,
+      pollSequence: 0,
+      requestInFlight: false,
+      skippedOverlapCount: 0,
+      successfulFetchCount: 0,
+      acceptedPayloadCount: 0,
+      consecutiveFailureCount: 0,
+      lastFetchStartedAt: null,
+      lastSuccessfulFetchAt: null,
+      lastAcceptedPayloadTimestamp: null,
+      lastPayloadReceivedAt: null,
+      lastClientRenderError: null,
+      lastFetchError: null,
+      lastStatus: "STARTING",
+      lastPayload: null,
+      forceNextFetchFailure: false,
+      forceNextMalformedInstrument: null,
+      history: [],
+    };
+    window.__REGIME_MONITOR_CLIENT_DIAGNOSTICS = clientDiagnostics;
 
     function ensurePanel(key, payload) {
       if (panels.has(key)) return panels.get(key);
@@ -2498,10 +2574,24 @@ DASHBOARD_HTML = """<!doctype html>
       const next = value == null || value === "" ? "" : String(value);
       if (nodes.current[field] === next) return;
       nodes.current[field] = next;
+      if (!nodes[field]) {
+        recordRenderError(field, new Error(`missing DOM node ${field}`));
+        return;
+      }
       nodes[field].textContent = next;
     }
 
     function updatePanel(key, payload, rankInfo) {
+      if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
+        payload = {
+          name: key,
+          symbol: key,
+          regime: "UNAVAILABLE",
+          connection_status: "MALFORMED_INSTRUMENT_PAYLOAD",
+          error: "Instrument payload is not an object",
+          chart: { bars: [] },
+        };
+      }
       const nodes = ensurePanel(key, payload);
       updateText(nodes, "name", instrumentCode(payload.symbol || key, key));
       updateText(nodes, "symbol", payload.name || payload.symbol || key);
@@ -2781,16 +2871,58 @@ DASHBOARD_HTML = """<!doctype html>
       return root ? `/${root}` : `/${fallback}`;
     }
 
-    function updateDashboard(payload) {
-      const instruments = payload && payload.instruments ? payload.instruments : { MBT: payload || {} };
-      updateFooterStatus(payload || {}, instruments);
-      const ranks = rankInstruments(instruments);
+    function updateDashboard(payload, meta) {
+      meta = meta || {};
+      const safePayload = payload && typeof payload === "object" ? payload : {};
+      const instruments = safePayload.instruments && typeof safePayload.instruments === "object"
+        ? safePayload.instruments
+        : { MBT: safePayload || {} };
+      updateFooterStatus(safePayload, instruments);
+      let ranks = new Map();
+      try {
+        ranks = rankInstruments(instruments);
+      } catch (error) {
+        recordRenderError("rankInstruments", error);
+      }
       const orderedKeys = PANEL_ORDER.filter((key) => instruments[key]).concat(
         Object.keys(instruments).filter((key) => !PANEL_ORDER.includes(key)).sort()
       );
+      let renderedInstrumentCount = 0;
+      const renderErrors = [];
       for (const key of orderedKeys) {
-        updatePanel(key, instruments[key] || {}, ranks.get(key) || null);
+        try {
+          updatePanel(key, instruments[key] || {}, ranks.get(key) || null);
+          renderedInstrumentCount += 1;
+        } catch (error) {
+          renderErrors.push({ instrument: key, message: error.message });
+          recordRenderError(key, error);
+          renderPanelError(key, instruments[key] || {}, error);
+        }
       }
+      const acceptedTimestamp = latestSourceTimestamp(safePayload, instruments);
+      clientDiagnostics.acceptedPayloadCount += 1;
+      clientDiagnostics.lastAcceptedPayloadTimestamp = acceptedTimestamp;
+      clientDiagnostics.lastPayloadReceivedAt = meta.receivedAt || new Date().toISOString();
+      clientDiagnostics.lastPayload = safePayload;
+      const entry = {
+        sequence: clientDiagnostics.pollSequence,
+        requestUrl: meta.requestUrl || null,
+        receivedAt: clientDiagnostics.lastPayloadReceivedAt,
+        payloadTimestamp: acceptedTimestamp,
+        renderedInstrumentCount,
+        renderErrors,
+      };
+      appendDiagnosticHistory(entry);
+      if (entry.sequence <= 10 || entry.sequence % 20 === 0 || renderErrors.length) {
+        sendClientDiagnostic({ event: "render", ...entry });
+      }
+      if (renderErrors.length) {
+        console.warn("[regime-monitor] payload rendered with panel errors", entry);
+      } else {
+        console.debug("[regime-monitor] payload rendered", entry);
+      }
+      pulseHeartbeat(clientDiagnostics.lastStatus || "LIVE");
+      return entry;
     }
 
     function rankInstruments(instruments) {
@@ -2819,33 +2951,113 @@ DASHBOARD_HTML = """<!doctype html>
       return component && Number.isFinite(component.value) ? component.value : -1;
     }
 
+    function renderPanelError(key, payload, error) {
+      const nodes = ensurePanel(key, payload && typeof payload === "object" ? payload : { name: key, symbol: key });
+      updateText(nodes, "connection", "RENDER_ERROR");
+      nodes.connection.dataset.state = "DASHBOARD_DISCONNECTED";
+      updateText(nodes, "error", error.message || String(error));
+      nodes.error.classList.remove("hidden");
+    }
+
+    function recordRenderError(scope, error) {
+      const message = error && error.message ? error.message : String(error);
+      clientDiagnostics.lastClientRenderError = {
+        scope,
+        message,
+        at: new Date().toISOString(),
+      };
+    }
+
+    function appendDiagnosticHistory(entry) {
+      clientDiagnostics.history.push(entry);
+      if (clientDiagnostics.history.length > 40) clientDiagnostics.history.shift();
+    }
+
+    function dataRequestUrl() {
+      const url = new URL(DATA_ENDPOINT, window.location.href);
+      url.searchParams.set("_", String(Date.now()));
+      url.searchParams.set("seq", String(clientDiagnostics.pollSequence));
+      return `${url.pathname}${url.search}`;
+    }
+
+    function debugParams() {
+      try {
+        return new URLSearchParams(window.location.search);
+      } catch (_error) {
+        return new URLSearchParams();
+      }
+    }
+
+    function applyDebugPayloadMutation(payload) {
+      const params = debugParams();
+      if (params.has("debug_malformed_once") && clientDiagnostics.forceNextMalformedInstrument == null) {
+        clientDiagnostics.forceNextMalformedInstrument = params.get("debug_malformed_once") || PANEL_ORDER[0];
+      }
+      const key = clientDiagnostics.forceNextMalformedInstrument;
+      if (!key) return payload;
+      clientDiagnostics.forceNextMalformedInstrument = null;
+      if (!payload || !payload.instruments || !payload.instruments[key]) return payload;
+      payload.instruments[key] = "SIMULATED_MALFORMED_INSTRUMENT_PAYLOAD";
+      return payload;
+    }
+
     // Future SSE migration point: EventSource messages can call this function
     // directly without changing the render/update logic.
-    function handleSnapshotMessage(data) {
-      updateDashboard(data);
+    function handleSnapshotMessage(data, meta) {
+      meta = meta || {};
+      return updateDashboard(data, meta);
     }
 
     async function pollOnce() {
-      try {
-        const response = await fetch(DATA_ENDPOINT, { cache: "no-store" });
-        if (!response.ok) throw new Error(`HTTP ${response.status}`);
-        handleSnapshotMessage(await response.json());
-      } catch (error) {
-        const fallback = {};
-        for (const key of PANEL_ORDER) {
-          fallback[key] = {
-            name: key,
-            symbol: key,
-            regime: "NO DATA",
-            confidence: null,
-            timestamp: new Date().toISOString(),
-            connection_status: "DASHBOARD_DISCONNECTED",
-            error: error.message,
-            chart: { bars: [] },
-          };
-        }
-        handleSnapshotMessage({ instruments: fallback });
+      updateFooterTime();
+      if (clientDiagnostics.requestInFlight) {
+        clientDiagnostics.skippedOverlapCount += 1;
+        return;
       }
+      clientDiagnostics.requestInFlight = true;
+      clientDiagnostics.pollSequence += 1;
+      clientDiagnostics.lastFetchStartedAt = new Date().toISOString();
+      const requestUrl = dataRequestUrl();
+      try {
+        const params = debugParams();
+        if ((params.has("debug_fail_once") && !clientDiagnostics.debugFailConsumed) || clientDiagnostics.forceNextFetchFailure) {
+          clientDiagnostics.debugFailConsumed = true;
+          clientDiagnostics.forceNextFetchFailure = false;
+          throw new Error("simulated_fetch_failure");
+        }
+        const response = await fetch(requestUrl, {
+          cache: "no-store",
+          headers: { "Cache-Control": "no-store", "Pragma": "no-cache" },
+        });
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        const data = applyDebugPayloadMutation(await response.json());
+        clientDiagnostics.successfulFetchCount += 1;
+        clientDiagnostics.consecutiveFailureCount = 0;
+        clientDiagnostics.lastSuccessfulFetchAt = new Date().toISOString();
+        clientDiagnostics.lastFetchError = null;
+        handleSnapshotMessage(data, { requestUrl, receivedAt: clientDiagnostics.lastSuccessfulFetchAt });
+      } catch (error) {
+        const message = error && error.message ? error.message : String(error);
+        clientDiagnostics.consecutiveFailureCount += 1;
+        clientDiagnostics.lastFetchError = { message, at: new Date().toISOString(), requestUrl };
+        console.warn("[regime-monitor] data poll failed", clientDiagnostics.lastFetchError);
+        sendClientDiagnostic({
+          event: "fetch_error",
+          sequence: clientDiagnostics.pollSequence,
+          requestUrl,
+          message,
+          consecutiveFailureCount: clientDiagnostics.consecutiveFailureCount,
+        });
+        updateFooterStatus({ generated_at: null }, {});
+        pulseHeartbeat("STALE");
+      } finally {
+        clientDiagnostics.requestInFlight = false;
+        scheduleNextPoll();
+      }
+    }
+
+    function scheduleNextPoll() {
+      window.setTimeout(pollOnce, POLL_INTERVAL_MS);
     }
 
     function updateChart(nodes, chart, metrics) {
@@ -3207,6 +3419,7 @@ DASHBOARD_HTML = """<!doctype html>
       }
       dataNode.textContent = label;
       dataNode.className = dataClass;
+      clientDiagnostics.lastStatus = label;
       if (ageNode) {
         if (age == null) {
           ageNode.textContent = "--";
@@ -3216,6 +3429,62 @@ DASHBOARD_HTML = """<!doctype html>
           ageNode.className = age <= 2 ? "live" : age <= 10 ? "stale" : "offline";
         }
       }
+    }
+
+    function pulseHeartbeat(status) {
+      const node = document.getElementById("footer-data-heartbeat");
+      if (!node) return;
+      const state = status === "LIVE" ? "live" : status === "DEGRADED" ? "stale" : "offline";
+      node.className = `data-heartbeat ${state}`;
+      node.classList.remove("pulse");
+      void node.offsetWidth;
+      node.classList.add("pulse");
+      window.setTimeout(() => node.classList.remove("pulse"), 150);
+    }
+
+    function sendClientDiagnostic(entry) {
+      const payload = JSON.stringify({
+        ...entry,
+        clientSentAt: new Date().toISOString(),
+        location: window.location.href,
+        status: clientDiagnostics.lastStatus,
+        successfulFetchCount: clientDiagnostics.successfulFetchCount,
+        acceptedPayloadCount: clientDiagnostics.acceptedPayloadCount,
+        consecutiveFailureCount: clientDiagnostics.consecutiveFailureCount,
+        lastAcceptedPayloadTimestamp: clientDiagnostics.lastAcceptedPayloadTimestamp,
+        lastClientRenderError: clientDiagnostics.lastClientRenderError,
+      });
+      try {
+        if (navigator.sendBeacon) {
+          navigator.sendBeacon("/client-diagnostics", new Blob([payload], { type: "application/json" }));
+          return;
+        }
+        fetch("/client-diagnostics", {
+          method: "POST",
+          body: payload,
+          headers: { "Content-Type": "application/json" },
+          cache: "no-store",
+          keepalive: true,
+        }).catch(() => {});
+      } catch (_error) {
+        // Diagnostics must never affect dashboard rendering.
+      }
+    }
+
+    function latestSourceTimestamp(payload, instruments) {
+      const candidates = [];
+      for (const item of Object.values(instruments || {})) {
+        candidates.push(item && item.chart && item.chart.generated_at);
+        candidates.push(item && item.received_at);
+        candidates.push(item && item.regime_calculated_at);
+      }
+      candidates.push(payload && payload.generated_at);
+      const timestamps = candidates
+        .map((value) => ({ value, millis: Date.parse(value) }))
+        .filter((item) => Number.isFinite(item.millis));
+      if (!timestamps.length) return null;
+      timestamps.sort((left, right) => right.millis - left.millis);
+      return timestamps[0].value;
     }
 
     function latestSourceAgeSeconds(payload, instruments) {
@@ -3233,9 +3502,19 @@ DASHBOARD_HTML = """<!doctype html>
       const newest = Math.max(...timestamps);
       return Math.max(0, (currentDashboardDate().getTime() - newest) / 1000);
     }
+    window.__REGIME_MONITOR_DEBUG = {
+      diagnostics: clientDiagnostics,
+      pollOnce,
+      handleSnapshotMessage,
+      simulateFetchFailureOnce() {
+        clientDiagnostics.forceNextFetchFailure = true;
+      },
+      simulateMalformedInstrumentOnce(key = PANEL_ORDER[0]) {
+        clientDiagnostics.forceNextMalformedInstrument = key;
+      },
+    };
     setInterval(updateFooterTime, 1000);
     updateFooterTime();
-    setInterval(pollOnce, POLL_INTERVAL_MS);
     pollOnce();
   </script>
 </body>
