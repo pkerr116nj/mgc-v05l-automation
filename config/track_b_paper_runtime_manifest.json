@@ -42,7 +42,7 @@
   "timeouts": {
     "startup_lock_stale_seconds": 60,
     "broker_snapshot_timeout_seconds": 10,
-    "runtime_verify_timeout_seconds": 15,
+    "runtime_verify_timeout_seconds": 30,
     "runtime_heartbeat_fresh_seconds": 20,
     "service_fresh_seconds": 180,
     "recovery_retry_limit": 3,
