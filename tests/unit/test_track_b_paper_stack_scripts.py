@@ -1807,18 +1807,17 @@ def test_paper_stack_start_enables_recovery_service_unless_operator_opts_out() -
     assert "WARNING_RECOVERY_SERVICE_ENABLE_FAILED" in source
 
 
-def test_recovery_tick_uses_thin_runtime_recovery_without_legacy_status_gates() -> None:
+def test_recovery_tick_uses_fast_runtime_recovery_without_legacy_status_gates() -> None:
     source = RECOVERY_SCRIPT.read_text(encoding="utf-8")
 
-    assert 'THIN_RECOVERY_SCRIPT="${REPO_ROOT}/scripts/track_b_thin_paper_runtime_recovery.sh"' in source
+    assert 'FAST_RECOVERY_SCRIPT="${REPO_ROOT}/scripts/track_b_fast_paper_runtime_recovery.sh"' in source
     tick_block = source[source.index("  tick)\n") : source.index("  enable)\n")]
-    assert 'bash "${THIN_RECOVERY_SCRIPT}" check' in tick_block
-    assert 'bash "${THIN_RECOVERY_SCRIPT}" start' in tick_block
-    assert 'bash "${THIN_RECOVERY_SCRIPT}" restart' in tick_block
-    assert "THIN_RECOVERY_RESTART_REQUIRED" in tick_block
-    assert "BROKER_TRUTH_NOT_CLEAN_RECOVERY_BLOCKED" in tick_block
-    assert "NO_ACTION_BROKER_TRUTH_NOT_CLEAN" in tick_block
-    assert "START_REQUESTED_THIN_PAPER_RECOVERY" in tick_block
+    assert 'bash "${FAST_RECOVERY_SCRIPT}" status' in tick_block
+    assert 'bash "${FAST_RECOVERY_SCRIPT}"' in tick_block
+    assert "FAST_RECOVERY_RESTART_REQUIRED" in tick_block
+    assert "FAST_START_BLOCKED" in tick_block
+    assert "NO_ACTION_FAST_START_BLOCKED" in tick_block
+    assert "START_REQUESTED_FAST_PAPER_RECOVERY" in tick_block
     assert "track_b_status_paper_stack.sh" not in tick_block
     assert "track_b_paper_stack_restart_precheck" not in tick_block
     assert "run_managed_exit_actuator" not in tick_block
@@ -1841,7 +1840,7 @@ def test_thin_recovery_script_uses_broker_truth_and_direct_minimal_start_only() 
     assert "mnq_mes_full_session_active_evidence" in source
     assert "IBKR_PAPER_BRIDGE" in source
     assert "expected_lanes = int" in source
-    assert 'EXPECTED_LANES="${TRACK_B_PAPER_EXPECTED_LANE_COUNT:-85}"' in source
+    assert 'EXPECTED_LANES="${TRACK_B_PAPER_EXPECTED_LANE_COUNT:-71}"' in source
     assert "classify_fresh_complete_clean_broker_truth" in source
     assert "latest_managed_positions.json" in source
     assert "allow_known_managed_positions=True" in source
@@ -2327,7 +2326,7 @@ def test_recovery_operator_controls_and_status_are_launchd_based() -> None:
     assert "SUPERVISOR_PAUSED" in source
     assert "RECOVERY_TICK_INTERVAL_SECONDS=120" in source
     assert "ACTIVE_SESSION_WATCHDOG_120S" in source
-    assert "canonical_paper_stack_restart_precheck" in source
+    assert "broker_centered_fast_start_contract" in source
     assert "launchctl print" in source
     assert "launchctl list" in source
     assert "last_action" in source
@@ -2350,13 +2349,12 @@ def test_recovery_tick_actions_are_safe_and_profile_preserving() -> None:
     source = RECOVERY_SCRIPT.read_text(encoding="utf-8")
 
     assert "NO_ACTION_RUNTIME_RUNNING" in source
-    assert "THIN_RECOVERY_RESTART_REQUIRED" in source
-    assert "NO_ACTION_BROKER_TRUTH_NOT_CLEAN" in source
-    assert "BROKER_TRUTH_NOT_CLEAN_RECOVERY_BLOCKED" in source
-    assert "START_REQUESTED_THIN_PAPER_RECOVERY" in source
-    assert 'TRACK_B_PAPER_STACK_PROFILE="mnq_mes_full_session_active_evidence" bash "${THIN_RECOVERY_SCRIPT}" check' in source
-    assert 'TRACK_B_PAPER_STACK_PROFILE="mnq_mes_full_session_active_evidence" bash "${THIN_RECOVERY_SCRIPT}" restart' in source
-    assert 'TRACK_B_PAPER_STACK_PROFILE="mnq_mes_full_session_active_evidence" bash "${THIN_RECOVERY_SCRIPT}" start' in source
+    assert "FAST_RECOVERY_RESTART_REQUIRED" in source
+    assert "NO_ACTION_FAST_START_BLOCKED" in source
+    assert "FAST_START_BLOCKED" in source
+    assert "START_REQUESTED_FAST_PAPER_RECOVERY" in source
+    assert 'bash "${FAST_RECOVERY_SCRIPT}" status' in source
+    assert 'bash "${FAST_RECOVERY_SCRIPT}"' in source
     assert "START_REQUESTED_CANONICAL_PAPER_STACK" not in source
     assert "START_REQUESTED_APPROVED_PAPER_STACK" not in source
     assert "NO_ACTION_BLOCKED_GATES" not in source
@@ -2379,9 +2377,8 @@ def test_recovery_tick_does_not_mutate_broker_before_thin_restart() -> None:
     assert "mgc_v05l.execution_core.track_b_managed_exit_actuator" not in tick_block
     assert "--apply" not in tick_block
     assert "--operator-authorized-managed-exit" not in tick_block
-    assert 'bash "${THIN_RECOVERY_SCRIPT}" check' in tick_block
-    assert 'bash "${THIN_RECOVERY_SCRIPT}" restart' in tick_block
-    assert 'bash "${THIN_RECOVERY_SCRIPT}" start' in tick_block
+    assert 'bash "${FAST_RECOVERY_SCRIPT}" status' in tick_block
+    assert 'bash "${FAST_RECOVERY_SCRIPT}"' in tick_block
 
 
 def test_recovery_profile_status_fields_are_reported() -> None:

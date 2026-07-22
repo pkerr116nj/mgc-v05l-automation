@@ -8,7 +8,7 @@ PLIST_PATH="${HOME}/Library/LaunchAgents/${LABEL}.plist"
 TEMPLATE_PATH="${REPO_ROOT}/var/launchd/track_b/${LABEL}.plist"
 STATUS_SCRIPT="${REPO_ROOT}/scripts/track_b_status_paper_stack.sh"
 START_SCRIPT="${REPO_ROOT}/scripts/track_b_start_paper_stack.sh"
-THIN_RECOVERY_SCRIPT="${REPO_ROOT}/scripts/track_b_thin_paper_runtime_recovery.sh"
+FAST_RECOVERY_SCRIPT="${REPO_ROOT}/scripts/track_b_fast_paper_runtime_recovery.sh"
 AUDIT_MODULE="mgc_v05l.execution_core.track_b_hourly_runtime_recovery_audit"
 PYTHON_BIN="${REPO_ROOT}/.venv/bin/python"
 RUNTIME_DIR="${REPO_ROOT}/outputs/probationary_pattern_engine/paper_session/runtime"
@@ -191,9 +191,9 @@ payload = {
     "disable_command": "bash scripts/track_b_hourly_paper_runtime_recovery.sh disable",
     "status_command": "bash scripts/track_b_hourly_paper_runtime_recovery.sh status",
     "tick_command": "bash scripts/track_b_hourly_paper_runtime_recovery.sh tick",
-    "runtime_start_path": "scripts/track_b_thin_paper_runtime_recovery.sh",
+    "runtime_start_path": "scripts/track_b_fast_paper_runtime_recovery.sh",
     "runtime_status_path": "runtime_pid_artifact_only",
-    "restart_authority_source": "thin_broker_truth_recovery",
+    "restart_authority_source": "broker_centered_fast_start_contract",
     "paper_only": True,
     "live_money_eligible": False,
     "paper_proof_invoked": False,
@@ -361,23 +361,24 @@ case "${mode}" in
       pid="$(tr -dc '0-9' < "${RUNTIME_DIR}/probationary_paper.pid" || true)"
     fi
     if [[ -n "${pid}" ]] && ps -p "${pid}" >/dev/null 2>&1; then
-      if TRACK_B_PAPER_STACK_PROFILE="mnq_mes_full_session_active_evidence" bash "${THIN_RECOVERY_SCRIPT}" check >/dev/null; then
-        write_tick_artifact "NO_ACTION_RUNTIME_RUNNING" "" "Exact runtime PID artifact is alive and matches thin PAPER runtime shape."
+      if bash "${FAST_RECOVERY_SCRIPT}" status >/dev/null; then
+        write_tick_artifact "NO_ACTION_RUNTIME_RUNNING" "" "Exact runtime PID artifact is alive and matches the fast PAPER runtime manifest."
         echo "Track B recovery tick: runtime already running with expected shape; no action."
         exit 0
       fi
-      thin_classification="$(json_value "${STATE_DIR}/latest_thin_paper_runtime_recovery.json" "classification")"
-      if [[ "${thin_classification}" == "BROKER_TRUTH_NOT_CLEAN_RECOVERY_BLOCKED" ]]; then
-        write_tick_artifact "NO_ACTION_BROKER_TRUTH_NOT_CLEAN" "BROKER_TRUTH_NOT_CLEAN_RECOVERY_BLOCKED" "Runtime shape check could not restart because broker truth is not clean."
+      fast_classification="$(json_value "${REPO_ROOT}/outputs/track_b_execution_core/fast_paper_runtime_start/latest_fast_paper_runtime_start.json" "classification")"
+      if [[ "${fast_classification}" == "FAST_START_BLOCKED" ]]; then
+        fast_blocker="$(json_value "${REPO_ROOT}/outputs/track_b_execution_core/fast_paper_runtime_start/latest_fast_paper_runtime_start.json" "first_blocker")"
+        write_tick_artifact "NO_ACTION_FAST_START_BLOCKED" "${fast_blocker:-FAST_START_BLOCKED}" "Broker-centered fast start contract blocked runtime recovery."
         echo "Track B recovery tick: broker truth is not clean; no restart."
         exit 0
       fi
-      write_tick_artifact "THIN_RECOVERY_RESTART_REQUIRED" "" "Exact runtime PID artifact is alive but failed thin runtime shape verification; invoking thin restart."
-      TRACK_B_PAPER_STACK_PROFILE="mnq_mes_full_session_active_evidence" bash "${THIN_RECOVERY_SCRIPT}" restart
+      write_tick_artifact "FAST_RECOVERY_RESTART_REQUIRED" "" "Exact runtime PID artifact is alive but failed fast runtime verification; invoking broker-centered recovery."
+      bash "${FAST_RECOVERY_SCRIPT}"
       exit 0
     fi
-    write_tick_artifact "START_REQUESTED_THIN_PAPER_RECOVERY" "" "Runtime PID artifact is absent/dead; invoking thin broker-truth PAPER recovery path."
-    TRACK_B_PAPER_STACK_PROFILE="mnq_mes_full_session_active_evidence" bash "${THIN_RECOVERY_SCRIPT}" start
+    write_tick_artifact "START_REQUESTED_FAST_PAPER_RECOVERY" "" "Runtime PID artifact is absent/dead; invoking broker-centered fast PAPER recovery path."
+    bash "${FAST_RECOVERY_SCRIPT}"
     ;;
   enable)
     bash "${REPO_ROOT}/scripts/generate_track_b_launchd_plists.sh" --json >/dev/null

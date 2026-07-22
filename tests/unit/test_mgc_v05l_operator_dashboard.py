@@ -15139,14 +15139,14 @@ def test_start_paper_command_auto_includes_enabled_temp_paper_overlays(tmp_path:
 
     command, metadata = service._paper_start_command_with_enabled_temp_paper(snapshot)
 
-    assert command == ["bash", "scripts/track_b_thin_paper_runtime_recovery.sh", "start"]
+    assert command == ["bash", "scripts/track_b_fast_paper_runtime_start.sh", "start"]
     assert metadata["enabled_lane_ids"] == [
         "atpe_long_medium_high_canary",
         "gc_mgc_london_open_acceptance_continuation_long__GC",
     ]
     assert metadata["requested_flags"] == ["--include-atpe-canary", "--include-gc-mgc-acceptance"]
     assert metadata["unresolved_lane_ids"] == []
-    assert metadata["thin_recovery_path"] == "scripts/track_b_thin_paper_runtime_recovery.sh"
+    assert metadata["fast_recovery_path"] == "scripts/track_b_fast_paper_runtime_start.sh"
     assert metadata["legacy_run_probationary_paper_soak_disabled"] is True
 
 

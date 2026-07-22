@@ -1,0 +1,57 @@
+{
+  "schema_version": "track_b_paper_runtime_manifest_v1",
+  "manifest_id": "track_b_paper_runtime_manifest_v1",
+  "account_id": "DUM882026",
+  "mode": "PAPER",
+  "paper_only": true,
+  "host": "127.0.0.1",
+  "port": 7497,
+  "broker_client_id": 9077,
+  "profile": "mnq_mes_full_session_active_evidence",
+  "expected_lane_count": 71,
+  "config_paths": [
+    "config/base.yaml",
+    "config/live.yaml",
+    "config/probationary_pattern_engine.yaml",
+    "config/headless_supervised_paper_runtime.yaml",
+    "outputs/probationary_pattern_engine/paper_session/runtime/paper_stack_mnq_mes_full_session_active_evidence.yaml",
+    "config/probationary_pattern_engine_paper.yaml"
+  ],
+  "schwab_config_path": "config/schwab.local.json",
+  "required_services": {
+    "phase1": {
+      "supervisor_status_path": "outputs/reports/phase1_databento_live_runtime_candles/latest_phase1_databento_live_supervisor_status.json",
+      "listener_status_path": "outputs/reports/phase1_databento_live_runtime_candles/latest_phase1_databento_live_listener_status.json",
+      "max_age_seconds": 180
+    },
+    "managed_exit": {
+      "status_path": "outputs/track_b_execution_core/managed_exit_service/latest_managed_exit_service_status.json",
+      "max_age_seconds": 180,
+      "required_apply_mode": "GUARDED_CLOSE_ONLY_APPLY"
+    }
+  },
+  "runtime_paths": {
+    "pid_path": "outputs/probationary_pattern_engine/paper_session/runtime/probationary_paper.pid",
+    "pid_metadata_path": "outputs/probationary_pattern_engine/paper_session/runtime/probationary_paper.pid.json",
+    "log_path": "outputs/probationary_pattern_engine/paper_session/runtime/fast_paper_runtime.log",
+    "runtime_truth_path": "outputs/probationary_pattern_engine/paper_session/runtime/paper_runtime_truth.json",
+    "config_in_force_path": "outputs/probationary_pattern_engine/paper_session/runtime/paper_config_in_force.json",
+    "startup_progress_path": "outputs/probationary_pattern_engine/paper_session/runtime/paper_post_truth_startup_progress.json"
+  },
+  "timeouts": {
+    "startup_lock_stale_seconds": 60,
+    "broker_snapshot_timeout_seconds": 10,
+    "runtime_verify_timeout_seconds": 15,
+    "runtime_heartbeat_fresh_seconds": 20,
+    "service_fresh_seconds": 180,
+    "recovery_retry_limit": 3,
+    "recovery_retry_sleep_seconds": 2
+  },
+  "guardrails": {
+    "diagnostic_only": false,
+    "production_recommendation": false,
+    "trading_gate": false,
+    "live_money_eligible": false,
+    "paper_proof_invoked": false
+  }
+}

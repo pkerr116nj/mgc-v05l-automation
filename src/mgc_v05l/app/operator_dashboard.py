@@ -10031,11 +10031,11 @@ class OperatorDashboardService:
         }
         if unresolved_lane_ids:
             return None, metadata
-        metadata["thin_recovery_path"] = "scripts/track_b_thin_paper_runtime_recovery.sh"
+        metadata["fast_recovery_path"] = "scripts/track_b_fast_paper_runtime_start.sh"
         metadata["legacy_run_probationary_paper_soak_disabled"] = True
         return [
             "bash",
-            "scripts/track_b_thin_paper_runtime_recovery.sh",
+            "scripts/track_b_fast_paper_runtime_start.sh",
             "start",
         ], metadata
 
