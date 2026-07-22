@@ -10021,8 +10021,11 @@ def _paper_runtime_pid_metadata_path(settings: StrategySettings) -> Path:
 
 
 def _paper_runtime_generation_payload(runtime_instance_id: str | None = None) -> dict[str, Any]:
+    instance_id = runtime_instance_id or str(os.environ.get("MGC_TRACK_B_RUNTIME_INSTANCE_ID") or "")
+    startup_generation_id = str(os.environ.get("MGC_TRACK_B_FAST_START_GENERATION_ID") or instance_id).strip()
     payload: dict[str, Any] = {
-        "runtime_instance_id": runtime_instance_id or str(os.environ.get("MGC_TRACK_B_RUNTIME_INSTANCE_ID") or ""),
+        "runtime_instance_id": instance_id,
+        "startup_generation_id": startup_generation_id,
         "restart_generation": _paper_runtime_restart_generation(),
     }
     launch_started_at = str(os.environ.get("MGC_TRACK_B_PAPER_LAUNCH_STARTED_AT") or "").strip()

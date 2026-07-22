@@ -115,7 +115,13 @@ def run_fast_paper_runtime_start(
 
         launcher = runtime_launcher or _launch_runtime
         launch_details = _launch_manifest_runtime(manifest, repo_root=repo_root, launcher=launcher)
-        verify = _wait_for_runtime(manifest, repo_root=repo_root, now_dt=generated_at, sleep_fn=sleep_fn)
+        verify = _wait_for_runtime(
+            manifest,
+            repo_root=repo_root,
+            now_dt=generated_at,
+            sleep_fn=sleep_fn,
+            launch_details=launch_details,
+        )
         details = dict(preflight.details)
         details["launch"] = launch_details
         details["post_launch_verification"] = verify.to_dict()
@@ -426,8 +432,17 @@ def _launch_manifest_runtime(manifest: Mapping[str, Any], *, repo_root: Path, la
     log_path.parent.mkdir(parents=True, exist_ok=True)
     cmd = _runtime_command(manifest, repo_root)
     env = dict(os.environ)
+    launch_started_at = datetime.now(timezone.utc)
+    startup_generation_id = f"fast-paper-start-{launch_started_at.strftime('%Y%m%dT%H%M%S%fZ')}-{os.getpid()}"
     env["PYTHONPATH"] = f"{repo_root / 'src'}{os.pathsep}{env['PYTHONPATH']}" if env.get("PYTHONPATH") else str(repo_root / "src")
     env["TRACK_B_FAST_PAPER_RUNTIME_MANIFEST"] = str(manifest.get("_manifest_path"))
+    env["MGC_TRACK_B_RUNTIME_INSTANCE_ID"] = startup_generation_id
+    env["MGC_TRACK_B_FAST_START_GENERATION_ID"] = startup_generation_id
+    env["MGC_TRACK_B_PAPER_LAUNCH_STARTED_AT"] = launch_started_at.isoformat()
+    env["MGC_TRACK_B_PAPER_LAUNCHER_PID"] = str(os.getpid())
+    env["MGC_TRACK_B_EXPECTED_PROJECT_ROOT"] = str(repo_root)
+    env["MGC_TRACK_B_PAPER_PID_METADATA_FILE"] = str(repo_root / str(runtime_paths.get("pid_metadata_path")))
+    env["MGC_TRACK_B_PAPER_CONFIG_FINGERPRINT"] = str(manifest.get("_manifest_fingerprint") or "")
     pid = launcher(cmd, env, repo_root, log_path)
     pid_path = repo_root / str(runtime_paths.get("pid_path"))
     pid_path.parent.mkdir(parents=True, exist_ok=True)
@@ -437,11 +452,21 @@ def _launch_manifest_runtime(manifest: Mapping[str, Any], *, repo_root: Path, la
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "pid": pid,
         "command": cmd,
+        "launch_started_at": launch_started_at.isoformat(),
+        "startup_generation_id": startup_generation_id,
+        "runtime_instance_id": startup_generation_id,
         "manifest_id": manifest.get("manifest_id"),
         "manifest_fingerprint": manifest.get("_manifest_fingerprint"),
     }
     _write_json(repo_root / str(runtime_paths.get("pid_metadata_path")), pid_meta)
-    return {"pid": pid, "command": cmd, "log_path": str(log_path)}
+    return {
+        "pid": pid,
+        "command": cmd,
+        "log_path": str(log_path),
+        "launch_started_at": launch_started_at.isoformat(),
+        "startup_generation_id": startup_generation_id,
+        "runtime_instance_id": startup_generation_id,
+    }
 
 
 def _runtime_command(manifest: Mapping[str, Any], repo_root: Path) -> list[str]:
@@ -464,39 +489,133 @@ def _wait_for_runtime(
     repo_root: Path,
     now_dt: datetime,
     sleep_fn: Callable[[float], None],
+    launch_details: Mapping[str, Any] | None = None,
 ) -> FastStartDecision:
     timeout = float((manifest.get("timeouts") or {}).get("runtime_verify_timeout_seconds") or 15)
     deadline = time.monotonic() + timeout
-    last = _verify_runtime(manifest, repo_root=repo_root, now_dt=now_dt)
+    launch_details = launch_details or {}
+    launch_started_at = _parse_datetime(launch_details.get("launch_started_at"))
+    expected_pid = _int(launch_details.get("pid"))
+    startup_generation_id = str(launch_details.get("startup_generation_id") or "")
+    last = _verify_runtime(
+        manifest,
+        repo_root=repo_root,
+        now_dt=now_dt,
+        expected_pid=expected_pid,
+        startup_generation_id=startup_generation_id,
+        launch_started_at=launch_started_at,
+    )
     while not last.ok and time.monotonic() < deadline:
         sleep_fn(0.5)
-        last = _verify_runtime(manifest, repo_root=repo_root, now_dt=datetime.now(timezone.utc))
+        last = _verify_runtime(
+            manifest,
+            repo_root=repo_root,
+            now_dt=datetime.now(timezone.utc),
+            expected_pid=expected_pid,
+            startup_generation_id=startup_generation_id,
+            launch_started_at=launch_started_at,
+        )
     return last
 
 
-def _verify_runtime(manifest: Mapping[str, Any], *, repo_root: Path, now_dt: datetime) -> FastStartDecision:
+def _verify_runtime(
+    manifest: Mapping[str, Any],
+    *,
+    repo_root: Path,
+    now_dt: datetime,
+    expected_pid: int | None = None,
+    startup_generation_id: str | None = None,
+    launch_started_at: datetime | None = None,
+) -> FastStartDecision:
     runtime_paths = manifest.get("runtime_paths") or {}
     pid = _int(_read_text(repo_root / str(runtime_paths.get("pid_path"))))
-    if pid is None or not _pid_alive(pid):
-        return FastStartDecision(False, "FAST_START_BLOCKED", "runtime_process_not_alive", "Manifest runtime PID is not alive.", {"pid": pid})
+    observed_pid = expected_pid or pid
+    if observed_pid is None or not _pid_alive(observed_pid):
+        return FastStartDecision(False, "FAST_START_BLOCKED", "runtime_process_not_alive", "Manifest runtime PID is not alive.", {"pid": observed_pid, "pid_file_pid": pid})
     truth = _load_json(repo_root / str(runtime_paths.get("runtime_truth_path")))
+    truth_generated_at = _parse_datetime(truth.get("generated_at") or truth.get("last_success_at"))
+    truth_runtime_instance_id = str(truth.get("runtime_instance_id") or "")
+    truth_startup_generation_id = str(truth.get("startup_generation_id") or truth_runtime_instance_id)
+    truth_pid = _int(truth.get("producer_pid") or truth.get("pid") or truth.get("runtime_pid"))
+    expected_generation = str(startup_generation_id or "")
+    base_details = {
+        "pid": observed_pid,
+        "pid_file_pid": pid,
+        "truth_generated_at": truth.get("generated_at") or truth.get("last_success_at"),
+        "truth_runtime_instance_id": truth_runtime_instance_id,
+        "truth_startup_generation_id": truth_startup_generation_id,
+        "expected_startup_generation_id": expected_generation or None,
+        "truth_producer_pid": truth_pid,
+        "launch_started_at": launch_started_at.isoformat() if launch_started_at else None,
+    }
+    if expected_pid is not None and truth_pid is not None and truth_pid != expected_pid:
+        return FastStartDecision(False, "FAST_START_BLOCKED", "runtime_truth_stale_pid", "Runtime truth belongs to a different process.", base_details)
+    if expected_generation and truth_startup_generation_id != expected_generation:
+        return FastStartDecision(False, "FAST_START_BLOCKED", "runtime_truth_stale_generation", "Runtime truth belongs to a different startup generation.", base_details)
+    if launch_started_at and (truth_generated_at is None or truth_generated_at.astimezone(timezone.utc) < launch_started_at.astimezone(timezone.utc)):
+        return FastStartDecision(False, "FAST_START_BLOCKED", "runtime_truth_predates_launch", "Runtime truth predates this launcher invocation.", base_details)
     lane_count = _int(truth.get("lane_count"))
     age = _age_seconds(truth.get("generated_at") or truth.get("last_success_at"), now_dt)
     expected = int(manifest.get("expected_lane_count") or 0)
     if lane_count != expected:
-        return FastStartDecision(False, "FAST_START_BLOCKED", "runtime_lane_count_mismatch", "Runtime lane count does not match manifest.", {"pid": pid, "lane_count": lane_count, "expected_lane_count": expected})
+        details = dict(base_details)
+        details.update({"lane_count": lane_count, "expected_lane_count": expected})
+        return FastStartDecision(False, "FAST_START_BLOCKED", "runtime_lane_count_mismatch", "Runtime lane count does not match manifest.", details)
     if age is None or age > float((manifest.get("timeouts") or {}).get("runtime_heartbeat_fresh_seconds") or 20):
-        return FastStartDecision(False, "FAST_START_BLOCKED", "runtime_heartbeat_not_fresh", "Runtime heartbeat is not fresh.", {"pid": pid, "age_seconds": age})
+        details = dict(base_details)
+        details["age_seconds"] = age
+        return FastStartDecision(False, "FAST_START_BLOCKED", "runtime_heartbeat_not_fresh", "Runtime heartbeat is not fresh.", details)
     progress = _load_json(repo_root / str(runtime_paths.get("startup_progress_path")))
+    progress_generated_at = _parse_datetime(progress.get("generated_at") or progress.get("heartbeat_at"))
+    progress_generation_id = str(progress.get("startup_generation_id") or progress.get("runtime_instance_id") or "")
+    progress_pid = _int(progress.get("producer_pid") or progress.get("pid") or progress.get("runtime_pid"))
+    progress_same_generation = not expected_generation or progress_generation_id == expected_generation
+    progress_same_pid = expected_pid is None or progress_pid is None or progress_pid == expected_pid
+    progress_after_launch = not launch_started_at or (
+        progress_generated_at is not None and progress_generated_at.astimezone(timezone.utc) >= launch_started_at.astimezone(timezone.utc)
+    )
     stage = str(progress.get("stage") or progress.get("latest_stage") or "")
-    entered = (
+    entered_by_progress = progress_same_generation and progress_same_pid and progress_after_launch and (
         "trading_loop" in stage
         or str(progress.get("state") or "").upper() == "TRADING_LOOP_ENTERED"
-        or str(truth.get("heartbeat_state") or "").upper() == "HEALTHY"
     )
+    entered_by_truth = str(truth.get("heartbeat_state") or "").upper() == "HEALTHY"
+    entered = entered_by_progress or entered_by_truth
     if not entered:
-        return FastStartDecision(False, "FAST_START_BLOCKED", "trading_loop_not_entered", "Runtime has not reached the trading loop.", {"pid": pid, "stage": stage})
-    return FastStartDecision(True, "RECOVERY_NOOP_RUNTIME_HEALTHY", None, "Runtime is alive with fresh heartbeat and expected lane count.", {"pid": pid, "lane_count": lane_count, "heartbeat_age_seconds": age, "trading_loop_entered": True})
+        details = dict(base_details)
+        details.update(
+            {
+                "stage": stage,
+                "progress_generated_at": progress.get("generated_at") or progress.get("heartbeat_at"),
+                "progress_runtime_instance_id": progress.get("runtime_instance_id"),
+                "progress_startup_generation_id": progress.get("startup_generation_id") or progress.get("runtime_instance_id"),
+                "progress_producer_pid": progress_pid,
+            }
+        )
+        return FastStartDecision(False, "FAST_START_BLOCKED", "trading_loop_not_entered", "Runtime has not reached the trading loop.", details)
+    first_heartbeat_elapsed = _seconds_between(launch_started_at, truth_generated_at)
+    details = dict(base_details)
+    details.update(
+        {
+            "pid": observed_pid,
+            "lane_count": lane_count,
+            "expected_lane_count": expected,
+            "heartbeat_age_seconds": age,
+            "first_runtime_heartbeat_at": truth_generated_at.isoformat() if truth_generated_at else None,
+            "first_runtime_heartbeat_elapsed_seconds": first_heartbeat_elapsed,
+            "first_71_lane_heartbeat_at": truth_generated_at.isoformat() if truth_generated_at else None,
+            "first_71_lane_heartbeat_elapsed_seconds": first_heartbeat_elapsed,
+            "trading_loop_entered": True,
+            "trading_loop_entered_at": (
+                progress_generated_at.isoformat() if entered_by_progress and progress_generated_at else truth_generated_at.isoformat() if truth_generated_at else None
+            ),
+            "trading_loop_entry_elapsed_seconds": (
+                _seconds_between(launch_started_at, progress_generated_at) if entered_by_progress else first_heartbeat_elapsed
+            ),
+            "trading_loop_evidence": "startup_progress" if entered_by_progress else "runtime_truth_healthy",
+        }
+    )
+    return FastStartDecision(True, "RECOVERY_NOOP_RUNTIME_HEALTHY", None, "Runtime is alive with fresh heartbeat and expected lane count.", details)
 
 
 def _run_simulated_validation(manifest: Mapping[str, Any], *, generated_at: datetime) -> dict[str, Any]:
@@ -639,6 +758,24 @@ def _age_seconds(value: Any, now_dt: datetime) -> float | None:
     if observed.tzinfo is None:
         observed = observed.replace(tzinfo=timezone.utc)
     return max(0.0, (now_dt.astimezone(timezone.utc) - observed.astimezone(timezone.utc)).total_seconds())
+
+
+def _parse_datetime(value: Any) -> datetime | None:
+    if not value:
+        return None
+    try:
+        observed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if observed.tzinfo is None:
+        observed = observed.replace(tzinfo=timezone.utc)
+    return observed
+
+
+def _seconds_between(start: datetime | None, end: datetime | None) -> float | None:
+    if start is None or end is None:
+        return None
+    return max(0.0, (end.astimezone(timezone.utc) - start.astimezone(timezone.utc)).total_seconds())
 
 
 def _int(value: Any) -> int | None:

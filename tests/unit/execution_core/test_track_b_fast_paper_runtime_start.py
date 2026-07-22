@@ -4,7 +4,7 @@ import json
 import os
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any, Mapping, Sequence
 
 import pytest
 
@@ -289,12 +289,34 @@ def test_start_uses_manifest_command_and_single_broker_refresh(tmp_path: Path) -
         calls["broker"] += 1
         return {"ok": True, "elapsed_seconds": 0.1}
 
-    def launcher(command: Sequence[str], _env: Mapping[str, str], _cwd: Path, _log_path: Path) -> int:
+    def launcher(command: Sequence[str], env: Mapping[str, str], _cwd: Path, _log_path: Path) -> int:
         calls["launcher"] += 1
         assert "probationary-paper-soak" in command
         assert str(tmp_path / "config/base.yaml") in command
-        write_json(tmp_path / "outputs/runtime/paper_runtime_truth.json", {"generated_at": datetime.now(timezone.utc).isoformat(), "lane_count": 71, "heartbeat_state": "HEALTHY"})
-        write_json(tmp_path / "outputs/runtime/paper_post_truth_startup_progress.json", {"stage": "trading_loop", "state": "RUNNING"})
+        generation_id = env["MGC_TRACK_B_FAST_START_GENERATION_ID"]
+        assert env["MGC_TRACK_B_RUNTIME_INSTANCE_ID"] == generation_id
+        write_json(
+            tmp_path / "outputs/runtime/paper_runtime_truth.json",
+            {
+                "generated_at": datetime.now(timezone.utc).isoformat(),
+                "lane_count": 71,
+                "heartbeat_state": "HEALTHY",
+                "producer_pid": os.getpid(),
+                "runtime_instance_id": generation_id,
+                "startup_generation_id": generation_id,
+            },
+        )
+        write_json(
+            tmp_path / "outputs/runtime/paper_post_truth_startup_progress.json",
+            {
+                "generated_at": datetime.now(timezone.utc).isoformat(),
+                "producer_pid": os.getpid(),
+                "runtime_instance_id": generation_id,
+                "startup_generation_id": generation_id,
+                "stage": "trading_loop",
+                "state": "RUNNING",
+            },
+        )
         return os.getpid()
 
     result = fast.run_fast_paper_runtime_start(
@@ -310,3 +332,77 @@ def test_start_uses_manifest_command_and_single_broker_refresh(tmp_path: Path) -
     assert result["ok"] is True
     assert result["classification"] == "RUNTIME_STARTED"
     assert calls == {"broker": 1, "launcher": 1}
+    verification = result["details"]["post_launch_verification"]["details"]
+    assert verification["expected_startup_generation_id"] == result["details"]["launch"]["startup_generation_id"]
+    assert verification["first_71_lane_heartbeat_elapsed_seconds"] is not None
+
+
+def test_start_ignores_stale_truth_from_prior_generation(tmp_path: Path) -> None:
+    manifest_path = manifest(tmp_path)
+    write_services(tmp_path)
+    write_broker(tmp_path)
+    stale_now = datetime.now(timezone.utc).isoformat()
+    write_json(
+        tmp_path / "outputs/runtime/paper_runtime_truth.json",
+        {
+            "generated_at": stale_now,
+            "lane_count": 7,
+            "heartbeat_state": "HEALTHY",
+            "producer_pid": os.getpid(),
+            "runtime_instance_id": "old-generation",
+            "startup_generation_id": "old-generation",
+        },
+    )
+    write_json(
+        tmp_path / "outputs/runtime/paper_post_truth_startup_progress.json",
+        {
+            "generated_at": stale_now,
+            "producer_pid": os.getpid(),
+            "runtime_instance_id": "old-generation",
+            "startup_generation_id": "old-generation",
+            "stage": "trading_loop",
+            "state": "RUNNING",
+        },
+    )
+    calls = {"broker": 0, "launcher": 0, "sleep": 0}
+    state: dict[str, str] = {}
+
+    def broker_refresh(_manifest: Mapping[str, Any], _repo: Path) -> Mapping[str, Any]:
+        calls["broker"] += 1
+        return {"ok": True, "elapsed_seconds": 0.1}
+
+    def launcher(_command: Sequence[str], env: Mapping[str, str], _cwd: Path, _log_path: Path) -> int:
+        calls["launcher"] += 1
+        state["generation_id"] = env["MGC_TRACK_B_FAST_START_GENERATION_ID"]
+        return os.getpid()
+
+    def sleep_once(_seconds: float) -> None:
+        calls["sleep"] += 1
+        generation_id = state["generation_id"]
+        write_json(
+            tmp_path / "outputs/runtime/paper_runtime_truth.json",
+            {
+                "generated_at": datetime.now(timezone.utc).isoformat(),
+                "lane_count": 71,
+                "heartbeat_state": "HEALTHY",
+                "producer_pid": os.getpid(),
+                "runtime_instance_id": generation_id,
+                "startup_generation_id": generation_id,
+            },
+        )
+
+    result = fast.run_fast_paper_runtime_start(
+        command="start",
+        repo_root=tmp_path,
+        manifest_path=manifest_path,
+        broker_refresher=broker_refresh,
+        runtime_launcher=launcher,
+        sleep_fn=sleep_once,
+        now=NOW,
+    )
+
+    assert result["ok"] is True
+    assert calls["sleep"] >= 1
+    verification = result["details"]["post_launch_verification"]["details"]
+    assert verification["lane_count"] == 71
+    assert verification["truth_startup_generation_id"] == result["details"]["launch"]["startup_generation_id"]
