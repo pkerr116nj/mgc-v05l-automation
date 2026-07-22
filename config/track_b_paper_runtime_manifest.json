@@ -9,13 +9,14 @@
   "broker_client_id": 9077,
   "profile": "mnq_mes_full_session_active_evidence",
   "expected_lane_count": 71,
+  "authoritative_lane_config_path": "outputs/probationary_pattern_engine/paper_session/runtime/paper_stack_mnq_mes_full_session_active_evidence.yaml",
   "config_paths": [
     "config/base.yaml",
     "config/live.yaml",
     "config/probationary_pattern_engine.yaml",
     "config/headless_supervised_paper_runtime.yaml",
-    "outputs/probationary_pattern_engine/paper_session/runtime/paper_stack_mnq_mes_full_session_active_evidence.yaml",
-    "config/probationary_pattern_engine_paper.yaml"
+    "config/probationary_pattern_engine_paper.yaml",
+    "outputs/probationary_pattern_engine/paper_session/runtime/paper_stack_mnq_mes_full_session_active_evidence.yaml"
   ],
   "schwab_config_path": "config/schwab.local.json",
   "required_services": {

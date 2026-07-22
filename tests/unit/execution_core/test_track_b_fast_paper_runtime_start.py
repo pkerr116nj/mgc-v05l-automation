@@ -40,7 +40,8 @@ def manifest(repo: Path) -> Path:
         "broker_client_id": 9077,
         "profile": "test_profile",
         "expected_lane_count": 71,
-        "config_paths": ["config/base.yaml"],
+        "authoritative_lane_config_path": "config/lanes.yaml",
+        "config_paths": ["config/base.yaml", "config/lanes.yaml"],
         "schwab_config_path": "config/schwab.local.json",
         "required_services": {
             "phase1": {
@@ -75,6 +76,11 @@ def manifest(repo: Path) -> Path:
     write_json(path, payload)
     (repo / "config").mkdir(exist_ok=True)
     (repo / "config/base.yaml").write_text("paper: true\n", encoding="utf-8")
+    lanes = [{"lane_id": f"lane_{index}"} for index in range(71)]
+    (repo / "config/lanes.yaml").write_text(
+        "probationary_paper_lanes_json: " + json.dumps(lanes, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
     (repo / "config/schwab.local.json").write_text("{}\n", encoding="utf-8")
     return path
 
@@ -254,6 +260,23 @@ def test_simulated_validation_demonstrates_three_starts_and_three_recoveries(tmp
     assert [row["kind"] for row in result["runs"]].count("clean_start") == 3
     assert [row["kind"] for row in result["runs"]].count("runtime_crash_auto_recovery") == 3
     assert all(row["lane_count"] == 71 for row in result["runs"])
+
+
+def test_manifest_requires_authoritative_lane_config_last(tmp_path: Path) -> None:
+    manifest_path = manifest(tmp_path)
+    payload = json.loads(manifest_path.read_text())
+    payload["config_paths"] = ["config/lanes.yaml", "config/base.yaml"]
+    manifest_path.write_text(json.dumps(payload, sort_keys=True), encoding="utf-8")
+
+    result = fast.run_fast_paper_runtime_start(
+        command="validate-manifest",
+        repo_root=tmp_path,
+        manifest_path=manifest_path,
+        now=NOW,
+    )
+
+    assert result["ok"] is False
+    assert result["first_blocker"] == "authoritative_lane_config_not_last"
 
 
 def test_start_uses_manifest_command_and_single_broker_refresh(tmp_path: Path) -> None:

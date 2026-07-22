@@ -10,6 +10,7 @@ truth artifacts are diagnostics only for this path.
 from __future__ import annotations
 
 import hashlib
+import ast
 import json
 import os
 import socket
@@ -227,6 +228,14 @@ def _validate_manifest(manifest: Mapping[str, Any], *, repo_root: Path) -> FastS
         if not (repo_root / str(rel)).exists():
             blockers.append(f"missing_config_path:{rel}")
             break
+    authoritative = str(manifest.get("authoritative_lane_config_path") or "")
+    config_paths = [str(path) for path in manifest.get("config_paths") or ()]
+    if authoritative:
+        if not config_paths or config_paths[-1] != authoritative:
+            blockers.append("authoritative_lane_config_not_last")
+        lane_count = _authoritative_lane_count(repo_root / authoritative)
+        if lane_count != int(manifest.get("expected_lane_count") or 0):
+            blockers.append("authoritative_lane_count_mismatch")
     if blockers:
         return FastStartDecision(False, "FAST_START_BLOCKED", blockers[0], "Runtime manifest is not valid.", {"blockers": blockers})
     return FastStartDecision(
@@ -239,6 +248,7 @@ def _validate_manifest(manifest: Mapping[str, Any], *, repo_root: Path) -> FastS
             "profile": manifest.get("profile"),
             "expected_lane_count": manifest.get("expected_lane_count"),
             "config_paths": _resolved_config_paths(manifest, repo_root),
+            "authoritative_lane_config_path": str((repo_root / authoritative).resolve()) if authoritative else None,
             "manifest_fingerprint": manifest.get("_manifest_fingerprint"),
         },
     )
@@ -553,6 +563,28 @@ def _recognized_managed_exposures(positions: Sequence[Mapping[str, Any]], manage
 
 def _resolved_config_paths(manifest: Mapping[str, Any], repo_root: Path) -> list[str]:
     return [str((repo_root / str(path)).resolve()) for path in manifest.get("config_paths") or ()]
+
+
+def _authoritative_lane_count(path: Path) -> int | None:
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError:
+        return None
+    raw_value: str | None = None
+    for line in text.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("probationary_paper_lanes_json:"):
+            raw_value = stripped.split(":", 1)[1].strip()
+            break
+    if raw_value is None:
+        return None
+    try:
+        if raw_value.startswith(("'", '"')):
+            raw_value = ast.literal_eval(raw_value)
+        rows = json.loads(raw_value)
+    except Exception:
+        return None
+    return len(rows) if isinstance(rows, list) else None
 
 
 def _load_json(path: Path) -> dict[str, Any]:
