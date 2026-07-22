@@ -2381,6 +2381,16 @@ def test_recovery_tick_does_not_mutate_broker_before_thin_restart() -> None:
     assert 'bash "${FAST_RECOVERY_SCRIPT}"' in tick_block
 
 
+def test_fast_start_scripts_load_approved_runtime_environment_without_secret_literals() -> None:
+    start_source = (REPO_ROOT / "scripts" / "track_b_fast_paper_runtime_start.sh").read_text(encoding="utf-8")
+    recovery_source = (REPO_ROOT / "scripts" / "track_b_fast_paper_runtime_recovery.sh").read_text(encoding="utf-8")
+
+    for source in (start_source, recovery_source):
+        assert 'source "${SCRIPT_DIR}/common_env.sh"' in source
+        assert "DATABENTO_API_KEY=" not in source
+        assert "SCHWAB_APP_SECRET=" not in source
+
+
 def test_recovery_profile_status_fields_are_reported() -> None:
     source = RECOVERY_SCRIPT.read_text(encoding="utf-8")
 
