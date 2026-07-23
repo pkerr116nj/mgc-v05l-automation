@@ -334,8 +334,11 @@ def test_lifecycle_owner_without_broker_position_blocks() -> None:
         ),
     )
 
-    assert payload["classification"] == BROKER_POSITION_GUARDIAN_HARD_HOLD
+    assert payload["classification"] == BROKER_POSITION_GUARDIAN_READY
     assert BROKER_LIFECYCLE_POSITION_MISMATCH in payload["hard_classifications"]
+    assert payload["global_hard_classifications"] == []
+    assert payload["blocked_entry_symbols"] == ["MNQ"]
+    assert payload["new_entries_allowed"] is True
 
 
 def test_aggregate_same_lane_units_match_broker_quantity_without_guardian_hold() -> None:
@@ -404,8 +407,11 @@ def test_collapsed_registry_quantity_against_broker_hard_holds() -> None:
         ),
     )
 
-    assert payload["classification"] == BROKER_POSITION_GUARDIAN_HARD_HOLD
+    assert payload["classification"] == BROKER_POSITION_GUARDIAN_READY
     assert BROKER_LIFECYCLE_POSITION_MISMATCH in payload["hard_classifications"]
+    assert payload["global_hard_classifications"] == []
+    assert payload["blocked_entry_symbols"] == ["MNQ"]
+    assert payload["new_entries_allowed"] is True
 
 
 def test_fresh_broker_flat_invalidates_stale_lifecycle_owner() -> None:

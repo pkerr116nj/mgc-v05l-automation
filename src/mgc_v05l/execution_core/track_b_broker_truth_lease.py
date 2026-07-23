@@ -198,20 +198,59 @@ def classify_broker_truth_lease(inputs: Mapping[str, Any]) -> dict[str, Any]:
             lifecycle=lifecycle,
             allowed_instruments=allowed_instruments,
         )
-        if latest_contradiction:
+        symbol_scoped_entry_blockers = _symbol_scoped_entry_blockers(
+            latest_contradiction=latest_contradiction,
+            broker_position_contradiction=broker_position_contradiction,
+            broker_truth=broker_truth,
+            latest_attempt=latest_attempt,
+            reconciliation=reconciliation,
+            allowed_instruments=allowed_instruments,
+        )
+        if latest_contradiction and not _is_symbol_scoped_contradiction(latest_contradiction):
             builder.invalidate(
                 "INVALIDATED_CONTRADICTION",
                 latest_contradiction["code"],
                 latest_contradiction["detail"],
                 operator_action_required=True,
             )
-        elif broker_position_contradiction:
+        elif broker_position_contradiction and not _is_symbol_scoped_contradiction(broker_position_contradiction):
             builder.invalidate(
                 "INVALIDATED_CONTRADICTION",
                 broker_position_contradiction["code"],
                 broker_position_contradiction["detail"],
                 operator_action_required=True,
             )
+        elif symbol_scoped_entry_blockers and _reconciliation_has_only_symbol_scoped_position_debris(
+            reconciliation=reconciliation,
+            blocked_symbols={str(row.get("symbol") or "") for row in symbol_scoped_entry_blockers},
+        ):
+            for row in symbol_scoped_entry_blockers:
+                builder.warn(
+                    str(row.get("code") or "symbol_scoped_position_blocker"),
+                    str(row.get("detail") or "Symbol-scoped position ownership evidence blocks only that symbol."),
+                )
+            if broker_truth_time is None or entry_valid_until is None or exit_valid_until is None:
+                builder.invalidate(
+                    "OPERATOR_REQUIRED",
+                    "broker_truth_time_missing",
+                    "Broker truth generated_at/last_success_at timestamp is missing or invalid.",
+                    operator_action_required=True,
+                )
+            elif current_time <= entry_valid_until:
+                if _latest_attempt_failed_after_success(latest_attempt=latest_attempt, broker_truth_time=broker_truth_time):
+                    builder.state = "ACTIVE_DEGRADED_REFRESH_FAILING"
+                    builder.warn(
+                        "broker_truth_refresh_failing",
+                        "Latest broker-truth refresh failed; active lease is preserved until entry validity expires.",
+                    )
+                else:
+                    builder.state = "ACTIVE"
+            elif _lifecycle_has_owned_position(lifecycle) and current_time <= exit_valid_until:
+                builder.state = "EXPIRED_EXITS_ONLY"
+                builder.block("entry_lease_expired", "Entry lease expired; new entries are blocked.")
+            else:
+                builder.state = "EXPIRED_BLOCK_NEW_ENTRIES"
+                builder.block("entry_lease_expired", "Entry lease expired; new entries are blocked.")
         elif not _reconciliation_clean(reconciliation) and not _reconciliation_clean_for_current_scope_close_authority(
             reconciliation=reconciliation,
             positions=[
@@ -371,12 +410,63 @@ def classify_broker_truth_lease(inputs: Mapping[str, Any]) -> dict[str, Any]:
     )
     submit_connection_capable = _connection_allows_new_entry(connection_mode)
     close_connection_capable = _connection_allows_close(connection_mode) or degraded_close_context["ready"]
+    symbol_scoped_entry_blockers = _symbol_scoped_entry_blockers(
+        latest_contradiction=_latest_success_contradiction(
+            latest_attempt=latest_attempt,
+            account_id=account_id,
+            allowed_instruments=allowed_instruments,
+            lifecycle=lifecycle,
+            order_state=order_state,
+            broker_truth=broker_truth,
+            open_order_truth=open_order_truth,
+        ),
+        broker_position_contradiction=_broker_position_contradiction(
+            broker_truth=broker_truth,
+            reconciliation=reconciliation,
+            lifecycle=lifecycle,
+            allowed_instruments=allowed_instruments,
+        ),
+        broker_truth=broker_truth,
+        latest_attempt=latest_attempt,
+        reconciliation=reconciliation,
+        allowed_instruments=allowed_instruments,
+    )
+    blocked_entry_symbols = sorted(
+        {
+            str(row.get("symbol") or "").strip().upper()
+            for row in symbol_scoped_entry_blockers
+            if str(row.get("symbol") or "").strip()
+        }
+    )
+    effective_reconciliation_clean = _reconciliation_clean(reconciliation) or bool(
+        symbol_scoped_entry_blockers
+        and _reconciliation_has_only_symbol_scoped_position_debris(
+            reconciliation=reconciliation,
+            blocked_symbols=set(blocked_entry_symbols),
+        )
+    )
+    symbol_scoped_submit_connection_capable = _symbol_scoped_submit_connection_capable(
+        connection_mode=connection_mode,
+        symbol_scoped_entry_blockers=symbol_scoped_entry_blockers,
+        broker_truth=broker_truth,
+        latest_attempt=latest_attempt,
+        reconciliation=reconciliation,
+        order_state=order_state,
+        open_order_truth=open_order_truth,
+        allowed_instruments=allowed_instruments,
+        broker_position_lease=broker_position_lease,
+        broker_open_order_lease=broker_open_order_lease,
+        effective_reconciliation_clean=effective_reconciliation_clean,
+        global_blockers=builder.blockers,
+    )
+    submit_connection_capable = submit_connection_capable or symbol_scoped_submit_connection_capable
+
     submit_entry_allowed = bool(
         submit_entry_allowed
         and submit_connection_capable
         and _lease_allows(broker_position_lease, AUTHORITY_USE_NEW_ENTRY)
         and _lease_allows(broker_open_order_lease, AUTHORITY_USE_NEW_ENTRY)
-        and _reconciliation_clean(reconciliation)
+        and effective_reconciliation_clean
     )
     submit_exit_allowed = bool(
         submit_exit_allowed
@@ -394,6 +484,9 @@ def classify_broker_truth_lease(inputs: Mapping[str, Any]) -> dict[str, Any]:
     )
     allowed_uses = {
         "new_entry": submit_entry_allowed,
+        "new_entry_global": submit_entry_allowed,
+        "blocked_entry_symbols": blocked_entry_symbols,
+        "symbol_scoped_entry_blockers": symbol_scoped_entry_blockers,
         "managed_risk_reducing_close": submit_exit_allowed,
         "broker_observed_adoption_diagnosis": broker_observed_adoption_allowed,
         "fill_callback_adoption": _lease_allows(execution_fill_evidence_lease, AUTHORITY_USE_FILL_CALLBACK_ADOPTION),
@@ -501,6 +594,10 @@ def classify_broker_truth_lease(inputs: Mapping[str, Any]) -> dict[str, Any]:
         "order_intent_match_status": order_state.get("match_status")
         or reconciliation.get("submit_intent_ownership_reconciliation", {}).get("classification"),
         "allowed_instruments": sorted(allowed_instruments),
+        "blocked_entry_symbols": blocked_entry_symbols,
+        "symbol_scoped_entry_blockers": symbol_scoped_entry_blockers,
+        "global_entry_blockers": list(builder.blockers),
+        "symbol_scoped_submit_connection_capable": symbol_scoped_submit_connection_capable,
         "allowed_contracts": list(inputs.get("allowed_contracts") or []),
         "allowed_lane_ids": list(inputs.get("allowed_lane_ids") or []),
         "submit_entry_allowed": bool(submit_entry_allowed),
@@ -907,7 +1004,12 @@ def _latest_success_contradiction(
         return {"code": "unknown_open_orders", "detail": "Latest successful broker truth reports unknown open orders."}
     positions = [row for row in _scoped_positions(latest_attempt, allowed_instruments) if abs(_quantity(row)) > 1e-9]
     if positions and not _lifecycle_positions_match(positions=positions, lifecycle=lifecycle):
-        return {"code": "unexpected_broker_position", "detail": "Latest successful broker truth reports unexpected position."}
+        return {
+            "code": "unexpected_broker_position",
+            "detail": "Latest successful broker truth reports unexpected position.",
+            "scope": "SYMBOL",
+            "symbols": sorted({_symbol(row) for row in positions if _symbol(row)}),
+        }
     return None
 
 
@@ -921,9 +1023,14 @@ def _broker_position_contradiction(
     nonzero_positions = [row for row in _scoped_positions(broker_truth, allowed_instruments) if abs(_quantity(row)) > 1e-9]
     if not nonzero_positions:
         if _lifecycle_has_owned_position(lifecycle) and not _reconciliation_clean(reconciliation):
+            symbols = _symbols_from_reconciliation_position_debris(reconciliation) or {
+                _symbol(row) for row in _list(lifecycle.get("open_positions")) if isinstance(row, Mapping) and _symbol(row)
+            }
             return {
                 "code": "lifecycle_broker_position_mismatch",
                 "detail": "Lifecycle reports an owned position but broker truth is flat and reconciliation is not clean.",
+                "scope": "SYMBOL",
+                "symbols": sorted(symbols),
             }
         return None
     if not _lifecycle_positions_match(positions=nonzero_positions, lifecycle=lifecycle):
@@ -935,8 +1042,200 @@ def _broker_position_contradiction(
             reconciliation=reconciliation,
         ):
             return None
-        return {"code": "unexpected_broker_position", "detail": "Broker truth reports an unexpected in-scope position."}
+        return {
+            "code": "unexpected_broker_position",
+            "detail": "Broker truth reports an unexpected in-scope position.",
+            "scope": "SYMBOL",
+            "symbols": sorted({_symbol(row) for row in nonzero_positions if _symbol(row)}),
+        }
     return None
+
+
+def _is_symbol_scoped_contradiction(contradiction: Mapping[str, Any] | None) -> bool:
+    if not contradiction:
+        return False
+    return str(contradiction.get("scope") or "").strip().upper() == "SYMBOL"
+
+
+def _symbol_scoped_entry_blockers(
+    *,
+    latest_contradiction: Mapping[str, Any] | None,
+    broker_position_contradiction: Mapping[str, Any] | None,
+    broker_truth: Mapping[str, Any],
+    latest_attempt: Mapping[str, Any],
+    reconciliation: Mapping[str, Any],
+    allowed_instruments: set[str],
+) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    for contradiction in (latest_contradiction, broker_position_contradiction):
+        if _is_symbol_scoped_contradiction(contradiction):
+            for symbol in _string_set(contradiction.get("symbols")):
+                rows.append(
+                    {
+                        "scope": "SYMBOL",
+                        "symbol": symbol,
+                        "code": str(contradiction.get("code") or "symbol_scoped_position_mismatch"),
+                        "detail": str(
+                            contradiction.get("detail")
+                            or "Unresolved position ownership blocks new entries only for this symbol."
+                        ),
+                    }
+                )
+    if rows:
+        return _dedupe_symbol_blockers(rows)
+    if _reconciliation_clean(reconciliation):
+        return []
+
+    sources = [broker_truth]
+    if _latest_attempt_success(latest_attempt):
+        sources.append(latest_attempt)
+    for source in sources:
+        for position in _scoped_positions(source, allowed_instruments):
+            if abs(_quantity(position)) <= 1e-9:
+                continue
+            symbol = _symbol(position)
+            if not symbol:
+                continue
+            rows.append(
+                {
+                    "scope": "SYMBOL",
+                    "symbol": symbol,
+                    "code": "unresolved_position_ownership",
+                    "detail": "Fresh broker truth reports current futures exposure without clean lifecycle ownership; block same-symbol entries only.",
+                    "local_symbol": position.get("local_symbol"),
+                    "quantity": position.get("quantity"),
+                }
+            )
+    return _dedupe_symbol_blockers(rows)
+
+
+def _dedupe_symbol_blockers(rows: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
+    seen: set[tuple[str, str]] = set()
+    result: list[dict[str, Any]] = []
+    for row in rows:
+        symbol = str(row.get("symbol") or "").strip().upper()
+        code = str(row.get("code") or "").strip()
+        if not symbol or (symbol, code) in seen:
+            continue
+        seen.add((symbol, code))
+        cleaned = dict(row)
+        cleaned["symbol"] = symbol
+        cleaned["scope"] = "SYMBOL"
+        result.append(cleaned)
+    return result
+
+
+def _symbol_scoped_submit_connection_capable(
+    *,
+    connection_mode: str,
+    symbol_scoped_entry_blockers: Sequence[Mapping[str, Any]],
+    broker_truth: Mapping[str, Any],
+    latest_attempt: Mapping[str, Any],
+    reconciliation: Mapping[str, Any],
+    order_state: Mapping[str, Any],
+    open_order_truth: Mapping[str, Any],
+    allowed_instruments: set[str],
+    broker_position_lease: Mapping[str, Any],
+    broker_open_order_lease: Mapping[str, Any],
+    effective_reconciliation_clean: bool,
+    global_blockers: Sequence[Mapping[str, Any]],
+) -> bool:
+    if str(connection_mode or "").strip().upper() != "ORDER_STATUS_UNRELIABLE":
+        return False
+    if not symbol_scoped_entry_blockers or not effective_reconciliation_clean or global_blockers:
+        return False
+    if not _bool(broker_truth.get("positions_complete")) or not _bool(broker_truth.get("open_orders_complete")):
+        return False
+    if not _lease_allows(broker_position_lease, AUTHORITY_USE_NEW_ENTRY):
+        return False
+    if not _lease_allows(broker_open_order_lease, AUTHORITY_USE_NEW_ENTRY):
+        return False
+    if _derived_broker_open_order_count(
+        broker_truth=broker_truth,
+        latest_attempt=latest_attempt,
+        reconciliation=reconciliation,
+        open_order_truth=open_order_truth,
+        allowed_instruments=allowed_instruments,
+    ):
+        return False
+    if _derived_unknown_open_order_count(
+        broker_truth=broker_truth,
+        latest_attempt=latest_attempt,
+        reconciliation=reconciliation,
+        order_state=order_state,
+        open_order_truth=open_order_truth,
+        allowed_instruments=allowed_instruments,
+    ):
+        return False
+    if _bool(reconciliation.get("live_money_eligible")) or _bool(broker_truth.get("live_money_eligible")):
+        return False
+    return True
+
+
+def _reconciliation_has_only_symbol_scoped_position_debris(
+    *,
+    reconciliation: Mapping[str, Any],
+    blocked_symbols: set[str],
+) -> bool:
+    blocked_symbols = {str(symbol or "").strip().upper() for symbol in blocked_symbols if str(symbol or "").strip()}
+    if not blocked_symbols:
+        return False
+    if int(reconciliation.get("unknown_broker_open_order_count") or 0) > 0:
+        return False
+    if int(reconciliation.get("track_b_broker_open_order_count") or 0) > 0:
+        return False
+    if _bool(reconciliation.get("live_money_eligible")):
+        return False
+    for reason in list(reconciliation.get("block_reasons") or []):
+        text = str(reason or "").upper()
+        if "OPEN_ORDER" in text or "UNKNOWN_ORDER" in text or "LIVE_MONEY" in text:
+            return False
+    blockers = _list(reconciliation.get("blockers"))
+    if not blockers:
+        return str(reconciliation.get("classification") or "") in {
+            "TRACK_B_PAPER_BROKER_RECONCILIATION_BLOCKED",
+            "BROKER_LIFECYCLE_RECONCILIATION_BLOCKED",
+        }
+    for blocker in blockers:
+        if not isinstance(blocker, Mapping):
+            return False
+        code = str(blocker.get("code") or "").upper()
+        if "OPEN_ORDER" in code or "UNKNOWN_ORDER" in code or "LIVE_MONEY" in code:
+            return False
+        symbols = _symbols_from_nested_mapping(blocker)
+        if symbols and symbols.isdisjoint(blocked_symbols):
+            return False
+        if not symbols and "REGISTRY" not in code and "POSITION" not in code and "LIFECYCLE" not in code:
+            return False
+    return True
+
+
+def _symbols_from_reconciliation_position_debris(reconciliation: Mapping[str, Any]) -> set[str]:
+    symbols: set[str] = set()
+    for position in _list(reconciliation.get("track_b_broker_positions")):
+        if isinstance(position, Mapping) and abs(_quantity(position)) > 1e-9:
+            symbol = _symbol(position)
+            if symbol:
+                symbols.add(symbol)
+    for blocker in _list(reconciliation.get("blockers")):
+        if isinstance(blocker, Mapping):
+            symbols.update(_symbols_from_nested_mapping(blocker))
+    return symbols
+
+
+def _symbols_from_nested_mapping(value: Any) -> set[str]:
+    symbols: set[str] = set()
+    if isinstance(value, Mapping):
+        if any(key in value for key in ("symbol", "track_b_root", "instrument_family", "local_symbol")):
+            symbol = _symbol(value)
+            if symbol:
+                symbols.add(symbol)
+        for nested in value.values():
+            symbols.update(_symbols_from_nested_mapping(nested))
+    elif isinstance(value, list):
+        for item in value:
+            symbols.update(_symbols_from_nested_mapping(item))
+    return symbols
 
 
 def _lifecycle_has_owned_position(lifecycle: Mapping[str, Any]) -> bool:

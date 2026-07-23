@@ -7591,6 +7591,17 @@ def test_active_profile_entry_uses_scoped_current_order_truth_not_profile_wide_s
         tmp_path / "outputs/track_b_execution_core/phase1_runtime_market_data/MET/1m/latest_runtime_candles.json",
         {"bars": [{"bar_end": "2999-01-01T00:00:00+00:00", "close": 160.0}]},
     )
+    _write_json(
+        tmp_path / "outputs/track_b_execution_core/managed_exit_service/latest_managed_exit_service_status.json",
+        {
+            "generated_at": "2999-01-01T00:00:00+00:00",
+            "pid": 456,
+            "mode": "GUARDED_CLOSE_ONLY_APPLY",
+            "classification": "NO_ELIGIBLE_EXITS",
+            "live_money_eligible": False,
+            "paper_proof_invoked": False,
+        },
+    )
     config = _config(
         tmp_path,
         submit=True,

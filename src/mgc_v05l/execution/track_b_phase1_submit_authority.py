@@ -21,6 +21,7 @@ def evaluate_phase1_broker_reconciliation_submit_gate(
     repo_root: Path,
     reconciliation_path: Path = DEFAULT_RECONCILIATION_PATH,
     max_age_seconds: float = DEFAULT_MAX_AGE_SECONDS,
+    candidate_symbol: str | None = None,
 ) -> dict[str, Any]:
     """Return whether current Phase-1 broker truth is safe enough to consider submit.
 
@@ -66,7 +67,21 @@ def evaluate_phase1_broker_reconciliation_submit_gate(
             failures.append(normalized)
 
     failures = list(dict.fromkeys(failures))
-    ready = not failures
+    scoped = _symbol_scoped_reconciliation_status(payload=payload, candidate_symbol=candidate_symbol)
+    blocking_failures = list(failures)
+    if scoped["candidate_symbol_allowed"]:
+        blocking_failures = [
+            reason
+            for reason in blocking_failures
+            if reason
+            not in {
+                "phase1_broker_reconciliation_not_reconciled",
+                "phase1_broker_reconciled_false",
+                "phase1_review_required_present",
+                "phase1_broker_reconciliation_blockers_present",
+            }
+        ]
+    ready = not blocking_failures
     return {
         "classification": (
             "TRACK_B_PHASE1_BROKER_RECONCILIATION_SUBMIT_GATE_READY"
@@ -74,12 +89,17 @@ def evaluate_phase1_broker_reconciliation_submit_gate(
             else "TRACK_B_PHASE1_BROKER_RECONCILIATION_SUBMIT_GATE_BLOCKED"
         ),
         "ready": ready,
-        "block_reasons": failures,
+        "block_reasons": blocking_failures,
+        "diagnostic_block_reasons": failures if ready and failures else [],
         "detail": (
             "Current Phase-1 broker reconciliation is fresh and clean; route/governance/exposure gates still apply."
             if ready
-            else f"Current Phase-1 broker reconciliation blocks submit: {', '.join(failures)}"
+            else f"Current Phase-1 broker reconciliation blocks submit: {', '.join(blocking_failures)}"
         ),
+        "blocker_scope": "SYMBOL" if scoped["candidate_symbol_allowed"] and failures else ("GLOBAL" if failures else "NONE"),
+        "candidate_symbol": scoped["candidate_symbol"],
+        "blocked_entry_symbols": scoped["blocked_entry_symbols"],
+        "symbol_scoped_blockers": scoped["symbol_scoped_blockers"],
         "path": str(path),
         "generated_at": generated_at_value,
         "age_seconds": age_seconds,
@@ -122,3 +142,90 @@ def _int_value(value: Any) -> int:
         return int(value or 0)
     except (TypeError, ValueError):
         return 0
+
+
+def _symbol_scoped_reconciliation_status(*, payload: dict[str, Any], candidate_symbol: str | None) -> dict[str, Any]:
+    candidate = _canonical_symbol(candidate_symbol)
+    blocked_symbols = _blocked_symbols_from_current_broker_positions(payload)
+    global_reasons: list[str] = []
+    if _int_value(payload.get("unknown_broker_open_order_count")):
+        global_reasons.append("unknown_open_orders")
+    if _int_value(payload.get("track_b_broker_open_order_count") or payload.get("open_order_count")):
+        global_reasons.append("open_orders_present")
+    if bool(payload.get("live_money_eligible")):
+        global_reasons.append("live_money_eligible")
+    for blocker in list(payload.get("blockers") or []):
+        if not isinstance(blocker, dict):
+            global_reasons.append("unclassified_blocker")
+            continue
+        code = str(blocker.get("code") or "").upper()
+        if "OPEN_ORDER" in code or "UNKNOWN_ORDER" in code or "LIVE_MONEY" in code:
+            global_reasons.append(code.lower())
+            continue
+        symbols = _symbols_from_nested(blocker)
+        if symbols and blocked_symbols and not symbols.issubset(blocked_symbols):
+            continue
+        if not symbols and not any(token in code for token in ("REGISTRY", "POSITION", "LIFECYCLE")):
+            global_reasons.append(code.lower() or "unclassified_blocker")
+    candidate_allowed = bool(candidate and blocked_symbols and candidate not in blocked_symbols and not global_reasons)
+    return {
+        "candidate_symbol": candidate,
+        "candidate_symbol_allowed": candidate_allowed,
+        "blocked_entry_symbols": sorted(blocked_symbols),
+        "symbol_scoped_blockers": [
+            {
+                "scope": "SYMBOL",
+                "symbol": symbol,
+                "code": "phase1_reconciliation_symbol_position_blocker",
+                "detail": "Current reconciliation has unresolved broker/lifecycle ownership for this symbol only.",
+            }
+            for symbol in sorted(blocked_symbols)
+        ],
+        "global_reasons": global_reasons,
+    }
+
+
+def _blocked_symbols_from_current_broker_positions(payload: dict[str, Any]) -> set[str]:
+    rows = payload.get("track_b_broker_positions") or []
+    symbols: set[str] = set()
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        try:
+            qty = float(row.get("quantity") or row.get("qty") or 0)
+        except (TypeError, ValueError):
+            qty = 0.0
+        if abs(qty) <= 1e-9:
+            continue
+        symbol = _canonical_symbol(row.get("symbol") or row.get("track_b_root") or row.get("instrument_family") or row.get("local_symbol"))
+        if symbol:
+            symbols.add(symbol)
+    return symbols
+
+
+def _symbols_from_nested(value: Any) -> set[str]:
+    symbols: set[str] = set()
+    if isinstance(value, dict):
+        if any(key in value for key in ("symbol", "track_b_root", "instrument_family", "local_symbol")):
+            symbol = _canonical_symbol(value.get("symbol") or value.get("track_b_root") or value.get("instrument_family") or value.get("local_symbol"))
+            if symbol:
+                symbols.add(symbol)
+        for nested in value.values():
+            symbols.update(_symbols_from_nested(nested))
+    elif isinstance(value, list):
+        for item in value:
+            symbols.update(_symbols_from_nested(item))
+    return symbols
+
+
+def _canonical_symbol(value: Any) -> str:
+    text = str(value or "").strip().upper()
+    if not text:
+        return ""
+    letters = "".join(ch for ch in text if ch.isalpha())
+    if text in {"MES", "MNQ", "MGC", "MET", "MSL", "MBT"}:
+        return text
+    for root in ("MNQ", "MES", "MGC", "MET", "MSL", "MBT", "NQ", "ES", "GC", "ZN", "ZB", "ZF", "ZT", "PL"):
+        if letters.startswith(root):
+            return root
+    return letters[:3]

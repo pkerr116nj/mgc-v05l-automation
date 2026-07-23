@@ -442,15 +442,18 @@ def _tripped_limits(
         rows.append(_limit("live_money_eligible", SAFE_STATE_HARD_HOLD, True, False, "Live-money route is prohibited."))
     guardian = inputs["broker_position_guardian"]
     if _active_classification(guardian) == BROKER_POSITION_GUARDIAN_HARD_HOLD:
-        rows.append(
-            _limit(
-                "broker_position_guardian_hard_hold",
-                SAFE_STATE_HARD_HOLD,
-                ", ".join(str(item) for item in guardian.get("hard_classifications") or []) or "hard_hold",
-                BROKER_POSITION_GUARDIAN_HARD_HOLD,
-                str(guardian.get("operator_explanation") or "Broker Position Guardian reports hard hold."),
+        global_hard = list(guardian.get("global_hard_classifications") or [])
+        symbol_scoped = list(guardian.get("symbol_scoped_entry_blockers") or [])
+        if global_hard or not symbol_scoped:
+            rows.append(
+                _limit(
+                    "broker_position_guardian_hard_hold",
+                    SAFE_STATE_HARD_HOLD,
+                    ", ".join(str(item) for item in global_hard or guardian.get("hard_classifications") or []) or "hard_hold",
+                    BROKER_POSITION_GUARDIAN_HARD_HOLD,
+                    str(guardian.get("operator_explanation") or "Broker Position Guardian reports hard hold."),
+                )
             )
-        )
     if not inputs["control_plane_snapshot"].get("control_plane_snapshot_id"):
         rows.append(
             _limit(

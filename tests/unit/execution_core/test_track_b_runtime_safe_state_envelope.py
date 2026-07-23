@@ -506,6 +506,8 @@ def test_active_managed_exposure_limit_is_distinct_from_broker_mutation_limit(tm
     payload = _build(tmp_path)
 
     assert payload["safe_state_classification"] == SAFE_STATE_POSITION_LIMIT_HIT
+    assert payload["submit_allowed"] is False
+    assert payload["entry_mutation_allowed"] is False
     assert payload["limit_counters"]["active_managed_exposure_count"] == 5
     assert payload["limit_counters"]["broker_mutation_events_per_runtime_generation"] == 0
     assert any(row["limit_id"] == "active_managed_exposure_count" for row in payload["tripped_limits"])

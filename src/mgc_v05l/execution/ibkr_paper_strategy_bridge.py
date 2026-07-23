@@ -3867,7 +3867,12 @@ def _phase1_reconciliation_gate_for_bridge(
     config: IbkrPaperStrategyBridgeConfig,
     intent: IbkrPaperStrategyOrderIntent,
 ) -> dict[str, Any]:
-    gate = dict(evaluate_phase1_broker_reconciliation_submit_gate(repo_root=config.repo_root))
+    gate = dict(
+        evaluate_phase1_broker_reconciliation_submit_gate(
+            repo_root=config.repo_root,
+            candidate_symbol=config.symbol,
+        )
+    )
     gate.setdefault("stale_reconciliation_refresh_attempted", False)
     gate.setdefault("stale_reconciliation_refresh_result", None)
     gate.setdefault("refreshed_reconciliation_age", None)
@@ -3913,7 +3918,12 @@ def _phase1_reconciliation_gate_for_bridge(
         return gate
 
     refresh_result = _refresh_phase1_broker_reconciliation_artifacts(config=config)
-    refreshed_gate = dict(evaluate_phase1_broker_reconciliation_submit_gate(repo_root=config.repo_root))
+    refreshed_gate = dict(
+        evaluate_phase1_broker_reconciliation_submit_gate(
+            repo_root=config.repo_root,
+            candidate_symbol=config.symbol,
+        )
+    )
     refreshed_gate["stale_reconciliation_refresh_attempted"] = True
     refreshed_gate["stale_reconciliation_refresh_result"] = refresh_result
     refreshed_gate["refreshed_reconciliation_age"] = refreshed_gate.get("age_seconds")

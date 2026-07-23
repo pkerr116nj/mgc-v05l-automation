@@ -95,8 +95,16 @@ def build_track_b_broker_position_guardian(
         findings=findings,
         broker_positions=broker_positions,
     )
+    symbol_scoped_entry_blockers = _symbol_scoped_entry_blockers(active_findings)
+    global_hard_classifications = _dedupe(
+        [
+            str(row.get("classification") or "")
+            for row in active_findings
+            if row.get("hard_hold") and not _symbol_scoped_entry_finding(row)
+        ]
+    )
     hard_classifications = _dedupe([str(row.get("classification") or "") for row in active_findings if row.get("hard_hold")])
-    classification = BROKER_POSITION_GUARDIAN_HARD_HOLD if hard_classifications else BROKER_POSITION_GUARDIAN_READY
+    classification = BROKER_POSITION_GUARDIAN_HARD_HOLD if global_hard_classifications else BROKER_POSITION_GUARDIAN_READY
     close_authority = _registry_verified_managed_close_authority(
         inputs=inputs,
         broker_positions=broker_positions,
@@ -105,6 +113,7 @@ def build_track_b_broker_position_guardian(
     )
     remediation_plan = _scoped_remediation_plan(findings=active_findings, broker_positions=broker_positions)
     close_submit_allowed = classification == BROKER_POSITION_GUARDIAN_READY or close_authority.get("allowed") is True
+    new_entries_allowed = not global_hard_classifications
     return {
         "schema_version": "track_b_broker_position_guardian_v1",
         "generated_at": actual_now.isoformat(),
@@ -121,6 +130,15 @@ def build_track_b_broker_position_guardian(
         "dashboard_projection_consumed": False,
         "classification": classification,
         "hard_classifications": hard_classifications,
+        "global_hard_classifications": global_hard_classifications,
+        "symbol_scoped_entry_blockers": symbol_scoped_entry_blockers,
+        "blocked_entry_symbols": sorted(
+            {
+                str(row.get("symbol") or "").strip().upper()
+                for row in symbol_scoped_entry_blockers
+                if str(row.get("symbol") or "").strip()
+            }
+        ),
         "findings": active_findings,
         "current_truth_invalidation": current_truth_invalidation,
         "source_freshness": _source_freshness(inputs),
@@ -130,13 +148,13 @@ def build_track_b_broker_position_guardian(
         "open_orders": open_orders,
         "managed_order_rows": managed_orders,
         "lifecycle_positions": lifecycle_positions,
-        "new_entries_allowed": classification == BROKER_POSITION_GUARDIAN_READY,
-        "lane_progression_allowed": classification == BROKER_POSITION_GUARDIAN_READY,
-        "guarded_roster_submit_allowed": classification == BROKER_POSITION_GUARDIAN_READY,
+        "new_entries_allowed": new_entries_allowed,
+        "lane_progression_allowed": new_entries_allowed,
+        "guarded_roster_submit_allowed": new_entries_allowed,
         "close_submit_allowed": close_submit_allowed,
         "managed_close_mutation_allowed": close_authority.get("allowed") is True,
         "managed_close_authority_reason_codes": list(close_authority.get("reason_codes") or []),
-        "requires_exact_scoped_remediation_plan": classification == BROKER_POSITION_GUARDIAN_HARD_HOLD,
+        "requires_exact_scoped_remediation_plan": bool(global_hard_classifications),
         "scoped_remediation_plan": remediation_plan,
         "operator_explanation": _operator_explanation(hard_classifications=hard_classifications, remediation_plan=remediation_plan),
         "source_artifact_paths": {
@@ -296,6 +314,63 @@ def _historical_finding(finding: Mapping[str, Any], *, inputs: Mapping[str, Mapp
     )
     row["hard_hold"] = False
     return row
+
+
+def _symbol_scoped_entry_finding(finding: Mapping[str, Any]) -> bool:
+    classification = str(finding.get("classification") or "")
+    if classification != BROKER_LIFECYCLE_POSITION_MISMATCH:
+        return False
+    detail = str(finding.get("detail") or "").lower()
+    if "opposite" in detail or "reverse" in detail:
+        return False
+    return bool(_mapping(finding.get("broker_position")) or _mapping(finding.get("lifecycle_position")) or _mapping(finding.get("managed_position")))
+
+
+def _symbol_scoped_entry_blockers(findings: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    seen: set[tuple[str, str]] = set()
+    for finding in findings:
+        if not _symbol_scoped_entry_finding(finding):
+            continue
+        symbol = _symbol_from_finding(finding)
+        if not symbol:
+            continue
+        key = (symbol, str(finding.get("classification") or ""))
+        if key in seen:
+            continue
+        seen.add(key)
+        rows.append(
+            {
+                "scope": "SYMBOL",
+                "symbol": symbol,
+                "classification": finding.get("classification"),
+                "detail": finding.get("detail"),
+                "reason": "Unresolved position ownership blocks new entries only for this symbol.",
+            }
+        )
+    return rows
+
+
+def _symbol_from_finding(finding: Mapping[str, Any]) -> str:
+    for key in ("broker_position", "lifecycle_position", "managed_position"):
+        row = _mapping(finding.get(key))
+        if not row:
+            continue
+        symbol = _text(
+            row.get("symbol")
+            or row.get("track_b_root")
+            or row.get("instrument_family")
+            or row.get("local_symbol")
+        ).upper()
+        if symbol:
+            if symbol in {"MES", "MNQ", "MGC", "MBT", "MET", "MSL"}:
+                return symbol
+            letters = "".join(ch for ch in symbol if ch.isalpha())
+            for root in ("MNQ", "MES", "MGC", "MBT", "MET", "MSL", "NQ", "ES", "GC", "ZN", "ZB", "ZF", "ZT", "PL"):
+                if letters.startswith(root):
+                    return root
+            return letters[:3]
+    return ""
 
 
 def _position_truth_fresh_complete(position_truth: Mapping[str, Any]) -> bool:

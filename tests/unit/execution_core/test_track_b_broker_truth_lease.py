@@ -785,7 +785,7 @@ def test_flat_no_order_state_blocks_unknown_open_orders() -> None:
     assert result["allowed_uses"]["new_entry"] is False
 
 
-def test_flat_no_order_state_blocks_exposure_even_with_submit_liveness() -> None:
+def test_flat_no_order_state_scopes_unresolved_exposure_even_with_submit_liveness() -> None:
     inputs = base_inputs()
     inputs["last_successful_broker_truth"] = {
         **dict(inputs["last_successful_broker_truth"]),
@@ -808,7 +808,9 @@ def test_flat_no_order_state_blocks_exposure_even_with_submit_liveness() -> None
 
     result = classify_broker_truth_lease(inputs)
 
-    assert result["allowed_uses"]["new_entry"] is False
+    assert result["allowed_uses"]["new_entry"] is True
+    assert result["blocked_entry_symbols"] == ["MNQ"]
+    assert result["symbol_scoped_submit_connection_capable"] is True
     assert result["connection_health"]["flat_no_order_submit_capable_context"]["broker_flat"] is False
 
 
@@ -1081,7 +1083,7 @@ def test_known_managed_exit_order_reconciliation_preserves_active_lease() -> Non
     assert _contradiction_codes(result) == set()
 
 
-def test_unexpected_broker_position_invalidates_immediately() -> None:
+def test_unexpected_broker_position_blocks_symbol_not_global_entries() -> None:
     inputs = base_inputs()
     inputs["last_successful_broker_truth"] = {
         **dict(inputs["last_successful_broker_truth"]),
@@ -1091,9 +1093,12 @@ def test_unexpected_broker_position_invalidates_immediately() -> None:
 
     result = classify_broker_truth_lease(inputs)
 
-    assert result["lease_state"] == "INVALIDATED_CONTRADICTION"
-    assert _contradiction_codes(result) >= {"unexpected_broker_position"}
-    assert result["submit_entry_allowed"] is False
+    assert result["lease_state"] == "ACTIVE"
+    assert result["submit_entry_allowed"] is True
+    assert result["allowed_uses"]["new_entry"] is True
+    assert result["blocked_entry_symbols"] == ["MGC"]
+    assert result["allowed_uses"]["blocked_entry_symbols"] == ["MGC"]
+    assert result["symbol_scoped_entry_blockers"][0]["code"] == "unexpected_broker_position"
 
 
 def test_manual_broker_action_lifecycle_mismatch_invalidates_until_cleanup() -> None:
@@ -1127,9 +1132,104 @@ def test_contradictory_successful_latest_truth_beats_last_good_truth() -> None:
 
     result = classify_broker_truth_lease(inputs)
 
-    assert result["lease_state"] == "INVALIDATED_CONTRADICTION"
-    assert _contradiction_codes(result) >= {"unexpected_broker_position"}
+    assert result["lease_state"] == "ACTIVE"
+    assert result["submit_entry_allowed"] is True
+    assert result["blocked_entry_symbols"] == ["MNQ"]
+    assert result["symbol_scoped_entry_blockers"][0]["code"] == "unexpected_broker_position"
+
+
+def test_unresolved_zn_position_blocks_zn_but_permits_es() -> None:
+    inputs = base_inputs()
+    inputs["allowed_instruments"] = ["ZN", "ES"]
+    for key in ("last_successful_broker_truth", "latest_attempt_status"):
+        inputs[key] = {
+            **dict(inputs[key]),
+            "positions": [{"symbol": "ZN", "local_symbol": "ZNU6", "quantity": "-1.0"}],
+        }
+    inputs["reconciliation"] = {
+        **dict(inputs["reconciliation"]),
+        "classification": "TRACK_B_PAPER_BROKER_RECONCILIATION_BLOCKED",
+        "broker_reconciled": False,
+        "track_b_broker_position_count": 1,
+        "track_b_broker_positions": [{"symbol": "ZN", "local_symbol": "ZNU6", "quantity": "-1.0"}],
+    }
+    result = classify_broker_truth_lease(inputs)
+
+    assert result["submit_entry_allowed"] is True
+    assert result["blocked_entry_symbols"] == ["ZN"]
+    assert "ES" not in result["blocked_entry_symbols"]
+
+
+def test_unresolved_zb_and_zn_positions_block_both_but_permit_mgc_mnq() -> None:
+    inputs = base_inputs()
+    inputs["allowed_instruments"] = ["ZB", "ZN", "MGC", "MNQ"]
+    positions = [
+        {"symbol": "ZN", "local_symbol": "ZNU6", "quantity": "-1.0"},
+        {"symbol": "ZB", "local_symbol": "ZBU6", "quantity": "-1.0"},
+    ]
+    for key in ("last_successful_broker_truth", "latest_attempt_status"):
+        inputs[key] = {**dict(inputs[key]), "positions": positions}
+    inputs["reconciliation"] = {
+        **dict(inputs["reconciliation"]),
+        "classification": "TRACK_B_PAPER_BROKER_RECONCILIATION_BLOCKED",
+        "broker_reconciled": False,
+        "track_b_broker_position_count": 2,
+        "track_b_broker_positions": positions,
+    }
+    result = classify_broker_truth_lease(inputs)
+
+    assert result["submit_entry_allowed"] is True
+    assert result["blocked_entry_symbols"] == ["ZB", "ZN"]
+    assert {"MGC", "MNQ"}.isdisjoint(result["blocked_entry_symbols"])
+
+
+def test_unknown_open_order_remains_global_with_symbol_scoped_position_blocker() -> None:
+    inputs = base_inputs()
+    inputs["allowed_instruments"] = ["ZN", "ES"]
+    for key in ("last_successful_broker_truth", "latest_attempt_status"):
+        inputs[key] = {
+            **dict(inputs[key]),
+            "positions": [{"symbol": "ZN", "local_symbol": "ZNU6", "quantity": "-1.0"}],
+        }
+    inputs["reconciliation"] = {
+        **dict(inputs["reconciliation"]),
+        "classification": "TRACK_B_PAPER_BROKER_RECONCILIATION_BLOCKED",
+        "broker_reconciled": False,
+        "track_b_broker_position_count": 1,
+        "track_b_broker_positions": [{"symbol": "ZN", "local_symbol": "ZNU6", "quantity": "-1.0"}],
+        "unknown_broker_open_order_count": 1,
+    }
+
+    result = classify_broker_truth_lease(inputs)
+
+    assert result["lease_state"] == "INVALIDATED_UNKNOWN_OPEN_ORDERS"
     assert result["submit_entry_allowed"] is False
+    assert result["allowed_uses"]["new_entry"] is False
+    assert result["global_entry_blockers"][0]["code"] == "unknown_open_orders"
+
+
+def test_broker_truth_staleness_remains_global_with_symbol_scoped_position_blocker() -> None:
+    inputs = base_inputs()
+    inputs["current_time"] = "2026-05-18T16:00:00+00:00"
+    inputs["allowed_instruments"] = ["ZN", "ES"]
+    for key in ("last_successful_broker_truth", "latest_attempt_status"):
+        inputs[key] = {
+            **dict(inputs[key]),
+            "positions": [{"symbol": "ZN", "local_symbol": "ZNU6", "quantity": "-1.0"}],
+        }
+    inputs["reconciliation"] = {
+        **dict(inputs["reconciliation"]),
+        "classification": "TRACK_B_PAPER_BROKER_RECONCILIATION_BLOCKED",
+        "broker_reconciled": False,
+        "track_b_broker_position_count": 1,
+        "track_b_broker_positions": [{"symbol": "ZN", "local_symbol": "ZNU6", "quantity": "-1.0"}],
+    }
+
+    result = classify_broker_truth_lease(inputs)
+
+    assert result["lease_state"] == "EXPIRED_BLOCK_NEW_ENTRIES"
+    assert result["submit_entry_allowed"] is False
+    assert result["allowed_uses"]["new_entry"] is False
 
 
 def test_live_money_eligibility_blocks_paper_lease() -> None:
