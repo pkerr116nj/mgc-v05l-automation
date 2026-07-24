@@ -11,10 +11,12 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
+import time
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Any, Mapping, Sequence
+from typing import Any, Callable, Mapping, Sequence
 
 
 DEFAULT_OUTPUT_ROOT = Path("outputs") / "track_b_execution_core"
@@ -26,6 +28,8 @@ DEFAULT_OUTPUT_DIR = DEFAULT_OUTPUT_ROOT / "research_analytics" / "live_trade_pa
 OPEN_ACCUMULATOR_JSONL = "open_trade_path_accumulator.jsonl"
 FINALIZED_CAPTURE_JSONL = "finalized_trade_path_capture.jsonl"
 STATUS_JSON = "ra8_path_accumulator_status.json"
+CADENCE_STATUS_JSON = "ra8_path_accumulator_cadence_status.json"
+CADENCE_LOCK = "ra8_path_accumulator_cadence.lock"
 CONTRACT_MD = "ra8_path_accumulator_contract.md"
 FINALIZATION_MD = "ra8_path_finalization_report.md"
 GRACE_DIAGNOSIS_MD = "ra8b_finalization_grace_diagnosis.md"
@@ -38,6 +42,12 @@ STATUS_SCHEMA_VERSION = "ra8_path_accumulator_status_v1"
 
 MAX_INTERNAL_GAP_SECONDS = 90
 DEFAULT_FINALIZATION_GRACE_SECONDS = 120
+DEFAULT_CADENCE_SECONDS = 60.0
+CADENCE_STATUS_SCHEMA_VERSION = "ra8_path_accumulator_cadence_status_v1"
+
+RA8_CADENCE_SUCCEEDED = "RA8_CADENCE_SUCCEEDED"
+RA8_CADENCE_FAILED = "RA8_CADENCE_FAILED"
+RA8_CADENCE_SKIPPED_LOCKED = "RA8_CADENCE_SKIPPED_LOCKED"
 
 
 @dataclass(frozen=True)
@@ -53,6 +63,17 @@ class LiveTradePathAccumulatorResult:
     grace_diagnosis_path: Path
     grace_contract_path: Path
     repair_report_path: Path
+
+
+@dataclass(frozen=True)
+class LiveTradePathAccumulatorCadenceResult:
+    status: dict[str, Any]
+    status_path: Path
+    lock_path: Path
+
+
+AccumulatorRunner = Callable[..., LiveTradePathAccumulatorResult]
+SleepFunc = Callable[[float], None]
 
 
 def run_live_trade_path_accumulator(
@@ -161,6 +182,141 @@ def run_live_trade_path_accumulator(
         grace_contract_path=grace_contract_path,
         repair_report_path=repair_report_path,
     )
+
+
+def run_live_trade_path_accumulator_cadence_once(
+    *,
+    managed_positions_path: Path = DEFAULT_MANAGED_POSITIONS,
+    canonical_records_path: Path = DEFAULT_CANONICAL_TRADE_RECORDS,
+    runtime_candle_root: Path = DEFAULT_RUNTIME_CANDLE_ROOT,
+    output_dir: Path = DEFAULT_OUTPUT_DIR,
+    status_path: Path | None = None,
+    lock_path: Path | None = None,
+    finalization_grace_seconds: int = DEFAULT_FINALIZATION_GRACE_SECONDS,
+    cadence_seconds: float = DEFAULT_CADENCE_SECONDS,
+    now: datetime | str | None = None,
+    runner: AccumulatorRunner | None = None,
+) -> LiveTradePathAccumulatorCadenceResult:
+    """Run one bounded out-of-process-friendly RA8 cadence pass.
+
+    The cadence wrapper only coordinates lock/status behavior around the
+    existing accumulator. It has no broker, runtime, strategy, or gate authority.
+    """
+
+    generated_at = _coerce_now(now)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    actual_status_path = status_path or output_dir / CADENCE_STATUS_JSON
+    actual_lock_path = lock_path or output_dir / CADENCE_LOCK
+    previous_status = _read_json(actual_status_path)
+    lock_handle = _try_acquire_lock(actual_lock_path, generated_at=generated_at)
+    if lock_handle is None:
+        status = _cadence_status(
+            classification=RA8_CADENCE_SKIPPED_LOCKED,
+            generated_at=generated_at,
+            cadence_seconds=cadence_seconds,
+            output_dir=output_dir,
+            lock_path=actual_lock_path,
+            previous_status=previous_status,
+            duration_seconds=0.0,
+            accumulator_status={},
+            last_error="another_ra8_accumulator_pass_is_running",
+        )
+        _write_json(actual_status_path, status)
+        return LiveTradePathAccumulatorCadenceResult(status=status, status_path=actual_status_path, lock_path=actual_lock_path)
+
+    started = time.monotonic()
+    try:
+        actual_runner = runner or run_live_trade_path_accumulator
+        try:
+            result = actual_runner(
+                managed_positions_path=managed_positions_path,
+                canonical_records_path=canonical_records_path,
+                runtime_candle_root=runtime_candle_root,
+                output_dir=output_dir,
+                accumulate_open_paths=True,
+                finalize_closed_paths=True,
+                repair_finalized=False,
+                finalization_grace_seconds=finalization_grace_seconds,
+                now=generated_at,
+            )
+            duration = round(time.monotonic() - started, 3)
+            status = _cadence_status(
+                classification=RA8_CADENCE_SUCCEEDED,
+                generated_at=generated_at,
+                cadence_seconds=cadence_seconds,
+                output_dir=output_dir,
+                lock_path=actual_lock_path,
+                previous_status=previous_status,
+                duration_seconds=duration,
+                accumulator_status=result.status,
+                last_error=None,
+            )
+        except Exception as exc:
+            duration = round(time.monotonic() - started, 3)
+            status = _cadence_status(
+                classification=RA8_CADENCE_FAILED,
+                generated_at=generated_at,
+                cadence_seconds=cadence_seconds,
+                output_dir=output_dir,
+                lock_path=actual_lock_path,
+                previous_status=previous_status,
+                duration_seconds=duration,
+                accumulator_status={},
+                last_error=f"{type(exc).__name__}: {exc}",
+            )
+        _write_json(actual_status_path, status)
+        return LiveTradePathAccumulatorCadenceResult(status=status, status_path=actual_status_path, lock_path=actual_lock_path)
+    finally:
+        _release_lock(actual_lock_path, lock_handle)
+
+
+def run_live_trade_path_accumulator_cadence_service(
+    *,
+    managed_positions_path: Path = DEFAULT_MANAGED_POSITIONS,
+    canonical_records_path: Path = DEFAULT_CANONICAL_TRADE_RECORDS,
+    runtime_candle_root: Path = DEFAULT_RUNTIME_CANDLE_ROOT,
+    output_dir: Path = DEFAULT_OUTPUT_DIR,
+    status_path: Path | None = None,
+    lock_path: Path | None = None,
+    finalization_grace_seconds: int = DEFAULT_FINALIZATION_GRACE_SECONDS,
+    cadence_seconds: float = DEFAULT_CADENCE_SECONDS,
+    max_iterations: int | None = None,
+    sleep_func: SleepFunc = time.sleep,
+    runner: AccumulatorRunner | None = None,
+) -> LiveTradePathAccumulatorCadenceResult:
+    iterations = 0
+    latest: LiveTradePathAccumulatorCadenceResult | None = None
+    while max_iterations is None or iterations < max_iterations:
+        started = time.monotonic()
+        latest = run_live_trade_path_accumulator_cadence_once(
+            managed_positions_path=managed_positions_path,
+            canonical_records_path=canonical_records_path,
+            runtime_candle_root=runtime_candle_root,
+            output_dir=output_dir,
+            status_path=status_path,
+            lock_path=lock_path,
+            finalization_grace_seconds=finalization_grace_seconds,
+            cadence_seconds=cadence_seconds,
+            runner=runner,
+        )
+        iterations += 1
+        if max_iterations is not None and iterations >= max_iterations:
+            break
+        sleep_for = max(1.0, float(cadence_seconds) - (time.monotonic() - started))
+        sleep_func(sleep_for)
+    if latest is None:
+        return run_live_trade_path_accumulator_cadence_once(
+            managed_positions_path=managed_positions_path,
+            canonical_records_path=canonical_records_path,
+            runtime_candle_root=runtime_candle_root,
+            output_dir=output_dir,
+            status_path=status_path,
+            lock_path=lock_path,
+            finalization_grace_seconds=finalization_grace_seconds,
+            cadence_seconds=cadence_seconds,
+            runner=runner,
+        )
+    return latest
 
 
 def accumulate_open_trade_paths(
@@ -834,6 +990,96 @@ def _write_json(path: Path, payload: Mapping[str, Any]) -> None:
 
 def _write_jsonl(path: Path, rows: Sequence[Mapping[str, Any]]) -> None:
     path.write_text("".join(json.dumps(row, sort_keys=True) + "\n" for row in rows), encoding="utf-8")
+
+
+def _try_acquire_lock(path: Path, *, generated_at: datetime) -> int | None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        handle = os.open(str(path), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+    except FileExistsError:
+        return None
+    payload = {
+        "schema_version": "ra8_path_accumulator_cadence_lock_v1",
+        "created_at": generated_at.isoformat(),
+        "pid": os.getpid(),
+        "diagnostic_only": True,
+        "production_recommendation": False,
+        "trading_gate": False,
+    }
+    os.write(handle, (json.dumps(payload, sort_keys=True) + "\n").encode("utf-8"))
+    return handle
+
+
+def _release_lock(path: Path, handle: int) -> None:
+    try:
+        os.close(handle)
+    finally:
+        try:
+            path.unlink()
+        except FileNotFoundError:
+            pass
+
+
+def _cadence_status(
+    *,
+    classification: str,
+    generated_at: datetime,
+    cadence_seconds: float,
+    output_dir: Path,
+    lock_path: Path,
+    previous_status: Mapping[str, Any],
+    duration_seconds: float,
+    accumulator_status: Mapping[str, Any],
+    last_error: str | None,
+) -> dict[str, Any]:
+    success = classification == RA8_CADENCE_SUCCEEDED
+    previous_last_successful_run_at = previous_status.get("last_successful_run_at")
+    previous_last_success_duration = previous_status.get("last_success_duration_seconds")
+    previous_last_success_rows = previous_status.get("last_success_rows_updated")
+    previous_last_success_open_count = previous_status.get("last_success_open_accumulator_count")
+    previous_last_success_finalized_count = previous_status.get("last_success_finalized_path_count")
+    rows_updated = _int_value(accumulator_status.get("accumulated_open_path_updates"))
+    return {
+        "schema_version": CADENCE_STATUS_SCHEMA_VERSION,
+        "generated_at": generated_at.isoformat(),
+        "classification": classification,
+        "cadence_seconds": float(cadence_seconds),
+        "recommended_cadence_reason": "source candles are 1m bars; 60s captures each completed bar without coupling to execution",
+        "command": "python -m mgc_v05l.app.track_b_live_trade_path_accumulator service --cadence-seconds 60",
+        "output_dir": str(output_dir),
+        "lock_path": str(lock_path),
+        "last_started_at": generated_at.isoformat(),
+        "last_completed_at": generated_at.isoformat(),
+        "last_duration_seconds": duration_seconds,
+        "last_successful_run_at": generated_at.isoformat() if success else previous_last_successful_run_at,
+        "last_success_duration_seconds": duration_seconds if success else previous_last_success_duration,
+        "last_rows_updated": rows_updated,
+        "last_success_rows_updated": rows_updated if success else previous_last_success_rows,
+        "last_open_accumulator_count": _int_value(accumulator_status.get("open_accumulator_count")),
+        "last_success_open_accumulator_count": _int_value(accumulator_status.get("open_accumulator_count"))
+        if success
+        else previous_last_success_open_count,
+        "last_finalized_path_count": _int_value(accumulator_status.get("finalized_path_count")),
+        "last_success_finalized_path_count": _int_value(accumulator_status.get("finalized_path_count"))
+        if success
+        else previous_last_success_finalized_count,
+        "last_newly_finalized_path_count": _int_value(accumulator_status.get("newly_finalized_path_count")),
+        "last_deferred_finalization_count": _int_value(accumulator_status.get("deferred_finalization_count")),
+        "last_error": last_error,
+        "accumulator_classification": accumulator_status.get("classification"),
+        "failure_isolated_from_trading": True,
+        "overlapping_runs_allowed": False,
+        "diagnostic_only": True,
+        "production_recommendation": False,
+        "trading_gate": False,
+    }
+
+
+def _int_value(value: Any) -> int:
+    try:
+        return int(value or 0)
+    except (TypeError, ValueError):
+        return 0
 
 
 def _coerce_now(value: datetime | str | None) -> datetime:

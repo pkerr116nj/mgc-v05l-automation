@@ -10,6 +10,8 @@ from mgc_v05l.execution_core.track_b_live_trade_path_accumulator import (
     finalize_closed_trade_paths,
     repair_finalized_trade_paths,
     run_live_trade_path_accumulator,
+    run_live_trade_path_accumulator_cadence_once,
+    run_live_trade_path_accumulator_cadence_service,
 )
 
 
@@ -190,6 +192,167 @@ def test_run_writes_json_jsonl_and_reports(tmp_path: Path) -> None:
     assert len([json.loads(line) for line in result.finalized_path.read_text().splitlines() if line.strip()]) == 1
     assert result.contract_path.exists()
     assert result.finalization_report_path.exists()
+
+
+def test_cadence_repeated_runs_are_idempotent(tmp_path: Path) -> None:
+    root = tmp_path / "candles"
+    _write_candles(root, "GC", [_bar("2026-07-07T12:01:00Z"), _bar("2026-07-07T12:02:00Z")])
+    managed = tmp_path / "managed.json"
+    canonical = tmp_path / "canonical.jsonl"
+    managed.write_text(json.dumps(_managed_positions()), encoding="utf-8")
+    canonical.write_text("", encoding="utf-8")
+
+    first = run_live_trade_path_accumulator_cadence_once(
+        managed_positions_path=managed,
+        canonical_records_path=canonical,
+        runtime_candle_root=root,
+        output_dir=tmp_path / "out",
+        now=NOW,
+    )
+    second = run_live_trade_path_accumulator_cadence_once(
+        managed_positions_path=managed,
+        canonical_records_path=canonical,
+        runtime_candle_root=root,
+        output_dir=tmp_path / "out",
+        now=NOW,
+    )
+
+    assert first.status["classification"] == "RA8_CADENCE_SUCCEEDED"
+    assert first.status["last_rows_updated"] == 1
+    assert second.status["classification"] == "RA8_CADENCE_SUCCEEDED"
+    assert second.status["last_rows_updated"] == 0
+    open_rows = [json.loads(line) for line in (tmp_path / "out" / "open_trade_path_accumulator.jsonl").read_text().splitlines()]
+    assert len(open_rows) == 1
+    assert open_rows[0]["path_sample_count"] == 2
+
+
+def test_cadence_single_instance_lock_skips_overlapping_run(tmp_path: Path) -> None:
+    out = tmp_path / "out"
+    out.mkdir()
+    lock = out / "ra8_path_accumulator_cadence.lock"
+    lock.write_text("locked\n", encoding="utf-8")
+
+    result = run_live_trade_path_accumulator_cadence_once(output_dir=out, lock_path=lock, now=NOW)
+
+    assert result.status["classification"] == "RA8_CADENCE_SKIPPED_LOCKED"
+    assert result.status["last_error"] == "another_ra8_accumulator_pass_is_running"
+    assert lock.exists()
+
+
+def test_cadence_recovers_after_one_failed_pass(tmp_path: Path) -> None:
+    root = tmp_path / "candles"
+    _write_candles(root, "GC", [_bar("2026-07-07T12:01:00Z")])
+    managed = tmp_path / "managed.json"
+    canonical = tmp_path / "canonical.jsonl"
+    managed.write_text(json.dumps(_managed_positions()), encoding="utf-8")
+    canonical.write_text("", encoding="utf-8")
+
+    def failing_runner(**_: object):
+        raise RuntimeError("boom")
+
+    failed = run_live_trade_path_accumulator_cadence_once(
+        managed_positions_path=managed,
+        canonical_records_path=canonical,
+        runtime_candle_root=root,
+        output_dir=tmp_path / "out",
+        runner=failing_runner,
+        now=NOW,
+    )
+    recovered = run_live_trade_path_accumulator_cadence_once(
+        managed_positions_path=managed,
+        canonical_records_path=canonical,
+        runtime_candle_root=root,
+        output_dir=tmp_path / "out",
+        now=NOW,
+    )
+
+    assert failed.status["classification"] == "RA8_CADENCE_FAILED"
+    assert "boom" in failed.status["last_error"]
+    assert recovered.status["classification"] == "RA8_CADENCE_SUCCEEDED"
+    assert recovered.status["last_successful_run_at"] == NOW.isoformat()
+    assert recovered.status["last_error"] is None
+
+
+def test_cadence_open_paths_continue_updating(tmp_path: Path) -> None:
+    root = tmp_path / "candles"
+    managed = tmp_path / "managed.json"
+    canonical = tmp_path / "canonical.jsonl"
+    managed.write_text(json.dumps(_managed_positions()), encoding="utf-8")
+    canonical.write_text("", encoding="utf-8")
+    _write_candles(root, "GC", [_bar("2026-07-07T12:01:00Z")])
+    run_live_trade_path_accumulator_cadence_once(
+        managed_positions_path=managed,
+        canonical_records_path=canonical,
+        runtime_candle_root=root,
+        output_dir=tmp_path / "out",
+        now=NOW,
+    )
+    _write_candles(root, "GC", [_bar("2026-07-07T12:01:00Z"), _bar("2026-07-07T12:02:00Z")])
+
+    second = run_live_trade_path_accumulator_cadence_once(
+        managed_positions_path=managed,
+        canonical_records_path=canonical,
+        runtime_candle_root=root,
+        output_dir=tmp_path / "out",
+        now=NOW,
+    )
+
+    rows = [json.loads(line) for line in (tmp_path / "out" / "open_trade_path_accumulator.jsonl").read_text().splitlines()]
+    assert second.status["last_rows_updated"] == 1
+    assert rows[0]["path_sample_count"] == 2
+
+
+def test_cadence_does_not_rewrite_finalized_paths_without_repair(tmp_path: Path) -> None:
+    root = tmp_path / "candles"
+    managed = tmp_path / "managed.json"
+    canonical = tmp_path / "canonical.jsonl"
+    managed.write_text(json.dumps(_managed_positions()), encoding="utf-8")
+    canonical.write_text(json.dumps(_closed_record()) + "\n", encoding="utf-8")
+    _write_candles(root, "GC", [_bar("2026-07-07T12:01:00Z"), _bar("2026-07-07T12:02:00Z")])
+    run_live_trade_path_accumulator_cadence_once(
+        managed_positions_path=managed,
+        canonical_records_path=canonical,
+        runtime_candle_root=root,
+        output_dir=tmp_path / "out",
+        now=NOW,
+    )
+    finalized_path = tmp_path / "out" / "finalized_trade_path_capture.jsonl"
+    before = finalized_path.read_text(encoding="utf-8")
+    _write_candles(root, "GC", [_bar("2026-07-07T12:01:00Z"), _bar("2026-07-07T12:02:00Z"), _bar("2026-07-07T12:03:00Z")])
+
+    run_live_trade_path_accumulator_cadence_once(
+        managed_positions_path=managed,
+        canonical_records_path=canonical,
+        runtime_candle_root=root,
+        output_dir=tmp_path / "out",
+        now=NOW,
+    )
+
+    assert finalized_path.read_text(encoding="utf-8") == before
+
+
+def test_cadence_service_runs_bounded_iterations(tmp_path: Path) -> None:
+    root = tmp_path / "candles"
+    managed = tmp_path / "managed.json"
+    canonical = tmp_path / "canonical.jsonl"
+    managed.write_text(json.dumps(_managed_positions()), encoding="utf-8")
+    canonical.write_text("", encoding="utf-8")
+    _write_candles(root, "GC", [_bar("2026-07-07T12:01:00Z")])
+    sleeps: list[float] = []
+
+    result = run_live_trade_path_accumulator_cadence_service(
+        managed_positions_path=managed,
+        canonical_records_path=canonical,
+        runtime_candle_root=root,
+        output_dir=tmp_path / "out",
+        cadence_seconds=30,
+        max_iterations=2,
+        sleep_func=sleeps.append,
+    )
+
+    assert result.status["classification"] == "RA8_CADENCE_SUCCEEDED"
+    assert len(sleeps) == 1
+    assert sleeps[0] >= 1.0
 
 
 def test_import_boundary() -> None:
