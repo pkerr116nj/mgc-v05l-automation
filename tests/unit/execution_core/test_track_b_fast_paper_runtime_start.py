@@ -116,13 +116,20 @@ def write_services(repo: Path, *, generated_at: str = NOW) -> None:
     )
 
 
-def write_broker(repo: Path, *, positions: list[dict[str, Any]] | None = None, orders: list[dict[str, Any]] | None = None) -> None:
+def write_broker(
+    repo: Path,
+    *,
+    positions: list[dict[str, Any]] | None = None,
+    orders: list[dict[str, Any]] | None = None,
+    generated_at: str = NOW,
+    unknown_order_count: int = 0,
+) -> None:
     positions = positions or []
     orders = orders or []
     write_json(
         repo / "outputs/reports/ibkr_read_only_verification/ibkr_broker_truth_refresh_status.json",
         {
-            "generated_at": NOW,
+            "generated_at": generated_at,
             "account": "DUM882026",
             "fresh": True,
             "positions_complete": True,
@@ -132,7 +139,7 @@ def write_broker(repo: Path, *, positions: list[dict[str, Any]] | None = None, o
     write_json(
         repo / "outputs/reports/ibkr_read_only_verification/ibkr_positions_snapshot.json",
         {
-            "generated_at": NOW,
+            "generated_at": generated_at,
             "ok": True,
             "account": "DUM882026",
             "selected_account_id": "DUM882026",
@@ -143,11 +150,12 @@ def write_broker(repo: Path, *, positions: list[dict[str, Any]] | None = None, o
     write_json(
         repo / "outputs/reports/ibkr_read_only_verification/ibkr_open_orders_snapshot.json",
         {
-            "generated_at": NOW,
+            "generated_at": generated_at,
             "ok": True,
             "account": "DUM882026",
             "selected_account_id": "DUM882026",
             "open_orders_complete": True,
+            "unknown_order_count": unknown_order_count,
             "open_orders": orders,
         },
     )
@@ -181,10 +189,16 @@ def test_broker_flat_fast_start_ignores_stale_derived_artifacts(tmp_path: Path) 
     assert result["details"]["stale_derived_artifact_policy"] == "diagnostic_only_when_broker_flat"
 
 
-def test_unmanaged_current_futures_exposure_blocks_startup(tmp_path: Path) -> None:
+def test_unresolved_zn_zb_exposure_allows_startup_with_symbol_blockers(tmp_path: Path) -> None:
     manifest_path = manifest(tmp_path)
     write_services(tmp_path)
-    write_broker(tmp_path, positions=[{"symbol": "MNQ", "local_symbol": "MNQU6", "security_type": "FUT", "quantity": 1}])
+    write_broker(
+        tmp_path,
+        positions=[
+            {"symbol": "ZN", "local_symbol": "ZNU6", "security_type": "FUT", "quantity": -1},
+            {"symbol": "ZB", "local_symbol": "ZBU6", "security_type": "FUT", "quantity": -1},
+        ],
+    )
 
     result = fast.run_fast_paper_runtime_start(
         command="preflight",
@@ -194,8 +208,51 @@ def test_unmanaged_current_futures_exposure_blocks_startup(tmp_path: Path) -> No
         now=NOW,
     )
 
-    assert result["ok"] is False
-    assert result["first_blocker"] == "unexplained_current_futures_exposure"
+    assert result["ok"] is True
+    assert result["classification"] == "FAST_START_READY"
+    assert result["details"]["blocked_entry_symbols"] == ["ZB", "ZN"]
+    assert result["details"]["aggregate_exposure_within_limit"] is True
+    assert result["details"]["recognized_managed_position_count"] == 0
+    assert result["details"]["unresolved_position_count"] == 2
+    assert {"ES", "MGC", "MNQ"}.issubset(set(result["details"]["conditionally_allowed_entry_symbols"]))
+    assert "ZB" not in result["details"]["conditionally_allowed_entry_symbols"]
+    assert "ZN" not in result["details"]["conditionally_allowed_entry_symbols"]
+    assert all(row["allowed"] is True for row in result["details"]["close_only_authority"])
+    assert all(row["net_new_exposure_allowed"] is False for row in result["details"]["close_only_authority"])
+    assert all(row["reversal_allowed"] is False for row in result["details"]["close_only_authority"])
+
+
+def test_symbol_scoped_startup_blockers_are_passed_to_runtime_env(tmp_path: Path) -> None:
+    manifest_path = manifest(tmp_path)
+    write_services(tmp_path)
+    write_broker(
+        tmp_path,
+        positions=[
+            {"symbol": "ZN", "local_symbol": "ZNU6", "security_type": "FUT", "quantity": -1},
+            {"symbol": "ZB", "local_symbol": "ZBU6", "security_type": "FUT", "quantity": -1},
+        ],
+    )
+    captured: dict[str, Any] = {}
+
+    def launcher(cmd: Sequence[str], env: Mapping[str, str], cwd: Path, log_path: Path) -> int:
+        captured["cmd"] = list(cmd)
+        captured["env"] = dict(env)
+        return os.getpid()
+
+    result = fast.run_fast_paper_runtime_start(
+        command="start",
+        repo_root=tmp_path,
+        manifest_path=manifest_path,
+        broker_refresher=ok_refresh,
+        runtime_launcher=launcher,
+        now=NOW,
+        sleep_fn=lambda _seconds: None,
+    )
+
+    assert result["classification"] == "RUNTIME_START_VERIFICATION_FAILED"
+    assert json.loads(captured["env"]["MGC_TRACK_B_BLOCKED_ENTRY_SYMBOLS"]) == ["ZB", "ZN"]
+    blocker_symbols = [row["symbol"] for row in json.loads(captured["env"]["MGC_TRACK_B_SYMBOL_SCOPED_ENTRY_BLOCKERS"])]
+    assert blocker_symbols == ["ZB", "ZN"]
 
 
 def test_conflicting_current_futures_order_blocks_startup(tmp_path: Path) -> None:
@@ -213,6 +270,92 @@ def test_conflicting_current_futures_order_blocks_startup(tmp_path: Path) -> Non
 
     assert result["ok"] is False
     assert result["first_blocker"] == "conflicting_current_futures_orders"
+
+
+def test_stale_broker_truth_remains_global_startup_block(tmp_path: Path) -> None:
+    manifest_path = manifest(tmp_path)
+    write_services(tmp_path)
+    write_broker(
+        tmp_path,
+        generated_at="2026-07-22T08:00:00+00:00",
+        positions=[{"symbol": "ZN", "local_symbol": "ZNU6", "security_type": "FUT", "quantity": -1}],
+    )
+
+    result = fast.run_fast_paper_runtime_start(
+        command="preflight",
+        repo_root=tmp_path,
+        manifest_path=manifest_path,
+        broker_refresher=ok_refresh,
+        now=NOW,
+    )
+
+    assert result["ok"] is False
+    assert result["first_blocker"] == "broker_snapshot_not_fresh_for_startup"
+
+
+def test_unknown_open_order_remains_global_startup_block(tmp_path: Path) -> None:
+    manifest_path = manifest(tmp_path)
+    write_services(tmp_path)
+    write_broker(
+        tmp_path,
+        positions=[{"symbol": "ZN", "local_symbol": "ZNU6", "security_type": "FUT", "quantity": -1}],
+        unknown_order_count=1,
+    )
+
+    result = fast.run_fast_paper_runtime_start(
+        command="preflight",
+        repo_root=tmp_path,
+        manifest_path=manifest_path,
+        broker_refresher=ok_refresh,
+        now=NOW,
+    )
+
+    assert result["ok"] is False
+    assert result["first_blocker"] == "unknown_current_futures_orders"
+
+
+def test_aggregate_unresolved_exposure_breach_remains_global_startup_block(tmp_path: Path) -> None:
+    manifest_path = manifest(tmp_path)
+    payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+    payload["startup_risk_policy"] = {"max_unresolved_futures_positions": 1}
+    manifest_path.write_text(json.dumps(payload, sort_keys=True), encoding="utf-8")
+    write_services(tmp_path)
+    write_broker(
+        tmp_path,
+        positions=[
+            {"symbol": "ZN", "local_symbol": "ZNU6", "security_type": "FUT", "quantity": -1},
+            {"symbol": "ZB", "local_symbol": "ZBU6", "security_type": "FUT", "quantity": -1},
+        ],
+    )
+
+    result = fast.run_fast_paper_runtime_start(
+        command="preflight",
+        repo_root=tmp_path,
+        manifest_path=manifest_path,
+        broker_refresher=ok_refresh,
+        now=NOW,
+    )
+
+    assert result["ok"] is False
+    assert result["first_blocker"] == "aggregate_unresolved_futures_exposure_limit"
+    assert result["details"]["blocked_entry_symbols"] == ["ZB", "ZN"]
+
+
+def test_ambiguous_unmappable_futures_contract_remains_global_startup_block(tmp_path: Path) -> None:
+    manifest_path = manifest(tmp_path)
+    write_services(tmp_path)
+    write_broker(tmp_path, positions=[{"symbol": "ZZ", "local_symbol": "ZZU6", "security_type": "FUT", "quantity": 1}])
+
+    result = fast.run_fast_paper_runtime_start(
+        command="preflight",
+        repo_root=tmp_path,
+        manifest_path=manifest_path,
+        broker_refresher=ok_refresh,
+        now=NOW,
+    )
+
+    assert result["ok"] is False
+    assert result["first_blocker"] == "ambiguous_current_futures_contract"
 
 
 def test_required_service_freshness_blocks_before_broker_refresh(tmp_path: Path) -> None:

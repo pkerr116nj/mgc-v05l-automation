@@ -28,6 +28,7 @@ from mgc_v05l.execution_core.track_b_current_state_authority import (
     broker_positions,
     is_track_b_futures_position,
     is_track_b_order,
+    track_b_root_from_local_symbol,
 )
 
 DEFAULT_MANIFEST_PATH = Path("config/track_b_paper_runtime_manifest.json")
@@ -37,6 +38,7 @@ LOCK_DIR = DEFAULT_OUTPUT_DIR / "startup.lock"
 
 RuntimeLauncher = Callable[[Sequence[str], Mapping[str, str], Path, Path], int]
 BrokerRefresher = Callable[[Mapping[str, Any], Path], Mapping[str, Any]]
+DEFAULT_MAX_UNRESOLVED_FUTURES_POSITIONS = 4
 
 
 @dataclass(frozen=True)
@@ -114,7 +116,12 @@ def run_fast_paper_runtime_start(
             return _publish(output_dir, generated_at, command, manifest, decision)
 
         launcher = runtime_launcher or _launch_runtime
-        launch_details = _launch_manifest_runtime(manifest, repo_root=repo_root, launcher=launcher)
+        launch_details = _launch_manifest_runtime(
+            manifest,
+            repo_root=repo_root,
+            launcher=launcher,
+            startup_authority=preflight.details,
+        )
         verify = _wait_for_runtime(
             manifest,
             repo_root=repo_root,
@@ -399,7 +406,20 @@ def _classify_broker_startup(manifest: Mapping[str, Any], *, repo_root: Path, no
     broker_age = _age_seconds(status.get("generated_at") or status.get("completed_at"), now_dt)
     if broker_age is None or broker_age > 30:
         return FastStartDecision(False, "FAST_START_BLOCKED", "broker_snapshot_not_fresh_for_startup", "Broker snapshot is not fresh enough for startup.", {"age_seconds": broker_age})
-    positions = [row for row in broker_positions(positions_payload) if is_track_b_futures_position(row) and abs(_float(row.get("quantity"))) > 1e-9]
+    position_rows = broker_positions(positions_payload)
+    ambiguous_positions = _ambiguous_current_futures_positions(position_rows)
+    if ambiguous_positions:
+        return FastStartDecision(
+            False,
+            "FAST_START_BLOCKED",
+            "ambiguous_current_futures_contract",
+            "Fresh broker truth contains a futures position that cannot be mapped to a canonical Track B symbol family.",
+            {
+                "account_id": manifest.get("account_id"),
+                "ambiguous_positions": ambiguous_positions,
+            },
+        )
+    positions = [row for row in position_rows if is_track_b_futures_position(row) and abs(_float(row.get("quantity"))) > 1e-9]
     open_orders = [row for row in broker_open_orders(orders_payload) if is_track_b_order(row)]
     unknown_orders = int(orders_payload.get("unknown_order_count") or 0)
     details = {
@@ -423,10 +443,32 @@ def _classify_broker_startup(manifest: Mapping[str, Any], *, repo_root: Path, no
     details["recognized_managed_position_count"] = len(recognized)
     if len(recognized) == len(positions):
         return FastStartDecision(True, "BROKER_MANAGED_EXPOSURE_FAST_START_ALLOWED", None, "Fresh broker exposure is recognized and Managed Exit is healthy.", details)
-    return FastStartDecision(False, "FAST_START_BLOCKED", "unexplained_current_futures_exposure", "Fresh broker truth shows futures exposure that is not canonically recognized.", details)
+    symbol_scoped = _symbol_scoped_startup_blockers(positions=positions, recognized=recognized, manifest=manifest)
+    details.update(symbol_scoped)
+    if not symbol_scoped["aggregate_exposure_within_limit"]:
+        return FastStartDecision(
+            False,
+            "FAST_START_BLOCKED",
+            "aggregate_unresolved_futures_exposure_limit",
+            "Fresh broker truth contains unresolved futures exposure above the configured startup risk limit.",
+            details,
+        )
+    return FastStartDecision(
+        True,
+        "BROKER_SYMBOL_SCOPED_EXPOSURE_FAST_START_ALLOWED",
+        None,
+        "Fresh broker exposure is exact and unresolved; startup is allowed with same-symbol entry blockers.",
+        details,
+    )
 
 
-def _launch_manifest_runtime(manifest: Mapping[str, Any], *, repo_root: Path, launcher: RuntimeLauncher) -> dict[str, Any]:
+def _launch_manifest_runtime(
+    manifest: Mapping[str, Any],
+    *,
+    repo_root: Path,
+    launcher: RuntimeLauncher,
+    startup_authority: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
     runtime_paths = manifest.get("runtime_paths") or {}
     log_path = repo_root / str(runtime_paths.get("log_path"))
     log_path.parent.mkdir(parents=True, exist_ok=True)
@@ -443,6 +485,11 @@ def _launch_manifest_runtime(manifest: Mapping[str, Any], *, repo_root: Path, la
     env["MGC_TRACK_B_EXPECTED_PROJECT_ROOT"] = str(repo_root)
     env["MGC_TRACK_B_PAPER_PID_METADATA_FILE"] = str(repo_root / str(runtime_paths.get("pid_metadata_path")))
     env["MGC_TRACK_B_PAPER_CONFIG_FINGERPRINT"] = str(manifest.get("_manifest_fingerprint") or "")
+    startup_authority = startup_authority or {}
+    blocked_symbols = [str(value) for value in list(startup_authority.get("blocked_entry_symbols") or [])]
+    symbol_blockers = list(startup_authority.get("symbol_scoped_entry_blockers") or [])
+    env["MGC_TRACK_B_BLOCKED_ENTRY_SYMBOLS"] = json.dumps(blocked_symbols, sort_keys=True)
+    env["MGC_TRACK_B_SYMBOL_SCOPED_ENTRY_BLOCKERS"] = json.dumps(symbol_blockers, sort_keys=True, default=str)
     pid = launcher(cmd, env, repo_root, log_path)
     pid_path = repo_root / str(runtime_paths.get("pid_path"))
     pid_path.parent.mkdir(parents=True, exist_ok=True)
@@ -457,6 +504,8 @@ def _launch_manifest_runtime(manifest: Mapping[str, Any], *, repo_root: Path, la
         "runtime_instance_id": startup_generation_id,
         "manifest_id": manifest.get("manifest_id"),
         "manifest_fingerprint": manifest.get("_manifest_fingerprint"),
+        "blocked_entry_symbols": blocked_symbols,
+        "symbol_scoped_entry_blockers": symbol_blockers,
     }
     _write_json(repo_root / str(runtime_paths.get("pid_metadata_path")), pid_meta)
     return {
@@ -466,6 +515,8 @@ def _launch_manifest_runtime(manifest: Mapping[str, Any], *, repo_root: Path, la
         "launch_started_at": launch_started_at.isoformat(),
         "startup_generation_id": startup_generation_id,
         "runtime_instance_id": startup_generation_id,
+        "blocked_entry_symbols": blocked_symbols,
+        "symbol_scoped_entry_blockers": symbol_blockers,
     }
 
 
@@ -678,6 +729,105 @@ def _recognized_managed_exposures(positions: Sequence[Mapping[str, Any]], manage
                 recognized.append(pos)
                 break
     return recognized
+
+
+def _ambiguous_current_futures_positions(rows: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
+    ambiguous: list[dict[str, Any]] = []
+    for row in rows:
+        security_type = str(row.get("security_type") or row.get("secType") or "").strip().upper()
+        if security_type and security_type != "FUT":
+            continue
+        if abs(_float(row.get("quantity") or row.get("position"))) <= 1e-9:
+            continue
+        root = _position_root(row)
+        if root in TRACK_B_FUTURES_ROOTS:
+            continue
+        if security_type == "FUT" or root:
+            ambiguous.append(
+                {
+                    "symbol": row.get("symbol"),
+                    "local_symbol": row.get("local_symbol") or row.get("localSymbol"),
+                    "security_type": row.get("security_type") or row.get("secType"),
+                    "quantity": row.get("quantity") or row.get("position"),
+                    "reason": "unmapped_futures_contract",
+                }
+            )
+    return ambiguous
+
+
+def _symbol_scoped_startup_blockers(
+    *,
+    positions: Sequence[Mapping[str, Any]],
+    recognized: Sequence[Mapping[str, Any]],
+    manifest: Mapping[str, Any],
+) -> dict[str, Any]:
+    recognized_keys = {_position_key(row) for row in recognized}
+    unresolved = [row for row in positions if _position_key(row) not in recognized_keys]
+    blocked_symbols = sorted({_position_root(row) for row in unresolved if _position_root(row)})
+    policy = _startup_risk_policy(manifest)
+    within_limit = len(unresolved) <= int(policy["max_unresolved_futures_positions"])
+    symbol_blockers = [
+        {
+            "scope": "SYMBOL",
+            "symbol": symbol,
+            "code": "unresolved_position_ownership",
+            "detail": "Fresh broker truth reports current futures exposure without clean lifecycle ownership; block same-symbol entries only.",
+        }
+        for symbol in blocked_symbols
+    ]
+    return {
+        "unresolved_position_count": len(unresolved),
+        "aggregate_exposure_count": len(positions),
+        "aggregate_exposure_within_limit": within_limit,
+        "startup_risk_policy": policy,
+        "blocked_entry_symbols": blocked_symbols,
+        "conditionally_allowed_entry_symbols": sorted(set(TRACK_B_FUTURES_ROOTS).difference(blocked_symbols)),
+        "symbol_scoped_entry_blockers": symbol_blockers,
+        "close_only_authority": [
+            {
+                "scope": "SYMBOL",
+                "symbol": _position_root(row),
+                "local_symbol": row.get("local_symbol") or row.get("localSymbol"),
+                "quantity": row.get("quantity") or row.get("position"),
+                "allowed": True,
+                "broad_flatten_allowed": False,
+                "global_flatten_allowed": False,
+                "reversal_allowed": False,
+                "net_new_exposure_allowed": False,
+                "reason": "exact_risk_reducing_close_only",
+            }
+            for row in unresolved
+        ],
+    }
+
+
+def _startup_risk_policy(manifest: Mapping[str, Any]) -> dict[str, Any]:
+    raw = manifest.get("startup_risk_policy")
+    policy = raw if isinstance(raw, Mapping) else {}
+    return {
+        "policy_source": "manifest_startup_risk_policy" if policy else "default_fast_start_policy",
+        "max_unresolved_futures_positions": int(
+            policy.get("max_unresolved_futures_positions") or DEFAULT_MAX_UNRESOLVED_FUTURES_POSITIONS
+        ),
+    }
+
+
+def _position_key(row: Mapping[str, Any]) -> tuple[str, str, float]:
+    return (
+        _position_root(row),
+        str(row.get("local_symbol") or row.get("localSymbol") or "").strip().upper(),
+        _float(row.get("quantity") or row.get("position")),
+    )
+
+
+def _position_root(row: Mapping[str, Any]) -> str:
+    for key in ("track_b_root", "instrument_family", "symbol"):
+        value = str(row.get(key) or "").strip().upper()
+        if value in TRACK_B_FUTURES_ROOTS:
+            return value
+    local_symbol = str(row.get("local_symbol") or row.get("localSymbol") or "").strip().upper()
+    root = track_b_root_from_local_symbol(local_symbol)
+    return root if root in TRACK_B_FUTURES_ROOTS else ""
 
 
 def _resolved_config_paths(manifest: Mapping[str, Any], repo_root: Path) -> list[str]:
