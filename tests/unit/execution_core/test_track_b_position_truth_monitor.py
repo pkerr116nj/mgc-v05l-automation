@@ -138,7 +138,7 @@ def test_position_truth_flags_working_close_order_via_open_order_truth(tmp_path:
     payload = build_track_b_position_truth(config=TrackBPositionTruthMonitorConfig(repo_root=tmp_path), now=NOW)
     mnq = _state(payload, "MNQ")
 
-    assert payload["open_order_truth"]["classification"] == "OPEN_CLOSE_ORDER_WORKING"
+    assert payload["open_order_truth"]["summary"]["working_close_order_count"] == 1
     assert payload["summary"]["working_close_order_count"] == 1
     assert mnq["classification"] == CLOSE_ORDER_WORKING
     assert mnq["open_order_truth_states"][0]["classification"] == "OPEN_CLOSE_ORDER_WORKING"
@@ -266,10 +266,49 @@ def test_open_managed_matched_classification(tmp_path: Path) -> None:
     payload = build_track_b_position_truth(config=TrackBPositionTruthMonitorConfig(repo_root=tmp_path), now=NOW)
     mgc = _state(payload, "MGC")
 
+    assert payload["summary"]["overall_classification"] == OPEN_MANAGED_MATCHED
     assert mgc["classification"] == OPEN_MANAGED_MATCHED
     assert mgc["open_managed_valid"] is True
     assert mgc["broker_quantity"] == "1"
     assert mgc["lifecycle_quantity"] == "1"
+
+
+def test_broker_contradicted_lifecycle_debris_is_diagnostic_with_open_managed_position(tmp_path: Path) -> None:
+    _seed_open_managed(tmp_path)
+    payload = json.loads(_reconciliation_path(tmp_path).read_text(encoding="utf-8"))
+    payload["broker_reconciled"] = False
+    payload["symbols"] = ["MGC", "ES"]
+    payload["track_b_lifecycle_positions"].append(
+        {
+            "instrument_family": "ES",
+            "local_symbol": "ESU6",
+            "quantity": "1",
+            "lifecycle_id": "stale_es_lifecycle",
+            "managed_exit_policy_id": "GLOBEX_ACTIVE_EVIDENCE_TIMEBOX_15M_EXIT_V1",
+        }
+    )
+    _write_json(_reconciliation_path(tmp_path), payload)
+
+    position_truth = build_track_b_position_truth(config=TrackBPositionTruthMonitorConfig(repo_root=tmp_path), now=NOW)
+
+    assert position_truth["summary"]["overall_classification"] == OPEN_MANAGED_MATCHED
+    assert position_truth["summary"]["diagnostic_lifecycle_debris_count"] == 1
+    assert position_truth["summary"]["diagnostic_lifecycle_debris_ignored"] is True
+    assert _state(position_truth, "ES")["classification"] == "LIFECYCLE_POSITION_WITHOUT_BROKER"
+
+
+def test_current_broker_position_without_lifecycle_still_requires_adoption(tmp_path: Path) -> None:
+    _seed_clean(tmp_path)
+    payload = json.loads(_reconciliation_path(tmp_path).read_text(encoding="utf-8"))
+    payload["track_b_broker_positions"] = [
+        {"symbol": "MGC", "track_b_root": "MGC", "local_symbol": "MGCM6", "quantity": "1", "average_cost": "45230.0"}
+    ]
+    _write_json(_reconciliation_path(tmp_path), payload)
+
+    position_truth = build_track_b_position_truth(config=TrackBPositionTruthMonitorConfig(repo_root=tmp_path), now=NOW)
+
+    assert position_truth["summary"]["overall_classification"] == "ATTENTION_REQUIRED"
+    assert _state(position_truth, "MGC")["classification"] == "BROKER_POSITION_REQUIRES_ADOPTION"
 
 
 def test_active_timed_hold_is_not_attention_required_summary(tmp_path: Path) -> None:
@@ -453,6 +492,8 @@ def _seed_working_mnq_close(root: Path) -> None:
         "remaining_quantity": "1",
         "order_type": "LMT",
         "limit_price": "29555.5",
+        "observed_at": NOW.isoformat(),
+        "submitted_at": NOW.isoformat(),
         "status": "Submitted",
     }
     payload.update(

@@ -617,22 +617,41 @@ def _summary(
         counts[classification] = counts.get(classification, 0) + 1
     open_order_summary = _mapping(open_order_truth.get("summary"))
     managed_order_summary = _mapping(managed_order_registry.get("summary"))
-    all_flat = reconciliation.get("broker_reconciled") is True and all(
-        s.get("classification") == FLAT_CLEAN for s in position_states
+    current_operational_classes = {FLAT_CLEAN, OPEN_MANAGED_MATCHED}
+    diagnostic_lifecycle_debris_count = sum(
+        1 for state in position_states if state.get("classification") == LIFECYCLE_POSITION_WITHOUT_BROKER
     )
+    actionable_states = [
+        state
+        for state in position_states
+        if state.get("classification") != LIFECYCLE_POSITION_WITHOUT_BROKER
+    ]
+    broker_open_managed = any(state.get("classification") == OPEN_MANAGED_MATCHED for state in position_states)
+    current_scope_operational = (
+        bool(actionable_states)
+        and all(state.get("classification") in current_operational_classes for state in actionable_states)
+    )
+    all_flat = all(s.get("classification") == FLAT_CLEAN for s in actionable_states)
     active_hold = (
-        reconciliation.get("broker_reconciled") is True
-        and str(managed_order_registry.get("classification") or "") == ACTIVE_HOLD_MANAGED_TIMED_EXIT_PENDING
+        str(managed_order_registry.get("classification") or "") == ACTIVE_HOLD_MANAGED_TIMED_EXIT_PENDING
         and bool(position_states)
-        and all(s.get("classification") in {FLAT_CLEAN, OPEN_MANAGED_MATCHED} for s in position_states)
+        and all(s.get("classification") in current_operational_classes for s in actionable_states)
     )
-    return {
-        "overall_classification": "CLEAN_FLAT_READY"
+    open_managed_normal = current_scope_operational and broker_open_managed
+    overall_classification = (
+        "CLEAN_FLAT_READY"
         if all_flat
         else ACTIVE_HOLD_MANAGED_TIMED_EXIT_PENDING
         if active_hold
-        else "ATTENTION_REQUIRED",
+        else OPEN_MANAGED_MATCHED
+        if open_managed_normal
+        else "ATTENTION_REQUIRED"
+    )
+    return {
+        "overall_classification": overall_classification,
         "active_hold_managed_timed_exit_pending": active_hold,
+        "diagnostic_lifecycle_debris_count": diagnostic_lifecycle_debris_count,
+        "diagnostic_lifecycle_debris_ignored": bool(diagnostic_lifecycle_debris_count and current_scope_operational),
         "classification_counts": counts,
         "broker_reconciled": reconciliation.get("broker_reconciled"),
         "runtime_running": runtime_status.get("runtime_running"),
