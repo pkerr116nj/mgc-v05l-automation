@@ -81,7 +81,7 @@ def test_closed_trade_finalizes_complete_path_and_mfe_mae(tmp_path: Path) -> Non
     finalized, count, deferred = finalize_closed_trade_paths(
         open_rows,
         previous_finalized=[],
-        canonical_records=[_closed_record()],
+        canonical_records=[_closed_record(exit_time="2026-07-07T12:02:30Z")],
         runtime_candle_root=root,
         generated_at=NOW,
     )
@@ -91,13 +91,20 @@ def test_closed_trade_finalizes_complete_path_and_mfe_mae(tmp_path: Path) -> Non
     assert finalized[0]["path_coverage_status"] == "COMPLETE"
     assert finalized[0]["mfe"] == 4.0
     assert finalized[0]["mae"] == -2.0
+    assert finalized[0]["mfe_timestamp"] == "2026-07-07T12:02:00+00:00"
+    assert finalized[0]["mae_timestamp"] == "2026-07-07T12:02:00+00:00"
+    assert finalized[0]["coverage"]["pre_entry_context"]["coverage_status"] == "COMPLETE"
+    assert finalized[0]["coverage"]["in_trade"]["coverage_status"] == "COMPLETE"
+    assert finalized[0]["coverage"]["post_exit_context"]["coverage_status"] == "COMPLETE"
+    assert any(sample.get("partial_entry_bar") is True for sample in finalized[0]["path_samples"])
+    assert any(sample.get("partial_exit_bar") is True for sample in finalized[0]["path_samples"])
     assert finalized[0]["counterfactual_ready"]["timebox"] is True
     assert finalized[0]["counterfactual_ready"]["trailing"] is True
     assert finalized[0]["capture_lifecycle_state"] == "FINALIZED"
 
 
-def test_missing_pre_entry_or_post_exit_bars_prevent_complete_research_evidence() -> None:
-    open_rows = [_open_row([_sample("2026-07-07T12:01:00Z"), _sample("2026-07-07T12:02:00Z"), _sample("2026-07-07T12:03:00Z")])]
+def test_missing_entry_overlap_prevents_complete_in_trade_evidence() -> None:
+    open_rows = [_open_row([_sample("2026-07-07T12:02:00Z"), _sample("2026-07-07T12:03:00Z")])]
 
     finalized, _, _ = finalize_closed_trade_paths(
         open_rows,
@@ -109,6 +116,8 @@ def test_missing_pre_entry_or_post_exit_bars_prevent_complete_research_evidence(
     )
 
     assert finalized[0]["path_coverage_status"] == "PARTIAL_ENTRY_MISSING"
+    assert finalized[0]["coverage"]["pre_entry_context"]["coverage_status"] == "MISSING_SOURCE"
+    assert finalized[0]["coverage"]["in_trade"]["coverage_status"] == "PARTIAL_ENTRY_MISSING"
     assert finalized[0]["capture_lifecycle_state"] == "FINALIZED_INCOMPLETE"
 
 
@@ -130,7 +139,7 @@ def test_partial_classifications_are_reported() -> None:
     )
     assert finalized[0]["path_coverage_status"] == "PARTIAL_ENTRY_MISSING"
 
-    open_rows = [_open_row([_sample_from_bar(bar) for bar in _complete_trade_bars()[:-1]])]
+    open_rows = [_open_row([_sample_from_bar(bar) for index, bar in enumerate(_complete_trade_bars()) if index != 31])]
     finalized, _, _ = finalize_closed_trade_paths(
         open_rows,
         previous_finalized=[],
@@ -143,22 +152,121 @@ def test_partial_classifications_are_reported() -> None:
 
     open_rows = [
         _open_row(
-            [_sample_from_bar(bar) for index, bar in enumerate(_complete_trade_bars()) if index != 10]
+            [_sample_from_bar(bar) for index, bar in enumerate(_complete_trade_bars()) if index != 31]
         )
     ]
     finalized, _, _ = finalize_closed_trade_paths(
         open_rows,
         previous_finalized=[],
-        canonical_records=[_closed_record(exit_time="2026-07-07T12:02:00Z")],
+        canonical_records=[_closed_record(exit_time="2026-07-07T12:03:00Z")],
         runtime_candle_root=Path("missing_runtime"),
         generated_at=NOW,
         repair_finalized=True,
     )
-    assert finalized[0]["path_coverage_status"] == "PARTIAL_INTERNAL_GAP"
+    assert finalized[0]["path_coverage_status"] == "PARTIAL_UNKNOWN_SPARSE_GAP"
+    assert finalized[0]["coverage"]["in_trade"]["missing_bar_count"] == 1
+    assert finalized[0]["coverage"]["in_trade"]["gap_ranges"] == [
+        {"start": "2026-07-07T12:01:00+00:00", "end": "2026-07-07T12:02:00+00:00"}
+    ]
+
+
+def test_pre_entry_context_is_excluded_from_finalized_mfe_mae() -> None:
+    samples = [_sample_from_bar(bar) for bar in _complete_trade_bars()]
+    samples[0]["high"] = 110.0
+    samples[0]["low"] = 90.0
+    open_rows = [_open_row(samples)]
+
+    finalized, _, _ = finalize_closed_trade_paths(
+        open_rows,
+        previous_finalized=[],
+        canonical_records=[_closed_record(exit_time="2026-07-07T12:02:30Z")],
+        runtime_candle_root=Path("missing_runtime"),
+        generated_at=NOW,
+        repair_finalized=True,
+    )
+
+    assert finalized[0]["path_coverage_status"] == "COMPLETE"
+    assert finalized[0]["mfe"] == 4.0
+    assert finalized[0]["mae"] == -2.0
+    assert finalized[0]["mfe_timestamp"] >= "2026-07-07T12:00:00"
+    assert finalized[0]["mae_timestamp"] >= "2026-07-07T12:00:00"
+
+
+def test_accepted_zf_semantics_exclude_context_and_classify_sparse_gap() -> None:
+    entry = "2026-07-27T09:36:11.105314Z"
+    exit_time = "2026-07-27T09:51:20.517231Z"
+    samples = [
+        _sample("2026-07-27T09:31:00Z", high=106.2578125, low=106.25),
+        _sample("2026-07-27T09:35:00Z", high=106.2421875, low=106.234375),
+        _sample("2026-07-27T09:36:00Z", high=106.2421875, low=106.234375),
+        _sample("2026-07-27T09:37:00Z", high=106.25, low=106.234375),
+        _sample("2026-07-27T09:38:00Z", high=106.25, low=106.2421875),
+        _sample("2026-07-27T09:39:00Z", high=106.2421875, low=106.2421875),
+        _sample("2026-07-27T09:40:00Z", high=106.2421875, low=106.2421875),
+        _sample("2026-07-27T09:41:00Z", high=106.234375, low=106.234375),
+        _sample("2026-07-27T09:42:00Z", high=106.2421875, low=106.2421875),
+        _sample("2026-07-27T09:43:00Z", high=106.234375, low=106.234375),
+        _sample("2026-07-27T09:44:00Z", high=106.2421875, low=106.2421875),
+        _sample("2026-07-27T09:45:00Z", high=106.234375, low=106.234375),
+        _sample("2026-07-27T09:46:00Z", high=106.2421875, low=106.234375),
+        _sample("2026-07-27T09:47:00Z", high=106.2421875, low=106.2421875),
+        _sample("2026-07-27T09:48:00Z", high=106.2421875, low=106.234375),
+        # 09:48-09:49 is intentionally absent from the sparse OHLCV source.
+        _sample("2026-07-27T09:50:00Z", high=106.2421875, low=106.2421875),
+        _sample("2026-07-27T09:51:00Z", high=106.2421875, low=106.2421875),
+        _sample("2026-07-27T09:52:00Z", high=106.2421875, low=106.2421875),
+        _sample("2026-07-27T09:53:00Z", high=106.2421875, low=106.2421875),
+    ]
+    open_rows = [
+        {
+            **_open_row(samples),
+            "instrument": "ZF",
+            "contract": "ZFU6",
+            "entry_time": entry,
+            "entry_price": 106.25,
+            "source_trade_id": "trade_bridge_fill_ZF_1m_2026-07-27T08_59_00Z_BUY_TO_OPEN",
+            "accumulator_key": "zf-key",
+            "capture_id": "trade_path_capture_347178be5687f977be8d450b",
+        }
+    ]
+
+    finalized, _, _ = finalize_closed_trade_paths(
+        open_rows,
+        previous_finalized=[],
+        canonical_records=[
+            {
+                **_closed_record(exit_time=exit_time),
+                "trade_id": "trade_bridge_fill_ZF_1m_2026-07-27T08_59_00Z_BUY_TO_OPEN",
+                "symbol": "ZF",
+                "entry_time": entry,
+                "exit_time": exit_time,
+                "entry_price": 106.25,
+                "exit_price": 106.2421875,
+            }
+        ],
+        runtime_candle_root=Path("missing_runtime"),
+        generated_at=NOW,
+        repair_finalized=True,
+    )
+
+    row = finalized[0]
+    assert row["capture_id"] == "trade_path_capture_347178be5687f977be8d450b"
+    assert row["mfe"] == 0.0
+    assert row["mae"] == -0.015625
+    assert row["mfe_timestamp"] == "2026-07-27T09:37:00+00:00"
+    assert row["mae_timestamp"] == "2026-07-27T09:37:00+00:00"
+    assert row["path_coverage_status"] == "PARTIAL_UNKNOWN_SPARSE_GAP"
+    assert row["coverage"]["pre_entry_context"]["coverage_status"] != "COMPLETE"
+    assert row["coverage"]["in_trade"]["missing_bar_count"] == 1
+    assert row["coverage"]["in_trade"]["gap_ranges"] == [
+        {"start": "2026-07-27T09:48:00+00:00", "end": "2026-07-27T09:49:00+00:00"}
+    ]
+    assert any(sample["partial_entry_bar"] is True for sample in row["path_samples"])
+    assert any(sample["partial_exit_bar"] is True for sample in row["path_samples"])
 
 
 def test_finalization_waits_when_exit_sample_missing_inside_grace_window() -> None:
-    open_rows = [_open_row([_sample_from_bar(bar) for bar in _complete_trade_bars()[:-1]])]
+    open_rows = [_open_row([_sample_from_bar(bar) for index, bar in enumerate(_complete_trade_bars()) if index != 31])]
     finalized, count, deferred = finalize_closed_trade_paths(
         open_rows,
         previous_finalized=[],
@@ -190,7 +298,7 @@ def test_finalizes_complete_when_exit_sample_arrives_after_grace_wait() -> None:
 
 
 def test_finalizes_partial_exit_missing_after_grace_expires() -> None:
-    open_rows = [_open_row([_sample_from_bar(bar) for bar in _complete_trade_bars()[:-1]])]
+    open_rows = [_open_row([_sample_from_bar(bar) for index, bar in enumerate(_complete_trade_bars()) if index != 31])]
     finalized, count, deferred = finalize_closed_trade_paths(
         open_rows,
         previous_finalized=[],
@@ -561,7 +669,7 @@ def _bar(end: str, *, high: float = 101.0, low: float = 99.0) -> dict:
 def _complete_trade_bars() -> list[dict]:
     bars = []
     start = datetime.fromisoformat("2026-07-07T11:31:00+00:00")
-    for offset in range(33):
+    for offset in range(34):
         end = start + __import__("datetime").timedelta(minutes=offset)
         high = 104.0 if end.isoformat() == "2026-07-07T12:02:00+00:00" else 101.0
         low = 98.0 if end.isoformat() == "2026-07-07T12:02:00+00:00" else 99.0

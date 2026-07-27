@@ -47,6 +47,7 @@ MAX_INTERNAL_GAP_SECONDS = 90
 DEFAULT_FINALIZATION_GRACE_SECONDS = 120
 DEFAULT_CADENCE_SECONDS = 60.0
 CADENCE_STATUS_SCHEMA_VERSION = "ra8_path_accumulator_cadence_status_v1"
+PARTIAL_UNKNOWN_SPARSE_GAP = "PARTIAL_UNKNOWN_SPARSE_GAP"
 
 RA8_CADENCE_SUCCEEDED = "RA8_CADENCE_SUCCEEDED"
 RA8_CADENCE_FAILED = "RA8_CADENCE_FAILED"
@@ -464,8 +465,18 @@ def repair_finalized_trade_paths(
                 durable_candle_root=durable_candle_root,
             )
             trailing = _samples_for_closed_trade(candle_payload.get("bars") or [], row)
-            merged = _merge_samples(row.get("path_samples") or [], trailing)
+            merged = _annotate_partial_trade_bars(
+                _merge_samples(row.get("path_samples") or [], trailing),
+                entry_time=row.get("entry_time"),
+                exit_time=row.get("exit_time"),
+            )
             if len(merged) > len(row.get("path_samples") or []):
+                coverage = _segmented_coverage(entry_time=row.get("entry_time"), exit_time=row.get("exit_time"), samples=merged)
+                metrics = _path_metrics(
+                    samples=_in_trade_samples(merged, entry_time=row.get("entry_time"), exit_time=row.get("exit_time")),
+                    side=str(row.get("side") or ""),
+                    entry_price=_float_or_none(row.get("entry_price")),
+                )
                 repaired.update(
                     {
                         "path_samples": merged,
@@ -476,12 +487,13 @@ def repair_finalized_trade_paths(
                             entry_time=row.get("entry_time"),
                             exit_time=row.get("exit_time"),
                             samples=merged,
+                            segmented_coverage=coverage,
                         ),
+                        "coverage": coverage,
                         "repair_status": "REPAIRED_WITH_RUNTIME_CANDLES",
                         "repaired_at": generated_at.isoformat(),
                     }
                 )
-                metrics = _path_metrics(samples=merged, side=str(row.get("side") or ""), entry_price=_float_or_none(row.get("entry_price")))
                 repaired.update(
                     {
                         "mfe": metrics.get("mfe"),
@@ -539,6 +551,7 @@ def build_path_accumulator_status(
             "partial_entry_missing_count": sum(1 for row in finalized_rows if row.get("path_coverage_status") == "PARTIAL_ENTRY_MISSING"),
             "partial_exit_missing_count": sum(1 for row in finalized_rows if row.get("path_coverage_status") == "PARTIAL_EXIT_MISSING"),
             "partial_internal_gap_count": sum(1 for row in finalized_rows if row.get("path_coverage_status") == "PARTIAL_INTERNAL_GAP"),
+            "partial_unknown_sparse_gap_count": sum(1 for row in finalized_rows if row.get("path_coverage_status") == PARTIAL_UNKNOWN_SPARSE_GAP),
             "missing_source_count": sum(1 for row in finalized_rows if row.get("path_coverage_status") == "MISSING_SOURCE"),
             "open_accumulating_count": sum(1 for row in open_rows if row.get("status") == "OPEN_ACCUMULATING"),
         },
@@ -856,11 +869,17 @@ def _finalized_from_open_and_record(
         if isinstance(record.get("path_capture"), Mapping)
         else open_row.get("retain_from"),
     }
-    samples = _merge_samples(retained, _samples_for_closed_trade(candle_payload.get("bars") or [], closed_trade_for_samples))
+    samples = _annotate_partial_trade_bars(
+        _merge_samples(retained, _samples_for_closed_trade(candle_payload.get("bars") or [], closed_trade_for_samples)),
+        entry_time=entry_time,
+        exit_time=exit_time,
+    )
     side = str(record.get("side") or open_row.get("side") or "").upper()
     entry_price = _float_or_none(record.get("entry_price") or open_row.get("entry_price"))
-    metrics = _path_metrics(samples=samples, side=side, entry_price=entry_price)
-    status = _coverage_status(entry_time=entry_time, exit_time=exit_time, samples=samples)
+    coverage = _segmented_coverage(entry_time=entry_time, exit_time=exit_time, samples=samples)
+    in_trade_samples = _in_trade_samples(samples, entry_time=entry_time, exit_time=exit_time)
+    metrics = _path_metrics(samples=in_trade_samples, side=side, entry_price=entry_price)
+    status = _coverage_status(entry_time=entry_time, exit_time=exit_time, samples=samples, segmented_coverage=coverage)
     payload = {
         "schema_version": FINALIZED_SCHEMA_VERSION,
         "finalized_trade_path_capture_id": _stable_id("finalized_trade_path", open_row.get("accumulator_key"), record.get("trade_id"), entry_time, exit_time),
@@ -885,6 +904,7 @@ def _finalized_from_open_and_record(
         "path_start_timestamp": _sample_start(samples),
         "path_end_timestamp": _sample_end(samples),
         "path_coverage_status": status,
+        "coverage": coverage,
         "capture_lifecycle_state": "FINALIZED" if status == "COMPLETE" else "FINALIZED_INCOMPLETE",
         "capture_source_type": candle_source_type,
         "mfe": metrics.get("mfe"),
@@ -929,11 +949,22 @@ def _read_preferred_candle_payload(
     return _read_json(runtime_path), runtime_path, "RUNTIME_SNAPSHOT_FALLBACK"
 
 
-def _coverage_status(*, entry_time: Any, exit_time: Any, samples: Sequence[Mapping[str, Any]]) -> str:
+def _coverage_status(
+    *,
+    entry_time: Any,
+    exit_time: Any,
+    samples: Sequence[Mapping[str, Any]],
+    segmented_coverage: Mapping[str, Any] | None = None,
+) -> str:
     if not samples:
         return "MISSING_SOURCE"
     if exit_time is None:
         return "OPEN_ACCUMULATING"
+    if segmented_coverage is not None:
+        in_trade = segmented_coverage.get("in_trade") if isinstance(segmented_coverage.get("in_trade"), Mapping) else {}
+        status = str(in_trade.get("coverage_status") or "")
+        if status:
+            return status
     entry = _parse_ts(entry_time)
     exit_ts = _parse_ts(exit_time)
     first_start = _parse_ts(samples[0].get("bar_start") or samples[0].get("bar_end"))
@@ -949,6 +980,171 @@ def _coverage_status(*, entry_time: Any, exit_time: Any, samples: Sequence[Mappi
     if _has_internal_gap(samples):
         return "PARTIAL_INTERNAL_GAP"
     return "COMPLETE"
+
+
+def _segmented_coverage(*, entry_time: Any, exit_time: Any, samples: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
+    entry = _parse_ts(entry_time)
+    exit_ts = _parse_ts(exit_time)
+    if entry is None or exit_ts is None:
+        empty = _coverage_segment_summary(expected_starts=[], observed_samples=[])
+        return {
+            "pre_entry_context": empty,
+            "in_trade": empty,
+            "post_exit_context": empty,
+        }
+    pre_start = entry - timedelta(minutes=30)
+    entry_floor = _minute_floor(entry)
+    exit_floor = _minute_floor(exit_ts)
+    exit_boundary = exit_ts == exit_floor
+    last_in_trade_start = exit_floor - timedelta(minutes=1) if exit_boundary else exit_floor
+    post_exit_start = exit_floor if exit_boundary else exit_floor + timedelta(minutes=1)
+
+    pre_expected = _minute_starts(pre_start, entry_floor)
+    in_trade_expected = _minute_starts(entry_floor, last_in_trade_start + timedelta(minutes=1))
+    post_expected = [post_exit_start] if post_exit_start is not None else []
+
+    in_trade_summary = _coverage_segment_summary(
+        expected_starts=in_trade_expected,
+        observed_samples=_in_trade_samples(samples, entry_time=entry_time, exit_time=exit_time),
+        sparse_missing_status=PARTIAL_UNKNOWN_SPARSE_GAP,
+    )
+    in_trade_missing = _missing_expected_starts(
+        expected_starts=in_trade_expected,
+        observed_samples=_in_trade_samples(samples, entry_time=entry_time, exit_time=exit_time),
+    )
+    if in_trade_missing and in_trade_expected:
+        if in_trade_expected[0] in in_trade_missing:
+            in_trade_summary["coverage_status"] = "PARTIAL_ENTRY_MISSING"
+        elif in_trade_expected[-1] in in_trade_missing:
+            in_trade_summary["coverage_status"] = "PARTIAL_EXIT_MISSING"
+
+    return {
+        "pre_entry_context": _coverage_segment_summary(
+            expected_starts=pre_expected,
+            observed_samples=[sample for sample in samples if _sample_start_dt(sample) in set(pre_expected)],
+            sparse_missing_status="UNKNOWN_SPARSE_GAP",
+        ),
+        "in_trade": in_trade_summary,
+        "post_exit_context": _coverage_segment_summary(
+            expected_starts=post_expected,
+            observed_samples=[sample for sample in samples if _sample_start_dt(sample) in set(post_expected)],
+            sparse_missing_status="UNKNOWN_SPARSE_GAP",
+        ),
+    }
+
+
+def _missing_expected_starts(
+    *,
+    expected_starts: Sequence[datetime],
+    observed_samples: Sequence[Mapping[str, Any]],
+) -> set[datetime]:
+    observed = {_sample_start_dt(sample) for sample in observed_samples if _sample_start_dt(sample) is not None}
+    return {start for start in expected_starts if start not in observed}
+
+
+def _coverage_segment_summary(
+    *,
+    expected_starts: Sequence[datetime],
+    observed_samples: Sequence[Mapping[str, Any]],
+    sparse_missing_status: str = "UNKNOWN_SPARSE_GAP",
+) -> dict[str, Any]:
+    expected = list(expected_starts)
+    observed_by_start = {_sample_start_dt(sample): sample for sample in observed_samples if _sample_start_dt(sample) is not None}
+    missing = [start for start in expected if start not in observed_by_start]
+    synthetic = sum(1 for sample in observed_by_start.values() if bool(sample.get("synthetic_no_trade")))
+    if not expected:
+        status = "NOT_APPLICABLE"
+    elif not observed_by_start:
+        status = "MISSING_SOURCE"
+    elif missing:
+        status = sparse_missing_status
+    else:
+        status = "COMPLETE"
+    return {
+        "expected_bar_count": len(expected),
+        "observed_bar_count": len(observed_by_start),
+        "synthetic_bar_count": synthetic,
+        "missing_bar_count": len(missing),
+        "gap_ranges": _gap_ranges(missing),
+        "coverage_status": status,
+    }
+
+
+def _gap_ranges(missing_starts: Sequence[datetime]) -> list[dict[str, str]]:
+    ranges: list[dict[str, str]] = []
+    missing = sorted(missing_starts)
+    if not missing:
+        return ranges
+    start = previous = missing[0]
+    for current in missing[1:]:
+        if current - previous == timedelta(minutes=1):
+            previous = current
+            continue
+        ranges.append({"start": start.isoformat(), "end": (previous + timedelta(minutes=1)).isoformat()})
+        start = previous = current
+    ranges.append({"start": start.isoformat(), "end": (previous + timedelta(minutes=1)).isoformat()})
+    return ranges
+
+
+def _minute_floor(value: datetime) -> datetime:
+    return value.replace(second=0, microsecond=0)
+
+
+def _minute_starts(start: datetime, exclusive_end: datetime) -> list[datetime]:
+    starts: list[datetime] = []
+    current = _minute_floor(start)
+    while current < exclusive_end:
+        starts.append(current)
+        current += timedelta(minutes=1)
+    return starts
+
+
+def _sample_start_dt(sample: Mapping[str, Any]) -> datetime | None:
+    return _parse_ts(sample.get("bar_start"))
+
+
+def _sample_end_dt(sample: Mapping[str, Any]) -> datetime | None:
+    return _parse_ts(sample.get("bar_end"))
+
+
+def _in_trade_samples(
+    samples: Sequence[Mapping[str, Any]],
+    *,
+    entry_time: Any,
+    exit_time: Any,
+) -> list[Mapping[str, Any]]:
+    entry = _parse_ts(entry_time)
+    exit_ts = _parse_ts(exit_time)
+    if entry is None or exit_ts is None:
+        return []
+    in_trade: list[Mapping[str, Any]] = []
+    for sample in samples:
+        start = _sample_start_dt(sample)
+        end = _sample_end_dt(sample)
+        if start is None or end is None:
+            continue
+        if end > entry and start < exit_ts:
+            in_trade.append(sample)
+    return in_trade
+
+
+def _annotate_partial_trade_bars(
+    samples: Sequence[Mapping[str, Any]],
+    *,
+    entry_time: Any,
+    exit_time: Any,
+) -> list[dict[str, Any]]:
+    entry = _parse_ts(entry_time)
+    exit_ts = _parse_ts(exit_time)
+    annotated: list[dict[str, Any]] = []
+    for sample in samples:
+        row = dict(sample)
+        start = _sample_start_dt(row)
+        end = _sample_end_dt(row)
+        row["partial_entry_bar"] = bool(entry is not None and start is not None and end is not None and start < entry < end)
+        row["partial_exit_bar"] = bool(exit_ts is not None and start is not None and end is not None and start < exit_ts < end)
+        annotated.append(row)
+    return annotated
 
 
 def _within_finalization_grace(
@@ -1023,8 +1219,16 @@ Coverage states:
 - PARTIAL_ENTRY_MISSING
 - PARTIAL_EXIT_MISSING
 - PARTIAL_INTERNAL_GAP
+- PARTIAL_UNKNOWN_SPARSE_GAP
 - MISSING_SOURCE
 - OPEN_ACCUMULATING
+
+Finalized MFE/MAE and counterfactual inputs are computed only from samples
+overlapping entry-to-exit. Pre-entry context and post-exit context are retained
+for research, but they do not contribute to in-trade extrema. Coverage is
+segmented into pre-entry context, in-trade path, and post-exit context. Missing
+1m OHLCV bars from sparse feeds are reported as unresolved sparse gaps unless
+upstream evidence proves data loss.
 """
 
 
