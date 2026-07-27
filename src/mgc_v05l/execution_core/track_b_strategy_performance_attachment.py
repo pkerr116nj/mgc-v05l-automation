@@ -8,12 +8,13 @@ positions, cancel orders, mutate lifecycle state, or gate runtime execution.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 from collections import Counter, defaultdict
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any
@@ -31,6 +32,7 @@ DEFAULT_FUNNEL_EVENTS = (
     Path("outputs") / "track_b_execution_core" / "strategy_attrition_funnel" / "strategy_funnel_events.jsonl"
 )
 DEFAULT_PHASE1_ROOT = Path("outputs") / "track_b_execution_core" / "phase1_runtime_market_data"
+DEFAULT_PHASE1_DURABLE_ROOT = Path("outputs") / "track_b_execution_core" / "phase1_runtime_market_data_intraday_backfill"
 DEFAULT_OUTPUT_DIR = Path("outputs") / "track_b_execution_core" / "strategy_performance"
 DEFAULT_EVENTS_PATH = DEFAULT_OUTPUT_DIR / "lane_performance_events.jsonl"
 DEFAULT_SUMMARY_PATH = DEFAULT_OUTPUT_DIR / "latest_lane_performance_summary.json"
@@ -40,6 +42,7 @@ DEFAULT_PAIRING_SUMMARY_PATH = DEFAULT_OUTPUT_DIR / "latest_trade_pairing_summar
 ENTRY_INTENT_TYPES = {"BUY_TO_OPEN", "SELL_TO_OPEN", "SELL_SHORT"}
 EXIT_EVENT_TYPES = {"EXIT_FILL_BROKER_BACKED", "EXIT_ORDER_FILLED", "POSITION_CLOSED"}
 PERFORMANCE_SCHEMA_VERSION = "track_b_strategy_performance_event_v1"
+PATH_CAPTURE_SCHEMA_VERSION = "canonical_trade_path_capture_ref_v1"
 
 
 @dataclass(frozen=True)
@@ -74,6 +77,7 @@ def build_strategy_performance_attachment(
     trade_registry_events_path: Path | str = DEFAULT_TRADE_REGISTRY_EVENTS,
     funnel_events_path: Path | str = DEFAULT_FUNNEL_EVENTS,
     phase1_root: Path | str = DEFAULT_PHASE1_ROOT,
+    durable_phase1_root: Path | str = DEFAULT_PHASE1_DURABLE_ROOT,
     output_dir: Path | str = DEFAULT_OUTPUT_DIR,
     include_lanes: Sequence[str] | None = None,
     write_artifacts: bool = True,
@@ -114,6 +118,7 @@ def build_strategy_performance_attachment(
         exit_fills=exit_fills,
         funnel_rows=funnel_rows,
         phase1_root=_resolve(root, Path(phase1_root)),
+        durable_phase1_root=_resolve(root, Path(durable_phase1_root)),
     )
     events = build_performance_events_from_canonical_records(
         lane_metadata=lane_metadata,
@@ -179,6 +184,7 @@ def build_canonical_trade_records(
     exit_fills: Iterable[Mapping[str, Any]],
     funnel_rows: Iterable[Mapping[str, Any]],
     phase1_root: Path,
+    durable_phase1_root: Path | None = None,
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     now = datetime.now(UTC)
     sorted_entries = _dedupe_entries(entry_fills, now=now)
@@ -219,6 +225,13 @@ def build_canonical_trade_records(
                 "exit_reason": _exit_reason(exit_row) if exit_row is not None else None,
                 "blockers_before_entry": _blockers_before_entry(sorted_funnel, lane_id=lane_id, entry_time=entry_time),
                 "source_refs": _source_refs(entry=entry, exit_row=exit_row),
+                "path_capture": _path_capture_reference(
+                    entry=entry,
+                    exit_row=exit_row,
+                    metadata=metadata,
+                    phase1_root=phase1_root,
+                    durable_phase1_root=durable_phase1_root or phase1_root,
+                ),
             }
         )
         records.append(record)
@@ -367,13 +380,18 @@ def _dedupe_entries(entries: Iterable[Mapping[str, Any]], *, now: datetime) -> l
             continue
         key = _entry_dedupe_key(candidate)
         existing = best.get(key)
-        if existing is None or _entry_quality(candidate) > _entry_quality(existing):
+        if existing is None:
+            best[key] = candidate
+            continue
+        candidate_time = _entry_time(candidate) or now
+        existing_time = _entry_time(existing) or now
+        if candidate_time < existing_time or (candidate_time == existing_time and _entry_quality(candidate) > _entry_quality(existing)):
             best[key] = candidate
     return sorted(best.values(), key=lambda row: _entry_time(row) or now)
 
 
 def _entry_dedupe_key(row: Mapping[str, Any]) -> tuple[str, str]:
-    for key in ("exec_id", "perm_id", "lifecycle_id", "trade_id"):
+    for key in ("lifecycle_id", "trade_id", "source_trade_id", "managed_position_id", "exec_id", "perm_id"):
         value = str(row.get(key) or "").strip()
         if value:
             return key, value
@@ -510,6 +528,122 @@ def _performance_event_keys() -> tuple[str, ...]:
         "realized_pnl_currency",
         "phase1_candle_source",
     )
+
+
+def _path_capture_reference(
+    *,
+    entry: Mapping[str, Any],
+    exit_row: Mapping[str, Any] | None,
+    metadata: LaneMetadata,
+    phase1_root: Path,
+    durable_phase1_root: Path,
+) -> dict[str, Any]:
+    entry_time = _entry_time(entry)
+    exit_time = _exit_time(exit_row) if exit_row else None
+    decision_bar = _parse_ts(entry.get("decision_bar_timestamp"))
+    retain_from = (decision_bar or entry_time) - timedelta(minutes=30) if (decision_bar or entry_time) else None
+    retain_until = exit_time + timedelta(minutes=1) if exit_time else None
+    trade_id = _trade_id_from_entry(entry)
+    lifecycle_id = entry.get("lifecycle_id")
+    capture_id = _stable_path_capture_id(trade_id, lifecycle_id, metadata.symbol, entry_time)
+    durable_path = durable_phase1_root / metadata.symbol / "1m" / "latest_runtime_candles.json"
+    runtime_path = phase1_root / metadata.symbol / "1m" / "latest_runtime_candles.json"
+    source_path = durable_path if durable_path.exists() else runtime_path
+    entry_bar = _bar_window_for_timestamp(source_path, entry_time)
+    decision_window = _bar_window_for_timestamp(source_path, decision_bar) if decision_bar else None
+    exit_bar = _bar_window_for_timestamp(source_path, exit_time) if exit_time else None
+    return {
+        "schema_version": PATH_CAPTURE_SCHEMA_VERSION,
+        "capture_required": True,
+        "capture_status": "CLOSED_PENDING_FINALIZATION" if exit_row is not None else "OPEN_ACCUMULATING",
+        "capture_lifecycle_state": "CLOSED_PENDING_FINALIZATION" if exit_row is not None else "OPEN_ACCUMULATING",
+        "capture_id": capture_id,
+        "accumulator_key": "|".join(
+            str(part or "")
+            for part in (
+                trade_id,
+                lifecycle_id,
+                metadata.symbol,
+                entry.get("local_symbol") or _mapping(entry.get("contract")).get("local_symbol") or metadata.symbol,
+                _entry_side(entry),
+                _iso(entry_time),
+            )
+        ),
+        "canonical_trade_path_id": None,
+        "sample_source": {
+            "source_component": "phase1_runtime_market_data_intraday_backfill",
+            "source_artifact": str(durable_path),
+            "fallback_source_artifact": str(runtime_path),
+            "bar_granularity": "1m",
+            "price_type": "OHLCV",
+            "timezone": "UTC",
+            "durable_source_required_for_complete_research": True,
+        },
+        "trade_identity": {
+            "source_trade_id": trade_id,
+            "managed_position_id": lifecycle_id,
+            "lifecycle_id": lifecycle_id,
+            "instrument": metadata.symbol,
+            "contract": entry.get("local_symbol") or _mapping(entry.get("contract")).get("local_symbol"),
+            "side": _entry_side(entry),
+            "quantity": str(entry.get("quantity") or entry.get("qty") or "1"),
+        },
+        "entry_anchor": {
+            "entry_fill_role": "FIRST_OPENING_FILL",
+            "entry_time": _iso(entry_time),
+            "entry_price": _str_decimal(_entry_price(entry)),
+            "entry_bar_start": entry_bar.get("bar_start"),
+            "entry_bar_end": entry_bar.get("bar_end"),
+            "decision_bar_timestamp": _iso(decision_bar),
+            "decision_bar_start": decision_window.get("bar_start") if decision_window else None,
+            "decision_bar_end": decision_window.get("bar_end") if decision_window else None,
+            "entry_fill_exec_id": entry.get("exec_id"),
+            "entry_order_id": entry.get("broker_order_id") or entry.get("order_id"),
+        },
+        "exit_anchor": {
+            "exit_fill_role": "FINAL_CLOSING_FILL" if exit_row is not None else None,
+            "exit_time": _iso(exit_time),
+            "exit_price": _str_decimal(_exit_price(exit_row)) if exit_row is not None else None,
+            "exit_bar_start": exit_bar.get("bar_start") if exit_bar else None,
+            "exit_bar_end": exit_bar.get("bar_end") if exit_bar else None,
+            "exit_fill_exec_id": exit_row.get("exec_id") if exit_row is not None else None,
+            "exit_order_id": exit_row.get("order_id") if exit_row is not None else None,
+        },
+        "fill_semantics": {
+            "canonical_trade_unit": "ONE_RECORD_PER_LIFECYCLE_OR_SOURCE_TRADE_ID",
+            "first_opening_fill_rule": "earliest opening fill for lifecycle/source trade id",
+            "final_closing_fill_rule": "last risk-reducing close fill that pairs to the lifecycle/source trade id",
+            "partial_fills_folded_into_trade": True,
+            "scale_ins_folded_when_same_lifecycle_or_source_trade": True,
+            "scale_outs_folded_until_final_closing_fill": True,
+        },
+        "retention": {
+            "open_accumulator_path": "outputs/track_b_execution_core/research_analytics/live_trade_path_accumulator/open_trade_path_accumulator.jsonl",
+            "finalized_capture_path": "outputs/track_b_execution_core/research_analytics/live_trade_path_accumulator/finalized_trade_path_capture.jsonl",
+            "retain_from": _iso(retain_from),
+            "retain_until": _iso(retain_until),
+            "pre_decision_completed_1m_bars_required": 30,
+            "post_exit_completed_1m_bars_required": 1,
+        },
+        "coverage": {
+            "coverage_state": "OPEN_ACCUMULATING" if exit_row is None else "PENDING_FINALIZATION",
+            "incomplete_paths_are_research_blocked": True,
+            "path_sample_count": 0,
+            "path_start_timestamp": None,
+            "path_end_timestamp": None,
+        },
+        "finalized_metrics": {
+            "path_coverage_status": "OPEN_ACCUMULATING" if exit_row is None else "PENDING_FINALIZATION",
+            "mfe_points": None,
+            "mae_points": None,
+            "mfe_timestamp": None,
+            "mae_timestamp": None,
+            "counterfactual_ready": {"timebox": False, "trailing": False, "vwap_avwap": False, "atr": False},
+        },
+        "diagnostic_only": True,
+        "production_recommendation": False,
+        "trading_gate": False,
+    }
 
 
 def _base_event(metadata: LaneMetadata, event_type: str) -> dict[str, Any]:
@@ -664,6 +798,32 @@ def _candle_extremes(
         if close is not None:
             latest_close = close
     return (max(highs) if highs else None, min(lows) if lows else None, latest_close, path)
+
+
+def _bar_window_for_timestamp(path: Path, timestamp: datetime | None) -> dict[str, str | None]:
+    if timestamp is None:
+        return {"bar_start": None, "bar_end": None}
+    payload = _read_json(path)
+    bars = payload.get("bars")
+    if not isinstance(bars, list):
+        return {"bar_start": None, "bar_end": None}
+    for bar in bars:
+        if not isinstance(bar, Mapping):
+            continue
+        start = _parse_ts(bar.get("bar_start"))
+        end = _parse_ts(bar.get("bar_end") or bar.get("timestamp"))
+        if end is None:
+            continue
+        if start and start <= timestamp <= end:
+            return {"bar_start": _iso(start), "bar_end": _iso(end)}
+        if not start and end >= timestamp:
+            return {"bar_start": None, "bar_end": _iso(end)}
+    return {"bar_start": None, "bar_end": None}
+
+
+def _stable_path_capture_id(*parts: Any) -> str:
+    digest = hashlib.sha256("|".join(str(part or "") for part in parts).encode("utf-8")).hexdigest()[:24]
+    return f"trade_path_capture_{digest}"
 
 
 def _match_exit(

@@ -58,6 +58,61 @@ def test_closed_long_mfe_mae_and_pnl(tmp_path: Path) -> None:
     assert closed["hold_seconds"] == 240
 
 
+def test_canonical_trade_record_emits_path_capture_reference_and_folds_partial_opening_fills(tmp_path: Path) -> None:
+    lane = "mgc_globex_active_participation_long"
+    _write_profile(tmp_path, [lane])
+    first = _entry(
+        lane_id=lane,
+        symbol="MGC",
+        side="BUY",
+        intent_type="BUY_TO_OPEN",
+        price="100",
+        multiplier="10",
+        fill_time="2026-06-24T00:01:00Z",
+    )
+    second = {**first, "fill_timestamp": "2026-06-24T00:01:30Z", "fill_price": "100.5", "exec_id": "exec.partial.2"}
+    _write_jsonl(tmp_path / "fills.jsonl", [first, second])
+    _write_jsonl(
+        tmp_path / "trade_events.jsonl",
+        [
+            _exit(
+                lane_id=lane,
+                symbol="MGC",
+                action="SELL",
+                price="103",
+                generated_at="2026-06-24T00:05:00Z",
+                lifecycle_id=str(first["lifecycle_id"]),
+            )
+        ],
+    )
+    _write_jsonl(tmp_path / "funnel.jsonl", [])
+    _write_candles(tmp_path, "MGC", highs=[101, 105, 104], lows=[99, 98, 102])
+
+    result = perf.build_strategy_performance_attachment(
+        repo_root=tmp_path,
+        config_path=Path("config.json"),
+        roster_path=Path("roster.json"),
+        filled_bridge_results_path=Path("fills.jsonl"),
+        trade_registry_events_path=Path("trade_events.jsonl"),
+        funnel_events_path=Path("funnel.jsonl"),
+        phase1_root=Path("phase1"),
+        output_dir=Path("out"),
+    )
+
+    records = [json.loads(line) for line in result.canonical_trades_path.read_text(encoding="utf-8").splitlines()]
+    assert len([row for row in records if row["event_type"] == "CANONICAL_TRADE_RECORD"]) == 1
+    record = records[0]
+    capture = record["path_capture"]
+    assert capture["schema_version"] == "canonical_trade_path_capture_ref_v1"
+    assert capture["capture_required"] is True
+    assert capture["entry_anchor"]["entry_fill_role"] == "FIRST_OPENING_FILL"
+    assert capture["exit_anchor"]["exit_fill_role"] == "FINAL_CLOSING_FILL"
+    assert capture["fill_semantics"]["partial_fills_folded_into_trade"] is True
+    assert capture["retention"]["pre_decision_completed_1m_bars_required"] == 30
+    assert capture["retention"]["post_exit_completed_1m_bars_required"] == 1
+    assert record["entry_time"] == "2026-06-24T00:01:00Z"
+
+
 def test_closed_short_mfe_mae_and_pnl(tmp_path: Path) -> None:
     _write_profile(tmp_path, ["gc_globex_active_participation_short"])
     _write_jsonl(

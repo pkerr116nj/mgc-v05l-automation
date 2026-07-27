@@ -11,6 +11,7 @@ from typing import Sequence
 from mgc_v05l.execution_core.track_b_live_trade_path_accumulator import (
     DEFAULT_CADENCE_SECONDS,
     DEFAULT_CANONICAL_TRADE_RECORDS,
+    DEFAULT_DURABLE_CANDLE_ROOT,
     DEFAULT_MANAGED_POSITIONS,
     DEFAULT_OUTPUT_DIR,
     DEFAULT_RUNTIME_CANDLE_ROOT,
@@ -37,6 +38,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--managed-positions-path", type=Path, default=DEFAULT_MANAGED_POSITIONS)
     parser.add_argument("--canonical-records-path", type=Path, default=DEFAULT_CANONICAL_TRADE_RECORDS)
     parser.add_argument("--runtime-candle-root", type=Path, default=DEFAULT_RUNTIME_CANDLE_ROOT)
+    parser.add_argument("--durable-candle-root", type=Path, default=DEFAULT_DURABLE_CANDLE_ROOT)
     parser.add_argument("--output-dir", type=Path, default=DEFAULT_OUTPUT_DIR)
     parser.add_argument("--repair-finalized", action="store_true")
     parser.add_argument("--finalization-grace-seconds", type=int, default=120)
@@ -53,6 +55,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             managed_positions_path=args.managed_positions_path,
             canonical_records_path=args.canonical_records_path,
             runtime_candle_root=args.runtime_candle_root,
+            durable_candle_root=args.durable_candle_root,
             output_dir=args.output_dir,
             finalization_grace_seconds=args.finalization_grace_seconds,
             cadence_seconds=args.cadence_seconds,
@@ -65,6 +68,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             managed_positions_path=args.managed_positions_path,
             canonical_records_path=args.canonical_records_path,
             runtime_candle_root=args.runtime_candle_root,
+            durable_candle_root=args.durable_candle_root,
             output_dir=args.output_dir,
             finalization_grace_seconds=args.finalization_grace_seconds,
             cadence_seconds=args.cadence_seconds,
@@ -76,6 +80,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         managed_positions_path=args.managed_positions_path,
         canonical_records_path=args.canonical_records_path,
         runtime_candle_root=args.runtime_candle_root,
+        durable_candle_root=args.durable_candle_root,
         output_dir=args.output_dir,
         accumulate_open_paths=args.command in {"accumulate-open-paths", "publish-ra8-artifacts"},
         finalize_closed_paths=args.command in {"finalize-closed-paths", "repair-finalized-paths", "publish-ra8-artifacts"},

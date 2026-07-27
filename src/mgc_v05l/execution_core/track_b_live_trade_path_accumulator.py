@@ -23,6 +23,7 @@ DEFAULT_OUTPUT_ROOT = Path("outputs") / "track_b_execution_core"
 DEFAULT_CANONICAL_TRADE_RECORDS = DEFAULT_OUTPUT_ROOT / "strategy_performance" / "canonical_trade_records.jsonl"
 DEFAULT_MANAGED_POSITIONS = DEFAULT_OUTPUT_ROOT / "managed_positions" / "latest_managed_positions.json"
 DEFAULT_RUNTIME_CANDLE_ROOT = DEFAULT_OUTPUT_ROOT / "phase1_runtime_market_data"
+DEFAULT_DURABLE_CANDLE_ROOT = DEFAULT_OUTPUT_ROOT / "phase1_runtime_market_data_intraday_backfill"
 DEFAULT_OUTPUT_DIR = DEFAULT_OUTPUT_ROOT / "research_analytics" / "live_trade_path_accumulator"
 
 OPEN_ACCUMULATOR_JSONL = "open_trade_path_accumulator.jsonl"
@@ -35,10 +36,12 @@ FINALIZATION_MD = "ra8_path_finalization_report.md"
 GRACE_DIAGNOSIS_MD = "ra8b_finalization_grace_diagnosis.md"
 GRACE_CONTRACT_MD = "ra8b_finalization_grace_contract.md"
 REPAIR_REPORT_MD = "ra8b_repair_report.md"
+CAPTURE_EXTENSION_CONTRACT_MD = "trade_path_capture_extension_contract.md"
 
 OPEN_SCHEMA_VERSION = "ra8_open_trade_path_accumulator_v1"
 FINALIZED_SCHEMA_VERSION = "ra8_finalized_trade_path_capture_v1"
 STATUS_SCHEMA_VERSION = "ra8_path_accumulator_status_v1"
+CAPTURE_SCHEMA_VERSION = "canonical_trade_path_capture_ref_v1"
 
 MAX_INTERNAL_GAP_SECONDS = 90
 DEFAULT_FINALIZATION_GRACE_SECONDS = 120
@@ -81,6 +84,7 @@ def run_live_trade_path_accumulator(
     managed_positions_path: Path = DEFAULT_MANAGED_POSITIONS,
     canonical_records_path: Path = DEFAULT_CANONICAL_TRADE_RECORDS,
     runtime_candle_root: Path = DEFAULT_RUNTIME_CANDLE_ROOT,
+    durable_candle_root: Path = DEFAULT_DURABLE_CANDLE_ROOT,
     output_dir: Path = DEFAULT_OUTPUT_DIR,
     accumulate_open_paths: bool = True,
     finalize_closed_paths: bool = True,
@@ -98,6 +102,7 @@ def run_live_trade_path_accumulator(
     grace_diagnosis_path = output_dir / GRACE_DIAGNOSIS_MD
     grace_contract_path = output_dir / GRACE_CONTRACT_MD
     repair_report_path = output_dir / REPAIR_REPORT_MD
+    capture_contract_path = output_dir / CAPTURE_EXTENSION_CONTRACT_MD
 
     previous_open = _read_jsonl(open_path)
     previous_finalized = _read_jsonl(finalized_path)
@@ -110,11 +115,14 @@ def run_live_trade_path_accumulator(
         open_rows, accumulated_count = accumulate_open_trade_paths(
             previous_open,
             managed_positions=managed_positions,
+            canonical_records=canonical_records,
             runtime_candle_root=runtime_candle_root,
+            durable_candle_root=durable_candle_root,
             generated_at=generated_at,
             source_paths={
                 "managed_positions": managed_positions_path,
                 "runtime_candle_root": runtime_candle_root,
+                "durable_candle_root": durable_candle_root,
             },
         )
 
@@ -126,6 +134,8 @@ def run_live_trade_path_accumulator(
             open_rows,
             previous_finalized=previous_finalized,
             canonical_records=canonical_records,
+            runtime_candle_root=runtime_candle_root,
+            durable_candle_root=durable_candle_root,
             generated_at=generated_at,
             repair_finalized=repair_finalized,
             finalization_grace_seconds=finalization_grace_seconds,
@@ -139,6 +149,7 @@ def run_live_trade_path_accumulator(
         finalized_rows, repaired_count = repair_finalized_trade_paths(
             finalized_rows,
             runtime_candle_root=runtime_candle_root,
+            durable_candle_root=durable_candle_root,
             generated_at=generated_at,
         )
 
@@ -156,6 +167,7 @@ def run_live_trade_path_accumulator(
             "managed_positions": managed_positions_path,
             "canonical_trade_records": canonical_records_path,
             "runtime_candle_root": runtime_candle_root,
+            "durable_candle_root": durable_candle_root,
             "open_trade_path_accumulator": open_path,
             "finalized_trade_path_capture": finalized_path,
         },
@@ -169,6 +181,7 @@ def run_live_trade_path_accumulator(
     grace_diagnosis_path.write_text(render_grace_diagnosis(status, finalized_rows), encoding="utf-8")
     grace_contract_path.write_text(render_grace_contract(finalization_grace_seconds), encoding="utf-8")
     repair_report_path.write_text(render_repair_report(status), encoding="utf-8")
+    capture_contract_path.write_text(render_capture_extension_contract(), encoding="utf-8")
     return LiveTradePathAccumulatorResult(
         open_rows=open_rows,
         finalized_rows=finalized_rows,
@@ -189,6 +202,7 @@ def run_live_trade_path_accumulator_cadence_once(
     managed_positions_path: Path = DEFAULT_MANAGED_POSITIONS,
     canonical_records_path: Path = DEFAULT_CANONICAL_TRADE_RECORDS,
     runtime_candle_root: Path = DEFAULT_RUNTIME_CANDLE_ROOT,
+    durable_candle_root: Path = DEFAULT_DURABLE_CANDLE_ROOT,
     output_dir: Path = DEFAULT_OUTPUT_DIR,
     status_path: Path | None = None,
     lock_path: Path | None = None,
@@ -232,6 +246,7 @@ def run_live_trade_path_accumulator_cadence_once(
                 managed_positions_path=managed_positions_path,
                 canonical_records_path=canonical_records_path,
                 runtime_candle_root=runtime_candle_root,
+                durable_candle_root=durable_candle_root,
                 output_dir=output_dir,
                 accumulate_open_paths=True,
                 finalize_closed_paths=True,
@@ -275,6 +290,7 @@ def run_live_trade_path_accumulator_cadence_service(
     managed_positions_path: Path = DEFAULT_MANAGED_POSITIONS,
     canonical_records_path: Path = DEFAULT_CANONICAL_TRADE_RECORDS,
     runtime_candle_root: Path = DEFAULT_RUNTIME_CANDLE_ROOT,
+    durable_candle_root: Path = DEFAULT_DURABLE_CANDLE_ROOT,
     output_dir: Path = DEFAULT_OUTPUT_DIR,
     status_path: Path | None = None,
     lock_path: Path | None = None,
@@ -292,6 +308,7 @@ def run_live_trade_path_accumulator_cadence_service(
             managed_positions_path=managed_positions_path,
             canonical_records_path=canonical_records_path,
             runtime_candle_root=runtime_candle_root,
+            durable_candle_root=durable_candle_root,
             output_dir=output_dir,
             status_path=status_path,
             lock_path=lock_path,
@@ -323,19 +340,29 @@ def accumulate_open_trade_paths(
     previous_open_rows: Sequence[Mapping[str, Any]],
     *,
     managed_positions: Mapping[str, Any],
+    canonical_records: Sequence[Mapping[str, Any]] = (),
     runtime_candle_root: Path,
+    durable_candle_root: Path = DEFAULT_DURABLE_CANDLE_ROOT,
     generated_at: datetime,
     source_paths: Mapping[str, Path | str] | None = None,
 ) -> tuple[list[dict[str, Any]], int]:
     rows_by_key = {str(row.get("accumulator_key")): dict(row) for row in previous_open_rows if row.get("accumulator_key")}
+    canonical_index = _CanonicalRecordIndex(canonical_records)
     accumulated_count = 0
     for position in _open_managed_positions(managed_positions):
         trade = _open_trade_from_position(position)
+        canonical = canonical_index.find_open(trade)
+        if canonical:
+            trade = _merge_trade_capture_contract(trade, canonical)
         if not trade.get("entry_time") or not trade.get("instrument"):
             continue
         key = _accumulator_key(trade)
         existing = rows_by_key.get(key) or _new_open_accumulator_row(trade, generated_at=generated_at, source_paths=source_paths or {})
-        candle_payload = _read_json(runtime_candle_root / str(trade["instrument"]).upper() / "1m" / "latest_runtime_candles.json")
+        candle_payload, candle_path, candle_source_type = _read_preferred_candle_payload(
+            instrument=str(trade["instrument"]).upper(),
+            runtime_candle_root=runtime_candle_root,
+            durable_candle_root=durable_candle_root,
+        )
         samples = _samples_for_trade(candle_payload.get("bars") or [], trade)
         merged_samples = _merge_samples(existing.get("path_samples") or [], samples)
         if len(merged_samples) > len(existing.get("path_samples") or []):
@@ -349,9 +376,17 @@ def accumulate_open_trade_paths(
                 "path_start_timestamp": _sample_start(merged_samples),
                 "path_end_timestamp": _sample_end(merged_samples),
                 "path_coverage_status": _coverage_status(entry_time=trade.get("entry_time"), exit_time=None, samples=merged_samples),
+                "capture_id": trade.get("capture_id") or existing.get("capture_id"),
+                "capture_lifecycle_state": "OPEN_ACCUMULATING",
+                "capture_required": True,
+                "retain_from": trade.get("retain_from"),
+                "retain_until": trade.get("retain_until"),
                 "source_refs": {
                     **dict(existing.get("source_refs") or {}),
+                    "candle_artifact": str(candle_path),
+                    "candle_source_type": candle_source_type,
                     "runtime_candle_artifact": str(runtime_candle_root / str(trade["instrument"]).upper() / "1m" / "latest_runtime_candles.json"),
+                    "durable_candle_artifact": str(durable_candle_root / str(trade["instrument"]).upper() / "1m" / "latest_runtime_candles.json"),
                 },
             }
         )
@@ -366,6 +401,8 @@ def finalize_closed_trade_paths(
     *,
     previous_finalized: Sequence[Mapping[str, Any]],
     canonical_records: Sequence[Mapping[str, Any]],
+    runtime_candle_root: Path = DEFAULT_RUNTIME_CANDLE_ROOT,
+    durable_candle_root: Path = DEFAULT_DURABLE_CANDLE_ROOT,
     generated_at: datetime,
     repair_finalized: bool = False,
     finalization_grace_seconds: int = DEFAULT_FINALIZATION_GRACE_SECONDS,
@@ -390,6 +427,8 @@ def finalize_closed_trade_paths(
         candidate = _finalized_from_open_and_record(
             open_row=open_row,
             record=record,
+            runtime_candle_root=runtime_candle_root,
+            durable_candle_root=durable_candle_root,
             generated_at=generated_at,
             source_paths=source_paths or {},
         )
@@ -410,6 +449,7 @@ def repair_finalized_trade_paths(
     finalized_rows: Sequence[Mapping[str, Any]],
     *,
     runtime_candle_root: Path,
+    durable_candle_root: Path = DEFAULT_DURABLE_CANDLE_ROOT,
     generated_at: datetime,
 ) -> tuple[list[dict[str, Any]], int]:
     rows: list[dict[str, Any]] = []
@@ -418,7 +458,11 @@ def repair_finalized_trade_paths(
         repaired = dict(row)
         if row.get("path_coverage_status") == "PARTIAL_EXIT_MISSING":
             instrument = str(row.get("instrument") or "").upper()
-            candle_payload = _read_json(runtime_candle_root / instrument / "1m" / "latest_runtime_candles.json")
+            candle_payload, _, _ = _read_preferred_candle_payload(
+                instrument=instrument,
+                runtime_candle_root=runtime_candle_root,
+                durable_candle_root=durable_candle_root,
+            )
             trailing = _samples_for_closed_trade(candle_payload.get("bars") or [], row)
             merged = _merge_samples(row.get("path_samples") or [], trailing)
             if len(merged) > len(row.get("path_samples") or []):
@@ -498,6 +542,21 @@ def build_path_accumulator_status(
             "missing_source_count": sum(1 for row in finalized_rows if row.get("path_coverage_status") == "MISSING_SOURCE"),
             "open_accumulating_count": sum(1 for row in open_rows if row.get("status") == "OPEN_ACCUMULATING"),
         },
+        "capture_lifecycle": {
+            "open_accumulating_count": sum(1 for row in open_rows if row.get("capture_lifecycle_state") == "OPEN_ACCUMULATING"),
+            "finalized_complete_count": sum(1 for row in finalized_rows if row.get("capture_lifecycle_state") == "FINALIZED"),
+            "finalized_incomplete_count": sum(1 for row in finalized_rows if row.get("capture_lifecycle_state") == "FINALIZED_INCOMPLETE"),
+            "runtime_snapshot_fallback_count": sum(
+                1
+                for row in [*open_rows, *finalized_rows]
+                if row.get("capture_source_type") == "RUNTIME_SNAPSHOT_FALLBACK"
+                or (
+                    row.get("source_refs", {}).get("candle_source_type") == "RUNTIME_SNAPSHOT_FALLBACK"
+                    if isinstance(row.get("source_refs"), Mapping)
+                    else False
+                )
+            ),
+        },
         "readiness": {
             "timebox_ready_count": sum(1 for row in finalized_rows if row.get("counterfactual_ready", {}).get("timebox") is True),
             "trailing_ready_count": sum(1 for row in finalized_rows if row.get("counterfactual_ready", {}).get("trailing") is True),
@@ -544,6 +603,23 @@ def _open_trade_from_position(position: Mapping[str, Any]) -> dict[str, Any]:
     }
 
 
+def _merge_trade_capture_contract(trade: Mapping[str, Any], record: Mapping[str, Any]) -> dict[str, Any]:
+    capture = record.get("path_capture") if isinstance(record.get("path_capture"), Mapping) else {}
+    entry_anchor = capture.get("entry_anchor") if isinstance(capture.get("entry_anchor"), Mapping) else {}
+    retention = capture.get("retention") if isinstance(capture.get("retention"), Mapping) else {}
+    return {
+        **dict(trade),
+        "capture_id": capture.get("capture_id"),
+        "source_trade_id": trade.get("source_trade_id") or record.get("source_trade_id") or record.get("trade_id"),
+        "managed_position_id": trade.get("managed_position_id") or record.get("managed_position_id") or record.get("lifecycle_id"),
+        "lifecycle_id": trade.get("lifecycle_id") or record.get("lifecycle_id"),
+        "entry_time": trade.get("entry_time") or record.get("entry_time") or entry_anchor.get("entry_time"),
+        "entry_price": trade.get("entry_price") or _float_or_none(record.get("entry_price") or entry_anchor.get("entry_price")),
+        "retain_from": retention.get("retain_from"),
+        "retain_until": retention.get("retain_until"),
+    }
+
+
 def _new_open_accumulator_row(
     trade: Mapping[str, Any],
     *,
@@ -555,9 +631,12 @@ def _new_open_accumulator_row(
         "schema_version": OPEN_SCHEMA_VERSION,
         "accumulator_id": _stable_id("open_trade_path", key),
         "accumulator_key": key,
+        "capture_id": trade.get("capture_id") or _stable_id("trade_path_capture", key),
         "created_at": generated_at.isoformat(),
         "updated_at": generated_at.isoformat(),
         "status": "OPEN_ACCUMULATING",
+        "capture_lifecycle_state": "OPEN_ACCUMULATING",
+        "capture_required": True,
         "source_trade_id": trade.get("source_trade_id"),
         "managed_position_id": trade.get("managed_position_id"),
         "lifecycle_id": trade.get("lifecycle_id"),
@@ -572,6 +651,8 @@ def _new_open_accumulator_row(
         "path_start_timestamp": None,
         "path_end_timestamp": None,
         "path_coverage_status": "OPEN_ACCUMULATING",
+        "retain_from": trade.get("retain_from"),
+        "retain_until": trade.get("retain_until"),
         "source_refs": {key: str(value) for key, value in source_paths.items()},
         "diagnostic_only": True,
         "production_recommendation": False,
@@ -583,6 +664,7 @@ def _samples_for_trade(bars: Sequence[Any], trade: Mapping[str, Any]) -> list[di
     entry = _parse_ts(trade.get("entry_time"))
     if entry is None:
         return []
+    retain_from = _parse_ts(trade.get("retain_from")) or entry - timedelta(minutes=30)
     samples: list[dict[str, Any]] = []
     for bar in bars:
         if not isinstance(bar, Mapping):
@@ -591,7 +673,7 @@ def _samples_for_trade(bars: Sequence[Any], trade: Mapping[str, Any]) -> list[di
         end = _parse_ts(bar.get("bar_end"))
         if end is None:
             continue
-        if end < entry:
+        if end < retain_from:
             continue
         samples.append(
             {
@@ -613,7 +695,9 @@ def _samples_for_closed_trade(bars: Sequence[Any], trade: Mapping[str, Any]) -> 
     exit_ts = _parse_ts(trade.get("exit_time"))
     if entry is None or exit_ts is None:
         return []
+    retain_from = _parse_ts(trade.get("retain_from")) or entry - timedelta(minutes=30)
     samples: list[dict[str, Any]] = []
+    included_after_exit = False
     for bar in bars:
         if not isinstance(bar, Mapping):
             continue
@@ -621,10 +705,12 @@ def _samples_for_closed_trade(bars: Sequence[Any], trade: Mapping[str, Any]) -> 
         end = _parse_ts(bar.get("bar_end"))
         if end is None:
             continue
-        if end < entry:
+        if end < retain_from:
             continue
         if start is not None and start > exit_ts:
-            continue
+            if included_after_exit:
+                continue
+            included_after_exit = True
         samples.append(
             {
                 "bar_start": start.isoformat() if start else None,
@@ -690,6 +776,46 @@ class _OpenAccumulatorIndex:
         return best
 
 
+class _CanonicalRecordIndex:
+    def __init__(self, rows: Sequence[Mapping[str, Any]]) -> None:
+        self._rows = [dict(row) for row in rows if isinstance(row, Mapping)]
+        self._by_trade: dict[str, Mapping[str, Any]] = {}
+        self._by_lifecycle: dict[str, Mapping[str, Any]] = {}
+        for row in self._rows:
+            if row.get("trade_id"):
+                self._by_trade.setdefault(str(row.get("trade_id")), row)
+            if row.get("source_trade_id"):
+                self._by_trade.setdefault(str(row.get("source_trade_id")), row)
+            if row.get("lifecycle_id"):
+                self._by_lifecycle.setdefault(str(row.get("lifecycle_id")), row)
+
+    def find_open(self, trade: Mapping[str, Any]) -> Mapping[str, Any]:
+        for value in (trade.get("source_trade_id"), trade.get("trade_id")):
+            if value and str(value) in self._by_trade:
+                return self._by_trade[str(value)]
+        lifecycle = trade.get("lifecycle_id") or trade.get("managed_position_id")
+        if lifecycle and str(lifecycle) in self._by_lifecycle:
+            return self._by_lifecycle[str(lifecycle)]
+        entry = _parse_ts(trade.get("entry_time"))
+        instrument = str(trade.get("instrument") or "").upper()
+        side = str(trade.get("side") or "").upper()
+        best: Mapping[str, Any] = {}
+        best_delta: float | None = None
+        for row in self._rows:
+            if str(row.get("symbol") or row.get("instrument") or "").upper() != instrument:
+                continue
+            if side and str(row.get("side") or "").upper() != side:
+                continue
+            row_entry = _parse_ts(row.get("entry_time"))
+            if row_entry is None or entry is None:
+                continue
+            delta = abs((row_entry - entry).total_seconds())
+            if delta <= 90 and (best_delta is None or delta < best_delta):
+                best = row
+                best_delta = delta
+        return best
+
+
 def _closed_canonical_records(rows: Sequence[Mapping[str, Any]]) -> list[Mapping[str, Any]]:
     closed: list[Mapping[str, Any]] = []
     for row in rows:
@@ -708,12 +834,29 @@ def _finalized_from_open_and_record(
     *,
     open_row: Mapping[str, Any],
     record: Mapping[str, Any],
+    runtime_candle_root: Path,
+    durable_candle_root: Path,
     generated_at: datetime,
     source_paths: Mapping[str, Path | str],
 ) -> dict[str, Any]:
-    samples = [dict(sample) for sample in open_row.get("path_samples") or [] if isinstance(sample, Mapping)]
     entry_time = _str_or_none(record.get("entry_time") or record.get("entry_timestamp") or open_row.get("entry_time"))
     exit_time = _str_or_none(record.get("exit_time") or record.get("exit_timestamp") or record.get("closed_at") or record.get("close_timestamp"))
+    instrument = str(record.get("symbol") or record.get("instrument") or open_row.get("instrument") or "").upper()
+    retained = [dict(sample) for sample in open_row.get("path_samples") or [] if isinstance(sample, Mapping)]
+    candle_payload, candle_path, candle_source_type = _read_preferred_candle_payload(
+        instrument=instrument,
+        runtime_candle_root=runtime_candle_root,
+        durable_candle_root=durable_candle_root,
+    )
+    closed_trade_for_samples = {
+        **dict(open_row),
+        "entry_time": entry_time,
+        "exit_time": exit_time,
+        "retain_from": (record.get("path_capture") or {}).get("retention", {}).get("retain_from")
+        if isinstance(record.get("path_capture"), Mapping)
+        else open_row.get("retain_from"),
+    }
+    samples = _merge_samples(retained, _samples_for_closed_trade(candle_payload.get("bars") or [], closed_trade_for_samples))
     side = str(record.get("side") or open_row.get("side") or "").upper()
     entry_price = _float_or_none(record.get("entry_price") or open_row.get("entry_price"))
     metrics = _path_metrics(samples=samples, side=side, entry_price=entry_price)
@@ -722,12 +865,14 @@ def _finalized_from_open_and_record(
         "schema_version": FINALIZED_SCHEMA_VERSION,
         "finalized_trade_path_capture_id": _stable_id("finalized_trade_path", open_row.get("accumulator_key"), record.get("trade_id"), entry_time, exit_time),
         "accumulator_key": open_row.get("accumulator_key"),
+        "capture_id": open_row.get("capture_id")
+        or ((record.get("path_capture") or {}).get("capture_id") if isinstance(record.get("path_capture"), Mapping) else None),
         "finalized_at": generated_at.isoformat(),
         "canonical_trade_record_id": record.get("trade_id") or record.get("source_trade_id"),
         "source_trade_id": record.get("source_trade_id") or record.get("trade_id") or open_row.get("source_trade_id"),
         "managed_position_id": open_row.get("managed_position_id"),
         "lifecycle_id": open_row.get("lifecycle_id") or record.get("lifecycle_id"),
-        "instrument": record.get("symbol") or record.get("instrument") or open_row.get("instrument"),
+        "instrument": instrument,
         "contract": record.get("contract") or open_row.get("contract"),
         "side": side,
         "entry_time": entry_time,
@@ -740,6 +885,8 @@ def _finalized_from_open_and_record(
         "path_start_timestamp": _sample_start(samples),
         "path_end_timestamp": _sample_end(samples),
         "path_coverage_status": status,
+        "capture_lifecycle_state": "FINALIZED" if status == "COMPLETE" else "FINALIZED_INCOMPLETE",
+        "capture_source_type": candle_source_type,
         "mfe": metrics.get("mfe"),
         "mae": metrics.get("mae"),
         "mfe_timestamp": metrics.get("mfe_timestamp"),
@@ -755,6 +902,7 @@ def _finalized_from_open_and_record(
             "open_accumulator_id": open_row.get("accumulator_id"),
             "open_accumulator_fingerprint": open_row.get("deterministic_fingerprint"),
             "canonical_trade_record_id": record.get("trade_id") or record.get("source_trade_id"),
+            "candle_artifact": str(candle_path),
         },
         "diagnostic_only": True,
         "production_recommendation": False,
@@ -762,6 +910,23 @@ def _finalized_from_open_and_record(
     }
     payload["deterministic_fingerprint"] = _fingerprint(_fingerprint_payload(payload))
     return payload
+
+
+def _read_preferred_candle_payload(
+    *,
+    instrument: str,
+    runtime_candle_root: Path,
+    durable_candle_root: Path,
+) -> tuple[dict[str, Any], Path, str]:
+    durable_path = durable_candle_root / instrument / "1m" / "latest_runtime_candles.json"
+    use_default_durable = durable_candle_root == DEFAULT_DURABLE_CANDLE_ROOT
+    use_default_runtime = runtime_candle_root == DEFAULT_RUNTIME_CANDLE_ROOT
+    if use_default_runtime or not use_default_durable:
+        durable_payload = _read_json(durable_path)
+        if isinstance(durable_payload.get("bars"), list) and durable_payload.get("bars"):
+            return durable_payload, durable_path, "DURABLE_INTRADAY_BACKFILL"
+    runtime_path = runtime_candle_root / instrument / "1m" / "latest_runtime_candles.json"
+    return _read_json(runtime_path), runtime_path, "RUNTIME_SNAPSHOT_FALLBACK"
 
 
 def _coverage_status(*, entry_time: Any, exit_time: Any, samples: Sequence[Mapping[str, Any]]) -> str:
@@ -775,9 +940,11 @@ def _coverage_status(*, entry_time: Any, exit_time: Any, samples: Sequence[Mappi
     last_end = _parse_ts(samples[-1].get("bar_end"))
     if entry is None or exit_ts is None or first_start is None or last_end is None:
         return "MISSING_SOURCE"
-    if first_start > entry:
+    required_start = entry - timedelta(minutes=30)
+    if first_start > required_start:
         return "PARTIAL_ENTRY_MISSING"
-    if last_end < exit_ts:
+    required_end = exit_ts + timedelta(minutes=1)
+    if last_end < required_end:
         return "PARTIAL_EXIT_MISSING"
     if _has_internal_gap(samples):
         return "PARTIAL_INTERNAL_GAP"
@@ -940,6 +1107,44 @@ def render_repair_report(status: Mapping[str, Any]) -> str:
             "Repair is explicit and diagnostic-only.",
         ]
     ) + "\n"
+
+
+def render_capture_extension_contract() -> str:
+    return """# Canonical Trade Path Capture Extension Contract
+
+This extension keeps the Canonical Trade Record as the identity spine. The
+record stores only path-capture references, fill anchors, lifecycle state,
+coverage state, and finalized summary metrics. Full 1m bar samples remain in
+the external RA8 artifacts:
+
+- `open_trade_path_accumulator.jsonl`
+- `finalized_trade_path_capture.jsonl`
+
+Authoritative candle source:
+
+1. `outputs/track_b_execution_core/phase1_runtime_market_data_intraday_backfill/{symbol}/1m/latest_runtime_candles.json`
+2. fallback only: `outputs/track_b_execution_core/phase1_runtime_market_data/{symbol}/1m/latest_runtime_candles.json`
+
+Complete research coverage requires:
+
+- at least 30 completed 1m bars before the decision/entry anchor,
+- entry-to-final-exit 1m bars,
+- one completed 1m bar after the final exit,
+- no internal gap greater than the configured gap threshold.
+
+Fill semantics:
+
+- first opening fill anchors the trade entry,
+- final closing fill anchors the trade exit,
+- partial fills, scale-ins, and scale-outs are folded into one canonical trade
+  when they share the same lifecycle/source trade id,
+- duplicate event replay is idempotent through `capture_id` and
+  `accumulator_key`.
+
+This is diagnostic/research only. Capture failure cannot affect order
+submission, strategy decisions, Managed Exit, readiness, reconciliation, broker
+authority, or trading gates.
+"""
 
 
 def _accumulator_key(trade: Mapping[str, Any]) -> str:

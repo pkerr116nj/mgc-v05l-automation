@@ -53,15 +53,36 @@ def test_no_duplicate_samples_on_repeated_invocation(tmp_path: Path) -> None:
     assert rows[0]["path_sample_count"] == 2
 
 
+def test_restart_gap_recovery_prefers_durable_intraday_backfill(tmp_path: Path) -> None:
+    runtime = tmp_path / "runtime"
+    durable = tmp_path / "durable"
+    _write_candles(runtime, "GC", [_bar("2026-07-07T12:02:00Z")])
+    _write_candles(durable, "GC", _complete_trade_bars())
+
+    rows, _ = accumulate_open_trade_paths(
+        [],
+        managed_positions=_managed_positions(),
+        canonical_records=[_open_canonical_record()],
+        runtime_candle_root=runtime,
+        durable_candle_root=durable,
+        generated_at=NOW,
+    )
+
+    assert rows[0]["path_sample_count"] == len(_complete_trade_bars())
+    assert rows[0]["source_refs"]["candle_source_type"] == "DURABLE_INTRADAY_BACKFILL"
+    assert rows[0]["capture_id"] == "capture_gc"
+
+
 def test_closed_trade_finalizes_complete_path_and_mfe_mae(tmp_path: Path) -> None:
     root = tmp_path / "candles"
-    _write_candles(root, "GC", [_bar("2026-07-07T12:01:00Z", high=101, low=99), _bar("2026-07-07T12:02:00Z", high=104, low=98)])
+    _write_candles(root, "GC", _complete_trade_bars())
     open_rows, _ = accumulate_open_trade_paths([], managed_positions=_managed_positions(), runtime_candle_root=root, generated_at=NOW)
 
     finalized, count, deferred = finalize_closed_trade_paths(
         open_rows,
         previous_finalized=[],
         canonical_records=[_closed_record()],
+        runtime_candle_root=root,
         generated_at=NOW,
     )
 
@@ -72,6 +93,23 @@ def test_closed_trade_finalizes_complete_path_and_mfe_mae(tmp_path: Path) -> Non
     assert finalized[0]["mae"] == -2.0
     assert finalized[0]["counterfactual_ready"]["timebox"] is True
     assert finalized[0]["counterfactual_ready"]["trailing"] is True
+    assert finalized[0]["capture_lifecycle_state"] == "FINALIZED"
+
+
+def test_missing_pre_entry_or_post_exit_bars_prevent_complete_research_evidence() -> None:
+    open_rows = [_open_row([_sample("2026-07-07T12:01:00Z"), _sample("2026-07-07T12:02:00Z"), _sample("2026-07-07T12:03:00Z")])]
+
+    finalized, _, _ = finalize_closed_trade_paths(
+        open_rows,
+        previous_finalized=[],
+        canonical_records=[_closed_record()],
+        runtime_candle_root=Path("missing_runtime"),
+        generated_at=NOW,
+        repair_finalized=True,
+    )
+
+    assert finalized[0]["path_coverage_status"] == "PARTIAL_ENTRY_MISSING"
+    assert finalized[0]["capture_lifecycle_state"] == "FINALIZED_INCOMPLETE"
 
 
 def test_partial_classifications_are_reported() -> None:
@@ -83,31 +121,49 @@ def test_partial_classifications_are_reported() -> None:
             ]
         )
     ]
-    finalized, _, _ = finalize_closed_trade_paths(open_rows, previous_finalized=[], canonical_records=[_closed_record()], generated_at=NOW)
+    finalized, _, _ = finalize_closed_trade_paths(
+        open_rows,
+        previous_finalized=[],
+        canonical_records=[_closed_record()],
+        runtime_candle_root=Path("missing_runtime"),
+        generated_at=NOW,
+    )
     assert finalized[0]["path_coverage_status"] == "PARTIAL_ENTRY_MISSING"
 
-    open_rows = [_open_row([_sample("2026-07-07T12:01:00Z", high=102, low=99)])]
-    finalized, _, _ = finalize_closed_trade_paths(open_rows, previous_finalized=[], canonical_records=[_closed_record()], generated_at=NOW, repair_finalized=True)
+    open_rows = [_open_row([_sample_from_bar(bar) for bar in _complete_trade_bars()[:-1]])]
+    finalized, _, _ = finalize_closed_trade_paths(
+        open_rows,
+        previous_finalized=[],
+        canonical_records=[_closed_record()],
+        runtime_candle_root=Path("missing_runtime"),
+        generated_at=NOW,
+        repair_finalized=True,
+    )
     assert finalized[0]["path_coverage_status"] == "PARTIAL_EXIT_MISSING"
 
     open_rows = [
         _open_row(
-            [
-                _sample("2026-07-07T12:01:00Z", high=101, low=99),
-                _sample("2026-07-07T12:05:00Z", high=104, low=98),
-            ]
+            [_sample_from_bar(bar) for index, bar in enumerate(_complete_trade_bars()) if index != 10]
         )
     ]
-    finalized, _, _ = finalize_closed_trade_paths(open_rows, previous_finalized=[], canonical_records=[_closed_record(exit_time="2026-07-07T12:05:00Z")], generated_at=NOW, repair_finalized=True)
+    finalized, _, _ = finalize_closed_trade_paths(
+        open_rows,
+        previous_finalized=[],
+        canonical_records=[_closed_record(exit_time="2026-07-07T12:02:00Z")],
+        runtime_candle_root=Path("missing_runtime"),
+        generated_at=NOW,
+        repair_finalized=True,
+    )
     assert finalized[0]["path_coverage_status"] == "PARTIAL_INTERNAL_GAP"
 
 
 def test_finalization_waits_when_exit_sample_missing_inside_grace_window() -> None:
-    open_rows = [_open_row([_sample("2026-07-07T12:01:00Z", high=102, low=99)])]
+    open_rows = [_open_row([_sample_from_bar(bar) for bar in _complete_trade_bars()[:-1]])]
     finalized, count, deferred = finalize_closed_trade_paths(
         open_rows,
         previous_finalized=[],
         canonical_records=[_closed_record(exit_time="2026-07-07T12:02:00Z")],
+        runtime_candle_root=Path("missing_runtime"),
         generated_at=datetime(2026, 7, 7, 12, 2, 30, tzinfo=UTC),
         finalization_grace_seconds=120,
     )
@@ -118,11 +174,12 @@ def test_finalization_waits_when_exit_sample_missing_inside_grace_window() -> No
 
 
 def test_finalizes_complete_when_exit_sample_arrives_after_grace_wait() -> None:
-    open_rows = [_open_row([_sample("2026-07-07T12:01:00Z", high=102, low=99), _sample("2026-07-07T12:02:00Z", high=104, low=98)])]
+    open_rows = [_open_row([_sample_from_bar(bar) for bar in _complete_trade_bars()])]
     finalized, count, deferred = finalize_closed_trade_paths(
         open_rows,
         previous_finalized=[],
         canonical_records=[_closed_record(exit_time="2026-07-07T12:02:00Z")],
+        runtime_candle_root=Path("missing_runtime"),
         generated_at=datetime(2026, 7, 7, 12, 2, 30, tzinfo=UTC),
         finalization_grace_seconds=120,
     )
@@ -133,11 +190,12 @@ def test_finalizes_complete_when_exit_sample_arrives_after_grace_wait() -> None:
 
 
 def test_finalizes_partial_exit_missing_after_grace_expires() -> None:
-    open_rows = [_open_row([_sample("2026-07-07T12:01:00Z", high=102, low=99)])]
+    open_rows = [_open_row([_sample_from_bar(bar) for bar in _complete_trade_bars()[:-1]])]
     finalized, count, deferred = finalize_closed_trade_paths(
         open_rows,
         previous_finalized=[],
         canonical_records=[_closed_record(exit_time="2026-07-07T12:02:00Z")],
+        runtime_candle_root=Path("missing_runtime"),
         generated_at=datetime(2026, 7, 7, 12, 5, 0, tzinfo=UTC),
         finalization_grace_seconds=120,
     )
@@ -149,7 +207,7 @@ def test_finalizes_partial_exit_missing_after_grace_expires() -> None:
 
 def test_repair_mode_can_complete_recent_partial_path_when_sample_available(tmp_path: Path) -> None:
     root = tmp_path / "candles"
-    _write_candles(root, "GC", [_bar("2026-07-07T12:01:00Z", high=102, low=99), _bar("2026-07-07T12:02:00Z", high=104, low=98)])
+    _write_candles(root, "GC", _complete_trade_bars())
     finalized = [
         {
             **_open_row([_sample("2026-07-07T12:01:00Z", high=102, low=99)]),
@@ -167,13 +225,13 @@ def test_repair_mode_can_complete_recent_partial_path_when_sample_available(tmp_
 
     assert repaired_count == 1
     assert repaired[0]["path_coverage_status"] == "COMPLETE"
-    assert repaired[0]["path_sample_count"] == 2
+    assert repaired[0]["path_sample_count"] == len(_complete_trade_bars())
     assert repaired[0]["repair_status"] == "REPAIRED_WITH_RUNTIME_CANDLES"
 
 
 def test_run_writes_json_jsonl_and_reports(tmp_path: Path) -> None:
     root = tmp_path / "candles"
-    _write_candles(root, "GC", [_bar("2026-07-07T12:01:00Z"), _bar("2026-07-07T12:02:00Z")])
+    _write_candles(root, "GC", _complete_trade_bars())
     managed = tmp_path / "managed.json"
     canonical = tmp_path / "canonical.jsonl"
     managed.write_text(json.dumps(_managed_positions()), encoding="utf-8")
@@ -271,6 +329,7 @@ def test_cadence_recovers_after_one_failed_pass(tmp_path: Path) -> None:
     assert recovered.status["classification"] == "RA8_CADENCE_SUCCEEDED"
     assert recovered.status["last_successful_run_at"] == NOW.isoformat()
     assert recovered.status["last_error"] is None
+    assert recovered.status["failure_isolated_from_trading"] is True
 
 
 def test_cadence_open_paths_continue_updating(tmp_path: Path) -> None:
@@ -308,7 +367,7 @@ def test_cadence_does_not_rewrite_finalized_paths_without_repair(tmp_path: Path)
     canonical = tmp_path / "canonical.jsonl"
     managed.write_text(json.dumps(_managed_positions()), encoding="utf-8")
     canonical.write_text(json.dumps(_closed_record()) + "\n", encoding="utf-8")
-    _write_candles(root, "GC", [_bar("2026-07-07T12:01:00Z"), _bar("2026-07-07T12:02:00Z")])
+    _write_candles(root, "GC", _complete_trade_bars())
     run_live_trade_path_accumulator_cadence_once(
         managed_positions_path=managed,
         canonical_records_path=canonical,
@@ -386,6 +445,29 @@ def test_import_boundary() -> None:
     assert violations == []
 
 
+def test_deterministic_rejoin_by_capture_id_and_canonical_identity(tmp_path: Path) -> None:
+    root = tmp_path / "candles"
+    _write_candles(root, "GC", _complete_trade_bars())
+    open_rows, _ = accumulate_open_trade_paths(
+        [],
+        managed_positions=_managed_positions(),
+        canonical_records=[_open_canonical_record()],
+        runtime_candle_root=root,
+        generated_at=NOW,
+    )
+    finalized, _, _ = finalize_closed_trade_paths(
+        open_rows,
+        previous_finalized=[],
+        canonical_records=[_closed_record()],
+        runtime_candle_root=root,
+        generated_at=NOW,
+    )
+
+    assert finalized[0]["capture_id"] == "capture_gc"
+    assert finalized[0]["canonical_trade_record_id"] == "trade_open_gc"
+    assert finalized[0]["source_trade_id"] == "trade_open_gc"
+
+
 def _managed_positions() -> dict:
     return {
         "managed_positions": [
@@ -415,6 +497,28 @@ def _closed_record(*, exit_time: str = "2026-07-07T12:02:00Z") -> dict:
         "exit_price": 102.0,
         "quantity": 1,
         "trade_status": "CLOSED",
+    }
+
+
+def _open_canonical_record() -> dict:
+    return {
+        "event_type": "CANONICAL_TRADE_RECORD",
+        "trade_id": "trade_open_gc",
+        "source_trade_id": "trade_open_gc",
+        "lifecycle_id": "life_gc",
+        "symbol": "GC",
+        "side": "LONG",
+        "entry_time": "2026-07-07T12:00:30Z",
+        "entry_price": 100.0,
+        "quantity": 1,
+        "trade_status": "OPEN_OR_UNPAIRED",
+        "path_capture": {
+            "capture_id": "capture_gc",
+            "retention": {
+                "retain_from": "2026-07-07T11:30:30+00:00",
+                "retain_until": None,
+            },
+        },
     }
 
 
@@ -451,6 +555,29 @@ def _bar(end: str, *, high: float = 101.0, low: float = 99.0) -> dict:
         "close": 100.0,
         "volume": 1,
         "completed": True,
+    }
+
+
+def _complete_trade_bars() -> list[dict]:
+    bars = []
+    start = datetime.fromisoformat("2026-07-07T11:31:00+00:00")
+    for offset in range(33):
+        end = start + __import__("datetime").timedelta(minutes=offset)
+        high = 104.0 if end.isoformat() == "2026-07-07T12:02:00+00:00" else 101.0
+        low = 98.0 if end.isoformat() == "2026-07-07T12:02:00+00:00" else 99.0
+        bars.append(_bar(end.isoformat(), high=high, low=low))
+    return bars
+
+
+def _sample_from_bar(bar: dict) -> dict:
+    return {
+        "bar_start": bar["bar_start"],
+        "bar_end": str(bar["bar_end"]).replace("Z", "+00:00"),
+        "open": bar["open"],
+        "high": bar["high"],
+        "low": bar["low"],
+        "close": bar["close"],
+        "volume": bar["volume"],
     }
 
 
