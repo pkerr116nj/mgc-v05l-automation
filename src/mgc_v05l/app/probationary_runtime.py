@@ -7968,6 +7968,11 @@ class ProbationaryPaperSupervisor:
                 lane_processing_durations: list[dict[str, Any]] = []
                 with phase1_runtime_artifact_poll_cache() as phase1_poll_cache:
                     for lane in active_lanes:
+                        if self._stop_requested:
+                            return self._finalize_signal_stop_summary(
+                                new_bars=new_bars,
+                                reconciliation_clean=reconciliation_clean,
+                            )
                         lane_started_at = time_module.perf_counter()
                         try:
                             if getattr(lane.spec, "runtime_kind", "") in {
@@ -8066,6 +8071,12 @@ class ProbationaryPaperSupervisor:
                             reconciliation_clean = False
                     phase1_poll_cache_snapshot = phase1_poll_cache.snapshot()
 
+                if self._stop_requested:
+                    return self._finalize_signal_stop_summary(
+                        new_bars=new_bars,
+                        reconciliation_clean=reconciliation_clean,
+                    )
+
                 maintenance_started_at = time_module.perf_counter()
                 managed_open_position_maintenance = _run_probationary_managed_open_position_maintenance(
                     settings=self._settings,
@@ -8117,6 +8128,12 @@ class ProbationaryPaperSupervisor:
                     risk_events=risk_events,
                     reconciliation_clean=reconciliation_clean,
                 )
+                if self._stop_requested:
+                    return self._finalize_signal_stop_summary(
+                        new_bars=new_bars,
+                        reconciliation_clean=reconciliation_clean,
+                    )
+
                 authority_status_started_at = time_module.perf_counter()
                 authority_status_substages: list[dict[str, Any]] = []
 
@@ -8434,6 +8451,33 @@ class ProbationaryPaperSupervisor:
                 )
                 if stop_reason is not None
                 else None
+            ),
+        )
+
+    def _finalize_signal_stop_summary(
+        self,
+        *,
+        new_bars: int,
+        reconciliation_clean: bool,
+    ) -> ProbationaryPaperSummary:
+        requested_at = None
+        if self._stop_signal_payload:
+            requested_at = str(self._stop_signal_payload.get("requested_at") or "")
+        return ProbationaryPaperSummary(
+            processed_bars=sum(lane.repositories.processed_bars.count() for lane in self._lanes),
+            new_bars=new_bars,
+            last_processed_bar_end_ts=_latest_probationary_lane_processed_ts(self._lanes),
+            operator_status_path=str(self._structured_logger.artifact_dir / "operator_status.json"),
+            artifacts_dir=str(self._structured_logger.artifact_dir),
+            reconciliation_clean=reconciliation_clean,
+            stop_reason="signal_stop_requested",
+            stop_provenance=_build_probationary_runtime_stop_provenance(
+                stop_source="signal",
+                stop_reason="signal_stop_requested",
+                runtime_instance_id=self._runtime_instance_id,
+                requested_at=requested_at,
+                expected_cleanup=False,
+                broker_safe_at_stop=True,
             ),
         )
 

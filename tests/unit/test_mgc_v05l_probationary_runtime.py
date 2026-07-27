@@ -11032,6 +11032,72 @@ def test_probationary_supervisor_runs_managed_maintenance_without_lane_candidate
     assert calls[0].diagnostic_json == tmp_path / "outputs" / "track_b_execution_core" / "diagnostics" / "latest_track_b_managed_open_position_maintenance.json"
 
 
+def test_probationary_supervisor_signal_stop_preempts_remaining_lanes_and_maintenance(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = _build_probationary_paper_settings(tmp_path)
+    root_logger = StructuredLogger(tmp_path / "root")
+    first_lane = _prepare_supervisor_test_lane(
+        _seed_test_lane(
+            tmp_path,
+            lane_id="mnq_lane",
+            symbol="MNQ",
+            source="usLatePauseResumeLongTurn",
+            session_restriction="US_LATE",
+            point_value=Decimal("2"),
+        )
+    )
+    second_lane = _prepare_supervisor_test_lane(
+        _seed_test_lane(
+            tmp_path,
+            lane_id="mgc_lane",
+            symbol="MGC",
+            source="usLatePauseResumeLongTurn",
+            session_restriction="US_LATE",
+            point_value=Decimal("10"),
+        )
+    )
+    first_lane.restore_startup = lambda: None
+    second_lane.restore_startup = lambda: None
+    supervisor = probationary_runtime_module.ProbationaryPaperSupervisor(
+        settings=settings,
+        lanes=[first_lane, second_lane],
+        structured_logger=root_logger,
+        alert_dispatcher=AlertDispatcher(root_logger),
+    )
+
+    def _first_poll():
+        supervisor._stop_requested = True
+        supervisor._stop_signal_payload = {
+            "signal": 15,
+            "requested_at": "2026-07-27T07:00:00+00:00",
+            "stop_source": "signal",
+        }
+        return 1, {"clean": True}, None
+
+    first_lane.poll_and_process = _first_poll
+    second_lane.poll_and_process = lambda: pytest.fail("signal stop should preempt remaining lanes")
+    monkeypatch.setattr(supervisor, "_install_signal_handlers", lambda: {})
+    monkeypatch.setattr(supervisor, "_restore_signal_handlers", lambda _previous: None)
+    monkeypatch.setattr(
+        probationary_runtime_module,
+        "_run_probationary_managed_open_position_maintenance",
+        lambda **_kwargs: pytest.fail("signal stop should preempt managed maintenance"),
+    )
+
+    summary = supervisor.run()
+
+    assert summary.stop_reason == "signal_stop_requested"
+    assert summary.new_bars == 1
+    assert summary.reconciliation_clean is True
+    assert summary.stop_provenance is not None
+    assert summary.stop_provenance["stop_source"] == "signal"
+    assert summary.stop_provenance["requested_at"] == "2026-07-27T07:00:00+00:00"
+    assert summary.stop_provenance["expected_cleanup"] is False
+    assert summary.stop_provenance["broker_safe_at_stop"] is True
+
+
 def test_probationary_supervisor_writes_managed_maintenance_failure_diagnostic(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
