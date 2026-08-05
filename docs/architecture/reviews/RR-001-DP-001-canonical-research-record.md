@@ -90,10 +90,8 @@ None.
 
 There are no blocking architectural concerns.
 
-However, DP-001 must be revised before approval or implementation. No ADR should be created until the revised proposal is reviewed and accepted.
+DP-001 was revised after this review, and ADR-001 records the accepted decision.
 
 ## Recommendation For Next Action
 
-Revise `docs/architecture/proposals/DP-001-canonical-research-record.md` to incorporate the accepted changes and explicitly address the deferred questions.
-
-After revision, decide whether to approve DP-001 and create ADR-001. Do not implement CRR before that approval.
+Proceed from ADR-001 to bounded CRR v1 implementation planning. Do not implement CRR outside the ADR-001 implementation boundary.

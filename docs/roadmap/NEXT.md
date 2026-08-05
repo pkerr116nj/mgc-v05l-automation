@@ -4,7 +4,7 @@ This page holds the next tranche of planning work after `NOW.md`. Items here sho
 
 ## Research Data Spine
 
-- Define a canonical research record contract that references, but does not replace, Canonical Trade Records, CTOL, CTOE, RA8, and RA7.
+- Plan and implement the accepted Canonical Research Record v1 contract from ADR-001.
 - Add a documented join contract for `trade_id`, `source_trade_id`, `trade_outcome_id`, `capture_id`, and `canonical_trade_path_id`.
 - Identify which current joins still require timestamp/contract tolerance and prioritize converting them to explicit identifiers.
 - Document the difference between raw truth, canonical derived truth, and research-derived evidence.
@@ -33,6 +33,5 @@ This page holds the next tranche of planning work after `NOW.md`. Items here sho
 
 ## Decision Records
 
-- Promote durable architecture decisions into `docs/architecture/decisions/` once they have been implemented and validated.
+- Promote durable architecture decisions into `docs/architecture/decisions/` once accepted through the governance lifecycle.
 - Keep speculative work in `docs/architecture/proposals/` until accepted.
-

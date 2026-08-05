@@ -92,7 +92,7 @@ Operational provenance artifacts:
 - `outputs/track_b_execution_core/managed_positions/latest_managed_positions.json`
 - `outputs/track_b_execution_core/managed_orders/latest_managed_orders.json`
 - `outputs/track_b_execution_core/broker_position_guardian/latest_broker_position_guardian.json`
-- `outputs/track_b_execution_core/runtime_safe_state/latest_runtime_safe_state_envelope.json`
+- `outputs/track_b_execution_core/safe_state/latest_runtime_safe_state_envelope.json`
 - `outputs/track_b_execution_core/*truth*/latest_*.json`
 
 Research and planning evidence:
@@ -156,4 +156,3 @@ The baseline supports a small canonical research record or envelope because the 
 The current platform should be consolidated and evolved, not replaced.
 
 Existing RA1-RA8, CAE, REF, CTOL, and CTOE work must be preserved. DP-001 should create a research-facing connective layer over those artifacts, not a competing data model that weakens established authority boundaries.
-

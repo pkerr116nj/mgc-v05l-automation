@@ -18,7 +18,8 @@ The current research spine is:
 2. Canonical Trade Records are authoritative for completed trade identity.
 3. CTOL and CTOE provide completed-trade analytics and enrichment.
 4. RA8 finalized capture and RA7 canonical paths provide path research evidence.
-5. Operational artifacts provide safety and provenance.
+5. RA3 provides subordinate deterministic attribution evidence.
+6. Operational artifacts provide safety and provenance.
 
 The current data-flow inventory lives at:
 
