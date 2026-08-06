@@ -49,8 +49,9 @@ Future major work should:
 
 - `ENGINEERING_PROCESS.md`
 - `PROJECT_PRINCIPLES.md`
+- `docs/architecture/human-ai-engineering-methodology.md`
+- `docs/architecture/evidence-driven-engineering-lessons.md`
 - `docs/architecture/baselines/BA-001-current-research-platform.md`
 - `docs/architecture/proposals/DP-001-canonical-research-record.md`
 - `docs/architecture/reviews/RR-001-DP-001-canonical-research-record.md`
 - `docs/architecture/decisions/ADR-001-canonical-research-record.md`
-

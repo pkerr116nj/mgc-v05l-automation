@@ -12,6 +12,7 @@ These are useful but not part of the current research-platform spine work. Keep 
 - Mission Control operational health improvements.
 - Journald/logging review.
 - Jupiter post-Atlas performance observation.
+- Cold/archive storage design and retention-class implementation.
 
 ## Research Platform Later
 
@@ -25,4 +26,3 @@ These are useful but not part of the current research-platform spine work. Keep 
 - Short runbooks for the canonical start/stop/recovery paths.
 - Clear operator-facing distinction between broker truth, lifecycle truth, and research truth.
 - A small health page that emphasizes alive/stale states instead of detailed internals.
-

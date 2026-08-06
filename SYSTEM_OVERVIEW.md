@@ -16,8 +16,12 @@ The repository supports deterministic PAPER trading, managed exits, operational 
 - CTOL and CTOE: provide completed-trade outcomes and enrichment.
 - RA and REF layers: provide path evidence, attribution, diagnostics, hypotheses, and offline experiments.
 - CAE: provides reusable analytics queries and result interpretation.
-- Mission Control: provides operational awareness.
+- Mission Control: provides operational awareness; its philosophy is recorded in `docs/architecture/mission-control-philosophy.md`.
 - Governance docs: preserve reasoning, decisions, and direction.
+
+The operator workstation and trading-application role separation is summarized in `docs/operations/trading-workstation-and-operator-workflow.md`.
+
+The human-AI engineering methodology is summarized in `docs/architecture/human-ai-engineering-methodology.md`.
 
 ## Authority Hierarchy
 
@@ -30,11 +34,21 @@ The repository supports deterministic PAPER trading, managed exits, operational 
 
 Derived research artifacts do not control runtime, broker, Managed Exit, Guardian, Safe-State, readiness, reconciliation, strategy, or trading gates.
 
+Track B architectural invariants are summarized in `docs/architecture/track-b-architectural-invariants.md`.
+
+Durable engineering lessons behind those invariants are summarized in `docs/architecture/evidence-driven-engineering-lessons.md`.
+
 ## Current Epics
 
 The active research-platform epic is `docs/epics/EPIC-002-research-platform.md`.
 
 Its current direction is to implement the Canonical Research Record v1 as a bounded, derived research contract over existing artifacts.
+
+Current Pattern Engine and replay/operator research terminology is summarized in `docs/research/pattern-engine-current-state.md`.
+
+The long-term Research Analytics Platform vision is recorded in `docs/architecture/research-analytics-platform-vision.md`.
+
+The long-term Decision Intelligence vision is recorded in `docs/architecture/decision-intelligence-vision.md`.
 
 ## Current Direction
 
@@ -45,4 +59,3 @@ The project is moving toward a coherent research and operations platform:
 - Improve path, context, attribution, and join quality over time.
 - Use Git-backed governance for major architectural changes.
 - Preserve runtime and research isolation.
-

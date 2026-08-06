@@ -46,6 +46,6 @@ Future Mission Control work should:
 
 - `SYSTEM_OVERVIEW.md`
 - `PROJECT_PRINCIPLES.md`
+- `docs/architecture/decision-intelligence-vision.md`
 - `docs/architecture/narratives/AN-002-infrastructure-evolution.md`
 - `docs/architecture/narratives/AN-003-trading-platform-evolution.md`
-

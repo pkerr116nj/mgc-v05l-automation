@@ -10,6 +10,8 @@ Build a coherent research platform on top of the existing Track B PAPER trading 
 
 This epic consolidates existing RA1-RA8, CTOL, CTOE, CAE, REF, and related work. It does not replace those layers.
 
+The long-term research analytics platform vision is recorded in `docs/architecture/research-analytics-platform-vision.md`.
+
 ## Factual Basis
 
 The current research spine is:

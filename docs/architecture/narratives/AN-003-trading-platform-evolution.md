@@ -49,8 +49,10 @@ Live readiness should emerge from evidence, not from optimistic interpretation o
 
 ## Related Documents
 
+- `docs/architecture/track-b-architectural-invariants.md`
+- `docs/architecture/evidence-driven-engineering-lessons.md`
+- `docs/architecture/mission-control-philosophy.md`
 - `docs/track_b_architecture_map.md`
 - `docs/architecture/baselines/BA-001-current-research-platform.md`
 - `docs/architecture/decisions/ADR-001-canonical-research-record.md`
 - `docs/architecture/narratives/AN-004-research-platform-evolution.md`
-

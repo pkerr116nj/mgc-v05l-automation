@@ -18,6 +18,8 @@ As PAPER trading matured, the platform needed durable evidence. Canonical Trade 
 
 Autonomous PAPER trading created a research opportunity: completed trades could become empirical evidence. RA layers, CAE, REF, path capture, attribution, and experiment tooling formed a research platform around actual completed trades.
 
+The long-term research analytics platform vision is recorded in `docs/architecture/research-analytics-platform-vision.md`.
+
 The Canonical Research Record decision consolidates this work into one derived research-facing contract without replacing the existing authority layers.
 
 ## Infrastructure Platform
@@ -28,7 +30,12 @@ The surrounding environment also changed. Network, service placement, monitoring
 
 The project then formalized its engineering memory. Baselines, design proposals, review resolutions, architecture decisions, and architecture narratives now capture reasoning that previously lived mostly in conversation.
 
+Durable engineering lessons learned from Track B leak testing, reconciliation, migration, and research are summarized in `docs/architecture/evidence-driven-engineering-lessons.md`.
+
+The collaboration methodology for architecture, review, implementation, validation, and knowledge capture is recorded in `docs/architecture/human-ai-engineering-methodology.md`.
+
 ## Future Decision Intelligence
 
 The future direction is evidence-driven decision support: durable artifacts, deterministic analytics, bounded experiments, explicit authority, and clear governance. The goal is not to let research make trading decisions automatically. The goal is to make future decisions better grounded, better reviewed, and easier to reproduce.
 
+The long-term vision is recorded in `docs/architecture/decision-intelligence-vision.md`.

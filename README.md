@@ -1,316 +1,220 @@
-# mgc-v05l-automation
+# MGC-v05l Automation
 
-Research-first trading strategy platform with legacy v0.5l benchmark support, SQLite-backed evidence storage, and a Schwab market-data integration path that normalizes into the same internal bar model used by replay and research flows.
+MGC-v05l automation is a PAPER-first trading and research platform for developing, supervising, and analyzing autonomous futures strategy behavior.
 
-Governing framework:
-- new strategy work follows the research-first platform charter in `docs/specs/RESEARCH_FIRST_STRATEGY_PLATFORM_CHARTER.md`
-- Thinkorswim parity remains available as a benchmark lane, not as the platform's global objective
+The repository combines deterministic PAPER trading, Managed Exit supervision, broker-truth safety, completed-trade evidence, research analytics, and Git-backed engineering governance.
 
-Current legacy benchmark lane:
-- replay-first and completed-bar only remain locked for benchmark reproduction
-- replay fills remain `NEXT_BAR_OPEN` for the legacy benchmark lane
-- each `strategy_identity_root + instrument` pair is a standalone strategy identity
-- concurrent different-instrument standalone strategies are supported
-- same-underlying position arbitration remains explicitly constrained unless implemented
+This README is the entry point for a new engineer. It points to the durable project knowledge without duplicating the underlying documents.
 
-## Current Architecture
+## Recommended Reading Order
 
-- `replay` remains the deterministic benchmark and debug path
-- replay/backtest now coordinates multiple standalone strategy identities through the shared runtime registry instead of a single-engine harness
-- Schwab historical data flows through explicit symbol mapping and normalization into the same internal `Bar` type
-- strategy logic stays broker-agnostic and unchanged by the market-data adapter
-- live broker functionality remains staged and bounded
-- research modules can challenge session, timeframe, and execution assumptions as long as provenance stays explicit
-- experimental causal momentum research remains isolated from production signals
-- EMA momentum evaluation reporting remains research-only and additive
+1. `SYSTEM_OVERVIEW.md` explains the platform purpose, major subsystems, authority hierarchy, and current direction.
+2. `PROJECT_PRINCIPLES.md` records the durable engineering principles that future work should preserve.
+3. `ENGINEERING_PROCESS.md` defines the governance lifecycle for routine, architecture, and emergency changes.
+4. `docs/architecture/track-b-architectural-invariants.md` summarizes the non-negotiable Track B authority, safety, and research/runtime boundaries.
+5. `docs/architecture/evidence-driven-engineering-lessons.md` explains why the project emphasizes broker truth, provenance, generalized fixes, bounded experiments, and governed promotion.
+6. `docs/architecture/decisions/ADR-001-canonical-research-record.md` records the accepted Canonical Research Record architecture decision.
+7. `docs/epics/EPIC-002-research-platform.md` describes the active research-platform epic and next implementation milestone.
+8. `docs/roadmap/NOW.md`, `docs/roadmap/NEXT.md`, and `docs/roadmap/PARKING_LOT.md` show current work, next work, and deferred ideas.
 
-## Install
+## Documentation Organization
 
-```bash
-python3.11 -m venv .venv
-. .venv/bin/activate
-pip install -e ".[dev]"
+### Governance
+
+- `ENGINEERING_PROCESS.md` defines the project lifecycle from idea through validation and closeout.
+- `docs/architecture/human-ai-engineering-methodology.md` explains the collaboration model for product ownership, architecture, review, implementation, validation, and knowledge capture.
+- `docs/architecture/IMPLEMENTATION_QUEUE.md` lists accepted architecture work awaiting implementation planning.
+
+### Architecture
+
+- `SYSTEM_OVERVIEW.md` is the concise map of the current platform.
+- `PROJECT_PRINCIPLES.md` records durable principles.
+- `docs/architecture/track-b-architectural-invariants.md` records Track B-specific invariants.
+- `docs/architecture/research-analytics-platform-vision.md` describes the long-term research analytics platform after CRR v1.
+- `docs/architecture/decision-intelligence-vision.md` describes the long-term advisory decision-support direction.
+- `docs/architecture/mission-control-philosophy.md` records the purpose and authority boundaries of Mission Control.
+- `docs/architecture/evidence-driven-engineering-lessons.md` summarizes lessons that shaped the current engineering posture.
+
+### Operations
+
+- `docs/operations/current-infrastructure-baseline.md` describes current host responsibilities from an ownership perspective.
+- `docs/operations/trading-workstation-and-operator-workflow.md` describes the current operator environment and workstation role separation.
+- `docs/operations/data-retention-and-archive-policy.md` records retention and archive direction for logs, artifacts, and research evidence.
+- `docs/operations/closeouts/atlas-regime-monitor-migration-closeout.md` closes out the Atlas Regime Monitor migration.
+
+### Research
+
+- `docs/epics/EPIC-002-research-platform.md` is the active epic for consolidating completed-trade research.
+- `docs/research/pattern-engine-current-state.md` records the current Pattern Engine and operator-baseline terminology.
+- `outputs/reports/research_data_inventory/research_data_inventory.md` inventories persistent data produced by the paper trading system.
+- `outputs/reports/research_data_inventory/research_data_flow_diagram.md` shows the research data-flow relationships.
+
+### Narratives
+
+- `docs/architecture/narratives/AN-001-physical-network-evolution.md` explains physical network evolution.
+- `docs/architecture/narratives/AN-002-infrastructure-evolution.md` explains infrastructure ownership evolution.
+- `docs/architecture/narratives/AN-003-trading-platform-evolution.md` explains the move toward deterministic PAPER execution.
+- `docs/architecture/narratives/AN-004-research-platform-evolution.md` explains the research platform evolution.
+- `docs/architecture/narratives/AN-005-mission-control-evolution.md` explains Mission Control evolution.
+- `docs/architecture/narratives/AN-006-engineering-governance-evolution.md` explains the governance evolution.
+
+### Roadmaps
+
+- `docs/roadmap/NOW.md` identifies active governance and implementation focus.
+- `docs/roadmap/NEXT.md` lists near-term planning and implementation candidates.
+- `docs/roadmap/PARKING_LOT.md` keeps useful deferred work visible without interrupting current priorities.
+
+### Decisions
+
+- `docs/architecture/baselines/BA-001-current-research-platform.md` records the factual pre-design research-platform baseline.
+- `docs/architecture/proposals/DP-001-canonical-research-record.md` is the accepted proposal superseded by ADR-001 for implementation governance.
+- `docs/architecture/reviews/RR-001-DP-001-canonical-research-record.md` resolves the independent review of DP-001.
+- `docs/architecture/decisions/ADR-001-canonical-research-record.md` is the accepted CRR architecture decision.
+
+### Closeouts
+
+- `docs/operations/closeouts/atlas-regime-monitor-migration-closeout.md` records completion, validation, and lessons from the Atlas Regime Monitor migration.
+
+## Documentation Taxonomy
+
+| Document Or Area | Category | Why Read It |
+| --- | --- | --- |
+| `PROJECT_PRINCIPLES.md` | WHY | Understand the durable principles behind the project. |
+| `docs/architecture/evidence-driven-engineering-lessons.md` | WHY | Understand the hard-won engineering lessons behind the current posture. |
+| `docs/architecture/research-analytics-platform-vision.md` | WHY | Understand the intended research platform direction after CRR v1. |
+| `docs/architecture/decision-intelligence-vision.md` | WHY | Understand future advisory decision support without authority drift. |
+| `docs/architecture/mission-control-philosophy.md` | WHY | Understand what Mission Control should and should not become. |
+| `docs/architecture/human-ai-engineering-methodology.md` | WHY | Understand how collaborative engineering work is conceived, challenged, implemented, and preserved. |
+| `docs/architecture/narratives/` | WHY | Understand subsystem evolution and architectural reasoning over time. |
+| `SYSTEM_OVERVIEW.md` | WHAT | Understand the current platform, subsystems, and authority hierarchy. |
+| `docs/architecture/track-b-architectural-invariants.md` | WHAT | Understand the current non-negotiable Track B invariants. |
+| `docs/architecture/baselines/` | WHAT | Understand factual current state before design work. |
+| `docs/epics/` | WHAT | Understand active multi-step product and architecture objectives. |
+| `docs/research/` | WHAT | Understand current research terminology and retained research state. |
+| `docs/roadmap/` | WHAT | Understand current, next, and deferred work. |
+| `ENGINEERING_PROCESS.md` | HOW | Understand the governance lifecycle and change tracks. |
+| `docs/architecture/proposals/` | HOW | Understand proposed designs before acceptance. |
+| `docs/architecture/reviews/` | HOW | Understand independent review findings and resolution. |
+| `docs/architecture/decisions/` | HOW | Understand accepted decisions and implementation boundaries. |
+| `docs/operations/` | HOW | Understand operational baselines, policies, closeouts, and workstation practices. |
+| `docs/specs/` and legacy runbooks | HOW | Understand older or subsystem-specific implementation/runbook material when needed. |
+
+## Documentation Dependency Map
+
+```text
+PROJECT_PRINCIPLES
+  -> SYSTEM_OVERVIEW
+  -> Track B Architectural Invariants
+  -> Evidence-Driven Engineering Lessons
+
+ENGINEERING_PROCESS
+  -> Human-AI Engineering Methodology
+  -> Baselines
+  -> Design Proposals
+  -> Review Resolutions
+  -> ADRs
+  -> Closeouts
+
+SYSTEM_OVERVIEW
+  -> Architecture visions and invariants
+  -> Operations baselines and policies
+  -> Research epic and research state
+  -> Roadmaps
+
+ADR-001 Canonical Research Record
+  <- BA-001 baseline
+  <- DP-001 proposal
+  <- RR-001 review resolution
+  -> EPIC-002 implementation planning
+  -> Research Analytics Platform Vision
+
+Operations documents
+  -> Current infrastructure baseline
+  -> Operator workflow
+  -> Retention and archive policy
+  -> Migration closeouts
+
+Research documents
+  -> Pattern Engine current state
+  -> Research data inventory outputs
+  -> EPIC-002
+  -> CRR v1 planning
 ```
 
-Active Trend Participation Engine research storage needs the optional research extras:
+## Repository Health Report
 
-```bash
-pip install -e ".[dev,research]"
+### Inventory
+
+| Family | Count | Notes |
+| --- | ---: | --- |
+| Architecture narratives | 6 | AN-001 through AN-006 are present. |
+| Baselines | 1 | BA-001 covers the current research platform. |
+| ADRs | 1 | ADR-001 accepts the Canonical Research Record. |
+| Design Proposals | 1 | DP-001 is accepted and superseded by ADR-001 for implementation governance. |
+| Review Resolutions | 1 | RR-001 is complete. |
+| Epics | 1 | EPIC-002 is active for the research platform. |
+| Operational policies and baselines | 4 | Current infrastructure, operator workflow, retention/archive, and Atlas closeout. |
+| Research docs under `docs/research/` | 1 | Pattern Engine current state; question/experiment/finding folders are ready for future use. |
+| Roadmaps | 3 | NOW, NEXT, and PARKING_LOT are present. |
+| Top-level architecture docs | 7 | Implementation queue, invariants, Mission Control, Decision Intelligence, Research Analytics, engineering lessons, and methodology. |
+
+### Empty Folders
+
+No empty documentation folders were found. Placeholder `.gitkeep` files remain in intentionally reserved folders such as `docs/research/questions/`, `docs/research/experiments/`, `docs/research/findings/`, `docs/operations/`, and `docs/architecture/decisions/`.
+
+### Orphaned Or Low-Inbound Documents
+
+No broken Markdown links were found.
+
+Some older legacy runbooks, specs, and Track B design documents are intentionally not woven into the new governance spine. They remain useful historical or subsystem-specific references, but the new entry path should start from this README, `SYSTEM_OVERVIEW.md`, `PROJECT_PRINCIPLES.md`, and `ENGINEERING_PROCESS.md`.
+
+### Duplicate Docs Or Concepts
+
+No duplicate governance documents were identified in the Knowledge Foundation set.
+
+Some concepts intentionally recur across documents:
+
+- Broker truth as current exposure authority.
+- Research/runtime isolation.
+- Missing evidence remains missing.
+- Git as institutional memory.
+
+These recurrences are deliberate cross-cutting principles rather than duplicate definitions.
+
+### Superseded Artifacts
+
+`docs/architecture/proposals/DP-001-canonical-research-record.md` is accepted and superseded as the active implementation-governance record by `docs/architecture/decisions/ADR-001-canonical-research-record.md`.
+
+No other superseded governance artifact was identified during this pass.
+
+## Commit Preparation
+
+Suggested commit title:
+
+```text
+docs: prepare knowledge foundation milestone
 ```
 
-## Required Environment Variables
+Suggested commit body:
 
-Schwab auth uses environment variables and local token storage. Do not commit secrets.
+```text
+Create the repository documentation entry point for the Knowledge Foundation milestone.
 
-```bash
-export SCHWAB_APP_KEY="your-app-key"
-export SCHWAB_APP_SECRET="your-app-secret"
-export SCHWAB_CALLBACK_URL="https://127.0.0.1:8182/callback"
-export SCHWAB_TOKEN_FILE=".local/schwab/tokens.json"
+Summarize recommended reading order, documentation organization, WHY/WHAT/HOW taxonomy, dependency map, and repository documentation health.
+
+Keep the work documentation-only and preserve existing runtime, trading, service, and generated-output boundaries.
 ```
 
-`.env.example` shows the expected variable names. The default local token file path is gitignored.
+Suggested Git tag:
 
-## Replay Usage
-
-```bash
-mgc-v05l replay \
-  --config config/base.yaml \
-  --config config/replay.yaml \
-  --csv /path/to/mgc_replay.csv
+```text
+knowledge-foundation-v1
 ```
 
-Replay uses the legacy benchmark fill policy `NEXT_BAR_OPEN` and prints:
-- aggregate replay summary
-- one per-standalone-strategy summary
-- backward-compatible top-level totals for legacy tooling
+Suggested milestone name:
 
-Replay CSV input remains backward compatible with the legacy single-symbol format:
-- `timestamp,open,high,low,close,volume`
-
-It also supports standalone multi-strategy replay input with explicit symbols:
-- `symbol,timestamp,open,high,low,close,volume`
-- `symbol,timeframe,timestamp,open,high,low,close,volume`
-
-Example multi-symbol replay:
-
-```bash
-mgc-v05l replay \
-  --config config/base.yaml \
-  --config config/replay.yaml \
-  --csv /path/to/multi_strategy_replay.csv \
-  --output /tmp/replay_summary.json \
-  --markdown-output /tmp/replay_summary.md
+```text
+Knowledge Foundation v1
 ```
 
-Replay output contract:
-- top-level totals stay present for legacy compatibility
-- `primary_standalone_strategy_id` identifies the primary runtime row used for backward-compatible final state fields
-- `per_strategy_summaries` contains one summary per standalone strategy identity
-- `aggregate_portfolio_summary` rolls the included standalone strategies into one combined replay summary
-
-## EMA Momentum Research Report
-
-The persisted EMA momentum research evaluator results can be summarized and exported without affecting production behavior:
-
-```bash
-mgc-v05l research-ema-eval-report \
-  --config config/base.yaml \
-  --config config/replay.yaml \
-  --experiment-run-id 1 \
-  --output /tmp/ema_eval_report.csv
-```
-
-This command prints a JSON summary and optionally writes a per-bar CSV export for comparing:
-- baseline raw context
-- filter-track labels
-- math-trigger labels
-
-The report/export path is research-only. It is not a backtest and does not alter strategy decisions or execution.
-
-## EMA Momentum Research Visualization
-
-Persisted EMA momentum research rows can also be rendered into a lightweight local HTML chart:
-
-```bash
-mgc-v05l research-ema-viz \
-  --config config/base.yaml \
-  --config config/replay.yaml \
-  --experiment-run-id 1 \
-  --ticker MGC \
-  --timeframe 5m \
-  --output /tmp/mgc_ema_viz.html
-```
-
-This produces a research-only historical artifact showing:
-- candles
-- VWAP and smoothed-close overlays
-- math-trigger markers
-- structure-label markers
-- lower feature panes for momentum and impulse context
-
-## Active Trend Participation Engine
-
-The Active Trend Participation Engine is a research-first intraday directional module that uses `5m` structure and `1m` timing for active, bounded long/short trend participation on `MES` and `MNQ`.
-
-```bash
-mgc-v05l research-trend-participation \
-  --source-sqlite /path/to/bars.sqlite3 \
-  --output-dir outputs/reports/trend_participation_engine \
-  --instruments MES MNQ
-```
-
-Wrapper scripts are available for backfill, update, and full research runs:
-- `scripts/backfill_trend_participation_engine.sh`
-- `scripts/update_trend_participation_engine.sh`
-- `scripts/run_trend_participation_engine.sh`
-
-Module notes and schema details live in `docs/TREND_PARTICIPATION_ENGINE.md`.
-
-## Schwab Local Auth Flow
-
-The local helper supports the existing approved HTTPS loopback callback:
-
-```bash
-https://127.0.0.1:8182/callback
-```
-
-Then run the local helper:
-
-```bash
-mgc-v05l schwab-authorize-local
-```
-
-It starts a temporary HTTPS callback listener on `127.0.0.1:8182`, opens the Schwab authorization URL in the browser, exchanges the returned code immediately, and stores the token set in `SCHWAB_TOKEN_FILE`.
-
-On first use, the helper generates a local self-signed loopback certificate in `.local/schwab/loopback-cert.pem` and `.local/schwab/loopback-key.pem`. The browser may show a one-time local certificate warning for `https://127.0.0.1:8182/callback`; continue through that prompt so the redirect can complete.
-
-Refresh the local token later if needed:
-
-```bash
-mgc-v05l schwab-refresh-token
-```
-
-Local token files are stored at `.local/schwab/tokens.json` by default, or at the path given by `SCHWAB_TOKEN_FILE`.
-
-## Fetch Historical Bars
-
-Use explicit symbol mapping. Do not assume MGC contract formatting in code.
-
-One-off symbol override:
-
-```bash
-mgc-v05l schwab-fetch-history \
-  --config config/base.yaml \
-  --config config/replay.yaml \
-  --internal-symbol MGC \
-  --historical-symbol "<confirmed-schwab-history-symbol>" \
-  --period-type day \
-  --period 1 \
-  --frequency-type minute \
-  --frequency 5 \
-  --start-date-ms 1741903200000 \
-  --end-date-ms 1741903800000
-```
-
-Optional local mapping file:
-
-```bash
-cp config/schwab.local.example.json config/schwab.local.json
-```
-
-Then fill in the confirmed Schwab futures symbols and run:
-
-```bash
-mgc-v05l schwab-fetch-history \
-  --config config/base.yaml \
-  --config config/replay.yaml \
-  --schwab-config config/schwab.local.json \
-  --internal-symbol MGC \
-  --internal-timeframe 1m \
-  --period-type day \
-  --period 1 \
-  --frequency-type minute \
-  --frequency 1
-```
-
-Add `--persist` to save normalized bars into the configured SQLite database.
-
-The historical foundation path now treats `1m` as the high-resolution base layer, while preserving deeper native Schwab surfaces where they extend farther back. Use the helper script to backfill chunked minute history:
-
-```bash
-bash scripts/backfill_schwab_1m_history.sh
-```
-
-Run the daily incremental sync to append the newest `1m` bars:
-
-```bash
-bash scripts/sync_schwab_1m_daily.sh
-```
-
-Then derive research surfaces from stored `1m` data:
-
-```bash
-bash scripts/resample_research_surfaces.sh
-```
-
-Backfill the broader native Schwab ladder:
-
-```bash
-bash scripts/backfill_schwab_native_timeframe_stack.sh
-```
-
-Daily-sync the broader native Schwab ladder:
-
-```bash
-bash scripts/sync_schwab_native_timeframe_stack.sh
-```
-
-Then derive the higher timeframe ladder:
-
-```bash
-bash scripts/resample_timeframe_stack.sh
-```
-
-Write a compact operator status report at any time:
-
-```bash
-bash scripts/report_market_data_status.sh
-```
-
-Canonical timeframe labels:
-- `1h` is normalized to stored `60m`
-- `2h` is normalized to stored `120m`
-- `4h` is normalized to stored `240m`
-- `6h` is normalized to stored `360m`
-- `12h` is normalized to stored `720m`
-- `24h` is normalized to stored `1440m`
-
-## Fetch Quotes
-
-Quote fetching is separate from strategy decisions for now.
-
-```bash
-mgc-v05l schwab-fetch-quote \
-  --config config/base.yaml \
-  --config config/replay.yaml \
-  --internal-symbol MGC \
-  --quote-symbol "<confirmed-schwab-quote-symbol>"
-```
-
-## Persistence
-
-Strategy and replay persistence is stored in SQLite using the configured `database_url`.
-
-Core tables include:
-- `bars`
-- `features`
-- `signals`
-- `strategy_state_snapshots`
-- `order_intents`
-- `fills`
-- `processed_bars`
-
-## Tests
-
-```bash
-PYTHONPATH=src .venv/bin/pytest tests/unit tests/integration -q
-PYTHONPYCACHEPREFIX=.pycache python3 -m compileall src tests docs
-```
-
-## Notes
-
-- Schwab historical `/pricehistory` and `/quotes` support are implemented through the adapter boundary
-- live Schwab ingestion and live order execution remain deferred
-- the symbol format for MGC futures on Schwab must remain explicitly configured until verified from real calls
-- secrets and token files must not be committed
-
-Additional docs:
-- [Developer Runbook](docs/DEVELOPER_RUNBOOK.md)
-- [Schwab Market Data Adapter Notes](docs/SCHWAB_MARKET_DATA_ADAPTER.md)
-- [Research Schema Extension](docs/RESEARCH_SCHEMA_EXTENSION.md)
-- [EMA Momentum Research Features](docs/EMA_MOMENTUM_RESEARCH_FEATURES.md)
-- [EMA Momentum Research Evaluator](docs/EMA_MOMENTUM_RESEARCH_EVALUATOR.md)
-- [EMA Momentum Research Report](docs/EMA_MOMENTUM_RESEARCH_REPORT.md)
-- [EMA Momentum Structure Labels](docs/EMA_MOMENTUM_STRUCTURE_LABELS.md)
-- [EMA Momentum Research Visualization](docs/EMA_MOMENTUM_RESEARCH_VISUALIZATION.md)
+Files intentionally excluded from this milestone should include unrelated application/runtime changes, generated outputs, and research scripts that are not part of the documentation foundation.

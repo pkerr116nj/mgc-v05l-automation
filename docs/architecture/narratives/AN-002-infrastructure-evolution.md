@@ -33,6 +33,8 @@ Infrastructure became less opportunistic and more intentional.
 
 The platform gained clearer distinctions between workstation, production-support services, management surfaces, storage, monitoring, and research outputs. That separation makes failures easier to localize and reduces the chance that a convenience deployment becomes an undocumented dependency.
 
+The Regime Monitor and its coupled market-data services were migrated from Jupiter to Atlas to establish clearer service ownership and improve infrastructure responsiveness.
+
 ## Where We Are Going
 
 The infrastructure direction is dedicated ownership with minimal operational complexity.
@@ -52,4 +54,4 @@ Future work should:
 - `SYSTEM_OVERVIEW.md`
 - `docs/architecture/narratives/AN-001-physical-network-evolution.md`
 - `docs/architecture/narratives/AN-005-mission-control-evolution.md`
-
+- `docs/operations/data-retention-and-archive-policy.md`

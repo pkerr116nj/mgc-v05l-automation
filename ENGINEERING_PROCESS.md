@@ -4,6 +4,8 @@ This repository uses Git as the authoritative project memory. Conversations gene
 
 Research must remain isolated from production authority unless explicitly approved. Missing evidence may not be inferred or fabricated.
 
+The broader human-AI engineering collaboration methodology is recorded in `docs/architecture/human-ai-engineering-methodology.md`.
+
 ## Lifecycle
 
 Idea -> Baseline Assessment -> Research Question, when applicable -> Design Proposal -> Independent Architecture Review for major decisions -> Review Resolution -> Architecture Decision Record -> Implementation -> Validation -> Closeout

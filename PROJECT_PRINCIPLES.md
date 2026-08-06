@@ -2,6 +2,14 @@
 
 These principles capture the durable engineering posture of the MGC-v05l automation project. They are not implementation rules, runbooks, or configuration instructions.
 
+Track B-specific invariants are recorded in `docs/architecture/track-b-architectural-invariants.md`.
+
+The engineering lessons behind the current evidence-first posture are summarized in `docs/architecture/evidence-driven-engineering-lessons.md`.
+
+The human-AI engineering collaboration methodology is summarized in `docs/architecture/human-ai-engineering-methodology.md`.
+
+Operational retention and archive policy is recorded in `docs/operations/data-retention-and-archive-policy.md`.
+
 ## Authority Is Singular
 
 Every important operational fact should have one controlling source.

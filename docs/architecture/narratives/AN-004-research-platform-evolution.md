@@ -49,11 +49,15 @@ Near-term evolution should focus on:
 
 ## Related Documents
 
+- `docs/architecture/track-b-architectural-invariants.md`
 - `docs/architecture/baselines/BA-001-current-research-platform.md`
 - `docs/architecture/proposals/DP-001-canonical-research-record.md`
 - `docs/architecture/reviews/RR-001-DP-001-canonical-research-record.md`
 - `docs/architecture/decisions/ADR-001-canonical-research-record.md`
+- `docs/architecture/research-analytics-platform-vision.md`
+- `docs/architecture/decision-intelligence-vision.md`
 - `docs/epics/EPIC-002-research-platform.md`
+- `docs/research/pattern-engine-current-state.md`
+- `docs/operations/data-retention-and-archive-policy.md`
 - `outputs/reports/research_data_inventory/research_data_inventory.md`
 - `outputs/reports/research_data_inventory/research_data_flow_diagram.md`
-
