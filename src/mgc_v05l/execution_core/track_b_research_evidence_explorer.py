@@ -28,6 +28,8 @@ DEFAULT_OUTPUT_ROOT = Path("outputs") / "track_b_execution_core"
 DEFAULT_CRR_PATH = DEFAULT_CRR_OUTPUT_DIR / CRR_JSONL
 DEFAULT_CRR_VALIDATION_PATH = DEFAULT_CRR_OUTPUT_DIR / VALIDATION_JSON
 DEFAULT_OUTPUT_DIR = DEFAULT_OUTPUT_ROOT / "research_analytics" / "research_evidence_explorer"
+DEFAULT_INVESTIGATION_OUTPUT_DIR = DEFAULT_OUTPUT_ROOT / "research_analytics" / "investigations"
+DEFAULT_INVESTIGATION_DOC_DIR = Path("docs") / "research" / "investigations"
 
 ANALYSIS_JSON = "research_evidence_explorer_v1.json"
 ANALYSIS_MD = "research_evidence_explorer_v1.md"
@@ -58,6 +60,36 @@ OPTIONAL_FIELDS = (
     "exit_reason",
 )
 MIN_CONTROLLED_INSTRUMENT_SAMPLE = 30
+MIN_COMPARISON_CELL_SAMPLE = 20
+INVESTIGATION_SCHEMA_VERSION = "research_investigation_record_v1"
+INVESTIGATION_VALIDATION_SCHEMA_VERSION = "research_investigation_validation_v1"
+
+EVIDENCE_BACKED_MILESTONES = (
+    {
+        "milestone_id": "MILESTONE_RA_PATH_LAYER",
+        "label": "Trade path research layer introduced",
+        "boundary_at": "2026-07-07T07:11:09-04:00",
+        "source": "git commit 06af163095f8285b31fbb5132c9df3887c6859f3 add canonical trade path layer",
+    },
+    {
+        "milestone_id": "MILESTONE_RA8_ACCUMULATOR",
+        "label": "Live path accumulator introduced",
+        "boundary_at": "2026-07-07T08:37:07-04:00",
+        "source": "git commit 4cc67bc3d959df0abedb0ddb0daf1a4c6e9086a3 add live trade path accumulator",
+    },
+    {
+        "milestone_id": "MILESTONE_PATH_CAPTURE_REFERENCES",
+        "label": "Canonical trade path capture references introduced",
+        "boundary_at": "2026-07-27T05:47:43-04:00",
+        "source": "git commit dc322d4ba0e2c807866d923794545ecf70e58307 add canonical trade path capture references",
+    },
+    {
+        "milestone_id": "MILESTONE_CRR_FOUNDATION",
+        "label": "Canonical Research Record foundation introduced",
+        "boundary_at": "2026-08-06T01:32:44-04:00",
+        "source": "git commit c903c14ed93bea86933cfd4b710cf24fd8701a46 feat: add exact-join CRR v1 foundation",
+    },
+)
 
 
 @dataclass(frozen=True)
@@ -72,6 +104,16 @@ class ResearchEvidenceExplorerResult:
     validation_path: Path
     validation_markdown_path: Path
     presentation_path: Path
+
+
+@dataclass(frozen=True)
+class ResearchInvestigationRunResult:
+    index: dict[str, Any]
+    investigations: dict[str, dict[str, Any]]
+    index_json_path: Path
+    index_markdown_path: Path
+    index_html_path: Path
+    investigation_paths: dict[str, dict[str, Path]]
 
 
 def run_research_evidence_explorer(
@@ -118,6 +160,118 @@ def run_research_evidence_explorer(
         validation_markdown_path=validation_markdown_path,
         presentation_path=presentation_path,
     )
+
+
+def run_research_investigations(
+    *,
+    crr_path: Path = DEFAULT_CRR_PATH,
+    crr_validation_path: Path = DEFAULT_CRR_VALIDATION_PATH,
+    explorer_output_dir: Path = DEFAULT_OUTPUT_DIR,
+    output_dir: Path = DEFAULT_INVESTIGATION_OUTPUT_DIR,
+    docs_dir: Path = DEFAULT_INVESTIGATION_DOC_DIR,
+    now: datetime | str | None = None,
+) -> ResearchInvestigationRunResult:
+    generated_at = _coerce_now(now)
+    crr_rows = _read_jsonl(crr_path)
+    crr_validation = _read_json(crr_validation_path)
+    analysis, population, _ = build_research_evidence_explorer(
+        crr_rows,
+        crr_validation=crr_validation,
+        crr_path=crr_path,
+        crr_validation_path=crr_validation_path,
+        generated_at=generated_at,
+    )
+    investigations = build_investigation_records(
+        analysis,
+        generated_at=generated_at,
+        crr_path=crr_path,
+        crr_validation_path=crr_validation_path,
+        explorer_path=explorer_output_dir / ANALYSIS_JSON,
+    )
+    output_dir.mkdir(parents=True, exist_ok=True)
+    docs_dir.mkdir(parents=True, exist_ok=True)
+    paths: dict[str, dict[str, Path]] = {}
+    for investigation_id, investigation in investigations.items():
+        investigation_dir = output_dir / investigation_id
+        investigation_dir.mkdir(parents=True, exist_ok=True)
+        validation = validate_investigation_record(investigation)
+        evidence = investigation.get("evidence", {})
+        population_artifact = investigation.get("population", {})
+        investigation_paths = {
+            "investigation_json": investigation_dir / "investigation.json",
+            "investigation_md": investigation_dir / "investigation.md",
+            "population_json": investigation_dir / "population.json",
+            "evidence_json": investigation_dir / "evidence.json",
+            "validation_json": investigation_dir / "validation_report.json",
+            "validation_md": investigation_dir / "validation_report.md",
+        }
+        _write_json(investigation_paths["investigation_json"], investigation)
+        investigation_paths["investigation_md"].write_text(render_investigation_markdown(investigation), encoding="utf-8")
+        _write_json(investigation_paths["population_json"], population_artifact)
+        _write_json(investigation_paths["evidence_json"], evidence)
+        _write_json(investigation_paths["validation_json"], validation)
+        investigation_paths["validation_md"].write_text(render_investigation_validation_markdown(validation), encoding="utf-8")
+        paths[investigation_id] = investigation_paths
+        summary_path = docs_dir / durable_investigation_summary_filename(investigation_id)
+        summary_path.write_text(render_durable_investigation_summary(investigation, investigation_paths), encoding="utf-8")
+        paths[investigation_id]["durable_summary"] = summary_path
+
+    index = build_investigation_index(investigations, generated_at=generated_at, output_dir=output_dir)
+    index_json_path = output_dir / "investigation_index.json"
+    index_markdown_path = output_dir / "investigation_index.md"
+    index_html_path = output_dir / "investigation_index.html"
+    _write_json(index_json_path, index)
+    index_markdown_path.write_text(render_investigation_index_markdown(index), encoding="utf-8")
+    index_html_path.write_text(render_investigation_index_html(index), encoding="utf-8")
+    return ResearchInvestigationRunResult(
+        index=index,
+        investigations=investigations,
+        index_json_path=index_json_path,
+        index_markdown_path=index_markdown_path,
+        index_html_path=index_html_path,
+        investigation_paths=paths,
+    )
+
+
+def build_investigation_records(
+    analysis: Mapping[str, Any],
+    *,
+    generated_at: datetime,
+    crr_path: Path,
+    crr_validation_path: Path,
+    explorer_path: Path,
+) -> dict[str, dict[str, Any]]:
+    rows = list(analysis.get("trade_drill_down_full_population") or [])
+    if not rows:
+        rows = full_population_rows_from_analysis(analysis)
+    source_artifacts = {
+        "crr": str(crr_path),
+        "crr_validation": str(crr_validation_path),
+        "explorer_analysis": str(explorer_path),
+    }
+    source_fingerprints = {
+        "crr": _file_sha256(crr_path),
+        "crr_validation": _file_sha256(crr_validation_path),
+        "explorer_analysis": _file_sha256(explorer_path),
+        "explorer_artifact": analysis.get("deterministic_fingerprint"),
+    }
+    common = {
+        "schema_version": INVESTIGATION_SCHEMA_VERSION,
+        "generated_at": generated_at.isoformat(),
+        "source_artifacts": source_artifacts,
+        "source_fingerprints": source_fingerprints,
+        "population_definition": analysis.get("population", {}).get("population_definition", {}),
+        "guardrails": dict(GUARDRAILS),
+        **GUARDRAILS,
+    }
+    records = {
+        "INV-001": build_inv_001(rows, common),
+        "INV-002": build_inv_002(rows, common),
+        "INV-003": build_inv_003(rows, common),
+    }
+    for record in records.values():
+        record["deterministic_fingerprint"] = _fingerprint(_fingerprint_payload(record))
+    return records
 
 
 def build_research_evidence_explorer(
@@ -195,6 +349,7 @@ def build_research_evidence_explorer(
         "comparability_controlled": controlled_comparison,
         "distributions": build_distributions(population_rows),
         "trade_drill_down": trade_drill_down_rows(population_rows),
+        "trade_drill_down_full_population": trade_drill_down_rows(population_rows, limit=None),
         "presentation_contract": {
             "presentation_reads_prepared_artifact_only": True,
             "hidden_recomputation": False,
@@ -547,8 +702,9 @@ def date_coverage(rows: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
     }
 
 
-def trade_drill_down_rows(rows: Sequence[Mapping[str, Any]], *, limit: int = 200) -> list[dict[str, Any]]:
+def trade_drill_down_rows(rows: Sequence[Mapping[str, Any]], *, limit: int | None = 200) -> list[dict[str, Any]]:
     ranked = sorted(rows, key=lambda row: (abs(float(row.get("realized_pnl_proxy") or 0.0)), str(row.get("research_record_id"))), reverse=True)
+    selected = ranked if limit is None else ranked[:limit]
     return [
         {
             "research_record_id": row.get("research_record_id"),
@@ -588,10 +744,639 @@ def trade_drill_down_rows(rows: Sequence[Mapping[str, Any]], *, limit: int = 200
             "source_provenance": row.get("source_provenance"),
             "missing_fields": row.get("missing_fields"),
         }
-        for row in ranked[:limit]
+        for row in selected
     ]
 
 
+def full_population_rows_from_analysis(analysis: Mapping[str, Any]) -> list[dict[str, Any]]:
+    return [dict(row) for row in analysis.get("trade_drill_down", [])]
+
+
+def filter_population(rows: Sequence[Mapping[str, Any]], filters: Mapping[str, Any]) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    included: list[dict[str, Any]] = []
+    excluded: list[dict[str, Any]] = []
+    for row in rows:
+        reason = filter_exclusion_reason(row, filters)
+        if reason:
+            excluded.append({"research_record_id": row.get("research_record_id"), "reason": reason})
+        else:
+            included.append(dict(row))
+    return included, excluded
+
+
+def filter_exclusion_reason(row: Mapping[str, Any], filters: Mapping[str, Any]) -> str | None:
+    for field in ("instrument", "side", "strategy_id", "lane_id", "session", "regime", "exit_policy", "exit_reason"):
+        allowed = filters.get(field)
+        if allowed is None:
+            continue
+        values = {str(item).upper() for item in (allowed if isinstance(allowed, list) else [allowed])}
+        if str(row.get(field) or "UNKNOWN").upper() not in values:
+            return f"{field}_not_selected"
+    if filters.get("winner_loser"):
+        pnl = _number(row.get("realized_pnl_proxy"))
+        if filters["winner_loser"] == "winner" and (pnl is None or pnl <= 0):
+            return "not_winner"
+        if filters["winner_loser"] == "loser" and (pnl is None or pnl > 0):
+            return "not_loser"
+    if filters.get("ra8") == "available" and row.get("path_status", {}).get("ra8") != "EXACT":
+        return "ra8_unavailable"
+    if filters.get("ra8") == "unavailable" and row.get("path_status", {}).get("ra8") == "EXACT":
+        return "ra8_available"
+    date_range = filters.get("date_range") or {}
+    exit_time = str(row.get("exit_time") or "")
+    if date_range.get("start") and exit_time < str(date_range["start"]):
+        return "before_date_range"
+    if date_range.get("end") and exit_time >= str(date_range["end"]):
+        return "after_date_range"
+    return None
+
+
+def investigation_metrics(rows: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
+    pnl = _values(rows, "realized_pnl_proxy")
+    winners = [value for value in pnl if value > 0]
+    losers = [value for value in pnl if value <= 0]
+    average_winner = _average(winners)
+    average_loser = _average(losers)
+    gross_profit = sum(winners)
+    gross_loss = abs(sum(losers))
+    return {
+        **cohort_metrics_for(rows, full_population_count=len(rows)),
+        "average_winner": average_winner,
+        "average_loser": average_loser,
+        "payoff_ratio": _round(abs(average_winner / average_loser)) if average_winner is not None and average_loser not in (None, 0) else None,
+        "profit_factor_proxy": _round(gross_profit / gross_loss) if gross_loss else None,
+        "expectancy": _average(pnl),
+        "trimmed_mean_5_percent": trimmed_mean(pnl, trim_fraction=0.05),
+        "missingness": _missing_field_counts(rows),
+    }
+
+
+def trimmed_mean(values: Sequence[float], *, trim_fraction: float = 0.05) -> float | None:
+    if not values:
+        return None
+    sorted_values = sorted(float(value) for value in values)
+    trim = int(len(sorted_values) * trim_fraction)
+    trimmed = sorted_values[trim : len(sorted_values) - trim] if trim and len(sorted_values) > trim * 2 else sorted_values
+    return _average(trimmed)
+
+
+def build_inv_001(rows: Sequence[Mapping[str, Any]], common: Mapping[str, Any]) -> dict[str, Any]:
+    sorted_rows = sorted(rows, key=lambda row: (float(row.get("realized_pnl_proxy") or 0), str(row.get("research_record_id"))))
+    losers = [row for row in sorted_rows if (_number(row.get("realized_pnl_proxy")) or 0) <= 0]
+    bottom20 = sorted_rows[:20]
+    bottom1 = percentile_slice(sorted_rows, 0.01, low=True)
+    bottom5 = percentile_slice(sorted_rows, 0.05, low=True)
+    bottom10 = percentile_slice(sorted_rows, 0.10, low=True)
+    worst1_excluded = sorted_rows[len(bottom1) :]
+    worst5_excluded = sorted_rows[len(bottom5) :]
+    evidence = {
+        "bottom_20_trades": bottom20,
+        "bottom_1_percent": cohort_evidence(bottom1),
+        "bottom_5_percent": cohort_evidence(bottom5),
+        "bottom_10_percent": cohort_evidence(bottom10),
+        "median_loser": median_trade(losers),
+        "full_losing_population_metrics": investigation_metrics(losers),
+        "concentration": {
+            field: _distribution((row.get(field) for row in bottom20), limit=20)
+            for field in ("instrument", "strategy_id", "lane_id", "session", "regime", "side", "exit_reason")
+        },
+        "mean_median_trimmed": {
+            "full_population": mean_median_trimmed(rows),
+            "losers": mean_median_trimmed(losers),
+            "bottom_10_percent": mean_median_trimmed(bottom10),
+            "excluding_worst_1_percent": mean_median_trimmed(worst1_excluded),
+            "excluding_worst_5_percent": mean_median_trimmed(worst5_excluded),
+        },
+        "classification": classify_extreme_losses(bottom20),
+    }
+    finding = (
+        "Aggregate negative results are materially affected by extreme losses: "
+        f"bottom 1% total P&L proxy {cohort_evidence(bottom1)['metrics'].get('total_realized_pnl_proxy')}, "
+        f"bottom 5% total P&L proxy {cohort_evidence(bottom5)['metrics'].get('total_realized_pnl_proxy')}."
+    )
+    return {
+        **common,
+        "investigation_id": "INV-001",
+        "title": "Extreme Loss Concentration",
+        "status": "DRAFT",
+        "question": "What explains the unusually large bottom-decile losses?",
+        "rationale": "The global bottom-decile average loss is far below its median, indicating skew that may concentrate aggregate losses.",
+        "population": {"count": len(rows), "filters": {}, "exclusions": []},
+        "filters_and_exclusions": {"filters": {}, "excluded_count": 0},
+        "methodology": [
+            "Identify bottom 20 trades and bottom 1%, 5%, and 10% cohorts by realized P&L proxy.",
+            "Compare mean, median, trimmed mean, and results excluding worst tails.",
+            "Describe concentration by instrument, strategy, lane, session, regime, side, and exit reason.",
+            "Do not infer classification without source support.",
+        ],
+        "metrics": {"full_population": investigation_metrics(rows)},
+        "evidence": evidence,
+        "contradictory_evidence": [
+            "The full losing population is larger than the extreme-loss tail, so losses are not solely a one-trade issue.",
+            "Sparse MFE/MAE/giveback limits exit-path explanation.",
+        ],
+        "findings": [finding],
+        "limitations": ["Raw P&L comparability can reflect instrument, multiplier, and quantity differences.", "RA8 path evidence is partial.", "Extreme-loss classification remains insufficient where source context is absent."],
+        "confidence": "PARTIAL",
+        "conclusion_status": "PARTIALLY_SUPPORTED",
+        "unresolved_questions": ["Which extreme losses are true strategy outcomes versus development or contract-economics artifacts?"],
+        "follow_up_candidates": ["Create a loss attribution view by instrument/session/strategy with source-evidence classifications."],
+    }
+
+
+def build_inv_002(rows: Sequence[Mapping[str, Any]], common: Mapping[str, Any]) -> dict[str, Any]:
+    long_rows, _ = filter_population(rows, {"side": "LONG"})
+    short_rows, _ = filter_population(rows, {"side": "SHORT"})
+    groups = {
+        "instrument": side_comparisons_by_field(rows, "instrument"),
+        "session": side_comparisons_by_field(rows, "session"),
+        "strategy_id": side_comparisons_by_field(rows, "strategy_id"),
+        "regime": side_comparisons_by_field(rows, "regime"),
+        "calendar_month": side_comparisons_by_period(rows, "month"),
+    }
+    controlled = side_control_summary(groups)
+    return {
+        **common,
+        "investigation_id": "INV-002",
+        "title": "Long Short Underperformance Control",
+        "status": "DRAFT",
+        "question": "Does long-side underperformance persist after controlling for instrument, session, strategy, and time period?",
+        "rationale": "Global long and short averages are both negative, with long worse globally. Composition may explain the observed side gap.",
+        "population": {"count": len(rows), "filters": {}, "exclusions": []},
+        "filters_and_exclusions": {"minimum_cell_sample": MIN_COMPARISON_CELL_SAMPLE, "excluded_sparse_cells": controlled["excluded_sparse_cells"]},
+        "methodology": [
+            "Compare long versus short globally.",
+            "Compare side metrics within instrument, session, strategy, regime, and month where both sides meet the sample threshold.",
+            "Use raw-dollar comparability disclosure and within-instrument control rather than invented multiplier normalization.",
+        ],
+        "metrics": {"long": investigation_metrics(long_rows), "short": investigation_metrics(short_rows)},
+        "evidence": {"controlled_side_comparisons": groups, "summary": controlled},
+        "contradictory_evidence": controlled["contradictory_evidence"],
+        "findings": [controlled["finding"]],
+        "limitations": ["Sparse cells are excluded rather than pooled.", "Raw P&L proxy is not normalized by contract economics.", "Side may be confounded by strategy, instrument, and time period."],
+        "confidence": controlled["confidence"],
+        "conclusion_status": controlled["conclusion_status"],
+        "unresolved_questions": ["Which side gaps persist within specific high-sample instrument/session/strategy combinations?"],
+        "follow_up_candidates": ["Build a side-comparison explorer table with minimum-sample controls and confidence labels."],
+    }
+
+
+def build_inv_003(rows: Sequence[Mapping[str, Any]], common: Mapping[str, Any]) -> dict[str, Any]:
+    monthly = period_metrics(rows, "month")
+    weekly = period_metrics(rows, "week", min_sample=30)
+    rolling = rolling_window_metrics(rows, window_size=100)
+    milestone = milestone_period_metrics(rows)
+    finding = "Performance varies materially across calendar and milestone periods, but population composition also changes; the evidence is descriptive rather than causal."
+    return {
+        **common,
+        "investigation_id": "INV-003",
+        "title": "Performance Over Development History",
+        "status": "DRAFT",
+        "question": "Has performance changed materially across the platform's development history?",
+        "rationale": "The CRR population spans multiple development milestones and may obscure changing trade populations over time.",
+        "population": {"count": len(rows), "filters": {}, "exclusions": []},
+        "filters_and_exclusions": {"weekly_minimum_sample": 30, "milestone_boundaries": list(EVIDENCE_BACKED_MILESTONES)},
+        "methodology": [
+            "Create neutral monthly, weekly, and rolling completed-trade windows.",
+            "Create milestone periods using only committed repository evidence.",
+            "Report mix changes and outcome metrics without implying milestone causality.",
+        ],
+        "metrics": {"full_population": investigation_metrics(rows)},
+        "evidence": {"monthly": monthly, "weekly": weekly, "rolling_100_trade_windows": rolling, "milestone_periods": milestone},
+        "contradictory_evidence": ["Milestone boundaries are development evidence, not causal market or strategy regime labels.", "Instrument and strategy mix changes can explain apparent performance shifts."],
+        "findings": [finding],
+        "limitations": ["Milestones are repository-evidence boundaries only.", "Weekly periods below sample threshold are excluded.", "RA8 coverage improves over time and can change path-evidence availability."],
+        "confidence": "PARTIAL",
+        "conclusion_status": "PARTIALLY_SUPPORTED",
+        "unresolved_questions": ["Which period changes remain after controlling for instrument, session, strategy, and side?"],
+        "follow_up_candidates": ["Add a period-composition explorer that separates outcome change from population-mix change."],
+    }
+
+
+def percentile_slice(rows: Sequence[Mapping[str, Any]], fraction: float, *, low: bool) -> list[Mapping[str, Any]]:
+    if not rows:
+        return []
+    sorted_rows = sorted(rows, key=lambda row: (float(row.get("realized_pnl_proxy") or 0), str(row.get("research_record_id"))))
+    count = max(1, math.ceil(len(sorted_rows) * fraction))
+    return sorted_rows[:count] if low else sorted_rows[-count:]
+
+
+def cohort_evidence(rows: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
+    return {
+        "sample_size": len(rows),
+        "metrics": investigation_metrics(rows),
+        "drill_down_rows": list(rows),
+        "distributions": {
+            field: _distribution((row.get(field) for row in rows), limit=20)
+            for field in ("instrument", "strategy_id", "lane_id", "session", "regime", "side", "exit_reason")
+        },
+        "ra8_coverage": {
+            "available": sum(1 for row in rows if row.get("path_status", {}).get("ra8") == "EXACT"),
+            "missing": sum(1 for row in rows if row.get("path_status", {}).get("ra8") != "EXACT"),
+        },
+    }
+
+
+def median_trade(rows: Sequence[Mapping[str, Any]]) -> dict[str, Any] | None:
+    if not rows:
+        return None
+    sorted_rows = sorted(rows, key=lambda row: (float(row.get("realized_pnl_proxy") or 0), str(row.get("research_record_id"))))
+    return dict(sorted_rows[len(sorted_rows) // 2])
+
+
+def mean_median_trimmed(rows: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
+    pnl = _values(rows, "realized_pnl_proxy")
+    return {
+        "sample_size": len(rows),
+        "mean": _average(pnl),
+        "median": _median(pnl),
+        "trimmed_mean_5_percent": trimmed_mean(pnl, trim_fraction=0.05),
+        "total": _round(sum(pnl)) if pnl else None,
+    }
+
+
+def classify_extreme_losses(rows: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
+    classifications: list[dict[str, Any]] = []
+    summary: dict[str, int] = {}
+    for row in rows:
+        quantity = _number(row.get("quantity"))
+        missing = set(row.get("missing_fields", []))
+        if quantity is not None and quantity > 1:
+            classification = "position_size_or_contract_economics_effect"
+            evidence = "CRR quantity is greater than one."
+        elif {"mfe_points", "mae_points"} & missing:
+            classification = "insufficient_evidence"
+            evidence = "Path/excursion fields are missing, so exit-path or intra-trade behavior cannot be classified."
+        else:
+            classification = "ordinary_strategy_outcome"
+            evidence = "No operational or sizing anomaly is visible in the CRR row."
+        summary[classification] = summary.get(classification, 0) + 1
+        classifications.append(
+            {
+                "research_record_id": row.get("research_record_id"),
+                "source_trade_id": row.get("source_trade_id"),
+                "classification": classification,
+                "evidence": evidence,
+            }
+        )
+    return {"summary": summary, "rows": classifications}
+
+
+def side_comparisons_by_field(rows: Sequence[Mapping[str, Any]], field: str) -> dict[str, Any]:
+    grouped: dict[str, list[Mapping[str, Any]]] = {}
+    for row in rows:
+        grouped.setdefault(str(row.get(field) or "UNKNOWN"), []).append(row)
+    comparisons: dict[str, Any] = {}
+    excluded: dict[str, Any] = {}
+    for value, value_rows in sorted(grouped.items()):
+        long_rows = [row for row in value_rows if row.get("side") == "LONG"]
+        short_rows = [row for row in value_rows if row.get("side") == "SHORT"]
+        if len(long_rows) < MIN_COMPARISON_CELL_SAMPLE or len(short_rows) < MIN_COMPARISON_CELL_SAMPLE:
+            excluded[value] = {
+                "long_count": len(long_rows),
+                "short_count": len(short_rows),
+                "reason": "below_minimum_side_sample",
+                "minimum_sample": MIN_COMPARISON_CELL_SAMPLE,
+            }
+            continue
+        long_metrics = investigation_metrics(long_rows)
+        short_metrics = investigation_metrics(short_rows)
+        comparisons[value] = {
+            "long": long_metrics,
+            "short": short_metrics,
+            "delta_long_minus_short_average": _round((_number(long_metrics.get("average_realized_pnl_proxy")) or 0) - (_number(short_metrics.get("average_realized_pnl_proxy")) or 0)),
+            "sample_size": len(value_rows),
+        }
+    return {"field": field, "comparisons": comparisons, "excluded_cells": excluded}
+
+
+def side_comparisons_by_period(rows: Sequence[Mapping[str, Any]], period: str) -> dict[str, Any]:
+    grouped: dict[str, list[Mapping[str, Any]]] = {}
+    for row in rows:
+        key = period_key(row.get("exit_time"), period)
+        grouped.setdefault(key, []).append(row)
+    comparisons: dict[str, Any] = {}
+    excluded: dict[str, Any] = {}
+    for value, value_rows in sorted(grouped.items()):
+        long_rows = [row for row in value_rows if row.get("side") == "LONG"]
+        short_rows = [row for row in value_rows if row.get("side") == "SHORT"]
+        if len(long_rows) < MIN_COMPARISON_CELL_SAMPLE or len(short_rows) < MIN_COMPARISON_CELL_SAMPLE:
+            excluded[value] = {
+                "long_count": len(long_rows),
+                "short_count": len(short_rows),
+                "reason": "below_minimum_side_sample",
+                "minimum_sample": MIN_COMPARISON_CELL_SAMPLE,
+            }
+            continue
+        comparisons[value] = {
+            "long": investigation_metrics(long_rows),
+            "short": investigation_metrics(short_rows),
+            "sample_size": len(value_rows),
+        }
+    return {"field": f"calendar_{period}", "comparisons": comparisons, "excluded_cells": excluded}
+
+
+def side_control_summary(groups: Mapping[str, Any]) -> dict[str, Any]:
+    cells = []
+    excluded: dict[str, Any] = {}
+    long_worse = 0
+    short_worse = 0
+    for group_name, group in groups.items():
+        excluded[group_name] = group.get("excluded_cells", {})
+        for value, comparison in group.get("comparisons", {}).items():
+            long_avg = _number(comparison.get("long", {}).get("average_realized_pnl_proxy"))
+            short_avg = _number(comparison.get("short", {}).get("average_realized_pnl_proxy"))
+            if long_avg is None or short_avg is None:
+                continue
+            delta = long_avg - short_avg
+            cells.append({"group": group_name, "value": value, "long_minus_short_average": _round(delta)})
+            if delta < 0:
+                long_worse += 1
+            elif delta > 0:
+                short_worse += 1
+    if not cells:
+        status = "INCONCLUSIVE"
+        confidence = "LOW"
+        finding = "No controlled side-comparison cells met the minimum sample threshold."
+    elif long_worse >= short_worse + 3:
+        status = "PARTIALLY_SUPPORTED"
+        confidence = "PARTIAL"
+        finding = f"Long underperformance persists in {long_worse} controlled cells versus {short_worse} cells where short underperforms."
+    else:
+        status = "INCONCLUSIVE"
+        confidence = "PARTIAL"
+        finding = f"Controlled cells are mixed: {long_worse} long-worse cells and {short_worse} short-worse cells."
+    return {
+        "controlled_cell_count": len(cells),
+        "long_worse_cell_count": long_worse,
+        "short_worse_cell_count": short_worse,
+        "cells": cells,
+        "excluded_sparse_cells": excluded,
+        "contradictory_evidence": [
+            "Global long/short averages can be distorted by instrument, strategy, and period composition.",
+            "Several controlled cells are sparse and excluded rather than pooled.",
+        ],
+        "finding": finding,
+        "confidence": confidence,
+        "conclusion_status": status,
+    }
+
+
+def period_metrics(rows: Sequence[Mapping[str, Any]], period: str, *, min_sample: int = 1) -> dict[str, Any]:
+    grouped: dict[str, list[Mapping[str, Any]]] = {}
+    for row in rows:
+        grouped.setdefault(period_key(row.get("exit_time"), period), []).append(row)
+    included: dict[str, Any] = {}
+    excluded: dict[str, Any] = {}
+    for key, period_rows in sorted(grouped.items()):
+        if len(period_rows) < min_sample:
+            excluded[key] = {"sample_size": len(period_rows), "reason": "below_minimum_sample", "minimum_sample": min_sample}
+            continue
+        included[key] = {
+            "sample_size": len(period_rows),
+            "metrics": investigation_metrics(period_rows),
+            "instrument_mix": _distribution((row.get("instrument") for row in period_rows)),
+            "strategy_mix": _distribution((row.get("strategy_id") for row in period_rows), limit=20),
+            "side_mix": _distribution((row.get("side") for row in period_rows)),
+            "extreme_loss_concentration": cohort_evidence(percentile_slice(period_rows, 0.05, low=True)).get("metrics"),
+        }
+    return {"period": period, "included": included, "excluded": excluded}
+
+
+def rolling_window_metrics(rows: Sequence[Mapping[str, Any]], *, window_size: int = 100) -> list[dict[str, Any]]:
+    sorted_rows = sorted(rows, key=lambda row: (str(row.get("exit_time") or ""), str(row.get("research_record_id"))))
+    windows: list[dict[str, Any]] = []
+    if not sorted_rows:
+        return windows
+    for start in range(0, len(sorted_rows), window_size):
+        window = sorted_rows[start : start + window_size]
+        if len(window) < max(20, window_size // 2):
+            continue
+        windows.append(
+            {
+                "window_index": len(windows) + 1,
+                "start_exit_time": window[0].get("exit_time"),
+                "end_exit_time": window[-1].get("exit_time"),
+                "sample_size": len(window),
+                "metrics": investigation_metrics(window),
+                "instrument_mix": _distribution((row.get("instrument") for row in window)),
+                "strategy_mix": _distribution((row.get("strategy_id") for row in window), limit=20),
+            }
+        )
+    return windows
+
+
+def milestone_period_metrics(rows: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
+    boundaries = sorted(EVIDENCE_BACKED_MILESTONES, key=lambda item: str(item["boundary_at"]))
+    periods: dict[str, list[Mapping[str, Any]]] = {}
+    for row in rows:
+        label = "Before " + str(boundaries[0]["label"])
+        exit_time = _parse_datetime(row.get("exit_time"))
+        for boundary in boundaries:
+            boundary_time = _parse_datetime(boundary["boundary_at"])
+            if exit_time is not None and boundary_time is not None and exit_time >= boundary_time:
+                label = "After " + str(boundary["label"])
+        periods.setdefault(label, []).append(row)
+    return {
+        "boundaries": list(boundaries),
+        "periods": {
+            label: {
+                "sample_size": len(period_rows),
+                "metrics": investigation_metrics(period_rows),
+                "instrument_mix": _distribution((row.get("instrument") for row in period_rows)),
+                "side_mix": _distribution((row.get("side") for row in period_rows)),
+                "ra8_coverage": cohort_evidence(period_rows)["ra8_coverage"],
+            }
+            for label, period_rows in sorted(periods.items())
+        },
+        "causality_disclosure": "Milestone periods are evidence-backed labels only and do not imply the milestone caused performance changes.",
+    }
+
+
+def period_key(value: Any, period: str) -> str:
+    parsed = _parse_datetime(value)
+    if parsed is None:
+        return "UNKNOWN"
+    if period == "month":
+        return parsed.strftime("%Y-%m")
+    if period == "week":
+        year, week, _ = parsed.isocalendar()
+        return f"{year}-W{week:02d}"
+    return parsed.date().isoformat()
+
+
+def _parse_datetime(value: Any) -> datetime | None:
+    if value in (None, ""):
+        return None
+    try:
+        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return parsed.astimezone(UTC) if parsed.tzinfo else parsed.replace(tzinfo=UTC)
+
+
+def validate_investigation_record(investigation: Mapping[str, Any]) -> dict[str, Any]:
+    blockers: list[str] = []
+    warnings: list[str] = []
+    if investigation.get("diagnostic_only") is not True or investigation.get("production_recommendation") is not False or investigation.get("trading_gate") is not False:
+        blockers.append("guardrails_invalid")
+    if investigation.get("conclusion_status") not in {"SUPPORTED", "PARTIALLY_SUPPORTED", "UNSUPPORTED", "INCONCLUSIVE", "SUPERSEDED"}:
+        blockers.append("invalid_conclusion_status")
+    if not investigation.get("source_fingerprints"):
+        blockers.append("missing_source_fingerprints")
+    if not investigation.get("evidence"):
+        blockers.append("missing_evidence")
+    if investigation.get("limitations"):
+        warnings.append("limitations_present")
+    status = "INVALID" if blockers else "VALID_WITH_WARNINGS" if warnings else "VALID"
+    validation = {
+        "schema_version": INVESTIGATION_VALIDATION_SCHEMA_VERSION,
+        "generated_at": investigation.get("generated_at"),
+        "investigation_id": investigation.get("investigation_id"),
+        "status": status,
+        "blockers": blockers,
+        "warnings": warnings,
+        "guardrails": dict(GUARDRAILS),
+        **GUARDRAILS,
+    }
+    validation["deterministic_fingerprint"] = _fingerprint(_fingerprint_payload(validation))
+    return validation
+
+
+def build_investigation_index(
+    investigations: Mapping[str, Mapping[str, Any]],
+    *,
+    generated_at: datetime,
+    output_dir: Path,
+) -> dict[str, Any]:
+    index = {
+        "schema_version": f"{INVESTIGATION_SCHEMA_VERSION}_index",
+        "generated_at": generated_at.isoformat(),
+        "output_dir": str(output_dir),
+        "investigations": [
+            {
+                "investigation_id": investigation.get("investigation_id"),
+                "title": investigation.get("title"),
+                "question": investigation.get("question"),
+                "conclusion_status": investigation.get("conclusion_status"),
+                "confidence": investigation.get("confidence"),
+                "fingerprint": investigation.get("deterministic_fingerprint"),
+                "primary_artifact": str(output_dir / str(investigation.get("investigation_id")) / "investigation.json"),
+            }
+            for investigation in investigations.values()
+        ],
+        "guardrails": dict(GUARDRAILS),
+        **GUARDRAILS,
+    }
+    index["deterministic_fingerprint"] = _fingerprint(_fingerprint_payload(index))
+    return index
+
+
+def durable_investigation_summary_filename(investigation_id: str) -> str:
+    return {
+        "INV-001": "INV-001-extreme-loss-concentration.md",
+        "INV-002": "INV-002-long-short-underperformance.md",
+        "INV-003": "INV-003-performance-over-time.md",
+    }.get(investigation_id, f"{investigation_id}.md")
+
+
+def render_investigation_markdown(investigation: Mapping[str, Any]) -> str:
+    lines = [
+        f"# {investigation.get('investigation_id')}: {investigation.get('title')}",
+        "",
+        f"- Status: `{investigation.get('status')}`",
+        f"- Conclusion status: `{investigation.get('conclusion_status')}`",
+        f"- Confidence: `{investigation.get('confidence')}`",
+        f"- Question: {investigation.get('question')}",
+        "",
+        "## Findings",
+        "",
+    ]
+    lines.extend(f"- {item}" for item in investigation.get("findings", []))
+    lines.extend(["", "## Contradictory Evidence", ""])
+    lines.extend(f"- {item}" for item in investigation.get("contradictory_evidence", []))
+    lines.extend(["", "## Limitations", ""])
+    lines.extend(f"- {item}" for item in investigation.get("limitations", []))
+    lines.extend(["", "## Follow-Up Candidates", ""])
+    lines.extend(f"- {item}" for item in investigation.get("follow_up_candidates", []))
+    lines.extend(["", "## Source Artifacts", ""])
+    for name, path in investigation.get("source_artifacts", {}).items():
+        lines.append(f"- `{name}`: `{path}`")
+    return "\n".join(lines) + "\n"
+
+
+def render_investigation_validation_markdown(validation: Mapping[str, Any]) -> str:
+    return (
+        "# Investigation Validation\n\n"
+        f"- Investigation: `{validation.get('investigation_id')}`\n"
+        f"- Status: `{validation.get('status')}`\n"
+        f"- Blockers: `{len(validation.get('blockers', []))}`\n"
+        f"- Warnings: `{len(validation.get('warnings', []))}`\n"
+    )
+
+
+def render_durable_investigation_summary(investigation: Mapping[str, Any], paths: Mapping[str, Path]) -> str:
+    lines = [
+        f"# {investigation.get('investigation_id')}: {investigation.get('title')}",
+        "",
+        "Status: Draft",
+        "",
+        "## Purpose",
+        "",
+        str(investigation.get("question")),
+        "",
+        "## Current Conclusion",
+        "",
+        f"`{investigation.get('conclusion_status')}` with `{investigation.get('confidence')}` confidence.",
+        "",
+        "These findings are descriptive, non-causal, and carry no production authority.",
+        "",
+        "## Generated Evidence",
+        "",
+    ]
+    for name, path in paths.items():
+        if name == "durable_summary":
+            continue
+        lines.append(f"- `{name}`: `{path}`")
+    lines.extend(["", "## Findings", ""])
+    lines.extend(f"- {item}" for item in investigation.get("findings", []))
+    lines.extend(["", "## Limitations", ""])
+    lines.extend(f"- {item}" for item in investigation.get("limitations", []))
+    lines.extend(["", "## Guardrails", "", "- `diagnostic_only=true`", "- `production_recommendation=false`", "- `trading_gate=false`"])
+    return "\n".join(lines) + "\n"
+
+
+def render_investigation_index_markdown(index: Mapping[str, Any]) -> str:
+    lines = [
+        "# Research Investigation Index",
+        "",
+        "|investigation|status|confidence|question|",
+        "|---|---|---|---|",
+    ]
+    for item in index.get("investigations", []):
+        lines.append(f"|{item.get('investigation_id')}|{item.get('conclusion_status')}|{item.get('confidence')}|{item.get('question')}|")
+    return "\n".join(lines) + "\n"
+
+
+def render_investigation_index_html(index: Mapping[str, Any]) -> str:
+    rows = "".join(
+        "<tr>"
+        f"<td>{html.escape(str(item.get('investigation_id')))}</td>"
+        f"<td>{html.escape(str(item.get('title')))}</td>"
+        f"<td>{html.escape(str(item.get('conclusion_status')))}</td>"
+        f"<td>{html.escape(str(item.get('confidence')))}</td>"
+        f"<td>{html.escape(str(item.get('question')))}</td>"
+        "</tr>"
+        for item in index.get("investigations", [])
+    )
+    return f"""<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><title>Research Investigation Index</title>
+<style>body{{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;margin:24px;background:#f6f7f4;color:#1f2933}}main{{max-width:1100px;margin:auto}}table{{width:100%;border-collapse:collapse;background:white}}th,td{{border-bottom:1px solid #d9e0df;padding:8px;text-align:left}}th{{background:#eef2ef}}</style>
+</head>
+<body><main><h1>Research Investigation Index</h1><p>Prepared research records only. No runtime, broker, strategy, or trading authority.</p><table><thead><tr><th>ID</th><th>Title</th><th>Status</th><th>Confidence</th><th>Question</th></tr></thead><tbody>{rows}</tbody></table></main></body>
+</html>
+"""
 def validate_research_evidence_explorer(analysis: Mapping[str, Any]) -> dict[str, Any]:
     warnings = list(analysis.get("warnings", []))
     blockers: list[str] = []

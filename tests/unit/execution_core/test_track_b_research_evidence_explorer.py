@@ -7,10 +7,15 @@ from pathlib import Path
 
 from mgc_v05l.execution_core.track_b_research_evidence_explorer import (
     build_cohorts,
+    build_investigation_records,
     build_research_evidence_explorer,
     build_within_instrument_comparison,
+    filter_population,
+    investigation_metrics,
     render_presentation_html,
     run_research_evidence_explorer,
+    run_research_investigations,
+    trimmed_mean,
 )
 
 
@@ -226,6 +231,89 @@ def test_guardrails_and_no_prohibited_imports_or_actions() -> None:
     assert analysis["presentation_contract"]["advisory_outputs"] is False
 
 
+def test_query_filters_are_deterministic_and_account_for_exclusions() -> None:
+    rows = [
+        _drill_row("a", pnl=1.0, instrument="ES", side="LONG", session="US", ra8=True),
+        _drill_row("b", pnl=-2.0, instrument="NQ", side="SHORT", session="US", ra8=False),
+        _drill_row("c", pnl=3.0, instrument="ES", side="SHORT", session="GLOBEX", ra8=True),
+    ]
+
+    included, excluded = filter_population(rows, {"instrument": "ES", "side": "SHORT", "ra8": "available"})
+
+    assert [row["research_record_id"] for row in included] == ["c"]
+    assert len(excluded) == 2
+    assert {row["reason"] for row in excluded} == {"side_not_selected", "instrument_not_selected"}
+
+
+def test_investigation_metrics_trimmed_mean_payoff_and_expectancy() -> None:
+    rows = [_drill_row(str(index), pnl=pnl) for index, pnl in enumerate([-100, -10, -5, 5, 20, 90])]
+
+    metrics = investigation_metrics(rows)
+
+    assert trimmed_mean([-100, -10, -5, 5, 20, 90], trim_fraction=0.20) == 2.5
+    assert metrics["average_winner"] == 38.333333
+    assert metrics["average_loser"] == -38.333333
+    assert metrics["payoff_ratio"] == 1.0
+    assert metrics["expectancy"] == 0.0
+
+
+def test_investigation_records_have_fingerprints_guardrails_and_ra8_optional(tmp_path: Path) -> None:
+    rows = []
+    for index in range(40):
+        rows.append(_crr_row(f"long_{index}", pnl=float(index - 35), side="LONG", instrument="ES", layers=("ctol", "ctoe", "ra7", "ra3")))
+        rows.append(_crr_row(f"short_{index}", pnl=float(index - 20), side="SHORT", instrument="ES"))
+    analysis, _, _ = build_research_evidence_explorer(
+        rows,
+        crr_validation=_crr_validation(status="VALID_WITH_WARNINGS", ra8_ready="SOURCE_COVERAGE_LIMIT"),
+        crr_path=tmp_path / "crr.jsonl",
+        crr_validation_path=tmp_path / "validation.json",
+        generated_at=NOW,
+    )
+
+    records = build_investigation_records(
+        analysis,
+        generated_at=NOW,
+        crr_path=tmp_path / "crr.jsonl",
+        crr_validation_path=tmp_path / "validation.json",
+        explorer_path=tmp_path / "explorer.json",
+    )
+
+    assert sorted(records) == ["INV-001", "INV-002", "INV-003"]
+    assert records["INV-001"]["deterministic_fingerprint"]
+    assert records["INV-002"]["conclusion_status"] in {"PARTIALLY_SUPPORTED", "INCONCLUSIVE"}
+    assert records["INV-003"]["evidence"]["milestone_periods"]["boundaries"]
+    assert all(record["guardrails"]["diagnostic_only"] is True for record in records.values())
+    assert all(record["production_recommendation"] is False for record in records.values())
+
+
+def test_run_investigations_writes_artifacts_and_durable_summaries(tmp_path: Path) -> None:
+    crr_path = tmp_path / "crr.jsonl"
+    validation_path = tmp_path / "validation.json"
+    output_dir = tmp_path / "investigations"
+    docs_dir = tmp_path / "docs"
+    rows = []
+    for index in range(30):
+        rows.append(_crr_row(f"long_{index}", pnl=float(index - 20), side="LONG", instrument="ES"))
+        rows.append(_crr_row(f"short_{index}", pnl=float(index - 15), side="SHORT", instrument="ES"))
+    _write_jsonl(crr_path, rows)
+    validation_path.write_text(json.dumps(_crr_validation()), encoding="utf-8")
+
+    result = run_research_investigations(
+        crr_path=crr_path,
+        crr_validation_path=validation_path,
+        explorer_output_dir=tmp_path,
+        output_dir=output_dir,
+        docs_dir=docs_dir,
+        now=NOW,
+    )
+
+    assert result.index_json_path.exists()
+    assert result.index_html_path.exists()
+    assert (output_dir / "INV-001" / "investigation.json").exists()
+    assert (docs_dir / "INV-001-extreme-loss-concentration.md").exists()
+    assert json.loads((output_dir / "INV-002" / "validation_report.json").read_text())["status"] in {"VALID", "VALID_WITH_WARNINGS"}
+
+
 def _normalized_row(index: int, pnl: float, *, instrument: str = "ES") -> dict[str, object]:
     return {
         "research_record_id": f"rr_{index}",
@@ -333,3 +421,37 @@ def _crr_row(
 
 def _write_jsonl(path: Path, rows: list[dict[str, object]]) -> None:
     path.write_text("".join(json.dumps(row, sort_keys=True) + "\n" for row in rows), encoding="utf-8")
+
+
+def _drill_row(
+    research_record_id: str,
+    *,
+    pnl: float,
+    instrument: str = "ES",
+    side: str = "LONG",
+    session: str = "US",
+    ra8: bool = True,
+) -> dict[str, object]:
+    return {
+        "research_record_id": research_record_id,
+        "source_trade_id": research_record_id,
+        "instrument": instrument,
+        "contract": f"{instrument}U6",
+        "side": side,
+        "quantity": "1",
+        "strategy_id": f"{instrument}_strategy",
+        "lane_id": f"{instrument}_lane",
+        "session": session,
+        "regime": "VALID",
+        "exit_policy": "TIMEBOX",
+        "exit_reason": "TIMEBOX",
+        "entry_time": "2026-08-06T12:00:00Z",
+        "exit_time": "2026-08-06T12:30:00Z",
+        "realized_pnl_proxy": pnl,
+        "hold_seconds": 1800.0,
+        "mfe_points": None,
+        "mae_points": None,
+        "path_status": {"ra7": "PARTIAL", "ra8": "EXACT" if ra8 else "MISSING"},
+        "missing_fields": [] if ra8 else ["ra8_finalized_capture"],
+        "source_provenance": [{"source_name": "fixture", "record_fingerprint": research_record_id}],
+    }
