@@ -7,11 +7,15 @@ from pathlib import Path
 
 from mgc_v05l.execution_core.track_b_research_evidence_explorer import (
     build_cohorts,
+    build_extreme_trade_forensic_audit,
     build_investigation_records,
+    build_loss_attribution,
     build_research_evidence_explorer,
     build_within_instrument_comparison,
+    classify_loss_trade,
     filter_population,
     investigation_metrics,
+    reconcile_extreme_trade_pnl,
     render_presentation_html,
     run_research_evidence_explorer,
     run_research_investigations,
@@ -311,7 +315,100 @@ def test_run_investigations_writes_artifacts_and_durable_summaries(tmp_path: Pat
     assert result.index_html_path.exists()
     assert (output_dir / "INV-001" / "investigation.json").exists()
     assert (docs_dir / "INV-001-extreme-loss-concentration.md").exists()
+    assert (output_dir / "INV-001" / "loss_attribution.html").exists()
+    assert (output_dir / "INV-001" / "loss_classification.json").exists()
+    assert (output_dir / "INV-001" / "anomaly_source_trace.json").exists()
+    assert (output_dir / "INV-001" / "anomaly_root_cause_review.html").exists()
     assert json.loads((output_dir / "INV-002" / "validation_report.json").read_text())["status"] in {"VALID", "VALID_WITH_WARNINGS"}
+
+
+def test_loss_classification_defaults_to_insufficient_evidence_and_requires_review() -> None:
+    row = _drill_row("loss_1", pnl=-100.0)
+
+    classification = classify_loss_trade(row)
+
+    assert classification["classification"] == "INSUFFICIENT_EVIDENCE"
+    assert classification["requires_review"] is True
+    assert "loss size alone is not evidence" in classification["reasoning"]
+
+
+def test_loss_classification_requires_supporting_evidence() -> None:
+    quantity_row = _drill_row("loss_1", pnl=-100.0)
+    quantity_row["quantity"] = "2"
+    data_quality_row = _drill_row("loss_2", pnl=-50.0)
+    data_quality_row["data_quality_flags"] = ["missing_realized_pnl_proxy"]
+
+    assert classify_loss_trade(quantity_row)["classification"] == "POSITION_SIZE_OR_CONTRACT_SCALE_EFFECT"
+    assert classify_loss_trade(data_quality_row)["classification"] == "PNL_PROXY_OR_DATA_QUALITY_CONCERN"
+
+
+def test_loss_attribution_has_no_silent_exclusions_and_reconciles_population() -> None:
+    rows = [_drill_row(str(index), pnl=float(-index - 1)) for index in range(40)]
+
+    attribution = build_loss_attribution(rows)
+
+    full = attribution["population_sensitivity"]["full_historical_population"]
+    assert full["included_count"] == 40
+    assert full["excluded_count"] == 0
+    assert attribution["summary"]["unresolved_review_count"] >= 4
+    assert attribution["loss_classification"]["unresolved_review_queue"]
+    assert attribution["loss_concentration"]["bottom_10_percent"]["instrument"][0]["count"] == 4
+
+
+def test_extreme_trade_pnl_reconciliation_uses_direction_and_quantity() -> None:
+    row = _drill_row("short_loss", pnl=-40.0, side="SHORT")
+    row.update({"entry_price": "100.0", "exit_price": "102.0", "realized_points": -2.0, "quantity": "2"})
+
+    reconciliation = reconcile_extreme_trade_pnl(row)
+
+    assert reconciliation["direction_sign"] == -1
+    assert reconciliation["directed_points_from_prices"] == -2.0
+    assert reconciliation["contract_multiplier_or_point_value_used"] == 10.0
+    assert reconciliation["expected_arithmetic_pnl_from_available_fields"] == -40.0
+    assert reconciliation["pnl_proxy_reconciled_to_available_fields"] is True
+
+
+def test_extreme_trade_forensic_audit_does_not_invent_contract_economics() -> None:
+    rows = [_drill_row(str(index), pnl=float(-index - 1)) for index in range(25)]
+
+    audit = build_extreme_trade_forensic_audit(rows)
+
+    first = audit["pnl_reconciliation"]["records"][0]
+    assert first["contract_economics_source"] == "IMPLIED_FROM_EMITTED_PNL_PROXY_AND_REALIZED_POINTS"
+    assert audit["classification"]["classification_counts"] == {"SOURCE_EVIDENCE_INCOMPLETE": 20}
+    assert audit["summary"]["unresolved_count"] == 20
+
+
+def test_extreme_trade_forensic_detects_price_scale_and_duplicate_execution() -> None:
+    rows = [_drill_row(str(index), pnl=float(-index - 1)) for index in range(22)]
+    rows[0].update({"instrument": "GC", "entry_price": "28757", "exit_price": "4001.7", "realized_points": -24755.3, "realized_pnl_proxy": -2475530.0})
+    rows[20].update({"entry_exec_id": "dup_exec"})
+    rows[21].update({"entry_exec_id": "dup_exec"})
+
+    audit = build_extreme_trade_forensic_audit(rows)
+    by_id = {item["research_record_id"]: item for item in audit["classification"]["records"]}
+
+    assert by_id["0"]["classification"] == "CONTRACT_MULTIPLIER_OR_SCALE_MISMATCH"
+    assert by_id["20"]["classification"] == "DUPLICATE_OR_REUSED_EXECUTION_EVIDENCE"
+    assert audit["execution_lineage"]["duplicate_execution_summary"]["entry_exec_id"]["duplicate_key_count"] == 1
+    trace_by_id = {item["research_record_id"]: item for item in audit["anomaly_source_trace"]["records"]}
+    assert trace_by_id["0"]["first_defective_layer"] == "entry_fill_persistence"
+    assert trace_by_id["0"]["hypothesis_tests"]["cross_instrument_entry_exit_pairing"].startswith("NOT_PROVEN_IN_CANONICAL_PAIRING")
+    assert audit["anomaly_root_cause"]["summary"]["first_defective_layer"] == "entry_fill_persistence"
+    assert audit["anomaly_repair_plan"]["status"] == "ROUTINE_TRACK_REPAIR_RECOMMENDED_NOT_IMPLEMENTED"
+
+
+def test_extreme_trade_population_impact_has_no_silent_exclusions() -> None:
+    rows = [_drill_row(str(index), pnl=float(-index - 1)) for index in range(30)]
+
+    audit = build_extreme_trade_forensic_audit(rows)
+    views = audit["population_impact"]["views"]
+
+    assert views["full_population"]["included_count"] == 30
+    assert views["excluding_only_pnl_unreconciled_records"]["excluded_count"] == 0
+    assert views["excluding_only_source_confirmed_data_anomalies"]["excluded_count"] == 0
+    assert views["economically_reconciled_trades_only"]["included_count"] == 0
+    assert audit["deterministic_fingerprint"] == build_extreme_trade_forensic_audit(rows)["deterministic_fingerprint"]
 
 
 def _normalized_row(index: int, pnl: float, *, instrument: str = "ES") -> dict[str, object]:
@@ -432,9 +529,16 @@ def _drill_row(
     session: str = "US",
     ra8: bool = True,
 ) -> dict[str, object]:
+    entry_price = 100.0
+    realized_points = pnl / 10.0
+    direction_sign = 1 if side == "LONG" else -1
+    exit_price = entry_price + (realized_points / direction_sign)
     return {
         "research_record_id": research_record_id,
         "source_trade_id": research_record_id,
+        "trade_id": research_record_id,
+        "lifecycle_id": f"lifecycle_{research_record_id}",
+        "con_id": 12345,
         "instrument": instrument,
         "contract": f"{instrument}U6",
         "side": side,
@@ -447,7 +551,18 @@ def _drill_row(
         "exit_reason": "TIMEBOX",
         "entry_time": "2026-08-06T12:00:00Z",
         "exit_time": "2026-08-06T12:30:00Z",
+        "entry_price": str(entry_price),
+        "exit_price": str(exit_price),
+        "entry_exec_id": f"entry_exec_{research_record_id}",
+        "exit_exec_id": f"exit_exec_{research_record_id}",
+        "entry_order_id": f"entry_order_{research_record_id}",
+        "exit_order_id": f"exit_order_{research_record_id}",
+        "entry_perm_id": f"entry_perm_{research_record_id}",
+        "exit_perm_id": f"exit_perm_{research_record_id}",
         "realized_pnl_proxy": pnl,
+        "realized_points": realized_points,
+        "pnl_source_artifact": "outputs/fixture/ctol.jsonl",
+        "pnl_source_record_id": f"outcome_{research_record_id}",
         "hold_seconds": 1800.0,
         "mfe_points": None,
         "mae_points": None,

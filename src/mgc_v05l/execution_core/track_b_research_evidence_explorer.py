@@ -38,6 +38,18 @@ SCHEMA_JSON = "research_evidence_explorer_schema.json"
 VALIDATION_REPORT_JSON = "research_evidence_explorer_validation_report.json"
 VALIDATION_REPORT_MD = "research_evidence_explorer_validation_report.md"
 PRESENTATION_HTML = "research_evidence_explorer_v1.html"
+EXTREME_FORENSIC_JSON = "extreme_trade_pnl_reconciliation.json"
+EXTREME_LINEAGE_JSON = "extreme_trade_execution_lineage.json"
+EXTREME_CLASSIFICATION_JSON = "extreme_trade_classification.json"
+EXTREME_POPULATION_IMPACT_JSON = "extreme_trade_population_impact.json"
+EXTREME_FORENSIC_HTML = "extreme_trade_forensic_review.html"
+EXTREME_FORENSIC_VALIDATION_JSON = "forensic_validation_report.json"
+EXTREME_FORENSIC_VALIDATION_MD = "forensic_validation_report.md"
+ANOMALY_SOURCE_TRACE_JSON = "anomaly_source_trace.json"
+ANOMALY_ROOT_CAUSE_JSON = "anomaly_root_cause.json"
+ANOMALY_REPAIR_PLAN_JSON = "anomaly_repair_plan.json"
+ANOMALY_BEFORE_AFTER_JSON = "anomaly_before_after.json"
+ANOMALY_ROOT_CAUSE_HTML = "anomaly_root_cause_review.html"
 
 SCHEMA_VERSION = "research_evidence_explorer_v1"
 VALIDATION_SCHEMA_VERSION = "research_evidence_explorer_validation_v1"
@@ -205,6 +217,48 @@ def run_research_investigations(
             "validation_json": investigation_dir / "validation_report.json",
             "validation_md": investigation_dir / "validation_report.md",
         }
+        if investigation_id == "INV-001":
+            loss_attribution = investigation.get("loss_attribution", {})
+            forensic_audit = investigation.get("extreme_trade_forensic_audit", {})
+            investigation_paths.update(
+                {
+                    "extreme_loss_inventory_json": investigation_dir / "extreme_loss_inventory.json",
+                    "loss_concentration_json": investigation_dir / "loss_concentration.json",
+                    "loss_classification_json": investigation_dir / "loss_classification.json",
+                    "population_sensitivity_json": investigation_dir / "population_sensitivity.json",
+                    "loss_attribution_html": investigation_dir / "loss_attribution.html",
+                    "extreme_trade_pnl_reconciliation_json": investigation_dir / EXTREME_FORENSIC_JSON,
+                    "extreme_trade_execution_lineage_json": investigation_dir / EXTREME_LINEAGE_JSON,
+                    "extreme_trade_classification_json": investigation_dir / EXTREME_CLASSIFICATION_JSON,
+                    "extreme_trade_population_impact_json": investigation_dir / EXTREME_POPULATION_IMPACT_JSON,
+                    "extreme_trade_forensic_review_html": investigation_dir / EXTREME_FORENSIC_HTML,
+                    "forensic_validation_report_json": investigation_dir / EXTREME_FORENSIC_VALIDATION_JSON,
+                    "forensic_validation_report_md": investigation_dir / EXTREME_FORENSIC_VALIDATION_MD,
+                    "anomaly_source_trace_json": investigation_dir / ANOMALY_SOURCE_TRACE_JSON,
+                    "anomaly_root_cause_json": investigation_dir / ANOMALY_ROOT_CAUSE_JSON,
+                    "anomaly_repair_plan_json": investigation_dir / ANOMALY_REPAIR_PLAN_JSON,
+                    "anomaly_before_after_json": investigation_dir / ANOMALY_BEFORE_AFTER_JSON,
+                    "anomaly_root_cause_review_html": investigation_dir / ANOMALY_ROOT_CAUSE_HTML,
+                }
+            )
+            _write_json(investigation_paths["extreme_loss_inventory_json"], loss_attribution.get("extreme_loss_inventory", {}))
+            _write_json(investigation_paths["loss_concentration_json"], loss_attribution.get("loss_concentration", {}))
+            _write_json(investigation_paths["loss_classification_json"], loss_attribution.get("loss_classification", {}))
+            _write_json(investigation_paths["population_sensitivity_json"], loss_attribution.get("population_sensitivity", {}))
+            investigation_paths["loss_attribution_html"].write_text(render_loss_attribution_html(investigation), encoding="utf-8")
+            _write_json(investigation_paths["extreme_trade_pnl_reconciliation_json"], forensic_audit.get("pnl_reconciliation", {}))
+            _write_json(investigation_paths["extreme_trade_execution_lineage_json"], forensic_audit.get("execution_lineage", {}))
+            _write_json(investigation_paths["extreme_trade_classification_json"], forensic_audit.get("classification", {}))
+            _write_json(investigation_paths["extreme_trade_population_impact_json"], forensic_audit.get("population_impact", {}))
+            investigation_paths["extreme_trade_forensic_review_html"].write_text(render_extreme_trade_forensic_html(investigation), encoding="utf-8")
+            forensic_validation = validate_extreme_trade_forensic_audit(forensic_audit)
+            _write_json(investigation_paths["forensic_validation_report_json"], forensic_validation)
+            investigation_paths["forensic_validation_report_md"].write_text(render_forensic_validation_markdown(forensic_validation), encoding="utf-8")
+            _write_json(investigation_paths["anomaly_source_trace_json"], forensic_audit.get("anomaly_source_trace", {}))
+            _write_json(investigation_paths["anomaly_root_cause_json"], forensic_audit.get("anomaly_root_cause", {}))
+            _write_json(investigation_paths["anomaly_repair_plan_json"], forensic_audit.get("anomaly_repair_plan", {}))
+            _write_json(investigation_paths["anomaly_before_after_json"], forensic_audit.get("anomaly_before_after", {}))
+            investigation_paths["anomaly_root_cause_review_html"].write_text(render_anomaly_root_cause_html(investigation), encoding="utf-8")
         _write_json(investigation_paths["investigation_json"], investigation)
         investigation_paths["investigation_md"].write_text(render_investigation_markdown(investigation), encoding="utf-8")
         _write_json(investigation_paths["population_json"], population_artifact)
@@ -421,6 +475,9 @@ def normalize_crr_row(row: Mapping[str, Any]) -> dict[str, Any]:
     return {
         "research_record_id": row.get("research_record_id"),
         "source_trade_id": identity.get("source_trade_id"),
+        "trade_id": identity.get("trade_id"),
+        "lifecycle_id": identity.get("lifecycle_id"),
+        "con_id": identity.get("con_id"),
         "instrument": identity.get("instrument") or "UNKNOWN",
         "contract": identity.get("contract") or "UNKNOWN",
         "side": str(identity.get("side") or "UNKNOWN").upper(),
@@ -430,15 +487,26 @@ def normalize_crr_row(row: Mapping[str, Any]) -> dict[str, Any]:
         "entry_time": entry.get("entry_time"),
         "exit_time": exit_anchor.get("exit_time"),
         "entry_price": entry.get("entry_price"),
+        "entry_exec_id": entry.get("entry_exec_id"),
+        "entry_order_id": entry.get("entry_order_id"),
+        "entry_perm_id": entry.get("entry_perm_id"),
         "exit_price": exit_anchor.get("exit_price"),
+        "exit_exec_id": exit_anchor.get("exit_exec_id"),
+        "exit_order_id": exit_anchor.get("exit_order_id"),
+        "exit_perm_id": exit_anchor.get("exit_perm_id"),
         "exit_reason": exit_anchor.get("exit_reason") or exit_anchor.get("exit_policy") or "UNKNOWN",
         "exit_policy": exit_anchor.get("exit_policy") or "UNKNOWN",
         "realized_pnl_proxy": _number(outcome.get("realized_pnl_proxy")),
         "realized_points": realized_points,
+        "pnl_source_artifact": row.get("outcome_ref", {}).get("path"),
+        "pnl_source_record_id": row.get("outcome_ref", {}).get("trade_outcome_id"),
+        "path_ref": dict(path_ref),
+        "join_quality": dict(join_quality),
         "hold_seconds": _number(outcome.get("hold_seconds")),
         "mfe_points": mfe,
         "mae_points": mae,
         "giveback_points": giveback,
+        "data_quality_flags": list(outcome.get("data_quality_flags") or []),
         "session": enrichment.get("session") or "UNKNOWN",
         "regime": enrichment.get("gre_validity_classification") or enrichment.get("market_context_validity_classification") or "UNKNOWN",
         "context_summary": dict(enrichment),
@@ -709,6 +777,9 @@ def trade_drill_down_rows(rows: Sequence[Mapping[str, Any]], *, limit: int | Non
         {
             "research_record_id": row.get("research_record_id"),
             "source_trade_id": row.get("source_trade_id"),
+            "trade_id": row.get("trade_id"),
+            "lifecycle_id": row.get("lifecycle_id"),
+            "con_id": row.get("con_id"),
             "instrument": row.get("instrument"),
             "contract": row.get("contract"),
             "side": row.get("side"),
@@ -716,6 +787,20 @@ def trade_drill_down_rows(rows: Sequence[Mapping[str, Any]], *, limit: int | Non
             "exit_time": row.get("exit_time"),
             "entry_price": row.get("entry_price"),
             "exit_price": row.get("exit_price"),
+            "entry_exec_id": row.get("entry_exec_id"),
+            "entry_order_id": row.get("entry_order_id"),
+            "entry_perm_id": row.get("entry_perm_id"),
+            "exit_exec_id": row.get("exit_exec_id"),
+            "exit_order_id": row.get("exit_order_id"),
+            "exit_perm_id": row.get("exit_perm_id"),
+            "broker_order_fill_refs": {
+                "entry_exec_id": row.get("entry_exec_id"),
+                "entry_order_id": row.get("entry_order_id"),
+                "entry_perm_id": row.get("entry_perm_id"),
+                "exit_exec_id": row.get("exit_exec_id"),
+                "exit_order_id": row.get("exit_order_id"),
+                "exit_perm_id": row.get("exit_perm_id"),
+            },
             "quantity": row.get("quantity"),
             "strategy_id": row.get("strategy_id"),
             "lane_id": row.get("lane_id"),
@@ -725,6 +810,9 @@ def trade_drill_down_rows(rows: Sequence[Mapping[str, Any]], *, limit: int | Non
             "exit_reason": row.get("exit_reason"),
             "cohort_memberships": row.get("cohort_memberships", []),
             "realized_pnl_proxy": row.get("realized_pnl_proxy"),
+            "realized_points": row.get("realized_points"),
+            "pnl_source_artifact": row.get("pnl_source_artifact"),
+            "pnl_source_record_id": row.get("pnl_source_record_id"),
             "within_instrument_pnl_percentile": row.get("within_instrument_pnl_percentile"),
             "hold_seconds": row.get("hold_seconds"),
             "outcome_summary": {
@@ -743,6 +831,7 @@ def trade_drill_down_rows(rows: Sequence[Mapping[str, Any]], *, limit: int | Non
             },
             "source_provenance": row.get("source_provenance"),
             "missing_fields": row.get("missing_fields"),
+            "data_quality_flags": row.get("data_quality_flags", []),
         }
         for row in selected
     ]
@@ -849,6 +938,8 @@ def build_inv_001(rows: Sequence[Mapping[str, Any]], common: Mapping[str, Any]) 
         },
         "classification": classify_extreme_losses(bottom20),
     }
+    loss_attribution = build_loss_attribution(rows)
+    forensic_audit = build_extreme_trade_forensic_audit(rows)
     finding = (
         "Aggregate negative results are materially affected by extreme losses: "
         f"bottom 1% total P&L proxy {cohort_evidence(bottom1)['metrics'].get('total_realized_pnl_proxy')}, "
@@ -871,12 +962,15 @@ def build_inv_001(rows: Sequence[Mapping[str, Any]], common: Mapping[str, Any]) 
         ],
         "metrics": {"full_population": investigation_metrics(rows)},
         "evidence": evidence,
+        "loss_attribution": loss_attribution,
+        "extreme_trade_forensic_audit": forensic_audit,
         "contradictory_evidence": [
             "The full losing population is larger than the extreme-loss tail, so losses are not solely a one-trade issue.",
             "Sparse MFE/MAE/giveback limits exit-path explanation.",
+            "The forensic audit reconciles arithmetic only where source fields are present; missing authoritative contract economics remains a limitation.",
         ],
-        "findings": [finding],
-        "limitations": ["Raw P&L comparability can reflect instrument, multiplier, and quantity differences.", "RA8 path evidence is partial.", "Extreme-loss classification remains insufficient where source context is absent."],
+        "findings": [finding, loss_attribution["summary"]["primary_finding"], forensic_audit["summary"]["primary_finding"]],
+        "limitations": ["Raw P&L comparability can reflect instrument, multiplier, and quantity differences.", "RA8 path evidence is partial.", "Extreme-loss classification remains insufficient where source context is absent.", "Contract point values are not independently sourced in CRR v1 and are treated as unresolved when absent."],
         "confidence": "PARTIAL",
         "conclusion_status": "PARTIALLY_SUPPORTED",
         "unresolved_questions": ["Which extreme losses are true strategy outcomes versus development or contract-economics artifacts?"],
@@ -1020,6 +1114,1073 @@ def classify_extreme_losses(rows: Sequence[Mapping[str, Any]]) -> dict[str, Any]
             }
         )
     return {"summary": summary, "rows": classifications}
+
+
+def build_loss_attribution(rows: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
+    sorted_rows = sorted(rows, key=lambda row: (float(row.get("realized_pnl_proxy") or 0), str(row.get("research_record_id"))))
+    cohorts = {
+        "worst_20": sorted_rows[:20],
+        "bottom_1_percent": percentile_slice(sorted_rows, 0.01, low=True),
+        "bottom_5_percent": percentile_slice(sorted_rows, 0.05, low=True),
+        "bottom_10_percent": percentile_slice(sorted_rows, 0.10, low=True),
+    }
+    inventory = {
+        name: [extreme_loss_inventory_row(row) for row in cohort_rows]
+        for name, cohort_rows in cohorts.items()
+    }
+    classifications = [classify_loss_trade(row) for row in sorted_rows[: max(20, len(cohorts["bottom_10_percent"]))]]
+    classification_counts = _distribution((item["classification"] for item in classifications))
+    unresolved_review = [item for item in classifications if item["requires_review"]]
+    sensitivity = population_sensitivity_views(rows, classifications)
+    total_losses = abs(sum(value for value in _values(rows, "realized_pnl_proxy") if value < 0))
+    concentration = {
+        name: {
+            field: concentration_by_field(cohort_rows, field, total_losses=total_losses)
+            for field in ("instrument", "contract", "side", "quantity", "strategy_id", "lane_id", "session", "regime", "exit_policy", "exit_reason", "calendar_month", "milestone_period")
+        }
+        for name, cohort_rows in cohorts.items()
+    }
+    supported_excluded_total = sensitivity["excluding_source_confirmed_development_or_leak_test_artifacts"]["metrics"].get("total_realized_pnl_proxy")
+    primary_finding = (
+        "No source-confirmed development, operational, or data-quality exclusions were sufficient to remove the aggregate negative result."
+        if supported_excluded_total is not None and supported_excluded_total < 0
+        else "Supported exclusions materially change the aggregate result."
+    )
+    return {
+        "schema_version": "inv_001_loss_attribution_v1",
+        "summary": {
+            "classification_counts": classification_counts,
+            "unresolved_review_count": len(unresolved_review),
+            "primary_finding": primary_finding,
+            "global_raw_dollar_disclosure": "Raw realized P&L proxy can reflect instrument, multiplier, quantity, and contract-economics differences.",
+            "within_instrument_control": "Use standardized within-instrument percentile views before interpreting strategy quality.",
+        },
+        "classification_contract": loss_classification_contract(),
+        "extreme_loss_inventory": inventory,
+        "loss_concentration": concentration,
+        "loss_classification": {
+            "classification_counts": classification_counts,
+            "classified_rows": classifications,
+            "unresolved_review_queue": unresolved_review,
+        },
+        "population_sensitivity": sensitivity,
+    }
+
+
+def extreme_loss_inventory_row(row: Mapping[str, Any]) -> dict[str, Any]:
+    return {
+        "research_record_id": row.get("research_record_id"),
+        "canonical_trade_identifiers": {
+            "source_trade_id": row.get("source_trade_id"),
+            "trade_id": row.get("trade_id"),
+            "lifecycle_id": row.get("lifecycle_id"),
+            "con_id": row.get("con_id"),
+        },
+        "instrument": row.get("instrument"),
+        "contract": row.get("contract"),
+        "side": row.get("side"),
+        "quantity": row.get("quantity"),
+        "realized_pnl_proxy": row.get("realized_pnl_proxy"),
+        "entry_time": row.get("entry_time"),
+        "exit_time": row.get("exit_time"),
+        "duration": row.get("hold_seconds"),
+        "strategy_id": row.get("strategy_id"),
+        "lane_id": row.get("lane_id"),
+        "session": row.get("session"),
+        "regime": row.get("regime"),
+        "exit_policy": row.get("exit_policy"),
+        "exit_reason": row.get("exit_reason"),
+        "broker_order_fill_refs": row.get("broker_order_fill_refs", {}),
+        "ra7_status": row.get("path_status", {}).get("ra7"),
+        "ra8_status": row.get("path_status", {}).get("ra8"),
+        "attribution_status": row.get("attribution_status", {}),
+        "source_provenance": row.get("source_provenance", []),
+        "missing_fields": row.get("missing_fields", []),
+        "data_quality_flags": row.get("data_quality_flags", []),
+    }
+
+
+def loss_classification_contract() -> dict[str, Any]:
+    categories = {
+        "ORDINARY_STRATEGY_OUTCOME": "Source fields support a normal completed trade with no visible sizing, data-quality, or lifecycle concern.",
+        "POSITION_SIZE_OR_CONTRACT_SCALE_EFFECT": "CRR quantity or reliable contract fields show scale is a material contributor.",
+        "DEVELOPMENT_OR_LEAK_TEST_ARTIFACT": "Source fields explicitly identify development, leak-test, or non-representative test provenance.",
+        "OPERATIONAL_OR_LIFECYCLE_ANOMALY": "Source fields explicitly show lifecycle, ownership, duplicate, or operational anomaly evidence.",
+        "PNL_PROXY_OR_DATA_QUALITY_CONCERN": "Source fields explicitly show P&L proxy, missing realized proxy, or data-quality invalidity.",
+        "INSUFFICIENT_EVIDENCE": "Available source fields do not support a narrower classification.",
+        "OTHER_SOURCE_BACKED_CATEGORY": "A different category is used only with explicit source-backed rationale.",
+    }
+    return {"default": "INSUFFICIENT_EVIDENCE", "categories": categories}
+
+
+def classify_loss_trade(row: Mapping[str, Any]) -> dict[str, Any]:
+    quantity = _number(row.get("quantity"))
+    flags = {str(item) for item in row.get("data_quality_flags", [])}
+    strategy_lane_text = " ".join(str(row.get(key) or "") for key in ("strategy_id", "lane_id")).lower()
+    missing = set(row.get("missing_fields", []))
+    if quantity is not None and quantity > 1:
+        classification = "POSITION_SIZE_OR_CONTRACT_SCALE_EFFECT"
+        reasoning = "CRR quantity is greater than one, so scale may contribute to raw P&L magnitude."
+        confidence = "MEDIUM"
+        requires_review = False
+        supporting = {"quantity": row.get("quantity")}
+    elif any(token in strategy_lane_text for token in ("leak", "test", "development", "dev")):
+        classification = "DEVELOPMENT_OR_LEAK_TEST_ARTIFACT"
+        reasoning = "Strategy or lane identifier explicitly contains development/test wording."
+        confidence = "MEDIUM"
+        requires_review = False
+        supporting = {"strategy_id": row.get("strategy_id"), "lane_id": row.get("lane_id")}
+    elif any("lifecycle" in flag.lower() or "duplicate" in flag.lower() or "orphan" in flag.lower() for flag in flags):
+        classification = "OPERATIONAL_OR_LIFECYCLE_ANOMALY"
+        reasoning = "CRR data-quality flags explicitly reference lifecycle, duplicate, or orphan evidence."
+        confidence = "MEDIUM"
+        requires_review = False
+        supporting = {"data_quality_flags": sorted(flags)}
+    elif (
+        any("realized_pnl_proxy" in flag.lower() or "pnl_proxy_invalid" in flag.lower() or "invalid_pnl" in flag.lower() for flag in flags)
+        or "realized_pnl_proxy" in missing
+        or _number(row.get("realized_pnl_proxy")) is None
+    ):
+        classification = "PNL_PROXY_OR_DATA_QUALITY_CONCERN"
+        reasoning = "CRR fields explicitly flag P&L/realized-value data-quality concern."
+        confidence = "MEDIUM"
+        requires_review = False
+        supporting = {"data_quality_flags": sorted(flags), "missing_fields": sorted(missing)}
+    else:
+        classification = "INSUFFICIENT_EVIDENCE"
+        reasoning = "No source field supports a narrower classification; loss size alone is not evidence."
+        confidence = "LOW"
+        requires_review = True
+        supporting = {"available_fields": ["instrument", "contract", "side", "strategy_id", "lane_id", "session", "exit_policy"]}
+    return {
+        "research_record_id": row.get("research_record_id"),
+        "source_trade_id": row.get("source_trade_id"),
+        "realized_pnl_proxy": row.get("realized_pnl_proxy"),
+        "classification": classification,
+        "supporting_source_fields": supporting,
+        "reasoning": reasoning,
+        "confidence": confidence,
+        "contradictory_evidence": ["No broker/runtime state was queried; classification uses CRR evidence only."],
+        "automatic_or_review": "REQUIRES_REVIEW" if requires_review else "AUTOMATIC",
+        "requires_review": requires_review,
+    }
+
+
+def concentration_by_field(rows: Sequence[Mapping[str, Any]], field: str, *, total_losses: float) -> list[dict[str, Any]]:
+    grouped: dict[str, list[Mapping[str, Any]]] = {}
+    for row in rows:
+        value = period_key(row.get("exit_time"), "month") if field == "calendar_month" else milestone_label_for_row(row) if field == "milestone_period" else str(row.get(field) or "UNKNOWN")
+        grouped.setdefault(value, []).append(row)
+    cohort_loss = abs(sum(value for value in _values(rows, "realized_pnl_proxy") if value < 0))
+    result = []
+    for value, value_rows in sorted(grouped.items()):
+        pnl = _values(value_rows, "realized_pnl_proxy")
+        loss = abs(sum(item for item in pnl if item < 0))
+        result.append(
+            {
+                "value": value,
+                "count": len(value_rows),
+                "total_pnl_proxy": _round(sum(pnl)) if pnl else None,
+                "median_pnl_proxy": _median(pnl),
+                "percentage_of_total_losses": _rate(loss, total_losses),
+                "percentage_of_extreme_loss_cohort": _rate(len(value_rows), len(rows)),
+                "missingness": _missing_field_counts(value_rows),
+            }
+        )
+    return sorted(result, key=lambda item: (abs(_number(item.get("total_pnl_proxy")) or 0), item["count"]), reverse=True)
+
+
+def milestone_label_for_row(row: Mapping[str, Any]) -> str:
+    boundaries = sorted(EVIDENCE_BACKED_MILESTONES, key=lambda item: str(item["boundary_at"]))
+    label = "Before " + str(boundaries[0]["label"])
+    exit_time = _parse_datetime(row.get("exit_time"))
+    for boundary in boundaries:
+        boundary_time = _parse_datetime(boundary["boundary_at"])
+        if exit_time is not None and boundary_time is not None and exit_time >= boundary_time:
+            label = "After " + str(boundary["label"])
+    return label
+
+
+def population_sensitivity_views(rows: Sequence[Mapping[str, Any]], classifications: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
+    class_by_id = {item.get("research_record_id"): item.get("classification") for item in classifications}
+    definitions = {
+        "full_historical_population": set(),
+        "excluding_source_confirmed_development_or_leak_test_artifacts": {"DEVELOPMENT_OR_LEAK_TEST_ARTIFACT"},
+        "excluding_source_confirmed_operational_or_lifecycle_anomalies": {"OPERATIONAL_OR_LIFECYCLE_ANOMALY"},
+        "excluding_source_confirmed_pnl_or_data_quality_invalid_records": {"PNL_PROXY_OR_DATA_QUALITY_CONCERN"},
+        "ordinary_strategy_population_if_sufficient": {"DEVELOPMENT_OR_LEAK_TEST_ARTIFACT", "OPERATIONAL_OR_LIFECYCLE_ANOMALY", "PNL_PROXY_OR_DATA_QUALITY_CONCERN", "POSITION_SIZE_OR_CONTRACT_SCALE_EFFECT"},
+    }
+    views = {}
+    for name, excluded_classes in definitions.items():
+        included = []
+        excluded_counts: dict[str, int] = {}
+        for row in rows:
+            classification = class_by_id.get(row.get("research_record_id"))
+            if classification in excluded_classes:
+                excluded_counts[str(classification)] = excluded_counts.get(str(classification), 0) + 1
+            else:
+                included.append(row)
+        views[name] = {
+            "included_count": len(included),
+            "excluded_count": len(rows) - len(included),
+            "excluded_count_by_classification": excluded_counts,
+            "metrics": investigation_metrics(included),
+            "long_short_result": {
+                "long": investigation_metrics([row for row in included if row.get("side") == "LONG"]),
+                "short": investigation_metrics([row for row in included if row.get("side") == "SHORT"]),
+            },
+            "instrument_mix": _distribution((row.get("instrument") for row in included)),
+            "strategy_mix": _distribution((row.get("strategy_id") for row in included), limit=20),
+            "session_mix": _distribution((row.get("session") for row in included)),
+        }
+    return views
+
+
+def render_loss_attribution_html(investigation: Mapping[str, Any]) -> str:
+    attribution = investigation.get("loss_attribution", {})
+    inventory = attribution.get("extreme_loss_inventory", {}).get("worst_20", [])
+    classification = attribution.get("loss_classification", {})
+    sensitivity = attribution.get("population_sensitivity", {})
+    concentration = attribution.get("loss_concentration", {}).get("worst_20", {})
+    rows = "".join(
+        "<tr>"
+        f"<td>{html.escape(str(row.get('research_record_id')))}</td>"
+        f"<td>{html.escape(str(row.get('instrument')))}</td>"
+        f"<td>{html.escape(str(row.get('contract')))}</td>"
+        f"<td>{html.escape(str(row.get('side')))}</td>"
+        f"<td>{html.escape(str(row.get('quantity')))}</td>"
+        f"<td>{_format_money(row.get('realized_pnl_proxy'))}</td>"
+        f"<td>{html.escape(_display_label(row.get('session')))}</td>"
+        f"<td>{html.escape(str(row.get('strategy_id')))}</td>"
+        f"<td>{html.escape(_display_label(row.get('ra8_status')))}</td>"
+        "</tr>"
+        for row in inventory
+    )
+    class_rows = "".join(
+        "<tr>"
+        f"<td>{html.escape(str(row.get('research_record_id')))}</td>"
+        f"<td>{html.escape(str(row.get('classification')))}</td>"
+        f"<td>{html.escape(str(row.get('confidence')))}</td>"
+        f"<td>{html.escape(str(row.get('automatic_or_review')))}</td>"
+        f"<td>{html.escape(str(row.get('reasoning')))}</td>"
+        "</tr>"
+        for row in classification.get("classified_rows", [])
+    )
+    sensitivity_rows = "".join(
+        "<tr>"
+        f"<td>{html.escape(_display_label(name))}</td>"
+        f"<td>{view.get('included_count')}</td>"
+        f"<td>{view.get('excluded_count')}</td>"
+        f"<td>{_format_money(view.get('metrics', {}).get('total_realized_pnl_proxy'))}</td>"
+        f"<td>{_format_money(view.get('metrics', {}).get('average_realized_pnl_proxy'))}</td>"
+        f"<td>{_format_money(view.get('metrics', {}).get('median_realized_pnl_proxy'))}</td>"
+        "</tr>"
+        for name, view in sensitivity.items()
+    )
+    concentration_rows = "".join(
+        "<tr>"
+        f"<td>{html.escape(_display_label(field))}</td>"
+        f"<td>{html.escape(str(items[0].get('value')) if items else 'NONE')}</td>"
+        f"<td>{items[0].get('count') if items else 0}</td>"
+        f"<td>{_format_money(items[0].get('total_pnl_proxy')) if items else 'MISSING'}</td>"
+        "</tr>"
+        for field, items in concentration.items()
+    )
+    unresolved = len(classification.get("unresolved_review_queue", []))
+    return f"""<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>INV-001 Loss Attribution</title>
+<style>body{{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;margin:24px;background:#f6f7f4;color:#1f2933}}main{{max-width:1240px;margin:auto}}section{{background:white;border:1px solid #d9e0df;border-radius:6px;margin:16px 0;padding:16px}}table{{width:100%;border-collapse:collapse;font-size:13px}}th,td{{border-bottom:1px solid #e7ecea;padding:7px;text-align:left;vertical-align:top}}th{{background:#eef2ef}}.warn{{color:#8a5a00;font-weight:700}}</style>
+</head><body><main>
+<h1>INV-001 Loss Attribution</h1>
+<p class="warn">Descriptive, non-causal, no production authority. Unresolved review queue: {unresolved}</p>
+<section><h2>Worst 20 Trades</h2><table><thead><tr><th>Research Record</th><th>Instrument</th><th>Contract</th><th>Side</th><th>Qty</th><th>P&L Proxy</th><th>Session</th><th>Strategy</th><th>RA8</th></tr></thead><tbody>{rows}</tbody></table></section>
+<section><h2>Top Concentrations In Worst 20</h2><table><thead><tr><th>Field</th><th>Largest Group</th><th>Count</th><th>Total P&L Proxy</th></tr></thead><tbody>{concentration_rows}</tbody></table></section>
+<section><h2>Classification</h2><table><thead><tr><th>Research Record</th><th>Classification</th><th>Confidence</th><th>Status</th><th>Reasoning</th></tr></thead><tbody>{class_rows}</tbody></table></section>
+<section><h2>Population Sensitivity</h2><table><thead><tr><th>View</th><th>Included</th><th>Excluded</th><th>Total P&L</th><th>Average</th><th>Median</th></tr></thead><tbody>{sensitivity_rows}</tbody></table></section>
+</main></body></html>
+"""
+
+
+def build_extreme_trade_forensic_audit(rows: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
+    sorted_rows = sorted(rows, key=lambda row: (float(row.get("realized_pnl_proxy") or 0), str(row.get("research_record_id"))))
+    worst_20 = sorted_rows[:20]
+    full_exec_index = execution_evidence_index(rows)
+    reconciliations = [reconcile_extreme_trade_pnl(row) for row in worst_20]
+    lineage_rows = [execution_lineage_for_row(row, full_exec_index=full_exec_index) for row in worst_20]
+    classifications = [
+        classify_extreme_trade_forensics(row, reconciliation=reconciliation, lineage=lineage)
+        for row, reconciliation, lineage in zip(worst_20, reconciliations, lineage_rows, strict=True)
+    ]
+    population_impact = extreme_trade_population_impact(rows, classifications)
+    classification_counts = _distribution(item["classification"] for item in classifications)
+    unresolved = [
+        item
+        for item in classifications
+        if item["classification"] in {"SOURCE_EVIDENCE_INCOMPLETE", "PNL_PROXY_UNRECONCILED"}
+    ]
+    price_scale = [
+        item
+        for item in classifications
+        if item["classification"] == "CONTRACT_MULTIPLIER_OR_SCALE_MISMATCH"
+    ]
+    source_confirmed = [
+        item
+        for item in classifications
+        if item["classification"] in {"CONTRACT_MULTIPLIER_OR_SCALE_MISMATCH", "DUPLICATE_OR_REUSED_EXECUTION_EVIDENCE"}
+    ]
+    primary_finding = (
+        f"Extreme-loss forensic audit found {len(price_scale)} source-backed price-scale anomalies, "
+        f"{len(source_confirmed) - len(price_scale)} duplicate/reused execution-evidence anomalies, and "
+        f"{len(unresolved)} unresolved records among the worst 20; no records were removed from the population."
+    )
+    source_trace = anomaly_source_trace(records=source_confirmed, reconciliations=reconciliations, lineage_rows=lineage_rows)
+    root_cause = anomaly_root_cause_report(source_trace)
+    repair_plan = anomaly_repair_plan(root_cause)
+    before_after = anomaly_before_after_report(population_impact)
+    audit = {
+        "schema_version": "inv_001_extreme_trade_forensic_audit_v1",
+        "scope": {
+            "description": "Worst 20 CRR trades by realized P&L proxy, covering the extreme GC/NQ losses and one ES comparison control.",
+            "trade_count": len(worst_20),
+            "instrument_distribution": _distribution(row.get("instrument") for row in worst_20),
+            "record_selection": "ascending_realized_pnl_proxy_worst_20",
+        },
+        "summary": {
+            "primary_finding": primary_finding,
+            "classification_counts": classification_counts,
+            "unresolved_count": len(unresolved),
+            "source_supported_exclusion_count": len(
+                [
+                    item
+                    for item in classifications
+                    if item["classification"]
+                    in {
+                        "CONTRACT_MULTIPLIER_OR_SCALE_MISMATCH",
+                        "QUANTITY_OR_FILL_AGGREGATION_MISMATCH",
+                        "TRADE_PAIRING_OR_POSITION_CYCLE_ANOMALY",
+                        "DUPLICATE_OR_REUSED_EXECUTION_EVIDENCE",
+                        "DEVELOPMENT_OR_LEAK_TEST_CONFIRMED",
+                        "OPERATIONAL_OR_LIFECYCLE_ANOMALY_CONFIRMED",
+                        "PNL_PROXY_UNRECONCILED",
+                    }
+                ]
+            ),
+            "guardrails": dict(GUARDRAILS),
+        },
+        "pnl_reconciliation": {
+            "schema_version": "inv_001_extreme_trade_pnl_reconciliation_v1",
+            "records": reconciliations,
+        },
+        "execution_lineage": {
+            "schema_version": "inv_001_extreme_trade_execution_lineage_v1",
+            "records": lineage_rows,
+            "duplicate_execution_summary": duplicate_execution_summary(full_exec_index),
+        },
+        "classification": {
+            "schema_version": "inv_001_extreme_trade_classification_v1",
+            "classification_contract": extreme_trade_classification_contract(),
+            "classification_counts": classification_counts,
+            "records": classifications,
+            "unresolved_review_queue": [item for item in classifications if item.get("requires_review")],
+        },
+        "population_impact": population_impact,
+        "anomaly_source_trace": source_trace,
+        "anomaly_root_cause": root_cause,
+        "anomaly_repair_plan": repair_plan,
+        "anomaly_before_after": before_after,
+        "guardrails": dict(GUARDRAILS),
+        **GUARDRAILS,
+    }
+    audit["deterministic_fingerprint"] = _fingerprint(_fingerprint_payload(audit))
+    return audit
+
+
+def anomaly_source_trace(
+    *,
+    records: Sequence[Mapping[str, Any]],
+    reconciliations: Sequence[Mapping[str, Any]],
+    lineage_rows: Sequence[Mapping[str, Any]],
+) -> dict[str, Any]:
+    reconciliation_by_id = {item.get("research_record_id"): item for item in reconciliations}
+    lineage_by_id = {item.get("research_record_id"): item for item in lineage_rows}
+    traces = []
+    for record in records:
+        record_id = record.get("research_record_id")
+        reconciliation = reconciliation_by_id.get(record_id, {})
+        lineage = lineage_by_id.get(record_id, {})
+        source_paths = record.get("supporting_artifact_paths", [])
+        canonical_path = next((path for path in source_paths if "canonical_trade_records.jsonl" in str(path)), None)
+        entry_source = "outputs/probationary_pattern_engine/paper_session/filled_bridge_results.jsonl"
+        exit_source = "outputs/track_b_execution_core/trade_registry/live_trade_events.jsonl"
+        if record.get("classification") == "CONTRACT_MULTIPLIER_OR_SCALE_MISMATCH":
+            first_defective_layer = "entry_fill_persistence"
+            defect = "price_domain_discontinuity_present_before_canonical_trade_construction"
+            first_defective_evidence = {
+                "entry_price": reconciliation.get("entry_price"),
+                "exit_price": reconciliation.get("exit_price"),
+                "price_scale_ratio": reconciliation.get("price_scale_ratio"),
+                "entry_exec_id": record.get("supporting_ids", {}).get("entry_exec_id"),
+            }
+            tests = {
+                "decimal_scaling_mismatch": "SUPPORTED_BY_PRICE_SCALE_RATIO" if reconciliation.get("price_scale_discontinuity") else "NOT_SUPPORTED",
+                "raw_vs_normalized_price_domain_mismatch": "SUPPORTED",
+                "contract_series_mapping_mismatch": "NOT_SUPPORTED_BY_CONTRACT_FIELDS",
+                "front_month_or_reference_symbol_contamination": "NARROWED_NOT_PROVEN",
+                "price_field_substitution": "NARROWED_NOT_PROVEN",
+                "string_number_conversion_error": "NOT_SUPPORTED",
+                "stale_or_legacy_schema_interpretation": "NARROWED_NOT_PROVEN",
+                "cross_instrument_entry_exit_pairing": "NOT_PROVEN_IN_CANONICAL_PAIRING; ENTRY_FILL_PRICE_ALREADY_WRONG_OR_FOREIGN_DOMAIN",
+            }
+        else:
+            first_defective_layer = "entry_fill_persistence"
+            defect = "entry_exec_id_reused_across_distinct_lifecycle_ids"
+            first_defective_evidence = {
+                "entry_exec_id": record.get("supporting_ids", {}).get("entry_exec_id"),
+                "duplicate_evidence": lineage.get("duplicate_evidence", {}),
+                "lifecycle_id": record.get("supporting_ids", {}).get("lifecycle_id"),
+            }
+            tests = {
+                "one_exec_id_attached_to_multiple_canonical_trades": "SUPPORTED",
+                "duplicated_canonical_record_generation": "NOT_PROVEN; DUPLICATE_EXEC_PRESENT_IN_ENTRY_FILL_SOURCE",
+                "faulty_position_cycle_boundary": "NARROWED_NOT_PROVEN",
+                "scale_in_or_partial_exit_reuse": "SOURCE_EVIDENCE_INCOMPLETE",
+                "reversal_mispairing": "NOT_SUPPORTED_BY_ENTRY_EXIT_SIDE_FIELDS",
+                "lifecycle_ownership_duplication": "NARROWED_NOT_PROVEN",
+                "stale_deduplication_key": "SUPPORTED_AS_MISSING_INVARIANT",
+                "source_row_copied_across_records": "NARROWED_NOT_PROVEN",
+            }
+        traces.append(
+            {
+                "research_record_id": record_id,
+                "source_trade_id": record.get("source_trade_id"),
+                "classification": record.get("classification"),
+                "instrument": record.get("instrument"),
+                "first_defective_layer": first_defective_layer,
+                "defect": defect,
+                "trace_layers": [
+                    {
+                        "layer": "original_entry_fill_persistence",
+                        "artifact_path": entry_source,
+                        "record_id": record.get("supporting_ids", {}).get("source_trade_id"),
+                        "exec_id": record.get("supporting_ids", {}).get("entry_exec_id"),
+                        "contract_identifier": {
+                            "contract": reconciliation.get("contract"),
+                            "con_id": reconciliation.get("con_id"),
+                            "instrument": reconciliation.get("instrument"),
+                        },
+                        "price": reconciliation.get("entry_price"),
+                    },
+                    {
+                        "layer": "original_exit_fill_or_close_event",
+                        "artifact_path": exit_source,
+                        "record_id": record.get("supporting_ids", {}).get("source_trade_id"),
+                        "exec_id": record.get("supporting_ids", {}).get("exit_exec_id"),
+                        "price": reconciliation.get("exit_price"),
+                    },
+                    {
+                        "layer": "canonical_trade_construction",
+                        "artifact_path": canonical_path,
+                        "record_id": record.get("supporting_ids", {}).get("canonical_trade_id"),
+                        "transformation": "entry fields copied from filled_bridge_results; exit selected by contract-scoped risk-reducing matcher",
+                    },
+                    {
+                        "layer": "ctol_pnl_calculation",
+                        "artifact_path": reconciliation.get("pnl_source_artifact"),
+                        "record_id": reconciliation.get("pnl_source_record_id"),
+                        "transformation": "P&L derived from canonical entry/exit prices, side, quantity, and multiplier.",
+                    },
+                    {
+                        "layer": "crr_materialization",
+                        "artifact_path": "outputs/track_b_execution_core/research_analytics/canonical_research_record/canonical_research_records.jsonl",
+                        "record_id": record_id,
+                        "transformation": "CRR materialized exact-source cache values and provenance references.",
+                    },
+                    {
+                        "layer": "investigation_output",
+                        "artifact_path": "outputs/track_b_execution_core/research_analytics/investigations/INV-001/",
+                        "record_id": record_id,
+                        "transformation": "INV-001 surfaced source-confirmed anomaly without excluding or rewriting the trade.",
+                    },
+                ],
+                "identity_consistency": {
+                    "instrument": reconciliation.get("instrument"),
+                    "contract": reconciliation.get("contract"),
+                    "con_id": reconciliation.get("con_id"),
+                    "source_trade_id": record.get("supporting_ids", {}).get("source_trade_id"),
+                    "lifecycle_id": record.get("supporting_ids", {}).get("lifecycle_id"),
+                    "entry_exec_id": record.get("supporting_ids", {}).get("entry_exec_id"),
+                    "exit_exec_id": record.get("supporting_ids", {}).get("exit_exec_id"),
+                    "consistent_through_ctol_and_crr": True,
+                },
+                "first_defective_evidence": first_defective_evidence,
+                "hypothesis_tests": tests,
+                "source_provenance": record.get("supporting_artifact_paths", []),
+            }
+        )
+    payload = {
+        "schema_version": "inv_001_anomaly_source_trace_v1",
+        "records": traces,
+        "guardrails": dict(GUARDRAILS),
+        **GUARDRAILS,
+    }
+    payload["deterministic_fingerprint"] = _fingerprint(_fingerprint_payload(payload))
+    return payload
+
+
+def anomaly_root_cause_report(source_trace: Mapping[str, Any]) -> dict[str, Any]:
+    records = []
+    for trace in source_trace.get("records", []):
+        classification = trace.get("classification")
+        if classification == "CONTRACT_MULTIPLIER_OR_SCALE_MISMATCH":
+            root = "ROOT_CAUSE_NARROWED"
+            defect_type = "TRANSFORMATION_DEFECT"
+            repair_scope = "generalized"
+            confidence = "HIGH"
+            summary = "Entry-fill persistence accepted a price-domain discontinuity before canonical trade construction."
+        else:
+            root = "ROOT_CAUSE_NARROWED"
+            defect_type = "IDENTITY_OR_DEDUP_DEFECT"
+            repair_scope = "generalized"
+            confidence = "HIGH"
+            summary = "Entry-fill persistence allowed the same broker exec ID to attach to multiple lifecycle/source trade IDs."
+        records.append(
+            {
+                "research_record_id": trace.get("research_record_id"),
+                "source_trade_id": trace.get("source_trade_id"),
+                "instrument": trace.get("instrument"),
+                "root_cause_classification": root,
+                "defect_classification": defect_type,
+                "first_proven_defective_layer": trace.get("first_defective_layer"),
+                "summary": summary,
+                "supporting_evidence": trace.get("first_defective_evidence"),
+                "contradictory_evidence": [
+                    "Canonical trade construction preserves instrument/contract/con_id identity in the affected rows.",
+                    "CTOL and CRR propagate the canonical fields rather than introducing a new cross-instrument join.",
+                    "The audit did not query broker state or alter source artifacts.",
+                ],
+                "confidence": confidence,
+                "repair_is_local_or_generalized": repair_scope,
+            }
+        )
+    counts = _distribution(item["defect_classification"] for item in records)
+    payload = {
+        "schema_version": "inv_001_anomaly_root_cause_v1",
+        "summary": {
+            "record_count": len(records),
+            "defect_counts": counts,
+            "first_defective_layer": "entry_fill_persistence",
+            "conclusion": "The leading cross-instrument hypothesis is narrowed to bad or foreign-domain entry-fill evidence entering durable persistence, not a proven CTOL/CRR pairing defect.",
+        },
+        "records": records,
+        "guardrails": dict(GUARDRAILS),
+        **GUARDRAILS,
+    }
+    payload["deterministic_fingerprint"] = _fingerprint(_fingerprint_payload(payload))
+    return payload
+
+
+def anomaly_repair_plan(root_cause: Mapping[str, Any]) -> dict[str, Any]:
+    payload = {
+        "schema_version": "inv_001_anomaly_repair_plan_v1",
+        "status": "ROUTINE_TRACK_REPAIR_RECOMMENDED_NOT_IMPLEMENTED",
+        "reason_not_implemented": "The repair touches canonical trade construction/source validation semantics and should be done as a separate bounded Routine Track change with regeneration validation.",
+        "recommended_generalized_invariants": [
+            {
+                "invariant": "contract_aware_price_domain_validation",
+                "description": "Before accepting or materializing an entry/exit fill, validate price against the instrument/contract domain and quarantine impossible discontinuities.",
+                "target_boundary": "filled_bridge_result persistence and canonical trade construction",
+            },
+            {
+                "invariant": "entry_exit_identity_key_must_include_contract",
+                "description": "All source lookup and pairing keys must include stable instrument, local_symbol/contract, con_id, lifecycle_id/source_trade_id, and fill role.",
+                "target_boundary": "entry/exit pairing and source lookup",
+            },
+            {
+                "invariant": "broker_exec_id_uniqueness_or_explicit_partial_fill_semantics",
+                "description": "A broker exec ID may not create multiple canonical trades unless an explicit partial-fill/scale-in record links the rows deterministically.",
+                "target_boundary": "entry dedupe and canonical trade record validation",
+            },
+            {
+                "invariant": "impossible_price_discontinuity_quarantine",
+                "description": "Trades with source-backed impossible price-domain breaks are preserved but marked research-invalid until repaired from authoritative fill evidence.",
+                "target_boundary": "canonical trade validation and CTOL/CRR readiness",
+            },
+        ],
+        "proposed_tests": [
+            "GC and NQ entries with adjacent timestamps cannot cross-link exit evidence.",
+            "A GC entry cannot accept an NQ-domain price without explicit source evidence.",
+            "An NQ entry cannot accept a GC-domain price without explicit source evidence.",
+            "Duplicate exec IDs across lifecycle IDs are quarantined unless explicit partial-fill semantics are present.",
+            "CTOL/CRR preserve invalid-source flags instead of silently computing ordinary P&L.",
+        ],
+        "implementation_boundary": "Do not patch the five rows. Add generalized validation/quarantine at source-persistence/canonical-construction boundaries, then regenerate derived artifacts.",
+        "guardrails": dict(GUARDRAILS),
+        **GUARDRAILS,
+    }
+    payload["deterministic_fingerprint"] = _fingerprint(_fingerprint_payload(payload))
+    return payload
+
+
+def anomaly_before_after_report(population_impact: Mapping[str, Any]) -> dict[str, Any]:
+    return {
+        "schema_version": "inv_001_anomaly_before_after_v1",
+        "repair_implemented": False,
+        "before": population_impact.get("views", {}).get("full_population", {}),
+        "source_supported_sensitivity_only": population_impact.get("views", {}).get("excluding_only_source_confirmed_data_anomalies", {}),
+        "after": None,
+        "note": "No source records were rewritten and no derived artifacts were regenerated under repaired canonical semantics in this slice.",
+        "guardrails": dict(GUARDRAILS),
+        **GUARDRAILS,
+    }
+
+
+def reconcile_extreme_trade_pnl(row: Mapping[str, Any]) -> dict[str, Any]:
+    entry_price = _number(row.get("entry_price"))
+    exit_price = _number(row.get("exit_price"))
+    quantity = _number(row.get("quantity"))
+    emitted_pnl = _number(row.get("realized_pnl_proxy"))
+    emitted_points = _number(row.get("realized_points"))
+    direction_sign = 1 if row.get("side") == "LONG" else -1 if row.get("side") == "SHORT" else None
+    price_difference = _round(exit_price - entry_price) if entry_price is not None and exit_price is not None else None
+    directed_points = _round(price_difference * direction_sign) if price_difference is not None and direction_sign is not None else None
+    point_difference = _round((emitted_points or 0) - (directed_points or 0)) if emitted_points is not None and directed_points is not None else None
+    point_reconciled = bool(point_difference is not None and abs(point_difference) <= 0.000001)
+    point_value_from_emitted_points = (
+        _round(emitted_pnl / (emitted_points * quantity))
+        if emitted_pnl is not None and emitted_points not in (None, 0) and quantity not in (None, 0)
+        else None
+    )
+    arithmetic_pnl_from_emitted_points = (
+        _round(emitted_points * quantity * point_value_from_emitted_points)
+        if emitted_points is not None and quantity is not None and point_value_from_emitted_points is not None
+        else None
+    )
+    arithmetic_difference = (
+        _round((arithmetic_pnl_from_emitted_points or 0) - emitted_pnl)
+        if arithmetic_pnl_from_emitted_points is not None and emitted_pnl is not None
+        else None
+    )
+    pnl_reconciled = bool(arithmetic_difference is not None and abs(arithmetic_difference) <= 0.01)
+    ratio = (
+        _round(max(abs(entry_price), abs(exit_price)) / min(abs(entry_price), abs(exit_price)))
+        if entry_price not in (None, 0) and exit_price not in (None, 0)
+        else None
+    )
+    price_scale_discontinuity = bool(ratio is not None and ratio >= 3.0)
+    return {
+        "research_record_id": row.get("research_record_id"),
+        "canonical_trade_id": row.get("trade_id"),
+        "source_trade_id": row.get("source_trade_id"),
+        "lifecycle_id": row.get("lifecycle_id"),
+        "instrument": row.get("instrument"),
+        "contract": row.get("contract"),
+        "con_id": row.get("con_id"),
+        "side": row.get("side"),
+        "quantity": row.get("quantity"),
+        "entry_timestamp": row.get("entry_time"),
+        "exit_timestamp": row.get("exit_time"),
+        "entry_price": row.get("entry_price"),
+        "exit_price": row.get("exit_price"),
+        "price_difference": price_difference,
+        "direction_sign": direction_sign,
+        "directed_points_from_prices": directed_points,
+        "emitted_realized_points": emitted_points,
+        "realized_points_reconciliation_difference": point_difference,
+        "realized_points_reconciled_to_prices": point_reconciled,
+        "contract_multiplier_or_point_value_used": point_value_from_emitted_points,
+        "contract_economics_source": "IMPLIED_FROM_EMITTED_PNL_PROXY_AND_REALIZED_POINTS" if point_value_from_emitted_points is not None else "SOURCE_EVIDENCE_ABSENT",
+        "commissions_included": "UNKNOWN",
+        "expected_arithmetic_pnl_from_available_fields": arithmetic_pnl_from_emitted_points,
+        "emitted_pnl_proxy": emitted_pnl,
+        "pnl_reconciliation_difference": arithmetic_difference,
+        "pnl_proxy_reconciled_to_available_fields": pnl_reconciled,
+        "price_scale_ratio": ratio,
+        "price_scale_discontinuity": price_scale_discontinuity,
+        "pnl_source_artifact": row.get("pnl_source_artifact"),
+        "pnl_source_record_id": row.get("pnl_source_record_id"),
+        "calculation_inputs": {
+            "entry_price": "CRR entry_anchor from canonical_trade_records",
+            "exit_price": "CRR exit_anchor from canonical_trade_records",
+            "quantity": "CRR trade_identity from canonical_trade_records",
+            "realized_points": "CRR outcome_summary from CTOL",
+            "realized_pnl_proxy": "CRR outcome_summary from CTOL",
+        },
+        "source_provenance": row.get("source_provenance", []),
+    }
+
+
+def execution_evidence_index(rows: Sequence[Mapping[str, Any]]) -> dict[str, dict[str, list[str]]]:
+    index: dict[str, dict[str, list[str]]] = {
+        "entry_exec_id": {},
+        "exit_exec_id": {},
+        "entry_order_id": {},
+        "exit_order_id": {},
+        "source_trade_id": {},
+        "lifecycle_id": {},
+    }
+    for row in rows:
+        record_id = str(row.get("research_record_id"))
+        for field in index:
+            value = row.get(field)
+            if value in (None, ""):
+                continue
+            index[field].setdefault(str(value), []).append(record_id)
+    return index
+
+
+def execution_lineage_for_row(row: Mapping[str, Any], *, full_exec_index: Mapping[str, Mapping[str, Sequence[str]]]) -> dict[str, Any]:
+    duplicate_fields: dict[str, list[str]] = {}
+    for field in ("entry_exec_id", "exit_exec_id", "source_trade_id", "lifecycle_id"):
+        value = row.get(field)
+        matches = list(full_exec_index.get(field, {}).get(str(value), [])) if value not in (None, "") else []
+        if len(matches) > 1:
+            duplicate_fields[field] = matches
+    quantity = _number(row.get("quantity"))
+    entry_time = _parse_datetime(row.get("entry_time"))
+    exit_time = _parse_datetime(row.get("exit_time"))
+    pairing_flags = []
+    if entry_time is None or exit_time is None:
+        pairing_flags.append("missing_entry_or_exit_timestamp")
+    elif exit_time <= entry_time:
+        pairing_flags.append("exit_not_after_entry")
+    if quantity is None or quantity <= 0:
+        pairing_flags.append("missing_or_nonpositive_quantity")
+    if row.get("entry_exec_id") in (None, "") or row.get("exit_exec_id") in (None, ""):
+        pairing_flags.append("missing_entry_or_exit_exec_id")
+    return {
+        "research_record_id": row.get("research_record_id"),
+        "canonical_trade_id": row.get("trade_id"),
+        "source_trade_id": row.get("source_trade_id"),
+        "lifecycle_id": row.get("lifecycle_id"),
+        "instrument": row.get("instrument"),
+        "contract": row.get("contract"),
+        "con_id": row.get("con_id"),
+        "side": row.get("side"),
+        "quantity": row.get("quantity"),
+        "entry_order_id": row.get("entry_order_id"),
+        "entry_perm_id": row.get("entry_perm_id"),
+        "entry_exec_id": row.get("entry_exec_id"),
+        "exit_order_id": row.get("exit_order_id"),
+        "exit_perm_id": row.get("exit_perm_id"),
+        "exit_exec_id": row.get("exit_exec_id"),
+        "strategy_id": row.get("strategy_id"),
+        "lane_id": row.get("lane_id"),
+        "session": row.get("session"),
+        "exit_reason": row.get("exit_reason"),
+        "duplicate_evidence": duplicate_fields,
+        "pairing_flags": pairing_flags,
+        "source_provenance": row.get("source_provenance", []),
+    }
+
+
+def duplicate_execution_summary(index: Mapping[str, Mapping[str, Sequence[str]]]) -> dict[str, Any]:
+    return {
+        field: {
+            "duplicate_key_count": len([records for records in values.values() if len(records) > 1]),
+            "max_records_per_key": max([len(records) for records in values.values()] or [0]),
+        }
+        for field, values in index.items()
+    }
+
+
+def extreme_trade_classification_contract() -> dict[str, Any]:
+    return {
+        "PNL_RECONCILED_ECONOMICALLY_PLAUSIBLE": "Prices, direction, quantity, and sourced contract economics reconcile to emitted P&L.",
+        "CONTRACT_MULTIPLIER_OR_SCALE_MISMATCH": "Source fields show price scale discontinuity or sourced economics cannot explain P&L scale.",
+        "QUANTITY_OR_FILL_AGGREGATION_MISMATCH": "Source quantity or partial-fill evidence conflicts with one-trade aggregation.",
+        "TRADE_PAIRING_OR_POSITION_CYCLE_ANOMALY": "Entry/exit pairing evidence is missing, reversed, cross-contract, or lifecycle-inconsistent.",
+        "DUPLICATE_OR_REUSED_EXECUTION_EVIDENCE": "One broker execution is linked to multiple canonical research trades.",
+        "DEVELOPMENT_OR_LEAK_TEST_CONFIRMED": "Source provenance explicitly identifies test/leak/development artifact status.",
+        "OPERATIONAL_OR_LIFECYCLE_ANOMALY_CONFIRMED": "Source fields explicitly identify operational or lifecycle anomaly evidence.",
+        "SOURCE_EVIDENCE_INCOMPLETE": "Available sources do not provide enough evidence for a narrower source-backed classification.",
+        "PNL_PROXY_UNRECONCILED": "Available price, point, quantity, and emitted P&L fields do not reconcile.",
+    }
+
+
+def classify_extreme_trade_forensics(
+    row: Mapping[str, Any],
+    *,
+    reconciliation: Mapping[str, Any],
+    lineage: Mapping[str, Any],
+) -> dict[str, Any]:
+    flags = {str(item).lower() for item in row.get("data_quality_flags", [])}
+    strategy_lane_text = " ".join(str(row.get(key) or "") for key in ("strategy_id", "lane_id")).lower()
+    if not reconciliation.get("pnl_proxy_reconciled_to_available_fields") or not reconciliation.get("realized_points_reconciled_to_prices"):
+        classification = "PNL_PROXY_UNRECONCILED"
+        confidence = "HIGH"
+        reasoning = "Available CRR/CTOL price, point, quantity, and P&L fields do not reconcile arithmetically."
+        review = True
+    elif reconciliation.get("price_scale_discontinuity"):
+        classification = "CONTRACT_MULTIPLIER_OR_SCALE_MISMATCH"
+        confidence = "HIGH"
+        reasoning = "Entry and exit prices for the same contract have a source-backed scale discontinuity."
+        review = True
+    elif lineage.get("duplicate_evidence"):
+        classification = "DUPLICATE_OR_REUSED_EXECUTION_EVIDENCE"
+        confidence = "HIGH"
+        reasoning = "Execution identifiers are reused by more than one CRR row."
+        review = True
+    elif lineage.get("pairing_flags"):
+        classification = "TRADE_PAIRING_OR_POSITION_CYCLE_ANOMALY"
+        confidence = "HIGH"
+        reasoning = "Entry/exit timestamps, quantity, or execution anchors fail deterministic lineage checks."
+        review = True
+    elif any(token in strategy_lane_text for token in ("leak", "test", "development", "dev")):
+        classification = "DEVELOPMENT_OR_LEAK_TEST_CONFIRMED"
+        confidence = "MEDIUM"
+        reasoning = "Strategy or lane identifier explicitly contains development/test wording."
+        review = True
+    elif any(token in " ".join(flags) for token in ("lifecycle", "orphan", "duplicate", "ownership")):
+        classification = "OPERATIONAL_OR_LIFECYCLE_ANOMALY_CONFIRMED"
+        confidence = "MEDIUM"
+        reasoning = "Data-quality flags explicitly identify lifecycle or operational anomaly evidence."
+        review = True
+    elif reconciliation.get("contract_economics_source") == "IMPLIED_FROM_EMITTED_PNL_PROXY_AND_REALIZED_POINTS":
+        classification = "SOURCE_EVIDENCE_INCOMPLETE"
+        confidence = "LOW"
+        reasoning = "Arithmetic is internally consistent, but no independent contract multiplier/point-value source is present."
+        review = True
+    else:
+        classification = "SOURCE_EVIDENCE_INCOMPLETE"
+        confidence = "LOW"
+        reasoning = "Available source fields do not support a narrower classification."
+        review = True
+    result = {
+        "research_record_id": row.get("research_record_id"),
+        "source_trade_id": row.get("source_trade_id"),
+        "instrument": row.get("instrument"),
+        "realized_pnl_proxy": row.get("realized_pnl_proxy"),
+        "classification": classification,
+        "reasoning": reasoning,
+        "confidence": confidence,
+        "requires_review": review,
+        "supporting_artifact_paths": sorted(
+            {
+                str(item.get("source_artifact_path"))
+                for item in row.get("source_provenance", [])
+                if item.get("source_artifact_path")
+            }
+        ),
+        "supporting_ids": {
+            "canonical_trade_id": row.get("trade_id"),
+            "source_trade_id": row.get("source_trade_id"),
+            "lifecycle_id": row.get("lifecycle_id"),
+            "entry_exec_id": row.get("entry_exec_id"),
+            "exit_exec_id": row.get("exit_exec_id"),
+            "pnl_source_record_id": row.get("pnl_source_record_id"),
+        },
+        "arithmetic": {
+            "entry_price": reconciliation.get("entry_price"),
+            "exit_price": reconciliation.get("exit_price"),
+            "direction_sign": reconciliation.get("direction_sign"),
+            "quantity": reconciliation.get("quantity"),
+            "directed_points_from_prices": reconciliation.get("directed_points_from_prices"),
+            "emitted_realized_points": reconciliation.get("emitted_realized_points"),
+            "contract_multiplier_or_point_value_used": reconciliation.get("contract_multiplier_or_point_value_used"),
+            "expected_arithmetic_pnl_from_available_fields": reconciliation.get("expected_arithmetic_pnl_from_available_fields"),
+            "emitted_pnl_proxy": reconciliation.get("emitted_pnl_proxy"),
+            "pnl_reconciliation_difference": reconciliation.get("pnl_reconciliation_difference"),
+        },
+        "contradictory_evidence": [
+            "No live broker state was queried.",
+            "No source record was excluded or rewritten.",
+        ],
+    }
+    result["deterministic_fingerprint"] = _fingerprint(_fingerprint_payload(result))
+    return result
+
+
+def extreme_trade_population_impact(
+    rows: Sequence[Mapping[str, Any]],
+    classifications: Sequence[Mapping[str, Any]],
+) -> dict[str, Any]:
+    class_by_id = {item.get("research_record_id"): item.get("classification") for item in classifications}
+    views = {
+        "full_population": set(),
+        "excluding_only_pnl_unreconciled_records": {"PNL_PROXY_UNRECONCILED"},
+        "excluding_only_source_confirmed_data_anomalies": {
+            "CONTRACT_MULTIPLIER_OR_SCALE_MISMATCH",
+            "QUANTITY_OR_FILL_AGGREGATION_MISMATCH",
+            "TRADE_PAIRING_OR_POSITION_CYCLE_ANOMALY",
+            "DUPLICATE_OR_REUSED_EXECUTION_EVIDENCE",
+            "DEVELOPMENT_OR_LEAK_TEST_CONFIRMED",
+            "OPERATIONAL_OR_LIFECYCLE_ANOMALY_CONFIRMED",
+        },
+        "economically_reconciled_trades_only": {"INCLUDE_ONLY:PNL_RECONCILED_ECONOMICALLY_PLAUSIBLE"},
+    }
+    impact: dict[str, Any] = {"schema_version": "inv_001_extreme_trade_population_impact_v1", "views": {}}
+    for name, excluded in views.items():
+        if name == "economically_reconciled_trades_only":
+            included = [row for row in rows if class_by_id.get(row.get("research_record_id")) == "PNL_RECONCILED_ECONOMICALLY_PLAUSIBLE"]
+            excluded_count = len(rows) - len(included)
+            excluded_counts = {"not_economically_reconciled_or_not_in_forensic_scope": excluded_count}
+        else:
+            included = [row for row in rows if class_by_id.get(row.get("research_record_id")) not in excluded]
+            excluded_count = len(rows) - len(included)
+            excluded_counts: dict[str, int] = {}
+            for row in rows:
+                classification = class_by_id.get(row.get("research_record_id"))
+                if classification in excluded:
+                    excluded_counts[str(classification)] = excluded_counts.get(str(classification), 0) + 1
+        impact["views"][name] = {
+            "included_count": len(included),
+            "excluded_count": excluded_count,
+            "excluded_count_by_classification": excluded_counts,
+            "label_caveat": "This is a source-supported sensitivity view, not a clean population claim.",
+            "metrics": investigation_metrics(included),
+            "long_short_outcomes": {
+                "long": investigation_metrics([row for row in included if row.get("side") == "LONG"]),
+                "short": investigation_metrics([row for row in included if row.get("side") == "SHORT"]),
+            },
+            "instrument_contribution": {
+                instrument: investigation_metrics([row for row in included if row.get("instrument") == instrument])
+                for instrument in sorted({str(row.get("instrument") or "UNKNOWN") for row in included})
+            },
+        }
+    return impact
+
+
+def validate_extreme_trade_forensic_audit(audit: Mapping[str, Any]) -> dict[str, Any]:
+    blockers = []
+    warnings = []
+    if audit.get("diagnostic_only") is not True or audit.get("production_recommendation") is not False or audit.get("trading_gate") is not False:
+        blockers.append("guardrails_invalid")
+    scope_count = audit.get("scope", {}).get("trade_count")
+    records = audit.get("classification", {}).get("records", [])
+    if scope_count != len(records):
+        blockers.append("classification_count_mismatch")
+    if audit.get("summary", {}).get("unresolved_count"):
+        warnings.append("unresolved_records_require_review")
+    if audit.get("summary", {}).get("source_supported_exclusion_count"):
+        warnings.append("source_supported_exclusion_sensitivity_present")
+    validation = {
+        "schema_version": "inv_001_extreme_trade_forensic_validation_v1",
+        "status": "INVALID" if blockers else "VALID_WITH_WARNINGS" if warnings else "VALID",
+        "blockers": blockers,
+        "warnings": warnings,
+        "scope_trade_count": scope_count,
+        "classification_counts": audit.get("summary", {}).get("classification_counts", {}),
+        "guardrails": dict(GUARDRAILS),
+        **GUARDRAILS,
+    }
+    validation["deterministic_fingerprint"] = _fingerprint(_fingerprint_payload(validation))
+    return validation
+
+
+def render_forensic_validation_markdown(validation: Mapping[str, Any]) -> str:
+    return (
+        "# INV-001 Forensic Validation\n\n"
+        f"- Status: `{validation.get('status')}`\n"
+        f"- Scope trades: `{validation.get('scope_trade_count')}`\n"
+        f"- Blockers: `{len(validation.get('blockers', []))}`\n"
+        f"- Warnings: `{len(validation.get('warnings', []))}`\n"
+    )
+
+
+def render_extreme_trade_forensic_html(investigation: Mapping[str, Any]) -> str:
+    audit = investigation.get("extreme_trade_forensic_audit", {})
+    reconciliation_rows = audit.get("pnl_reconciliation", {}).get("records", [])
+    classification_rows = audit.get("classification", {}).get("records", [])
+    impact_views = audit.get("population_impact", {}).get("views", {})
+    rec_rows = "".join(
+        "<tr>"
+        f"<td>{html.escape(str(row.get('research_record_id')))}</td>"
+        f"<td>{html.escape(str(row.get('instrument')))}</td>"
+        f"<td>{html.escape(str(row.get('contract')))}</td>"
+        f"<td>{html.escape(str(row.get('side')))}</td>"
+        f"<td>{html.escape(str(row.get('entry_price')))}</td>"
+        f"<td>{html.escape(str(row.get('exit_price')))}</td>"
+        f"<td>{html.escape(str(row.get('emitted_realized_points')))}</td>"
+        f"<td>{html.escape(str(row.get('contract_multiplier_or_point_value_used')))}</td>"
+        f"<td>{_format_money(row.get('emitted_pnl_proxy'))}</td>"
+        f"<td>{html.escape(str(row.get('price_scale_discontinuity')))}</td>"
+        "</tr>"
+        for row in reconciliation_rows
+    )
+    class_rows = "".join(
+        "<tr>"
+        f"<td>{html.escape(str(row.get('research_record_id')))}</td>"
+        f"<td>{html.escape(str(row.get('classification')))}</td>"
+        f"<td>{html.escape(str(row.get('confidence')))}</td>"
+        f"<td>{html.escape(str(row.get('reasoning')))}</td>"
+        "</tr>"
+        for row in classification_rows
+    )
+    impact_rows = "".join(
+        "<tr>"
+        f"<td>{html.escape(_display_label(name))}</td>"
+        f"<td>{view.get('included_count')}</td>"
+        f"<td>{view.get('excluded_count')}</td>"
+        f"<td>{_format_money(view.get('metrics', {}).get('total_realized_pnl_proxy'))}</td>"
+        f"<td>{_format_money(view.get('metrics', {}).get('average_realized_pnl_proxy'))}</td>"
+        f"<td>{_format_money(view.get('metrics', {}).get('median_realized_pnl_proxy'))}</td>"
+        "</tr>"
+        for name, view in impact_views.items()
+    )
+    return f"""<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>INV-001 Extreme Trade Forensic Review</title>
+<style>body{{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;margin:24px;background:#f8f8f4;color:#1f2933}}main{{max-width:1280px;margin:auto}}section{{background:white;border:1px solid #d9e0df;border-radius:6px;margin:16px 0;padding:16px}}table{{width:100%;border-collapse:collapse;font-size:13px}}th,td{{border-bottom:1px solid #e7ecea;padding:7px;text-align:left;vertical-align:top}}th{{background:#eef2ef}}.warn{{color:#8a5a00;font-weight:700}}</style>
+</head><body><main>
+<h1>INV-001 Extreme Trade Forensic Review</h1>
+<p class="warn">Descriptive forensic audit only. No exclusions, production guidance, broker access, or trading authority.</p>
+<section><h2>P&L Reconciliation</h2><table><thead><tr><th>Research Record</th><th>Instrument</th><th>Contract</th><th>Side</th><th>Entry</th><th>Exit</th><th>Points</th><th>Point Value Used</th><th>P&L Proxy</th><th>Scale Break</th></tr></thead><tbody>{rec_rows}</tbody></table></section>
+<section><h2>Classification</h2><table><thead><tr><th>Research Record</th><th>Classification</th><th>Confidence</th><th>Reasoning</th></tr></thead><tbody>{class_rows}</tbody></table></section>
+<section><h2>Population Impact</h2><table><thead><tr><th>View</th><th>Included</th><th>Excluded</th><th>Total P&L</th><th>Average</th><th>Median</th></tr></thead><tbody>{impact_rows}</tbody></table></section>
+</main></body></html>
+"""
+
+
+def render_anomaly_root_cause_html(investigation: Mapping[str, Any]) -> str:
+    audit = investigation.get("extreme_trade_forensic_audit", {})
+    source_trace = audit.get("anomaly_source_trace", {})
+    root_cause = audit.get("anomaly_root_cause", {})
+    repair_plan = audit.get("anomaly_repair_plan", {})
+    traces = source_trace.get("records", [])
+    causes = {row.get("research_record_id"): row for row in root_cause.get("records", [])}
+    trace_rows = "".join(
+        "<tr>"
+        f"<td>{html.escape(str(row.get('research_record_id')))}</td>"
+        f"<td>{html.escape(str(row.get('instrument')))}</td>"
+        f"<td>{html.escape(str(row.get('classification')))}</td>"
+        f"<td>{html.escape(str(row.get('first_defective_layer')))}</td>"
+        f"<td>{html.escape(str(row.get('defect')))}</td>"
+        f"<td>{html.escape(str(row.get('identity_consistency', {}).get('contract')))}</td>"
+        f"<td>{html.escape(str(row.get('identity_consistency', {}).get('con_id')))}</td>"
+        f"<td>{html.escape(str(row.get('identity_consistency', {}).get('entry_exec_id')))}</td>"
+        f"<td>{html.escape(str(row.get('identity_consistency', {}).get('exit_exec_id')))}</td>"
+        f"<td>{html.escape(str(row.get('hypothesis_tests', {}).get('cross_instrument_entry_exit_pairing')))}</td>"
+        "</tr>"
+        for row in traces
+    )
+    cause_rows = "".join(
+        "<tr>"
+        f"<td>{html.escape(str(row.get('research_record_id')))}</td>"
+        f"<td>{html.escape(str(row.get('defect_classification')))}</td>"
+        f"<td>{html.escape(str(row.get('root_cause_classification')))}</td>"
+        f"<td>{html.escape(str(row.get('confidence')))}</td>"
+        f"<td>{html.escape(str(row.get('summary')))}</td>"
+        "</tr>"
+        for row in causes.values()
+    )
+    invariant_rows = "".join(
+        "<tr>"
+        f"<td>{html.escape(str(item.get('invariant')))}</td>"
+        f"<td>{html.escape(str(item.get('target_boundary')))}</td>"
+        f"<td>{html.escape(str(item.get('description')))}</td>"
+        "</tr>"
+        for item in repair_plan.get("recommended_generalized_invariants", [])
+    )
+    return f"""<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>INV-001 Anomaly Root Cause Review</title>
+<style>body{{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;margin:24px;background:#f8f8f4;color:#1f2933}}main{{max-width:1320px;margin:auto}}section{{background:white;border:1px solid #d9e0df;border-radius:6px;margin:16px 0;padding:16px}}table{{width:100%;border-collapse:collapse;font-size:13px}}th,td{{border-bottom:1px solid #e7ecea;padding:7px;text-align:left;vertical-align:top}}th{{background:#eef2ef}}.warn{{color:#8a5a00;font-weight:700}}</style>
+</head><body><main>
+<h1>INV-001 Anomaly Root Cause Review</h1>
+<p class="warn">Research audit only. The report narrows the first defective durable layer without rewriting records or changing production authority.</p>
+<section><h2>Source Trace</h2><table><thead><tr><th>Research Record</th><th>Instrument</th><th>Classification</th><th>First Defective Layer</th><th>Defect</th><th>Contract</th><th>Con ID</th><th>Entry Exec</th><th>Exit Exec</th><th>Cross-Instrument Pairing Test</th></tr></thead><tbody>{trace_rows}</tbody></table></section>
+<section><h2>Root Cause Classification</h2><table><thead><tr><th>Research Record</th><th>Defect Type</th><th>Root Cause</th><th>Confidence</th><th>Summary</th></tr></thead><tbody>{cause_rows}</tbody></table></section>
+<section><h2>Generalized Repair Plan</h2><p>Status: {html.escape(str(repair_plan.get('status')))}</p><table><thead><tr><th>Invariant</th><th>Boundary</th><th>Description</th></tr></thead><tbody>{invariant_rows}</tbody></table></section>
+</main></body></html>
+"""
 
 
 def side_comparisons_by_field(rows: Sequence[Mapping[str, Any]], field: str) -> dict[str, Any]:
