@@ -74,6 +74,15 @@ INV_005_FOCAL_COMPARISONS_JSON = "focal_trade_peer_comparisons.json"
 INV_005_BREADTH_FRAGILITY_JSON = "breadth_fragility_classification.json"
 INV_005_CONTRADICTORY_EVIDENCE_JSON = "contradictory_evidence.json"
 INV_005_HTML = "nq_winner_peer_analysis.html"
+INV_006_PERIOD_COMPARISON_JSON = "period_comparison.json"
+INV_006_COMPOSITION_ATTRIBUTION_JSON = "composition_attribution.json"
+INV_006_PEER_PERIOD_COMPARISONS_JSON = "peer_period_comparisons.json"
+INV_006_TAIL_SENSITIVITY_JSON = "tail_sensitivity.json"
+INV_006_MILESTONE_CHANGE_AUDIT_JSON = "milestone_change_audit.json"
+INV_006_CONTEXT_COVERAGE_JSON = "context_coverage.json"
+INV_006_HYPOTHESIS_RESULTS_JSON = "hypothesis_results.json"
+INV_006_CONTRADICTORY_EVIDENCE_JSON = "contradictory_evidence.json"
+INV_006_HTML = "august_nq_attribution.html"
 
 SCHEMA_VERSION = "research_evidence_explorer_v1"
 VALIDATION_SCHEMA_VERSION = "research_evidence_explorer_validation_v1"
@@ -341,6 +350,29 @@ def run_research_investigations(
             _write_json(investigation_paths["breadth_fragility_classification_json"], investigation.get("breadth_fragility_classification", {}))
             _write_json(investigation_paths["contradictory_evidence_json"], investigation.get("contradictory_evidence_detail", {}))
             investigation_paths["nq_winner_peer_analysis_html"].write_text(render_inv_005_html(investigation), encoding="utf-8")
+        if investigation_id == "INV-006":
+            investigation_paths.update(
+                {
+                    "period_comparison_json": investigation_dir / INV_006_PERIOD_COMPARISON_JSON,
+                    "composition_attribution_json": investigation_dir / INV_006_COMPOSITION_ATTRIBUTION_JSON,
+                    "peer_period_comparisons_json": investigation_dir / INV_006_PEER_PERIOD_COMPARISONS_JSON,
+                    "tail_sensitivity_json": investigation_dir / INV_006_TAIL_SENSITIVITY_JSON,
+                    "milestone_change_audit_json": investigation_dir / INV_006_MILESTONE_CHANGE_AUDIT_JSON,
+                    "context_coverage_json": investigation_dir / INV_006_CONTEXT_COVERAGE_JSON,
+                    "hypothesis_results_json": investigation_dir / INV_006_HYPOTHESIS_RESULTS_JSON,
+                    "contradictory_evidence_json": investigation_dir / INV_006_CONTRADICTORY_EVIDENCE_JSON,
+                    "august_nq_attribution_html": investigation_dir / INV_006_HTML,
+                }
+            )
+            _write_json(investigation_paths["period_comparison_json"], investigation.get("period_comparison", {}))
+            _write_json(investigation_paths["composition_attribution_json"], investigation.get("composition_attribution", {}))
+            _write_json(investigation_paths["peer_period_comparisons_json"], investigation.get("peer_period_comparisons", {}))
+            _write_json(investigation_paths["tail_sensitivity_json"], investigation.get("tail_sensitivity", {}))
+            _write_json(investigation_paths["milestone_change_audit_json"], investigation.get("milestone_change_audit", {}))
+            _write_json(investigation_paths["context_coverage_json"], investigation.get("context_coverage", {}))
+            _write_json(investigation_paths["hypothesis_results_json"], investigation.get("hypothesis_results", {}))
+            _write_json(investigation_paths["contradictory_evidence_json"], investigation.get("contradictory_evidence_detail", {}))
+            investigation_paths["august_nq_attribution_html"].write_text(render_inv_006_html(investigation), encoding="utf-8")
         _write_json(investigation_paths["investigation_json"], investigation)
         investigation_paths["investigation_md"].write_text(render_investigation_markdown(investigation), encoding="utf-8")
         _write_json(investigation_paths["population_json"], population_artifact)
@@ -419,6 +451,7 @@ def build_investigation_records(
         "INV-003": build_inv_003(rows, common),
         "INV-004": build_inv_004(rows, common),
         "INV-005": build_inv_005(rows, common),
+        "INV-006": build_inv_006(rows, common),
     }
     for record in records.values():
         record["deterministic_fingerprint"] = _fingerprint(_fingerprint_payload(record))
@@ -542,6 +575,7 @@ def build_research_evidence_explorer(
         "investigation_highlights": {
             "INV-004": build_inv_004_highlight(population_rows),
             "INV-005": build_inv_005_highlight(population_rows),
+            "INV-006": build_inv_006_highlight(population_rows),
         },
         "cohort_definitions": cohort_definitions(len(population_rows)),
         "metric_definitions": metric_definitions(),
@@ -1057,6 +1091,32 @@ def build_inv_005_highlight(rows: Sequence[Mapping[str, Any]]) -> dict[str, Any]
         "nonpositive_without_focal_count": peer_metrics.get("summary", {}).get("nonpositive_without_focal_count"),
         "breadth_fragility_classification": breadth.get("classification"),
         "strongest_contradictory_evidence": contradictory.get("summary", [])[:3],
+        "guardrails": dict(GUARDRAILS),
+    }
+
+
+def build_inv_006_highlight(rows: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
+    nq_rows = [row for row in rows if str(row.get("instrument") or "").upper() == "NQ"]
+    groups = inv_006_period_groups(nq_rows)
+    period = inv_006_period_comparison(groups)
+    tail = inv_006_tail_sensitivity(groups)
+    peer = inv_006_peer_period_comparisons(groups)
+    context = inv_006_context_coverage(groups)
+    hypotheses = inv_006_hypothesis_results(period, inv_006_composition_attribution(groups), peer, tail, inv_006_milestone_change_audit(groups), context)
+    classification = inv_006_overall_classification(hypotheses, tail, peer, {})
+    return {
+        "investigation_id": "INV-006",
+        "title": "August NQ Performance Regime Attribution",
+        "artifact_path": str(DEFAULT_INVESTIGATION_OUTPUT_DIR / "INV-006" / "investigation.json"),
+        "html_path": str(DEFAULT_INVESTIGATION_OUTPUT_DIR / "INV-006" / INV_006_HTML),
+        "august_trade_count": period.get("summary", {}).get("august_trade_count"),
+        "week_32_trade_count": period.get("summary", {}).get("week_32_trade_count"),
+        "top_20_winners_in_august": period.get("summary", {}).get("top_20_winners_in_august"),
+        "top_20_winners_in_week_32": period.get("summary", {}).get("top_20_winners_in_week_32"),
+        "august_excluding_top_10_sign": tail.get("views", {}).get("august_excluding_top_10_percent", {}).get("sign_classification"),
+        "supported_peer_period_cells": peer.get("summary", {}).get("supported_cell_count"),
+        "improved_peer_period_cells": peer.get("summary", {}).get("improved_average_cell_count"),
+        "overall_classification": classification.get("classification"),
         "guardrails": dict(GUARDRAILS),
     }
 
@@ -2326,6 +2386,491 @@ def percentile_rank(values: Sequence[float], value: float | None) -> float | Non
         return None
     less_or_equal = sum(1 for item in values if item <= value)
     return _rate(less_or_equal, len(values))
+
+
+INV_006_AUGUST_PREFIX = "2026-08"
+INV_006_WEEK_32 = "2026-W32"
+INV_006_MIN_PEER_SAMPLE = 10
+INV_006_STRONG_PEER_SAMPLE = 20
+
+
+def build_inv_006(rows: Sequence[Mapping[str, Any]], common: Mapping[str, Any]) -> dict[str, Any]:
+    nq_rows = [row for row in rows if str(row.get("instrument") or "").upper() == "NQ"]
+    groups = inv_006_period_groups(nq_rows)
+    period_comparison = inv_006_period_comparison(groups)
+    composition = inv_006_composition_attribution(groups)
+    peer_periods = inv_006_peer_period_comparisons(groups)
+    tail = inv_006_tail_sensitivity(groups)
+    milestone = inv_006_milestone_change_audit(groups)
+    context = inv_006_context_coverage(groups)
+    hypotheses = inv_006_hypothesis_results(period_comparison, composition, peer_periods, tail, milestone, context)
+    classification = inv_006_overall_classification(hypotheses, tail, peer_periods, composition)
+    contradictory = inv_006_contradictory_evidence(period_comparison, peer_periods, tail, context, classification)
+    return {
+        **common,
+        "investigation_id": "INV-006",
+        "title": "August NQ Performance Regime Attribution",
+        "status": "DRAFT",
+        "question": "Why were qualified NQ results and top winners concentrated in August 2026, especially week 32?",
+        "rationale": "INV-005 found 19 of 20 top NQ winners in August 2026 and 18 of 20 in week 32, requiring period and composition attribution before narrower experiments.",
+        "population": {
+            "count": len(nq_rows),
+            "filters": {"instrument": "NQ", "active_population_view": "SOURCE_INTEGRITY_QUALIFIED"},
+            "comparison_groups": {name: {"count": len(group_rows), "date_coverage": date_coverage(group_rows)} for name, group_rows in groups.items()},
+            "ra8_coverage": cohort_evidence(nq_rows)["ra8_coverage"],
+            "missingness": _missing_field_counts(nq_rows),
+            "source_fingerprints": common.get("source_fingerprints", {}),
+        },
+        "source_contract": {
+            "source_population": "SOURCE_INTEGRITY_QUALIFIED",
+            "crr": "CRR v1",
+            "eligibility": "research eligibility records",
+            "explorer": "prepared Explorer analytics",
+            "inv_004": "INV-004 evidence",
+            "inv_005": "INV-005 evidence",
+            "ra8_required": False,
+            "missing_context_reconstructed": False,
+            "raw_dollar_disclosure": "Raw realized P&L proxy is not multiplier-, risk-, or contract-economics-normalized.",
+            "causality_disclosure": "Temporal proximity and composition differences are descriptive evidence only and do not prove causality.",
+        },
+        "methodology": [
+            "Partition source-integrity-qualified NQ rows into August 2026, week 32, pre-August, August excluding week 32, and tail-adjusted groups.",
+            "Compare period performance, composition, tail sensitivity, like-for-like peer cells, and structured context coverage.",
+            "Inspect durable repository milestones by timestamp and documented scope; temporal proximity is not causal proof.",
+            "Do not infer unavailable market regime, volatility, VWAP, AVWAP, or contract-economics fields.",
+        ],
+        "period_comparison": period_comparison,
+        "composition_attribution": composition,
+        "peer_period_comparisons": peer_periods,
+        "tail_sensitivity": tail,
+        "milestone_change_audit": milestone,
+        "context_coverage": context,
+        "hypothesis_results": hypotheses,
+        "overall_classification": classification,
+        "contradictory_evidence_detail": contradictory,
+        "evidence": {
+            "period_comparison": period_comparison,
+            "composition_attribution": composition,
+            "peer_period_comparisons": peer_periods,
+            "tail_sensitivity": tail,
+            "milestone_change_audit": milestone,
+            "context_coverage": context,
+            "hypothesis_results": hypotheses,
+            "overall_classification": classification,
+        },
+        "contradictory_evidence": contradictory.get("summary", []),
+        "findings": [
+            classification.get("summary"),
+            period_comparison.get("summary", {}).get("finding"),
+            peer_periods.get("summary", {}).get("finding"),
+        ],
+        "limitations": [
+            "Structured market-context coverage is incomplete and unavailable fields are not reconstructed.",
+            "RA8/path evidence is optional and sparse, so period attribution cannot explain path mechanics.",
+            "Raw P&L proxy is descriptive and not normalized risk economics.",
+            "Milestone timing is evidence of temporal proximity only, not causality.",
+        ],
+        "confidence": "PARTIAL",
+        "conclusion_status": "PARTIALLY_SUPPORTED" if classification.get("classification") != "INSUFFICIENT_EVIDENCE" else "INCONCLUSIVE",
+        "unresolved_questions": [
+            "Do post-repair future NQ trades reproduce week-32-like peer behavior?",
+            "Which missing structured context fields distinguish August from pre-August once captured?",
+        ],
+        "follow_up_candidates": [
+            "Create a post-repair NQ period monitor comparing future NQ Globex/US long cohorts against August baselines.",
+        ],
+    }
+
+
+def inv_006_period_groups(rows: Sequence[Mapping[str, Any]]) -> dict[str, list[Mapping[str, Any]]]:
+    august = [row for row in rows if str(row.get("exit_time") or "").startswith(INV_006_AUGUST_PREFIX)]
+    week_32 = [row for row in rows if period_key(row.get("exit_time"), "week") == INV_006_WEEK_32]
+    pre_august = [row for row in rows if str(row.get("exit_time") or "") < f"{INV_006_AUGUST_PREFIX}-01"]
+    august_ex_week_32 = [row for row in august if period_key(row.get("exit_time"), "week") != INV_006_WEEK_32]
+    top_10_ids = {row.get("research_record_id") for row in percentile_slice(rows, 0.10, low=False)}
+    inv_005_top20_ids = {row.get("research_record_id") for row in sorted(rows, key=lambda item: ((_number(item.get("realized_pnl_proxy")) or 0.0), str(item.get("research_record_id"))), reverse=True)[:20]}
+    return {
+        "full_qualified_nq": list(rows),
+        "august_2026": august,
+        "week_32_2026": week_32,
+        "pre_august": pre_august,
+        "august_excluding_week_32": august_ex_week_32,
+        "week_32_excluding_top_10_nq_winners": [row for row in week_32 if row.get("research_record_id") not in top_10_ids],
+        "august_excluding_inv_005_top_20_winners": [row for row in august if row.get("research_record_id") not in inv_005_top20_ids],
+    }
+
+
+def inv_006_period_comparison(groups: Mapping[str, Sequence[Mapping[str, Any]]]) -> dict[str, Any]:
+    comparisons = {
+        name: inv_006_period_summary(group_rows)
+        for name, group_rows in groups.items()
+    }
+    aug_count = comparisons.get("august_2026", {}).get("trade_count", 0)
+    week_count = comparisons.get("week_32_2026", {}).get("trade_count", 0)
+    top20 = groups.get("full_qualified_nq", [])
+    top20_ids = {row.get("research_record_id") for row in sorted(top20, key=lambda item: ((_number(item.get("realized_pnl_proxy")) or 0.0), str(item.get("research_record_id"))), reverse=True)[:20]}
+    top20_aug = sum(1 for row in groups.get("august_2026", []) if row.get("research_record_id") in top20_ids)
+    top20_week = sum(1 for row in groups.get("week_32_2026", []) if row.get("research_record_id") in top20_ids)
+    result = {
+        "schema_version": "inv_006_period_comparison_v1",
+        "groups": comparisons,
+        "summary": {
+            "august_trade_count": aug_count,
+            "week_32_trade_count": week_count,
+            "top_20_winners_in_august": top20_aug,
+            "top_20_winners_in_week_32": top20_week,
+            "finding": f"August contains {aug_count} qualified NQ trades; week 32 contains {week_count}; top-20 winners in August/week32 are {top20_aug}/{top20_week}.",
+        },
+        "guardrails": dict(GUARDRAILS),
+    }
+    result["deterministic_fingerprint"] = _fingerprint(_fingerprint_payload(result))
+    return result
+
+
+def inv_006_period_summary(rows: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
+    metrics = investigation_metrics(rows)
+    return {
+        "trade_count": len(rows),
+        "date_coverage": date_coverage(rows),
+        "metrics": metrics,
+        "best_1_percent": nq_percentile_contribution(rows, fraction=0.01, low=False),
+        "best_5_percent": nq_percentile_contribution(rows, fraction=0.05, low=False),
+        "best_10_percent": nq_percentile_contribution(rows, fraction=0.10, low=False),
+        "worst_1_percent": nq_percentile_contribution(rows, fraction=0.01, low=True),
+        "worst_5_percent": nq_percentile_contribution(rows, fraction=0.05, low=True),
+        "worst_10_percent": nq_percentile_contribution(rows, fraction=0.10, low=True),
+        "strategy_mix": _distribution((row.get("strategy_id") for row in rows), limit=30),
+        "lane_mix": _distribution((row.get("lane_id") for row in rows), limit=30),
+        "session_mix": _distribution(row.get("session") for row in rows),
+        "side_mix": _distribution(row.get("side") for row in rows),
+        "regime_mix": _distribution(row.get("regime") for row in rows),
+        "contract_mix": _distribution(row.get("contract") for row in rows),
+        "quantity_mix": _distribution(row.get("quantity") for row in rows),
+        "exit_policy_mix": _distribution(row.get("exit_policy") for row in rows),
+        "exit_reason_mix": _distribution(row.get("exit_reason") for row in rows),
+        "rolling_10_trade_windows": rolling_window_metrics(rows, window_size=10) if len(rows) >= 10 else [],
+        "rolling_20_trade_windows": rolling_window_metrics(rows, window_size=20) if len(rows) >= 20 else [],
+        "rolling_50_trade_windows": rolling_window_metrics(rows, window_size=50) if len(rows) >= 50 else [],
+        "ra8_coverage": cohort_evidence(rows)["ra8_coverage"],
+        "missingness": _missing_field_counts(rows),
+    }
+
+
+def inv_006_composition_attribution(groups: Mapping[str, Sequence[Mapping[str, Any]]]) -> dict[str, Any]:
+    august = groups.get("august_2026", [])
+    pre = groups.get("pre_august", [])
+    dimensions = {
+        "strategy": "strategy_id",
+        "lane": "lane_id",
+        "session": "session",
+        "side": "side",
+        "regime": "regime",
+        "contract": "contract",
+        "exit_policy": "exit_policy",
+        "exit_reason": "exit_reason",
+    }
+    return {
+        "schema_version": "inv_006_composition_attribution_v1",
+        "dimensions": {
+            name: inv_006_dimension_composition(august, pre, field)
+            for name, field in dimensions.items()
+        },
+        "guardrails": dict(GUARDRAILS),
+    }
+
+
+def inv_006_dimension_composition(period_rows: Sequence[Mapping[str, Any]], prior_rows: Sequence[Mapping[str, Any]], field: str) -> list[dict[str, Any]]:
+    values = sorted({str(row.get(field) or "UNKNOWN") for row in [*period_rows, *prior_rows]})
+    period_total = sum(_values(period_rows, "realized_pnl_proxy"))
+    prior_total = sum(_values(prior_rows, "realized_pnl_proxy"))
+    records = []
+    for value in values:
+        p_rows = [row for row in period_rows if str(row.get(field) or "UNKNOWN") == value]
+        q_rows = [row for row in prior_rows if str(row.get(field) or "UNKNOWN") == value]
+        top_ids = {row.get("research_record_id") for row in percentile_slice(p_rows, 0.10, low=False)}
+        p_metrics = investigation_metrics(p_rows)
+        q_metrics = investigation_metrics(q_rows)
+        records.append(
+            {
+                "value": value,
+                "period_count": len(p_rows),
+                "prior_count": len(q_rows),
+                "period_share": _rate(len(p_rows), len(period_rows)),
+                "prior_share": _rate(len(q_rows), len(prior_rows)),
+                "period_metrics": p_metrics,
+                "prior_metrics": q_metrics,
+                "period_contribution_to_total_pnl": _rate(_number(p_metrics.get("total_realized_pnl_proxy")) or 0.0, period_total),
+                "prior_contribution_to_total_pnl": _rate(_number(q_metrics.get("total_realized_pnl_proxy")) or 0.0, prior_total),
+                "period_top_10_winner_count": len(top_ids),
+                "period_top_10_total_realized_pnl_proxy": _round(sum(_values([row for row in p_rows if row.get("research_record_id") in top_ids], "realized_pnl_proxy"))),
+                "missingness": _missing_field_counts(p_rows),
+            }
+        )
+    return sorted(records, key=lambda item: abs(_number(item.get("period_metrics", {}).get("total_realized_pnl_proxy")) or 0.0), reverse=True)
+
+
+def inv_006_peer_period_comparisons(groups: Mapping[str, Sequence[Mapping[str, Any]]]) -> dict[str, Any]:
+    period_sets = {"august_2026": groups.get("august_2026", []), "week_32_2026": groups.get("week_32_2026", [])}
+    prior = groups.get("pre_august", [])
+    levels = (
+        ("A", ("strategy_id", "lane_id", "session", "side")),
+        ("B", ("strategy_id", "session", "side")),
+        ("C", ("strategy_id", "side")),
+    )
+    records = []
+    excluded = []
+    for period_name, period_rows in period_sets.items():
+        cells = sorted({tuple(str(row.get(field) or "UNKNOWN") for field in fields) for _, fields in levels for row in period_rows})
+        seen: set[tuple[str, tuple[str, ...]]] = set()
+        for row in period_rows:
+            selected = None
+            attempts = []
+            for level, fields in levels:
+                key = tuple(str(row.get(field) or "UNKNOWN") for field in fields)
+                signature = (period_name, level, key)
+                if signature in seen:
+                    continue
+                p_rows = [item for item in period_rows if tuple(str(item.get(field) or "UNKNOWN") for field in fields) == key]
+                q_rows = [item for item in prior if tuple(str(item.get(field) or "UNKNOWN") for field in fields) == key]
+                attempts.append({"level": level, "key": key, "period_count": len(p_rows), "prior_count": len(q_rows)})
+                if len(p_rows) >= INV_006_MIN_PEER_SAMPLE and len(q_rows) >= INV_006_MIN_PEER_SAMPLE:
+                    selected = (level, fields, key, p_rows, q_rows)
+                    break
+            if not selected:
+                if attempts:
+                    excluded.append({"period": period_name, "reason": "below_minimum_sample", "attempts": attempts})
+                continue
+            level, fields, key, p_rows, q_rows = selected
+            seen.add((period_name, level, key))
+            p_metrics = investigation_metrics(p_rows)
+            q_metrics = investigation_metrics(q_rows)
+            p_ex_top = [item for item in p_rows if item.get("research_record_id") not in {top.get("research_record_id") for top in percentile_slice(p_rows, 0.10, low=False)}]
+            q_ex_top = [item for item in q_rows if item.get("research_record_id") not in {top.get("research_record_id") for top in percentile_slice(q_rows, 0.10, low=False)}]
+            records.append(
+                {
+                    "period": period_name,
+                    "peer_level": level,
+                    "fields": list(fields),
+                    "key": list(key),
+                    "period_count": len(p_rows),
+                    "prior_count": len(q_rows),
+                    "sample_class": "STRONG_COMPARISON" if len(p_rows) >= INV_006_STRONG_PEER_SAMPLE and len(q_rows) >= INV_006_STRONG_PEER_SAMPLE else "DESCRIPTIVE_COMPARISON",
+                    "period_metrics": p_metrics,
+                    "prior_metrics": q_metrics,
+                    "average_delta_period_minus_prior": _round((_number(p_metrics.get("average_realized_pnl_proxy")) or 0.0) - (_number(q_metrics.get("average_realized_pnl_proxy")) or 0.0)),
+                    "sign_persistence": inv_006_sign_persistence(p_metrics, q_metrics),
+                    "period_excluding_top_10_metrics": investigation_metrics(p_ex_top),
+                    "prior_excluding_top_10_metrics": investigation_metrics(q_ex_top),
+                }
+            )
+    improved = [record for record in records if (_number(record.get("average_delta_period_minus_prior")) or 0.0) > 0]
+    result = {
+        "schema_version": "inv_006_peer_period_comparisons_v1",
+        "records": records,
+        "excluded_cells": excluded,
+        "summary": {
+            "supported_cell_count": len(records),
+            "improved_average_cell_count": len(improved),
+            "excluded_cell_count": len(excluded),
+            "finding": f"{len(improved)} of {len(records)} supported like-for-like period cells have higher average P&L in the later period.",
+        },
+        "guardrails": dict(GUARDRAILS),
+    }
+    result["deterministic_fingerprint"] = _fingerprint(_fingerprint_payload(result))
+    return result
+
+
+def inv_006_sign_persistence(a: Mapping[str, Any], b: Mapping[str, Any]) -> str:
+    a_total = _number(a.get("total_realized_pnl_proxy")) or 0.0
+    b_total = _number(b.get("total_realized_pnl_proxy")) or 0.0
+    if a_total > 0 and b_total > 0:
+        return "POSITIVE_BOTH_PERIODS"
+    if a_total > 0 and b_total <= 0:
+        return "PERIOD_POSITIVE_PRIOR_NONPOSITIVE"
+    if a_total <= 0 and b_total > 0:
+        return "PERIOD_NONPOSITIVE_PRIOR_POSITIVE"
+    return "NONPOSITIVE_BOTH_PERIODS"
+
+
+def inv_006_tail_sensitivity(groups: Mapping[str, Sequence[Mapping[str, Any]]]) -> dict[str, Any]:
+    inv005_top20_ids = {row.get("research_record_id") for row in sorted(groups.get("full_qualified_nq", []), key=lambda item: ((_number(item.get("realized_pnl_proxy")) or 0.0), str(item.get("research_record_id"))), reverse=True)[:20]}
+    views = {
+        "august_full": inv_006_tail_view(groups.get("august_2026", []), set()),
+        "august_excluding_top_1_percent": inv_006_tail_view(groups.get("august_2026", []), {row.get("research_record_id") for row in percentile_slice(groups.get("august_2026", []), 0.01, low=False)}),
+        "august_excluding_top_5_percent": inv_006_tail_view(groups.get("august_2026", []), {row.get("research_record_id") for row in percentile_slice(groups.get("august_2026", []), 0.05, low=False)}),
+        "august_excluding_top_10_percent": inv_006_tail_view(groups.get("august_2026", []), {row.get("research_record_id") for row in percentile_slice(groups.get("august_2026", []), 0.10, low=False)}),
+        "week_32_full": inv_006_tail_view(groups.get("week_32_2026", []), set()),
+        "week_32_excluding_top_10_percent": inv_006_tail_view(groups.get("week_32_2026", []), {row.get("research_record_id") for row in percentile_slice(groups.get("week_32_2026", []), 0.10, low=False)}),
+        "august_excluding_inv_005_top_20_winners": inv_006_tail_view(groups.get("august_2026", []), inv005_top20_ids),
+    }
+    result = {"schema_version": "inv_006_tail_sensitivity_v1", "views": views, "guardrails": dict(GUARDRAILS)}
+    result["deterministic_fingerprint"] = _fingerprint(_fingerprint_payload(result))
+    return result
+
+
+def inv_006_tail_view(rows: Sequence[Mapping[str, Any]], excluded_ids: set[Any]) -> dict[str, Any]:
+    included = [row for row in rows if row.get("research_record_id") not in excluded_ids]
+    total = _number(investigation_metrics(included).get("total_realized_pnl_proxy")) or 0.0
+    return {
+        "included_count": len(included),
+        "excluded_count": len(rows) - len(included),
+        "metrics": investigation_metrics(included),
+        "sign_classification": "positive" if total > 0 else "near_zero" if abs(total) < 1e-9 else "negative",
+    }
+
+
+def inv_006_milestone_change_audit(groups: Mapping[str, Sequence[Mapping[str, Any]]]) -> dict[str, Any]:
+    august_start = "2026-08-01T00:00:00"
+    week_32_start = "2026-08-03T00:00:00"
+    records = []
+    for milestone in EVIDENCE_BACKED_MILESTONES:
+        boundary = str(milestone.get("boundary_at"))
+        records.append(
+            {
+                "milestone_id": milestone.get("milestone_id"),
+                "label": milestone.get("label"),
+                "boundary_at": boundary,
+                "source": milestone.get("source"),
+                "before_or_during_august": boundary <= "2026-08-31T23:59:59",
+                "immediately_before_week_32": "2026-07-20" <= boundary[:10] <= "2026-08-03",
+                "plausibly_changed_observed_population": "UNKNOWN_FROM_AVAILABLE_EVIDENCE",
+                "supporting_evidence": [str(milestone.get("source"))],
+                "contradictory_evidence": ["Temporal proximity does not prove causality.", "No runtime or strategy configuration causality is inferred from repository milestone timing."],
+            }
+        )
+    return {
+        "schema_version": "inv_006_milestone_change_audit_v1",
+        "records": records,
+        "summary": "Durable milestones exist near the period, but no causal strategy/configuration attribution is made.",
+        "guardrails": dict(GUARDRAILS),
+    }
+
+
+def inv_006_context_coverage(groups: Mapping[str, Sequence[Mapping[str, Any]]]) -> dict[str, Any]:
+    fields = {
+        "session": "session",
+        "regime": "regime",
+        "strategy_setup_family": "strategy_id",
+        "slope_curvature": "slope_curvature",
+        "volatility_state": "volatility_state",
+        "trend_state": "trend_state",
+        "participation_state": "strategy_id",
+        "vwap_avwap_context": "vwap_avwap_relation",
+        "opening_range_position": "opening_range_position",
+        "crfd_gre_status": "regime",
+    }
+    return {
+        "schema_version": "inv_006_context_coverage_v1",
+        "fields": {
+            name: {
+                group_name: inv_006_field_coverage(group_rows, field)
+                for group_name, group_rows in groups.items()
+                if group_name in {"august_2026", "week_32_2026", "pre_august"}
+            }
+            for name, field in fields.items()
+        },
+        "guardrails": dict(GUARDRAILS),
+    }
+
+
+def inv_006_field_coverage(rows: Sequence[Mapping[str, Any]], field: str) -> dict[str, Any]:
+    present = [row for row in rows if row.get(field) not in (None, "", "UNKNOWN", "UNAVAILABLE")]
+    return {
+        "coverage_count": len(present),
+        "missing_count": len(rows) - len(present),
+        "comparison_defensible": len(present) >= INV_006_MIN_PEER_SAMPLE,
+    }
+
+
+def inv_006_hypothesis_results(
+    period: Mapping[str, Any],
+    composition: Mapping[str, Any],
+    peer_periods: Mapping[str, Any],
+    tail: Mapping[str, Any],
+    milestone: Mapping[str, Any],
+    context: Mapping[str, Any],
+) -> dict[str, Any]:
+    views = tail.get("views", {})
+    peer_summary = peer_periods.get("summary", {})
+    context_fields = context.get("fields", {})
+    weak_context = any(
+        not group_cov.get("comparison_defensible")
+        for field_cov in context_fields.values()
+        for group_cov in field_cov.values()
+        if field_cov
+    )
+    hypotheses = {
+        "H1_composition_driven": inv_006_hypothesis("PARTIALLY_SUPPORTED", ["August/week-32 composition is dominated by NQ Globex/US long cohorts."], ["Composition alone does not explain all peer-period differences."]),
+        "H2_same_peer_cohorts_performed_better": inv_006_hypothesis("PARTIALLY_SUPPORTED" if peer_summary.get("improved_average_cell_count", 0) else "INCONCLUSIVE", [peer_summary.get("finding")], ["Sparse cells are excluded and not all cohorts have prior support."]),
+        "H3_week_32_isolated_favorable_period": inv_006_hypothesis("PARTIALLY_SUPPORTED", [period.get("summary", {}).get("finding")], ["August includes additional non-week-32 trades, so week 32 is not the whole August population."]),
+        "H4_strategy_configuration_transition_associated": inv_006_hypothesis("INCONCLUSIVE", [milestone.get("summary")], ["Temporal proximity does not prove causality."]),
+        "H5_tail_dependent_within_august": inv_006_hypothesis("PARTIALLY_SUPPORTED" if views.get("august_excluding_top_10_percent", {}).get("sign_classification") != "positive" else "UNSUPPORTED", [f"August ex-top-10 sign: {views.get('august_excluding_top_10_percent', {}).get('sign_classification')}"], ["Top-winner peer cohorts can remain positive without focal winners."]),
+        "H6_context_insufficient": inv_006_hypothesis("SUPPORTED" if weak_context else "PARTIALLY_SUPPORTED", ["Structured context fields have incomplete coverage for some requested explanations."], ["Session and strategy/setup family are available."]),
+    }
+    return {"schema_version": "inv_006_hypothesis_results_v1", "hypotheses": hypotheses, "guardrails": dict(GUARDRAILS)}
+
+
+def inv_006_hypothesis(status: str, support: Sequence[Any], contradict: Sequence[Any]) -> dict[str, Any]:
+    return {
+        "status": status,
+        "supporting_evidence": [str(item) for item in support if item],
+        "contradictory_evidence": [str(item) for item in contradict if item],
+        "limitations": ["Descriptive only; no causal or production inference."],
+        "confidence": "PARTIAL" if status in {"SUPPORTED", "PARTIALLY_SUPPORTED"} else "LOW",
+    }
+
+
+def inv_006_overall_classification(
+    hypotheses: Mapping[str, Any],
+    tail: Mapping[str, Any],
+    peer_periods: Mapping[str, Any],
+    composition: Mapping[str, Any],
+) -> dict[str, Any]:
+    h = hypotheses.get("hypotheses", {})
+    if h.get("H5_tail_dependent_within_august", {}).get("status") == "PARTIALLY_SUPPORTED":
+        classification = "TAIL_CONCENTRATION_PRIMARILY"
+    elif h.get("H2_same_peer_cohorts_performed_better", {}).get("status") == "PARTIALLY_SUPPORTED":
+        classification = "LIKE_FOR_LIKE_PERFORMANCE_IMPROVEMENT"
+    elif h.get("H1_composition_driven", {}).get("status") == "PARTIALLY_SUPPORTED":
+        classification = "COMPOSITION_SHIFT_PRIMARILY"
+    else:
+        classification = "MIXED_MULTIFACTOR"
+    return {
+        "schema_version": "inv_006_overall_classification_v1",
+        "classification": classification,
+        "threshold_logic": {
+            "TAIL_CONCENTRATION_PRIMARILY": "Selected when August/week-32 results are materially weakened or nonpositive after top-winner removal.",
+            "LIKE_FOR_LIKE_PERFORMANCE_IMPROVEMENT": "Selected when supported like-for-like cells broadly improve versus prior period and tail dependence is not primary.",
+            "COMPOSITION_SHIFT_PRIMARILY": "Selected when period composition changes dominate without stronger like-for-like or tail evidence.",
+            "MIXED_MULTIFACTOR": "Selected when no single descriptive threshold dominates.",
+        },
+        "summary": f"August concentration is classified as {classification}.",
+        "guardrails": dict(GUARDRAILS),
+    }
+
+
+def inv_006_contradictory_evidence(
+    period: Mapping[str, Any],
+    peer_periods: Mapping[str, Any],
+    tail: Mapping[str, Any],
+    context: Mapping[str, Any],
+    classification: Mapping[str, Any],
+) -> dict[str, Any]:
+    summary = [
+        "Like-for-like peer cells may improve even while tail sensitivity remains high.",
+        "Top-winner peer cohorts from INV-005 remain positive without focal winners.",
+        "Structured market context is incomplete, so market-regime explanations are limited.",
+        "Temporal repository milestones do not prove causality.",
+        "Raw P&L proxy is not normalized risk economics.",
+    ]
+    return {
+        "schema_version": "inv_006_contradictory_evidence_v1",
+        "summary": summary,
+        "peer_period_summary": peer_periods.get("summary", {}),
+        "tail_sensitivity_summary": {name: view.get("sign_classification") for name, view in tail.get("views", {}).items()},
+        "overall_classification": classification.get("classification"),
+        "guardrails": dict(GUARDRAILS),
+    }
 
 
 def percentile_slice(rows: Sequence[Mapping[str, Any]], fraction: float, *, low: bool) -> list[Mapping[str, Any]]:
@@ -3697,6 +4242,87 @@ def render_inv_005_html(investigation: Mapping[str, Any]) -> str:
 """
 
 
+def render_inv_006_html(investigation: Mapping[str, Any]) -> str:
+    period = investigation.get("period_comparison", {})
+    groups = period.get("groups", {})
+    composition = investigation.get("composition_attribution", {}).get("dimensions", {})
+    peer = investigation.get("peer_period_comparisons", {})
+    tail = investigation.get("tail_sensitivity", {}).get("views", {})
+    hypotheses = investigation.get("hypothesis_results", {}).get("hypotheses", {})
+    classification = investigation.get("overall_classification", {})
+    contradictory = investigation.get("contradictory_evidence_detail", {})
+
+    period_rows = "".join(
+        "<tr>"
+        f"<td>{html.escape(_display_label(name))}</td>"
+        f"<td>{summary.get('trade_count')}</td>"
+        f"<td>{_format_money(summary.get('metrics', {}).get('total_realized_pnl_proxy'))}</td>"
+        f"<td>{_format_money(summary.get('metrics', {}).get('average_realized_pnl_proxy'))}</td>"
+        f"<td>{_format_money(summary.get('metrics', {}).get('median_realized_pnl_proxy'))}</td>"
+        f"<td>{html.escape(str(summary.get('metrics', {}).get('win_rate')))}</td>"
+        "</tr>"
+        for name, summary in groups.items()
+    )
+    composition_rows = "".join(
+        "<tr>"
+        f"<td>{html.escape(str(dim))}</td>"
+        f"<td>{html.escape(str(item.get('value')))}</td>"
+        f"<td>{item.get('period_count')}</td>"
+        f"<td>{item.get('prior_count')}</td>"
+        f"<td>{_format_money(item.get('period_metrics', {}).get('total_realized_pnl_proxy'))}</td>"
+        f"<td>{_format_money(item.get('prior_metrics', {}).get('total_realized_pnl_proxy'))}</td>"
+        "</tr>"
+        for dim in ("strategy", "session", "side")
+        for item in composition.get(dim, [])[:5]
+    )
+    peer_rows = "".join(
+        "<tr>"
+        f"<td>{html.escape(str(item.get('period')))}</td>"
+        f"<td>{html.escape(str(item.get('peer_level')))}</td>"
+        f"<td>{html.escape('/'.join(str(x) for x in item.get('key', [])))}</td>"
+        f"<td>{item.get('period_count')}</td>"
+        f"<td>{item.get('prior_count')}</td>"
+        f"<td>{_format_money(item.get('average_delta_period_minus_prior'))}</td>"
+        f"<td>{html.escape(str(item.get('sign_persistence')))}</td>"
+        "</tr>"
+        for item in peer.get("records", [])[:20]
+    )
+    tail_rows = "".join(
+        "<tr>"
+        f"<td>{html.escape(_display_label(name))}</td>"
+        f"<td>{view.get('included_count')}</td>"
+        f"<td>{view.get('excluded_count')}</td>"
+        f"<td>{_format_money(view.get('metrics', {}).get('total_realized_pnl_proxy'))}</td>"
+        f"<td>{html.escape(str(view.get('sign_classification')))}</td>"
+        "</tr>"
+        for name, view in tail.items()
+    )
+    hypothesis_rows = "".join(
+        "<tr>"
+        f"<td>{html.escape(str(name))}</td>"
+        f"<td>{html.escape(str(item.get('status')))}</td>"
+        f"<td>{html.escape('; '.join(item.get('supporting_evidence', [])[:2]))}</td>"
+        "</tr>"
+        for name, item in hypotheses.items()
+    )
+    contrary_rows = "".join(f"<li>{html.escape(str(item))}</li>" for item in contradictory.get("summary", []))
+    return f"""<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>INV-006 August NQ Attribution</title>
+<style>body{{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;margin:24px;background:#f6f7f4;color:#1f2933}}main{{max-width:1320px;margin:auto}}section{{background:white;border:1px solid #d9e0df;border-radius:6px;margin:16px 0;padding:16px}}table{{width:100%;border-collapse:collapse;font-size:13px}}th,td{{border-bottom:1px solid #e7ecea;padding:7px;text-align:left;vertical-align:top}}th{{background:#eef2ef}}.warn{{color:#8a5a00;font-weight:700}}</style>
+</head><body><main>
+<h1>INV-006 August NQ Performance Regime Attribution</h1>
+<p class="warn">Descriptive, non-causal, source-integrity-qualified research only. No production recommendation or trading authority.</p>
+<section><h2>Classification</h2><p>{html.escape(str(classification.get('summary')))}</p><p>Class: <strong>{html.escape(str(classification.get('classification')))}</strong></p></section>
+<section><h2>Period Comparison</h2><table><thead><tr><th>Group</th><th>Trades</th><th>Total</th><th>Average</th><th>Median</th><th>Win Rate</th></tr></thead><tbody>{period_rows}</tbody></table></section>
+<section><h2>Tail Sensitivity</h2><table><thead><tr><th>View</th><th>Included</th><th>Excluded</th><th>Total</th><th>Sign</th></tr></thead><tbody>{tail_rows}</tbody></table></section>
+<section><h2>Composition Attribution</h2><table><thead><tr><th>Dimension</th><th>Value</th><th>August Count</th><th>Prior Count</th><th>August Total</th><th>Prior Total</th></tr></thead><tbody>{composition_rows}</tbody></table></section>
+<section><h2>Like-For-Like Peer Period Cells</h2><p>{html.escape(str(peer.get('summary', {}).get('finding')))}</p><table><thead><tr><th>Period</th><th>Level</th><th>Cell</th><th>Period Count</th><th>Prior Count</th><th>Average Delta</th><th>Sign</th></tr></thead><tbody>{peer_rows}</tbody></table></section>
+<section><h2>Hypotheses</h2><table><thead><tr><th>Hypothesis</th><th>Status</th><th>Evidence</th></tr></thead><tbody>{hypothesis_rows}</tbody></table></section>
+<section><h2>Contradictory Evidence</h2><ul>{contrary_rows}</ul></section>
+</main></body></html>
+"""
+
+
 def side_comparisons_by_field(rows: Sequence[Mapping[str, Any]], field: str) -> dict[str, Any]:
     grouped: dict[str, list[Mapping[str, Any]]] = {}
     for row in rows:
@@ -3957,6 +4583,7 @@ def durable_investigation_summary_filename(investigation_id: str) -> str:
         "INV-003": "INV-003-performance-over-time.md",
         "INV-004": "INV-004-nq-qualified-performance-attribution.md",
         "INV-005": "INV-005-nq-winner-concentration-peer-cohorts.md",
+        "INV-006": "INV-006-august-nq-performance-regime-attribution.md",
     }.get(investigation_id, f"{investigation_id}.md")
 
 
@@ -4295,6 +4922,7 @@ def render_presentation_html(analysis: Mapping[str, Any]) -> str:
             ("population-views", "Population Views"),
             ("inv004", "INV-004 NQ"),
             ("inv005", "INV-005 Peers"),
+            ("inv006", "INV-006 August"),
             ("cohorts", "Cohort Comparison"),
             ("controlled", "Within-Instrument View"),
             ("distributions", "Distributions"),
@@ -4311,6 +4939,7 @@ def render_presentation_html(analysis: Mapping[str, Any]) -> str:
     anomaly_rows = render_anomaly_rows(analysis)
     inv_004_rows = render_inv_004_highlight_rows(analysis)
     inv_005_rows = render_inv_005_highlight_rows(analysis)
+    inv_006_rows = render_inv_006_highlight_rows(analysis)
     distribution_sections = "".join(
         render_distribution_chart(key, item)
         for key, item in analysis.get("distributions", {}).items()
@@ -4407,6 +5036,11 @@ def render_presentation_html(analysis: Mapping[str, Any]) -> str:
     <h2>INV-005: NQ Winner Peer Cohorts</h2>
     <p>Prepared peer-cohort highlight over top NQ winners. Descriptive only; no causal or production language.</p>
     <table><thead><tr><th>Metric</th><th>Value</th></tr></thead><tbody>{inv_005_rows}</tbody></table>
+  </section>
+  <section id="inv006">
+    <h2>INV-006: August NQ Attribution</h2>
+    <p>Prepared August/week-32 period attribution highlight. Descriptive only; no causal or production language.</p>
+    <table><thead><tr><th>Metric</th><th>Value</th></tr></thead><tbody>{inv_006_rows}</tbody></table>
   </section>
   <section id="cohorts">
     <h2>Cohort Comparison</h2>
@@ -4704,6 +5338,29 @@ def render_inv_005_highlight_rows(analysis: Mapping[str, Any]) -> str:
         ("Nonpositive without focal", highlight.get("nonpositive_without_focal_count")),
         ("Breadth / fragility", highlight.get("breadth_fragility_classification")),
         ("Strongest contradictory evidence", "; ".join(str(item) for item in highlight.get("strongest_contradictory_evidence", []))),
+        ("Investigation artifact", highlight.get("artifact_path")),
+        ("HTML artifact", highlight.get("html_path")),
+    ]
+    return "".join(
+        "<tr>"
+        f"<td>{html.escape(str(label))}</td>"
+        f"<td>{html.escape(str(value if value not in (None, '') else 'MISSING'))}</td>"
+        "</tr>"
+        for label, value in rows
+    )
+
+
+def render_inv_006_highlight_rows(analysis: Mapping[str, Any]) -> str:
+    highlight = analysis.get("investigation_highlights", {}).get("INV-006", {})
+    rows = [
+        ("August NQ trades", highlight.get("august_trade_count")),
+        ("Week 32 NQ trades", highlight.get("week_32_trade_count")),
+        ("Top 20 winners in August", highlight.get("top_20_winners_in_august")),
+        ("Top 20 winners in week 32", highlight.get("top_20_winners_in_week_32")),
+        ("August ex top 10 sign", highlight.get("august_excluding_top_10_sign")),
+        ("Supported peer period cells", highlight.get("supported_peer_period_cells")),
+        ("Improved peer period cells", highlight.get("improved_peer_period_cells")),
+        ("Overall classification", highlight.get("overall_classification")),
         ("Investigation artifact", highlight.get("artifact_path")),
         ("HTML artifact", highlight.get("html_path")),
     ]

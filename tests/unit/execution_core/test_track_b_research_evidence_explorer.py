@@ -29,11 +29,20 @@ from mgc_v05l.execution_core.track_b_research_evidence_explorer import (
     inv_005_peer_assignments,
     inv_005_peer_metrics,
     inv_005_top_winner_cohorts,
+    build_inv_006,
+    inv_006_composition_attribution,
+    inv_006_context_coverage,
+    inv_006_hypothesis_results,
+    inv_006_peer_period_comparisons,
+    inv_006_period_comparison,
+    inv_006_period_groups,
+    inv_006_tail_sensitivity,
     reconcile_extreme_trade_pnl,
     render_presentation_html,
     render_investigation_index_html,
     render_inv_004_html,
     render_inv_005_html,
+    render_inv_006_html,
     run_research_evidence_explorer,
     run_research_investigations,
     trimmed_mean,
@@ -419,7 +428,7 @@ def test_investigation_records_have_fingerprints_guardrails_and_ra8_optional(tmp
         explorer_path=tmp_path / "explorer.json",
     )
 
-    assert sorted(records) == ["INV-001", "INV-002", "INV-003", "INV-004", "INV-005"]
+    assert sorted(records) == ["INV-001", "INV-002", "INV-003", "INV-004", "INV-005", "INV-006"]
     assert records["INV-001"]["deterministic_fingerprint"]
     assert records["INV-002"]["conclusion_status"] in {"PARTIALLY_SUPPORTED", "INCONCLUSIVE"}
     assert records["INV-003"]["evidence"]["milestone_periods"]["boundaries"]
@@ -608,6 +617,62 @@ def test_inv_005_explorer_highlight_and_guardrails(tmp_path: Path) -> None:
     assert analysis["investigation_highlights"]["INV-005"]["qualified_nq_trade_count"] == 60
     assert "INV-005: NQ Winner Peer Cohorts" in rendered
     assert analysis["guardrails"]["production_recommendation"] is False
+
+
+def test_inv_006_period_membership_and_tail_sensitivity() -> None:
+    rows = _august_nq_rows()
+    groups = inv_006_period_groups(rows)
+    period = inv_006_period_comparison(groups)
+    tail = inv_006_tail_sensitivity(groups)
+
+    assert len(groups["august_2026"]) == 24
+    assert len(groups["week_32_2026"]) == 20
+    assert len(groups["pre_august"]) == 20
+    assert period["summary"]["top_20_winners_in_august"] >= 10
+    assert tail["views"]["august_excluding_top_10_percent"]["included_count"] < tail["views"]["august_full"]["included_count"]
+    assert tail["deterministic_fingerprint"] == inv_006_tail_sensitivity(groups)["deterministic_fingerprint"]
+
+
+def test_inv_006_peer_period_context_and_hypotheses_are_bounded() -> None:
+    groups = inv_006_period_groups(_august_nq_rows())
+    period = inv_006_period_comparison(groups)
+    composition = inv_006_composition_attribution(groups)
+    peer = inv_006_peer_period_comparisons(groups)
+    tail = inv_006_tail_sensitivity(groups)
+    context = inv_006_context_coverage(groups)
+    hypotheses = inv_006_hypothesis_results(period, composition, peer, tail, {"summary": "fixture milestone"}, context)
+
+    assert composition["dimensions"]["strategy"][0]["period_count"] >= 10
+    assert peer["summary"]["supported_cell_count"] >= 1
+    assert context["fields"]["session"]["august_2026"]["comparison_defensible"] is True
+    assert context["fields"]["vwap_avwap_context"]["august_2026"]["comparison_defensible"] is False
+    assert hypotheses["hypotheses"]["H6_context_insufficient"]["status"] == "SUPPORTED"
+
+
+def test_inv_006_html_and_explorer_highlight_have_no_authority_language(tmp_path: Path) -> None:
+    rows = _august_nq_rows()
+    inv = build_inv_006(rows, _common())
+    html = render_inv_006_html(inv)
+    analysis, _, _ = build_research_evidence_explorer(
+        [_crr_row_from_drill(row) for row in rows],
+        crr_validation=_crr_validation(),
+        crr_path=tmp_path / "crr.jsonl",
+        crr_validation_path=tmp_path / "validation.json",
+        generated_at=NOW,
+    )
+    rendered = render_presentation_html(analysis)
+
+    assert inv["overall_classification"]["classification"] in {
+        "COMPOSITION_SHIFT_PRIMARILY",
+        "LIKE_FOR_LIKE_PERFORMANCE_IMPROVEMENT",
+        "TEMPORARY_FAVORABLE_PERIOD",
+        "STRATEGY_OR_CONFIGURATION_TRANSITION_ASSOCIATED",
+        "TAIL_CONCENTRATION_PRIMARILY",
+        "MIXED_MULTIFACTOR",
+        "INSUFFICIENT_EVIDENCE",
+    }
+    assert "No production recommendation" in html
+    assert "INV-006: August NQ Attribution" in rendered
 
 
 def test_loss_classification_defaults_to_insufficient_evidence_and_requires_review() -> None:
@@ -879,6 +944,42 @@ def _nq_rows() -> list[dict[str, object]]:
                 "contract": "NQU6",
                 "research_eligibility": {"classification": "ELIGIBLE_WITH_LIMITATIONS"},
                 "calendar_month": "2026-08",
+            }
+        )
+        rows.append(row)
+    return rows
+
+
+def _august_nq_rows() -> list[dict[str, object]]:
+    rows: list[dict[str, object]] = []
+    pre_pnls = [500.0, 400.0, 350.0, 300.0, 250.0, 200.0, -100.0, -150.0, -200.0, -250.0] * 2
+    august_pnls = [10000.0, 9000.0, 8000.0, 7000.0, 6000.0, 5000.0, 4000.0, 3000.0, 2500.0, 2000.0, 1500.0, 1200.0, 900.0, 700.0, 500.0, 300.0, -100.0, -200.0, -300.0, -400.0, 250.0, 150.0, -50.0, -75.0]
+    for index, pnl in enumerate(pre_pnls):
+        row = _drill_row(f"pre_nq_{index:03d}", pnl=pnl, instrument="NQ", side="LONG", session="GLOBEX", ra8=False)
+        row.update(
+            {
+                "strategy_id": "PAPER_ACTIVE_EVIDENCE_NQ_GLOBEX_PARTICIPATION_LONG_V1",
+                "lane_id": "nq_globex_active_participation_long",
+                "contract": "NQU6",
+                "entry_time": f"2026-07-{1 + index % 20:02d}T12:00:00Z",
+                "exit_time": f"2026-07-{1 + index % 20:02d}T12:30:00Z",
+                "regime": "UNAVAILABLE",
+                "research_eligibility": {"classification": "ELIGIBLE_WITH_LIMITATIONS"},
+            }
+        )
+        rows.append(row)
+    for index, pnl in enumerate(august_pnls):
+        day = 3 + (index % 5) if index < 20 else 10 + (index - 20)
+        row = _drill_row(f"aug_nq_{index:03d}", pnl=pnl, instrument="NQ", side="LONG", session="GLOBEX", ra8=index < 10)
+        row.update(
+            {
+                "strategy_id": "PAPER_ACTIVE_EVIDENCE_NQ_GLOBEX_PARTICIPATION_LONG_V1",
+                "lane_id": "nq_globex_active_participation_long",
+                "contract": "NQU6",
+                "entry_time": f"2026-08-{day:02d}T12:00:00Z",
+                "exit_time": f"2026-08-{day:02d}T12:30:00Z",
+                "regime": "UNAVAILABLE",
+                "research_eligibility": {"classification": "ELIGIBLE_WITH_LIMITATIONS"},
             }
         )
         rows.append(row)
