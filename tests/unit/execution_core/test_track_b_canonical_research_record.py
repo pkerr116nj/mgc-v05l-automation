@@ -98,7 +98,16 @@ def test_inconsistent_exact_path_evidence_is_broken_and_invalid() -> None:
 
 def test_identity_and_entry_exit_caches_reconcile_to_canonical_records() -> None:
     rows = build_canonical_research_records([_canonical()], outcomes=[_outcome()], generated_at=NOW)
-    validation = validate_canonical_research_records(rows, canonical_records=[_canonical()], outcomes=[_outcome()], generated_at=NOW)
+    validation = validate_canonical_research_records(
+        rows,
+        canonical_records=[_canonical()],
+        outcomes=[_outcome()],
+        enrichments=[_enrichment()],
+        trade_paths=[_path()],
+        attributions=[_attribution()],
+        finalized_captures=[_finalized_capture()],
+        generated_at=NOW,
+    )
 
     assert validation["counts"]["reconciliation_mismatch_count"] == 0
     assert rows[0]["entry_anchor"]["entry_time"] == "2026-08-06T12:00:00Z"
@@ -106,12 +115,123 @@ def test_identity_and_entry_exit_caches_reconcile_to_canonical_records() -> None
 
 
 def test_ctol_cache_fields_reconcile() -> None:
-    rows = build_canonical_research_records([_canonical()], outcomes=[_outcome()], generated_at=NOW)
-    validation = validate_canonical_research_records(rows, canonical_records=[_canonical()], outcomes=[_outcome()], generated_at=NOW)
+    rows = build_canonical_research_records(
+        [_canonical()],
+        outcomes=[_outcome()],
+        enrichments=[_enrichment()],
+        trade_paths=[_path()],
+        attributions=[_attribution()],
+        finalized_captures=[_finalized_capture()],
+        generated_at=NOW,
+    )
+    validation = validate_canonical_research_records(
+        rows,
+        canonical_records=[_canonical()],
+        outcomes=[_outcome()],
+        enrichments=[_enrichment()],
+        trade_paths=[_path()],
+        attributions=[_attribution()],
+        finalized_captures=[_finalized_capture()],
+        generated_at=NOW,
+    )
 
     assert rows[0]["outcome_summary"]["realized_pnl_proxy"] == 25.0
     assert rows[0]["outcome_summary"]["realized_points"] == 2.5
+    assert validation["status"] == "VALID"
+
+
+def test_incomplete_ctol_full_population_is_invalid_with_refresh_guidance() -> None:
+    canonicals = [_canonical("trade_1"), _canonical("trade_2")]
+    rows = build_canonical_research_records(canonicals, outcomes=[_outcome("trade_1", "outcome_1")], generated_at=NOW)
+    validation = validate_canonical_research_records(rows, canonical_records=canonicals, outcomes=[_outcome("trade_1", "outcome_1")], generated_at=NOW)
+
+    ctol = _readiness(validation, "ctol")
+    assert validation["status"] == "INVALID_UPSTREAM_READINESS"
+    assert ctol["readiness_classification"] == "STALE_OR_INCOMPLETE_MATERIALIZATION"
+    assert validation["refresh_guidance"]
+
+
+def test_incomplete_ctoe_full_population_is_invalid() -> None:
+    canonicals = [_canonical("trade_1"), _canonical("trade_2")]
+    outcomes = [_outcome("trade_1", "outcome_1"), _outcome("trade_2", "outcome_2")]
+    rows = build_canonical_research_records(canonicals, outcomes=outcomes, enrichments=[_enrichment("outcome_1")], generated_at=NOW)
+    validation = validate_canonical_research_records(rows, canonical_records=canonicals, outcomes=outcomes, enrichments=[_enrichment("outcome_1")], generated_at=NOW)
+
+    assert validation["status"] == "INVALID_UPSTREAM_READINESS"
+    assert _readiness(validation, "ctoe")["readiness_classification"] == "STALE_OR_INCOMPLETE_MATERIALIZATION"
+
+
+def test_incomplete_ra7_full_population_is_invalid() -> None:
+    canonicals = [_canonical("trade_1"), _canonical("trade_2")]
+    outcomes = [_outcome("trade_1", "outcome_1"), _outcome("trade_2", "outcome_2")]
+    enrichments = [_enrichment("outcome_1"), _enrichment("outcome_2")]
+    rows = build_canonical_research_records(canonicals, outcomes=outcomes, enrichments=enrichments, trade_paths=[_path("trade_1", "outcome_1", "path_1")], generated_at=NOW)
+    validation = validate_canonical_research_records(rows, canonical_records=canonicals, outcomes=outcomes, enrichments=enrichments, trade_paths=[_path("trade_1", "outcome_1", "path_1")], generated_at=NOW)
+
+    assert validation["status"] == "INVALID_UPSTREAM_READINESS"
+    assert _readiness(validation, "ra7")["readiness_classification"] == "STALE_OR_INCOMPLETE_MATERIALIZATION"
+
+
+def test_incomplete_ra3_full_population_is_invalid() -> None:
+    canonicals = [_canonical("trade_1"), _canonical("trade_2")]
+    outcomes = [_outcome("trade_1", "outcome_1"), _outcome("trade_2", "outcome_2")]
+    enrichments = [_enrichment("outcome_1"), _enrichment("outcome_2")]
+    paths = [_path("trade_1", "outcome_1", "path_1"), _path("trade_2", "outcome_2", "path_2")]
+    rows = build_canonical_research_records(canonicals, outcomes=outcomes, enrichments=enrichments, trade_paths=paths, attributions=[_attribution("outcome_1", "attr_1")], generated_at=NOW)
+    validation = validate_canonical_research_records(rows, canonical_records=canonicals, outcomes=outcomes, enrichments=enrichments, trade_paths=paths, attributions=[_attribution("outcome_1", "attr_1")], generated_at=NOW)
+
+    assert validation["status"] == "INVALID_UPSTREAM_READINESS"
+    assert _readiness(validation, "ra3")["readiness_classification"] == "STALE_OR_INCOMPLETE_MATERIALIZATION"
+
+
+def test_missing_ra8_coverage_is_source_limit_and_valid_with_warnings() -> None:
+    rows = build_canonical_research_records(
+        [_canonical()],
+        outcomes=[_outcome()],
+        enrichments=[_enrichment()],
+        trade_paths=[_path()],
+        attributions=[_attribution()],
+        generated_at=NOW,
+    )
+    validation = validate_canonical_research_records(
+        rows,
+        canonical_records=[_canonical()],
+        outcomes=[_outcome()],
+        enrichments=[_enrichment()],
+        trade_paths=[_path()],
+        attributions=[_attribution()],
+        generated_at=NOW,
+    )
+
     assert validation["status"] == "VALID_WITH_WARNINGS"
+    assert _readiness(validation, "ra8")["readiness_classification"] == "SOURCE_COVERAGE_LIMIT"
+    assert validation["missing_by_layer"] == {"ra8": 1}
+
+
+def test_complete_exact_coverage_with_no_optional_warnings_is_valid() -> None:
+    rows = build_canonical_research_records(
+        [_canonical()],
+        outcomes=[_outcome()],
+        enrichments=[_enrichment()],
+        trade_paths=[_path()],
+        attributions=[_attribution()],
+        finalized_captures=[_finalized_capture()],
+        generated_at=NOW,
+    )
+    validation = validate_canonical_research_records(
+        rows,
+        canonical_records=[_canonical()],
+        outcomes=[_outcome()],
+        enrichments=[_enrichment()],
+        trade_paths=[_path()],
+        attributions=[_attribution()],
+        finalized_captures=[_finalized_capture()],
+        generated_at=NOW,
+    )
+
+    assert validation["status"] == "VALID"
+    assert all(item["readiness_classification"] == "READY" for item in validation["upstream_readiness"])
+    assert rows[0]["join_quality"]["tolerance"] == []
 
 
 def test_provenance_is_present_for_joined_sources() -> None:
@@ -200,13 +320,14 @@ def test_import_boundary() -> None:
     assert violations == []
 
 
-def _canonical() -> dict[str, object]:
+def _canonical(trade_id: str = "trade_1") -> dict[str, object]:
+    suffix = trade_id.rsplit("_", 1)[-1]
     return {
         "schema_version": "canonical_trade_record_v1",
-        "trade_id": "trade_1",
+        "trade_id": trade_id,
         "pairing_status": "PAIRED",
         "trade_status": "CLOSED",
-        "lifecycle_id": "life_1",
+        "lifecycle_id": f"life_{suffix}",
         "symbol": "MGC",
         "local_symbol": "MGCQ6",
         "con_id": 123,
@@ -214,23 +335,23 @@ def _canonical() -> dict[str, object]:
         "quantity": 1,
         "entry_time": "2026-08-06T12:00:00Z",
         "entry_price": 2400.0,
-        "entry_order_id": "entry_order_1",
-        "entry_perm_id": "entry_perm_1",
-        "entry_exec_id": "entry_exec_1",
+        "entry_order_id": f"entry_order_{suffix}",
+        "entry_perm_id": f"entry_perm_{suffix}",
+        "entry_exec_id": f"entry_exec_{suffix}",
         "exit_time": "2026-08-06T12:30:00Z",
         "exit_price": 2402.5,
-        "exit_order_id": "exit_order_1",
-        "exit_perm_id": "exit_perm_1",
-        "exit_exec_id": "exit_exec_1",
+        "exit_order_id": f"exit_order_{suffix}",
+        "exit_perm_id": f"exit_perm_{suffix}",
+        "exit_exec_id": f"exit_exec_{suffix}",
         "exit_policy": "MANAGED_EXIT_TIMEOUT",
         "exit_reason": "TIMEOUT",
         "strategy_id": "strategy_1",
         "lane_id": "lane_1",
         "path_capture": {
-            "capture_id": "capture_1",
+            "capture_id": f"capture_{suffix}",
             "trade_identity": {
-                "source_trade_id": "trade_1",
-                "lifecycle_id": "life_1",
+                "source_trade_id": trade_id,
+                "lifecycle_id": f"life_{suffix}",
                 "instrument": "MGC",
                 "contract": "MGCQ6",
                 "side": "LONG",
@@ -240,12 +361,12 @@ def _canonical() -> dict[str, object]:
     }
 
 
-def _outcome() -> dict[str, object]:
+def _outcome(trade_id: str = "trade_1", outcome_id: str = "outcome_1") -> dict[str, object]:
     return {
         "schema_version": "track_b_canonical_trade_outcome_v1",
-        "trade_outcome_id": "outcome_1",
-        "entry_trade_id": "trade_1",
-        "exit_trade_id": "trade_1",
+        "trade_outcome_id": outcome_id,
+        "entry_trade_id": trade_id,
+        "exit_trade_id": trade_id,
         "instrument": "MGC",
         "contract": "MGCQ6",
         "side": "LONG",
@@ -256,15 +377,15 @@ def _outcome() -> dict[str, object]:
         "realized_points": 2.5,
         "realized_pnl_proxy": 25.0,
         "hold_seconds": 1800.0,
-        "source_refs": {"source_trade_id": "trade_1"},
+        "source_refs": {"source_trade_id": trade_id},
         "diagnostic_only": True,
     }
 
 
-def _enrichment() -> dict[str, object]:
+def _enrichment(outcome_id: str = "outcome_1") -> dict[str, object]:
     return {
         "schema_version": "track_b_trade_outcome_enrichment_v1",
-        "trade_outcome_id": "outcome_1",
+        "trade_outcome_id": outcome_id,
         "gre_validity_classification": "VALID",
         "crfd_validity_classification": "VALID",
         "market_context_validity_classification": "VALID",
@@ -273,38 +394,40 @@ def _enrichment() -> dict[str, object]:
     }
 
 
-def _path() -> dict[str, object]:
+def _path(trade_id: str = "trade_1", outcome_id: str = "outcome_1", path_id: str = "path_1") -> dict[str, object]:
+    suffix = trade_id.rsplit("_", 1)[-1]
     return {
         "schema_version": "canonical_trade_path_v1",
-        "canonical_trade_path_id": "path_1",
-        "source_trade_id": "trade_1",
-        "trade_outcome_id": "outcome_1",
+        "canonical_trade_path_id": path_id,
+        "source_trade_id": trade_id,
+        "trade_outcome_id": outcome_id,
         "path_coverage_status": "COMPLETE",
-        "deterministic_fingerprint": "path_fp_1",
-        "provenance": {"source_refs": {"capture_id": "capture_1"}},
+        "deterministic_fingerprint": f"path_fp_{suffix}",
+        "provenance": {"source_refs": {"capture_id": f"capture_{suffix}"}},
         "diagnostic_only": True,
     }
 
 
-def _attribution() -> dict[str, object]:
+def _attribution(outcome_id: str = "outcome_1", attribution_id: str = "attr_1") -> dict[str, object]:
     return {
         "schema_version": "canonical_trade_decision_attribution_v1",
-        "trade_decision_attribution_id": "attr_1",
-        "trade_outcome_id": "outcome_1",
+        "trade_decision_attribution_id": attribution_id,
+        "trade_outcome_id": outcome_id,
         "entry": {"entry_authority": "TRACK_B_STRATEGY_MANAGED_PAPER_LIFECYCLE", "lane_id": "lane_1"},
         "exit": {"exit_authority": "MANAGED_EXIT", "canonical_exit_reason": "MANAGED_EXIT_TIMEOUT"},
         "diagnostic_only": True,
     }
 
 
-def _finalized_capture() -> dict[str, object]:
+def _finalized_capture(trade_id: str = "trade_1") -> dict[str, object]:
+    suffix = trade_id.rsplit("_", 1)[-1]
     return {
         "schema_version": "ra8_finalized_trade_path_capture_v1",
-        "capture_id": "capture_1",
-        "source_trade_id": "trade_1",
+        "capture_id": f"capture_{suffix}",
+        "source_trade_id": trade_id,
         "capture_lifecycle_state": "FINALIZED",
         "coverage_status": "COMPLETE",
-        "deterministic_fingerprint": "capture_fp_1",
+        "deterministic_fingerprint": f"capture_fp_{suffix}",
     }
 
 
@@ -321,3 +444,10 @@ def _source_paths() -> dict[str, Path]:
 
 def _write_jsonl(path: Path, rows: list[dict[str, object]]) -> None:
     path.write_text("".join(json.dumps(row, sort_keys=True) + "\n" for row in rows), encoding="utf-8")
+
+
+def _readiness(validation: dict[str, object], source_name: str) -> dict[str, object]:
+    for row in validation["upstream_readiness"]:  # type: ignore[index]
+        if row["source_name"] == source_name:
+            return row
+    raise AssertionError(f"missing readiness row for {source_name}")

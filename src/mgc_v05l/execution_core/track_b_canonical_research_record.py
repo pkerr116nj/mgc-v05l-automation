@@ -76,6 +76,13 @@ class CanonicalResearchRecordResult:
     summary_markdown_path: Path
 
 
+@dataclass(frozen=True)
+class CanonicalResearchRecordEvaluation:
+    rows: list[dict[str, Any]]
+    validation: dict[str, Any]
+    summary: dict[str, Any]
+
+
 def run_canonical_research_record(
     *,
     canonical_records_path: Path = DEFAULT_CANONICAL_RECORDS_PATH,
@@ -87,6 +94,53 @@ def run_canonical_research_record(
     output_dir: Path = DEFAULT_OUTPUT_DIR,
     now: datetime | str | None = None,
 ) -> CanonicalResearchRecordResult:
+    generated_at = _coerce_now(now)
+    evaluation = evaluate_canonical_research_record(
+        canonical_records_path=canonical_records_path,
+        outcomes_path=outcomes_path,
+        enrichments_path=enrichments_path,
+        trade_paths_path=trade_paths_path,
+        attributions_path=attributions_path,
+        finalized_captures_path=finalized_captures_path,
+        now=generated_at,
+    )
+    rows = evaluation.rows
+    validation = evaluation.validation
+    summary = evaluation.summary
+
+    output_dir.mkdir(parents=True, exist_ok=True)
+    records_path = output_dir / CRR_JSONL
+    schema_path = output_dir / SCHEMA_JSON
+    validation_json_path = output_dir / VALIDATION_JSON
+    validation_markdown_path = output_dir / VALIDATION_MD
+    summary_markdown_path = output_dir / SUMMARY_MD
+    _write_jsonl(records_path, rows)
+    _write_json(schema_path, canonical_research_record_schema())
+    _write_json(validation_json_path, validation)
+    validation_markdown_path.write_text(render_validation_markdown(validation), encoding="utf-8")
+    summary_markdown_path.write_text(render_summary_markdown(summary), encoding="utf-8")
+    return CanonicalResearchRecordResult(
+        rows=rows,
+        validation=validation,
+        summary=summary,
+        records_path=records_path,
+        schema_path=schema_path,
+        validation_json_path=validation_json_path,
+        validation_markdown_path=validation_markdown_path,
+        summary_markdown_path=summary_markdown_path,
+    )
+
+
+def evaluate_canonical_research_record(
+    *,
+    canonical_records_path: Path = DEFAULT_CANONICAL_RECORDS_PATH,
+    outcomes_path: Path = DEFAULT_OUTCOMES_PATH,
+    enrichments_path: Path = DEFAULT_ENRICHMENTS_PATH,
+    trade_paths_path: Path = DEFAULT_TRADE_PATHS_PATH,
+    attributions_path: Path = DEFAULT_ATTRIBUTIONS_PATH,
+    finalized_captures_path: Path = DEFAULT_FINALIZED_CAPTURES_PATH,
+    now: datetime | str | None = None,
+) -> CanonicalResearchRecordEvaluation:
     generated_at = _coerce_now(now)
     source_paths = {
         "canonical_trade_records": canonical_records_path,
@@ -116,32 +170,15 @@ def run_canonical_research_record(
         rows,
         canonical_records=canonical_records,
         outcomes=outcomes,
+        enrichments=enrichments,
+        trade_paths=trade_paths,
+        attributions=attributions,
+        finalized_captures=finalized_captures,
         generated_at=generated_at,
         source_paths=source_paths,
     )
     summary = build_canonical_research_record_summary(rows, validation=validation, generated_at=generated_at, source_paths=source_paths)
-
-    output_dir.mkdir(parents=True, exist_ok=True)
-    records_path = output_dir / CRR_JSONL
-    schema_path = output_dir / SCHEMA_JSON
-    validation_json_path = output_dir / VALIDATION_JSON
-    validation_markdown_path = output_dir / VALIDATION_MD
-    summary_markdown_path = output_dir / SUMMARY_MD
-    _write_jsonl(records_path, rows)
-    _write_json(schema_path, canonical_research_record_schema())
-    _write_json(validation_json_path, validation)
-    validation_markdown_path.write_text(render_validation_markdown(validation), encoding="utf-8")
-    summary_markdown_path.write_text(render_summary_markdown(summary), encoding="utf-8")
-    return CanonicalResearchRecordResult(
-        rows=rows,
-        validation=validation,
-        summary=summary,
-        records_path=records_path,
-        schema_path=schema_path,
-        validation_json_path=validation_json_path,
-        validation_markdown_path=validation_markdown_path,
-        summary_markdown_path=summary_markdown_path,
-    )
+    return CanonicalResearchRecordEvaluation(rows=rows, validation=validation, summary=summary)
 
 
 def build_canonical_research_records(
@@ -226,6 +263,10 @@ def validate_canonical_research_records(
     *,
     canonical_records: Sequence[Mapping[str, Any]],
     outcomes: Sequence[Mapping[str, Any]],
+    enrichments: Sequence[Mapping[str, Any]] = (),
+    trade_paths: Sequence[Mapping[str, Any]] = (),
+    attributions: Sequence[Mapping[str, Any]] = (),
+    finalized_captures: Sequence[Mapping[str, Any]] = (),
     generated_at: datetime,
     source_paths: Mapping[str, Path | str] | None = None,
 ) -> dict[str, Any]:
@@ -246,11 +287,37 @@ def validate_canonical_research_records(
             mismatches.extend(_outcome_mismatches(row, outcome))
     if len(rows) != expected:
         mismatches.append({"layer": "canonical_trade_records", "field": "row_count", "expected": expected, "actual": len(rows)})
+    source_payloads = {
+        "canonical_trade_records": canonical_records,
+        "ctol": outcomes,
+        "ctoe": enrichments,
+        "ra7": trade_paths,
+        "ra3": attributions,
+        "ra8": finalized_captures,
+    }
+    upstream_readiness = build_upstream_readiness(
+        rows,
+        expected_completed_records=expected,
+        source_payloads=source_payloads,
+        source_paths=source_paths or {},
+    )
+    required_blockers = [
+        item
+        for item in upstream_readiness
+        if item.get("required") is True and item.get("readiness_classification") != "READY"
+    ]
+    optional_warnings = [
+        item
+        for item in upstream_readiness
+        if item.get("required") is False and item.get("readiness_classification") != "READY"
+    ]
     if broken:
         status = "INVALID_BROKEN_JOIN"
     elif mismatches:
         status = "INVALID_RECONCILIATION_MISMATCH"
-    elif missing:
+    elif required_blockers:
+        status = "INVALID_UPSTREAM_READINESS"
+    elif optional_warnings:
         status = "VALID_WITH_WARNINGS"
     else:
         status = "VALID"
@@ -271,6 +338,8 @@ def validate_canonical_research_records(
         "join_quality": _join_quality_counts(rows),
         "missing_by_layer": _items_by_layer(missing),
         "broken_by_layer": _items_by_layer(broken),
+        "upstream_readiness": upstream_readiness,
+        "refresh_guidance": build_refresh_guidance(upstream_readiness),
         "reconciliation_mismatches": mismatches[:50],
         "valid_for_research": status in {"VALID", "VALID_WITH_WARNINGS"},
     }
@@ -302,6 +371,9 @@ def build_canonical_research_record_summary(
         "join_quality": validation.get("join_quality", {}),
         "missing_by_layer": validation.get("missing_by_layer", {}),
         "broken_by_layer": validation.get("broken_by_layer", {}),
+        "upstream_readiness": validation.get("upstream_readiness", []),
+        "refresh_guidance": validation.get("refresh_guidance", []),
+        "interpretation": _summary_interpretation(validation),
     }
 
 
@@ -325,6 +397,148 @@ def canonical_research_record_schema() -> dict[str, Any]:
     }
 
 
+def build_upstream_readiness(
+    rows: Sequence[Mapping[str, Any]],
+    *,
+    expected_completed_records: int,
+    source_payloads: Mapping[str, Sequence[Mapping[str, Any]]],
+    source_paths: Mapping[str, Path | str],
+) -> list[dict[str, Any]]:
+    specs = (
+        {
+            "source_name": "canonical_trade_records",
+            "layer": "canonical_trade_records",
+            "required": True,
+            "expected_population_relationship": "identity spine for every completed paired CRR row",
+            "exact_join_count": len(rows),
+        },
+        {
+            "source_name": "ctol",
+            "layer": "ctol",
+            "required": True,
+            "expected_population_relationship": "one CTOL outcome for every CRR-eligible completed paired Canonical Trade Record",
+            "exact_join_count": _layer_join_count(rows, "ctol", "exact"),
+        },
+        {
+            "source_name": "ctoe",
+            "layer": "ctoe",
+            "required": True,
+            "expected_population_relationship": "one CTOE enrichment for every CRR-eligible completed paired Canonical Trade Record",
+            "exact_join_count": _layer_join_count(rows, "ctoe", "exact"),
+        },
+        {
+            "source_name": "ra7",
+            "path_key": "ra7_canonical_trade_paths",
+            "layer": "ra7",
+            "required": True,
+            "expected_population_relationship": "one RA7 canonical path summary row for every CRR-eligible completed paired Canonical Trade Record",
+            "exact_join_count": _layer_join_count(rows, "ra7", "exact"),
+        },
+        {
+            "source_name": "ra3",
+            "path_key": "ra3_trade_decision_attribution",
+            "layer": "ra3",
+            "required": True,
+            "expected_population_relationship": "one RA3 deterministic attribution row for every CRR-eligible completed paired Canonical Trade Record",
+            "exact_join_count": _layer_join_count(rows, "ra3", "exact"),
+        },
+        {
+            "source_name": "ra8",
+            "path_key": "ra8_finalized_capture",
+            "layer": "ra8",
+            "required": False,
+            "expected_population_relationship": "optional finalized retained path capture where live path source evidence exists",
+            "exact_join_count": _layer_join_count(rows, "ra8", "exact"),
+        },
+    )
+    readiness = []
+    for spec in specs:
+        layer = str(spec["layer"])
+        source_name = str(spec["source_name"])
+        path_key = str(spec.get("path_key") or source_name)
+        payload_rows = list(source_payloads.get(source_name, ()))
+        raw_path = source_paths.get(path_key)
+        path = Path(raw_path) if raw_path else None
+        path_exists = path.exists() if path else False
+        exact_count = int(spec["exact_join_count"])
+        missing_count = _layer_join_count(rows, layer, "missing")
+        broken_count = _layer_join_count(rows, layer, "broken")
+        required = bool(spec["required"])
+        if not payload_rows and not path_exists:
+            classification = "MISSING_REQUIRED_SOURCE" if required else "SOURCE_COVERAGE_LIMIT"
+            reason = "Required source artifact is missing." if required else "Optional source artifact is missing; path evidence remains unavailable."
+        elif broken_count:
+            classification = "INVALID_SOURCE"
+            reason = f"{broken_count} broken exact reference(s) were found for this layer."
+        elif required and exact_count < expected_completed_records:
+            classification = "STALE_OR_INCOMPLETE_MATERIALIZATION"
+            reason = (
+                f"Expected {expected_completed_records} exact row(s), found {exact_count}. "
+                f"Refresh the {source_name.upper()} producer before relying on CRR."
+            )
+        elif not required and exact_count < expected_completed_records:
+            classification = "SOURCE_COVERAGE_LIMIT"
+            reason = (
+                f"Optional path-source coverage is partial: {exact_count} of {expected_completed_records} CRR row(s) have exact RA8 finalized captures."
+            )
+        else:
+            classification = "READY"
+            reason = None
+        readiness.append(
+            {
+                "source_name": source_name,
+                "artifact_path": str(path) if path else None,
+                "row_count": len(payload_rows),
+                "generated_at_or_latest_evidence_timestamp": _latest_evidence_timestamp(payload_rows),
+                "source_fingerprint": _file_sha256(path) if path else None,
+                "expected_population_relationship": spec["expected_population_relationship"],
+                "required": required,
+                "readiness_classification": classification,
+                "coverage_percentage": _rate(exact_count, expected_completed_records),
+                "exact_join_count": exact_count,
+                "missing_join_count": missing_count,
+                "broken_join_count": broken_count,
+                "warning_or_blocker_reason": reason,
+            }
+        )
+    return readiness
+
+
+def build_refresh_guidance(upstream_readiness: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
+    guidance: list[dict[str, Any]] = []
+    for item in upstream_readiness:
+        classification = item.get("readiness_classification")
+        source_name = str(item.get("source_name") or "UNKNOWN")
+        if classification == "STALE_OR_INCOMPLETE_MATERIALIZATION":
+            guidance.append(
+                {
+                    "source_name": source_name,
+                    "classification": classification,
+                    "recommended_action": f"Refresh {source_name.upper()} through its existing producer before regenerating CRR.",
+                    "reason": item.get("warning_or_blocker_reason"),
+                }
+            )
+        elif classification == "MISSING_REQUIRED_SOURCE":
+            guidance.append(
+                {
+                    "source_name": source_name,
+                    "classification": classification,
+                    "recommended_action": f"Restore or regenerate the required {source_name.upper()} artifact before regenerating CRR.",
+                    "reason": item.get("warning_or_blocker_reason"),
+                }
+            )
+        elif classification == "SOURCE_COVERAGE_LIMIT":
+            guidance.append(
+                {
+                    "source_name": source_name,
+                    "classification": classification,
+                    "recommended_action": "No CRR tolerance join is recommended. Treat this as explicit source-coverage debt in the upstream evidence layer.",
+                    "reason": item.get("warning_or_blocker_reason"),
+                }
+            )
+    return guidance
+
+
 def render_validation_markdown(validation: Mapping[str, Any]) -> str:
     counts = validation.get("counts", {})
     lines = [
@@ -337,6 +551,14 @@ def render_validation_markdown(validation: Mapping[str, Any]) -> str:
         f"- Missing joins: `{counts.get('missing_join_count')}`",
         f"- Broken joins: `{counts.get('broken_join_count')}`",
         f"- Reconciliation mismatches: `{counts.get('reconciliation_mismatch_count')}`",
+        "",
+        "## Upstream Readiness",
+        "",
+        _readiness_table(validation.get("upstream_readiness", [])),
+        "",
+        "## Refresh Guidance",
+        "",
+        _guidance_lines(validation.get("refresh_guidance", [])),
         "",
         "## Missing By Layer",
         "",
@@ -351,6 +573,7 @@ def render_validation_markdown(validation: Mapping[str, Any]) -> str:
 
 def render_summary_markdown(summary: Mapping[str, Any]) -> str:
     overall = summary.get("overall", {})
+    interpretation = summary.get("interpretation", {})
     lines = [
         "# Canonical Research Record Summary",
         "",
@@ -361,6 +584,14 @@ def render_summary_markdown(summary: Mapping[str, Any]) -> str:
         f"- Exact RA7 joins: `{overall.get('exact_ra7_count')}`",
         f"- Exact RA3 joins: `{overall.get('exact_ra3_count')}`",
         f"- Exact RA8 joins: `{overall.get('exact_ra8_count')}`",
+        f"- Exact-only joins: `{interpretation.get('exact_only_joins')}`",
+        f"- Tolerance joins used: `{interpretation.get('tolerance_joins_used')}`",
+        f"- Required full-population layers complete: `{interpretation.get('required_full_population_layers_complete')}`",
+        f"- RA8 finalized path-source coverage: `{interpretation.get('ra8_finalized_path_source_coverage')}`",
+        "",
+        "## Interpretation",
+        "",
+        _guidance_lines(interpretation.get("notes", [])),
         "",
         "CRR is derived, diagnostic-only research infrastructure and has no runtime, broker, Managed Exit, strategy, or trading-gate authority.",
     ]
@@ -732,6 +963,33 @@ def _items_by_layer(items: Sequence[Mapping[str, Any]]) -> dict[str, int]:
     return dict(sorted(counts.items()))
 
 
+def _summary_interpretation(validation: Mapping[str, Any]) -> dict[str, Any]:
+    readiness = validation.get("upstream_readiness", [])
+    required_ready = all(
+        item.get("readiness_classification") == "READY"
+        for item in readiness
+        if item.get("required") is True
+    )
+    ra8 = next((item for item in readiness if item.get("source_name") == "ra8"), {})
+    notes: list[str] = []
+    if required_ready:
+        notes.append("All required identity, outcome, context/path-summary, and attribution layers are exact and complete for the current CRR population.")
+    else:
+        notes.append("At least one required full-population source is stale, incomplete, missing, or invalid.")
+    if ra8.get("readiness_classification") == "SOURCE_COVERAGE_LIMIT":
+        notes.append("Finalized RA8 path-source coverage remains partial and is preserved as explicit research evidence coverage, not a broken CRR join.")
+    elif ra8.get("readiness_classification") == "READY":
+        notes.append("Finalized RA8 path-source coverage is complete for the current CRR population.")
+    notes.append("No tolerance joins were used.")
+    return {
+        "exact_only_joins": True,
+        "tolerance_joins_used": False,
+        "required_full_population_layers_complete": required_ready,
+        "ra8_finalized_path_source_coverage": ra8.get("readiness_classification"),
+        "notes": notes,
+    }
+
+
 def _layer_join_count(rows: Sequence[Mapping[str, Any]], layer: str, bucket: str) -> int:
     return sum(1 for row in rows for item in row.get("join_quality", {}).get(bucket, []) if item.get("layer") == layer)
 
@@ -813,6 +1071,23 @@ def _file_sha256(path: Path) -> str | None:
     return digest.hexdigest()
 
 
+def _latest_evidence_timestamp(rows: Sequence[Mapping[str, Any]]) -> str | None:
+    values: list[str] = []
+    for row in rows:
+        for key in ("generated_at", "exit_time", "exit_timestamp", "finalized_at", "updated_at", "created_at"):
+            value = _str_or_none(row.get(key))
+            if value:
+                values.append(value)
+                break
+    return max(values) if values else None
+
+
+def _rate(numerator: int, denominator: int) -> float:
+    if denominator <= 0:
+        return 0.0
+    return round(numerator / denominator, 6)
+
+
 def _read_jsonl(path: Path) -> list[dict[str, Any]]:
     if not path.exists():
         return []
@@ -861,4 +1136,50 @@ def _dict_table(data: Mapping[str, Any]) -> str:
     lines = ["|layer|count|", "|---|---:|"]
     for key, value in data.items():
         lines.append(f"|{key}|{value}|")
+    return "\n".join(lines)
+
+
+def _readiness_table(rows: Sequence[Mapping[str, Any]]) -> str:
+    if not rows:
+        return "No upstream readiness rows."
+    lines = [
+        "|source|classification|required|rows|exact|missing|coverage|reason|",
+        "|---|---|---:|---:|---:|---:|---:|---|",
+    ]
+    for row in rows:
+        reason = str(row.get("warning_or_blocker_reason") or "")
+        lines.append(
+            "|"
+            + "|".join(
+                [
+                    str(row.get("source_name") or ""),
+                    str(row.get("readiness_classification") or ""),
+                    str(row.get("required")),
+                    str(row.get("row_count")),
+                    str(row.get("exact_join_count")),
+                    str(row.get("missing_join_count")),
+                    str(row.get("coverage_percentage")),
+                    reason.replace("|", "/"),
+                ]
+            )
+            + "|"
+        )
+    return "\n".join(lines)
+
+
+def _guidance_lines(items: Sequence[Any]) -> str:
+    if not items:
+        return "No guidance."
+    lines: list[str] = []
+    for item in items:
+        if isinstance(item, Mapping):
+            source = item.get("source_name")
+            action = str(item.get("recommended_action") or "")
+            reason = item.get("reason")
+            label = f"{source}: " if source else ""
+            punctuation = "" if action.endswith((".", "!", "?")) else "."
+            detail = f" Reason: {reason}" if reason else ""
+            lines.append(f"- {label}{action}{punctuation}{detail}")
+        else:
+            lines.append(f"- {item}")
     return "\n".join(lines)
