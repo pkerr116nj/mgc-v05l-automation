@@ -66,6 +66,14 @@ INV_004_CONTROLLED_COMPARISONS_JSON = "controlled_comparisons.json"
 INV_004_TOP_BOTTOM_TRADES_JSON = "top_bottom_trades.json"
 INV_004_CONTRADICTORY_EVIDENCE_JSON = "contradictory_evidence.json"
 INV_004_HTML = "nq_performance_attribution.html"
+INV_005_TOP_WINNER_COHORTS_JSON = "top_winner_cohorts.json"
+INV_005_PEER_ASSIGNMENTS_JSON = "peer_cohort_assignments.json"
+INV_005_PEER_METRICS_JSON = "peer_cohort_metrics.json"
+INV_005_RECURRING_TRAITS_JSON = "recurring_traits.json"
+INV_005_FOCAL_COMPARISONS_JSON = "focal_trade_peer_comparisons.json"
+INV_005_BREADTH_FRAGILITY_JSON = "breadth_fragility_classification.json"
+INV_005_CONTRADICTORY_EVIDENCE_JSON = "contradictory_evidence.json"
+INV_005_HTML = "nq_winner_peer_analysis.html"
 
 SCHEMA_VERSION = "research_evidence_explorer_v1"
 VALIDATION_SCHEMA_VERSION = "research_evidence_explorer_validation_v1"
@@ -312,6 +320,27 @@ def run_research_investigations(
             _write_json(investigation_paths["top_bottom_trades_json"], investigation.get("top_bottom_trades", {}))
             _write_json(investigation_paths["contradictory_evidence_json"], investigation.get("contradictory_evidence_detail", {}))
             investigation_paths["nq_performance_attribution_html"].write_text(render_inv_004_html(investigation), encoding="utf-8")
+        if investigation_id == "INV-005":
+            investigation_paths.update(
+                {
+                    "top_winner_cohorts_json": investigation_dir / INV_005_TOP_WINNER_COHORTS_JSON,
+                    "peer_cohort_assignments_json": investigation_dir / INV_005_PEER_ASSIGNMENTS_JSON,
+                    "peer_cohort_metrics_json": investigation_dir / INV_005_PEER_METRICS_JSON,
+                    "recurring_traits_json": investigation_dir / INV_005_RECURRING_TRAITS_JSON,
+                    "focal_trade_peer_comparisons_json": investigation_dir / INV_005_FOCAL_COMPARISONS_JSON,
+                    "breadth_fragility_classification_json": investigation_dir / INV_005_BREADTH_FRAGILITY_JSON,
+                    "contradictory_evidence_json": investigation_dir / INV_005_CONTRADICTORY_EVIDENCE_JSON,
+                    "nq_winner_peer_analysis_html": investigation_dir / INV_005_HTML,
+                }
+            )
+            _write_json(investigation_paths["top_winner_cohorts_json"], investigation.get("top_winner_cohorts", {}))
+            _write_json(investigation_paths["peer_cohort_assignments_json"], investigation.get("peer_cohort_assignments", {}))
+            _write_json(investigation_paths["peer_cohort_metrics_json"], investigation.get("peer_cohort_metrics", {}))
+            _write_json(investigation_paths["recurring_traits_json"], investigation.get("recurring_traits", {}))
+            _write_json(investigation_paths["focal_trade_peer_comparisons_json"], investigation.get("focal_trade_peer_comparisons", {}))
+            _write_json(investigation_paths["breadth_fragility_classification_json"], investigation.get("breadth_fragility_classification", {}))
+            _write_json(investigation_paths["contradictory_evidence_json"], investigation.get("contradictory_evidence_detail", {}))
+            investigation_paths["nq_winner_peer_analysis_html"].write_text(render_inv_005_html(investigation), encoding="utf-8")
         _write_json(investigation_paths["investigation_json"], investigation)
         investigation_paths["investigation_md"].write_text(render_investigation_markdown(investigation), encoding="utf-8")
         _write_json(investigation_paths["population_json"], population_artifact)
@@ -389,6 +418,7 @@ def build_investigation_records(
         "INV-002": build_inv_002(rows, common),
         "INV-003": build_inv_003(rows, common),
         "INV-004": build_inv_004(rows, common),
+        "INV-005": build_inv_005(rows, common),
     }
     for record in records.values():
         record["deterministic_fingerprint"] = _fingerprint(_fingerprint_payload(record))
@@ -511,6 +541,7 @@ def build_research_evidence_explorer(
         "review_required_queue": review_queue,
         "investigation_highlights": {
             "INV-004": build_inv_004_highlight(population_rows),
+            "INV-005": build_inv_005_highlight(population_rows),
         },
         "cohort_definitions": cohort_definitions(len(population_rows)),
         "metric_definitions": metric_definitions(),
@@ -994,6 +1025,37 @@ def build_inv_004_highlight(rows: Sequence[Mapping[str, Any]]) -> dict[str, Any]
             "lane": top_lane,
             "session": top_session,
         },
+        "strongest_contradictory_evidence": contradictory.get("summary", [])[:3],
+        "guardrails": dict(GUARDRAILS),
+    }
+
+
+def build_inv_005_highlight(rows: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
+    nq_rows = [row for row in rows if str(row.get("instrument") or "").upper() == "NQ"]
+    if not nq_rows:
+        return {
+            "investigation_id": "INV-005",
+            "title": "NQ Winner Concentration And Peer-Cohort Analysis",
+            "qualified_nq_trade_count": 0,
+            "status": "NO_NQ_ROWS",
+        }
+    top_winner_cohorts = inv_005_top_winner_cohorts(nq_rows)
+    assignments = inv_005_peer_assignments(nq_rows, top_winner_cohorts.get("top_20_winners", {}).get("rows", []))
+    peer_metrics = inv_005_peer_metrics(assignments)
+    recurring_traits = inv_005_recurring_traits(nq_rows, top_winner_cohorts.get("top_20_winners", {}).get("rows", []))
+    breadth = inv_005_breadth_fragility_classification(top_winner_cohorts, peer_metrics, recurring_traits)
+    contradictory = inv_005_contradictory_evidence(top_winner_cohorts, peer_metrics, recurring_traits, breadth)
+    return {
+        "investigation_id": "INV-005",
+        "title": "NQ Winner Concentration And Peer-Cohort Analysis",
+        "artifact_path": str(DEFAULT_INVESTIGATION_OUTPUT_DIR / "INV-005" / "investigation.json"),
+        "html_path": str(DEFAULT_INVESTIGATION_OUTPUT_DIR / "INV-005" / INV_005_HTML),
+        "qualified_nq_trade_count": len(nq_rows),
+        "top_20_winner_count": top_winner_cohorts.get("top_20_winners", {}).get("trade_count"),
+        "usable_peer_cohort_count": peer_metrics.get("summary", {}).get("usable_peer_cohort_count"),
+        "positive_without_focal_count": peer_metrics.get("summary", {}).get("positive_without_focal_count"),
+        "nonpositive_without_focal_count": peer_metrics.get("summary", {}).get("nonpositive_without_focal_count"),
+        "breadth_fragility_classification": breadth.get("classification"),
         "strongest_contradictory_evidence": contradictory.get("summary", [])[:3],
         "guardrails": dict(GUARDRAILS),
     }
@@ -1706,6 +1768,7 @@ def nq_trade_detail(row: Mapping[str, Any]) -> dict[str, Any]:
             "lifecycle_id": row.get("lifecycle_id"),
             "con_id": row.get("con_id"),
         },
+        "instrument": row.get("instrument"),
         "contract": row.get("contract"),
         "side": row.get("side"),
         "quantity": row.get("quantity"),
@@ -1799,6 +1862,470 @@ def nq_contradictory_evidence(
         "missingness": missingness,
         "guardrails": dict(GUARDRAILS),
     }
+
+
+INV_005_PEER_LEVELS = (
+    ("A", ("instrument", "side", "strategy_id", "lane_id", "session")),
+    ("B", ("instrument", "side", "strategy_id", "session")),
+    ("C", ("instrument", "side", "strategy_id")),
+    ("D", ("instrument", "side", "session")),
+)
+INV_005_MIN_PEER_SAMPLE = 10
+INV_005_STRONG_PEER_SAMPLE = 20
+
+
+def build_inv_005(rows: Sequence[Mapping[str, Any]], common: Mapping[str, Any]) -> dict[str, Any]:
+    nq_rows = [row for row in rows if str(row.get("instrument") or "").upper() == "NQ"]
+    top_winner_cohorts = inv_005_top_winner_cohorts(nq_rows)
+    assignments = inv_005_peer_assignments(nq_rows, top_winner_cohorts.get("top_20_winners", {}).get("rows", []))
+    peer_metrics = inv_005_peer_metrics(assignments)
+    focal_comparisons = inv_005_focal_trade_peer_comparisons(assignments)
+    recurring_traits = inv_005_recurring_traits(nq_rows, top_winner_cohorts.get("top_20_winners", {}).get("rows", []))
+    breadth = inv_005_breadth_fragility_classification(top_winner_cohorts, peer_metrics, recurring_traits)
+    contradictory = inv_005_contradictory_evidence(top_winner_cohorts, peer_metrics, recurring_traits, breadth)
+    positive_peer_count = peer_metrics.get("summary", {}).get("positive_without_focal_count", 0)
+    usable_peer_count = peer_metrics.get("summary", {}).get("usable_peer_cohort_count", 0)
+    status = "PARTIALLY_SUPPORTED" if usable_peer_count and positive_peer_count else "INCONCLUSIVE"
+    return {
+        **common,
+        "investigation_id": "INV-005",
+        "title": "NQ Winner Concentration And Peer-Cohort Analysis",
+        "status": "DRAFT",
+        "question": "Do NQ's largest winners belong to repeatable peer cohorts, or are they isolated, fragile outcomes?",
+        "rationale": "INV-004 found positive aggregate NQ performance that turns negative after removing the top 10% winners, so the next bounded step is to test whether those winners sit inside source-backed peer cohorts.",
+        "population": {
+            "count": len(nq_rows),
+            "filters": {"instrument": "NQ", "active_population_view": "SOURCE_INTEGRITY_QUALIFIED"},
+            "date_coverage": date_coverage(nq_rows),
+            "side_mix": _distribution(row.get("side") for row in nq_rows),
+            "strategy_mix": _distribution((row.get("strategy_id") for row in nq_rows), limit=30),
+            "session_mix": _distribution(row.get("session") for row in nq_rows),
+            "regime_mix": _distribution(row.get("regime") for row in nq_rows),
+            "ra8_coverage": cohort_evidence(nq_rows)["ra8_coverage"],
+            "missingness": _missing_field_counts(nq_rows),
+            "source_fingerprints": common.get("source_fingerprints", {}),
+        },
+        "source_contract": {
+            "source_population": "SOURCE_INTEGRITY_QUALIFIED",
+            "crr": "CRR v1",
+            "eligibility": "research eligibility records",
+            "explorer": "prepared Explorer analytics",
+            "inv_004": "INV-004 generated evidence",
+            "ra8_required": False,
+            "contract_economics_inferred": False,
+            "raw_dollar_disclosure": "Raw realized P&L proxy is not multiplier-, risk-, or contract-economics-normalized.",
+        },
+        "methodology": [
+            "Build deterministic top-winner cohorts from source-integrity-qualified NQ rows.",
+            "For each top-20 winner, choose the narrowest peer level that meets the 10-trade descriptive threshold.",
+            "Compare each focal winner with its selected peer cohort, then recompute peer results excluding the focal winner and excluding top 10% peer winners.",
+            "Report sparse peer cells explicitly rather than pooling or inventing context.",
+            "Treat frequency and concentration as descriptive evidence only, not causality or production authority.",
+        ],
+        "top_winner_cohorts": top_winner_cohorts,
+        "peer_cohort_assignments": assignments,
+        "peer_cohort_metrics": peer_metrics,
+        "recurring_traits": recurring_traits,
+        "focal_trade_peer_comparisons": focal_comparisons,
+        "breadth_fragility_classification": breadth,
+        "contradictory_evidence_detail": contradictory,
+        "evidence": {
+            "top_winner_cohorts": top_winner_cohorts,
+            "peer_cohort_metrics": peer_metrics,
+            "recurring_traits": recurring_traits,
+            "focal_trade_peer_comparisons": focal_comparisons,
+            "breadth_fragility_classification": breadth,
+        },
+        "contradictory_evidence": contradictory.get("summary", []),
+        "findings": [
+            breadth.get("summary"),
+            peer_metrics.get("summary", {}).get("finding"),
+            recurring_traits.get("summary", {}).get("finding"),
+        ],
+        "limitations": [
+            "Independent contract point-value provenance is missing in CRR v1.",
+            "RA8/path evidence is optional and sparse, so peer analysis does not explain entry/exit path quality.",
+            "Peer groups are formed from available CRR fields only; unavailable setup/context fields remain unavailable.",
+            "Raw P&L proxy is descriptive and not normalized risk economics.",
+        ],
+        "confidence": "PARTIAL" if usable_peer_count else "LOW",
+        "conclusion_status": status,
+        "unresolved_questions": [
+            "Which peer traits survive when future contract-economics provenance and richer setup labels are available?",
+            "Are positive peer cohorts stable in new PAPER trades after source-integrity repair?",
+        ],
+        "follow_up_candidates": [
+            "Run a narrow NQ top-winner peer cohort review over future post-repair trades once sample size increases.",
+        ],
+    }
+
+
+def inv_005_top_winner_cohorts(rows: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
+    positive_rows = [row for row in rows if (_number(row.get("realized_pnl_proxy")) or 0.0) > 0.0]
+    top_10_ids = {row.get("research_record_id") for row in percentile_slice(rows, 0.10, low=False)}
+    total_nq = sum(_values(rows, "realized_pnl_proxy"))
+    cohorts = {
+        "top_1_percent": percentile_slice(rows, 0.01, low=False),
+        "top_5_percent": percentile_slice(rows, 0.05, low=False),
+        "top_10_percent": percentile_slice(rows, 0.10, low=False),
+        "top_20_winners": sorted(rows, key=lambda row: ((_number(row.get("realized_pnl_proxy")) or 0.0), str(row.get("research_record_id"))), reverse=True)[:20],
+        "single_largest_winner": sorted(rows, key=lambda row: ((_number(row.get("realized_pnl_proxy")) or 0.0), str(row.get("research_record_id"))), reverse=True)[:1],
+        "positive_excluding_top_10_percent": [row for row in positive_rows if row.get("research_record_id") not in top_10_ids],
+    }
+    return {
+        "schema_version": "inv_005_top_winner_cohorts_v1",
+        "cohort_definitions": {
+            "top_1_percent": "ceil(1% of qualified NQ rows), highest realized P&L proxy with deterministic ID tie-break.",
+            "top_5_percent": "ceil(5% of qualified NQ rows), highest realized P&L proxy with deterministic ID tie-break.",
+            "top_10_percent": "ceil(10% of qualified NQ rows), highest realized P&L proxy with deterministic ID tie-break.",
+            "top_20_winners": "20 highest qualified NQ realized P&L proxy rows.",
+            "single_largest_winner": "highest qualified NQ realized P&L proxy row.",
+            "positive_excluding_top_10_percent": "positive qualified NQ rows with top 10% winners removed.",
+        },
+        **{name: inv_005_cohort_summary(cohort_rows, total_nq=total_nq) for name, cohort_rows in cohorts.items()},
+        "deterministic_fingerprint": _fingerprint(_fingerprint_payload({name: [row.get("research_record_id") for row in cohort_rows] for name, cohort_rows in cohorts.items()})),
+        "guardrails": dict(GUARDRAILS),
+    }
+
+
+def inv_005_cohort_summary(rows: Sequence[Mapping[str, Any]], *, total_nq: float) -> dict[str, Any]:
+    metrics = investigation_metrics(rows)
+    cohort_total = _number(metrics.get("total_realized_pnl_proxy")) or 0.0
+    return {
+        "trade_count": len(rows),
+        "rows": [nq_trade_detail(row) for row in rows],
+        "total_realized_pnl_proxy": metrics.get("total_realized_pnl_proxy"),
+        "average_realized_pnl_proxy": metrics.get("average_realized_pnl_proxy"),
+        "median_realized_pnl_proxy": metrics.get("median_realized_pnl_proxy"),
+        "trimmed_mean_5_percent": metrics.get("trimmed_mean_5_percent"),
+        "percentage_of_total_nq_pnl": _rate(cohort_total, total_nq),
+        "strategy_mix": _distribution((row.get("strategy_id") for row in rows), limit=30),
+        "lane_mix": _distribution((row.get("lane_id") for row in rows), limit=30),
+        "session_mix": _distribution(row.get("session") for row in rows),
+        "side_mix": _distribution(row.get("side") for row in rows),
+        "regime_mix": _distribution(row.get("regime") for row in rows),
+        "contract_mix": _distribution(row.get("contract") for row in rows),
+        "calendar_month_mix": _distribution(period_key(row.get("exit_time"), "month") for row in rows),
+        "calendar_week_mix": _distribution(period_key(row.get("exit_time"), "week") for row in rows),
+        "milestone_period_mix": _distribution(milestone_label_for_row(row) for row in rows),
+        "quantity_mix": _distribution(row.get("quantity") for row in rows),
+        "ra8_coverage": cohort_evidence(rows)["ra8_coverage"],
+        "missingness": _missing_field_counts(rows),
+    }
+
+
+def inv_005_peer_assignments(rows: Sequence[Mapping[str, Any]], focal_rows: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
+    assignments = []
+    for focal in focal_rows:
+        selected = None
+        attempted = []
+        for level, fields in INV_005_PEER_LEVELS:
+            peers = [
+                row
+                for row in rows
+                if all(str(inv_005_field_value(row, field)) == str(inv_005_field_value(focal, field)) for field in fields)
+            ]
+            attempted.append({"level": level, "fields": list(fields), "peer_count": len(peers)})
+            if len(peers) >= INV_005_MIN_PEER_SAMPLE:
+                selected = (level, fields, peers)
+                break
+        if selected is None:
+            assignments.append(
+                {
+                    "focal_trade": inv_005_trade_detail(focal),
+                    "selected_peer_level": None,
+                    "selected_fields": [],
+                    "peer_count": 0,
+                    "sample_class": "PEER_COHORT_TOO_SPARSE",
+                    "attempted_levels": attempted,
+                    "peer_rows": [],
+                }
+            )
+            continue
+        level, fields, peers = selected
+        assignments.append(
+            {
+                "focal_trade": inv_005_trade_detail(focal),
+                "selected_peer_level": level,
+                "selected_fields": list(fields),
+                "peer_count": len(peers),
+                "sample_class": "STRONG_COHORT" if len(peers) >= INV_005_STRONG_PEER_SAMPLE else "DESCRIPTIVE_COHORT",
+                "attempted_levels": attempted,
+                "peer_rows": [inv_005_trade_detail(row) for row in peers],
+            }
+        )
+    result = {"schema_version": "inv_005_peer_cohort_assignments_v1", "assignments": assignments, "guardrails": dict(GUARDRAILS)}
+    result["deterministic_fingerprint"] = _fingerprint(_fingerprint_payload(result))
+    return result
+
+
+def inv_005_peer_metrics(assignments: Mapping[str, Any]) -> dict[str, Any]:
+    records = []
+    for assignment in assignments.get("assignments", []):
+        focal = assignment.get("focal_trade", {})
+        peer_rows = assignment.get("peer_rows", [])
+        focal_id = focal.get("research_record_id")
+        if not peer_rows:
+            records.append({"focal_trade_id": focal_id, "classification": "PEER_COHORT_TOO_SPARSE", "peer_count": 0})
+            continue
+        without_focal = [row for row in peer_rows if row.get("research_record_id") != focal_id]
+        top_peer_ids = {row.get("research_record_id") for row in percentile_slice(peer_rows, 0.10, low=False)}
+        excluding_peer_top_10 = [row for row in peer_rows if row.get("research_record_id") not in top_peer_ids]
+        focal_pnl = _number(focal.get("realized_pnl_proxy")) or 0.0
+        peer_total = _number(investigation_metrics(peer_rows).get("total_realized_pnl_proxy")) or 0.0
+        without_focal_total = _number(investigation_metrics(without_focal).get("total_realized_pnl_proxy")) or 0.0
+        ex_top_total = _number(investigation_metrics(excluding_peer_top_10).get("total_realized_pnl_proxy")) or 0.0
+        records.append(
+            {
+                "focal_trade_id": focal_id,
+                "selected_peer_level": assignment.get("selected_peer_level"),
+                "sample_class": assignment.get("sample_class"),
+                "peer_count": len(peer_rows),
+                "focal_realized_pnl_proxy": focal_pnl,
+                "peer_metrics": investigation_metrics(peer_rows),
+                "peer_without_focal_metrics": investigation_metrics(without_focal),
+                "peer_excluding_top_10_percent_metrics": investigation_metrics(excluding_peer_top_10),
+                "focal_contribution_to_peer_total": _rate(focal_pnl, peer_total),
+                "peer_remains_positive_without_focal": without_focal_total > 0,
+                "peer_remains_positive_excluding_top_10_percent": ex_top_total > 0,
+                "classification": inv_005_peer_classification(focal, peer_rows, without_focal_total),
+                "time_distribution": {
+                    "calendar_month": _distribution(period_key(row.get("exit_time"), "month") for row in peer_rows),
+                    "calendar_week": _distribution(period_key(row.get("exit_time"), "week") for row in peer_rows),
+                    "milestone_period": _distribution(milestone_label_for_row(row) for row in peer_rows),
+                },
+                "missingness": _missing_field_counts(peer_rows),
+                "ra8_coverage": cohort_evidence(peer_rows)["ra8_coverage"],
+            }
+        )
+    usable = [record for record in records if record.get("peer_count", 0) >= INV_005_MIN_PEER_SAMPLE]
+    positive_without = [record for record in usable if record.get("peer_remains_positive_without_focal")]
+    negative_without = [record for record in usable if not record.get("peer_remains_positive_without_focal")]
+    result = {
+        "schema_version": "inv_005_peer_cohort_metrics_v1",
+        "records": records,
+        "summary": {
+            "top_winner_count": len(records),
+            "usable_peer_cohort_count": len(usable),
+            "positive_without_focal_count": len(positive_without),
+            "nonpositive_without_focal_count": len(negative_without),
+            "too_sparse_count": len(records) - len(usable),
+            "finding": f"{len(positive_without)} of {len(usable)} usable top-winner peer cohorts remain positive after removing the focal winner.",
+        },
+        "guardrails": dict(GUARDRAILS),
+    }
+    result["deterministic_fingerprint"] = _fingerprint(_fingerprint_payload(result))
+    return result
+
+
+def inv_005_peer_classification(focal: Mapping[str, Any], peer_rows: Sequence[Mapping[str, Any]], without_focal_total: float) -> str:
+    if len(peer_rows) < INV_005_MIN_PEER_SAMPLE:
+        return "PEER_COHORT_TOO_SPARSE"
+    focal_pnl = _number(focal.get("realized_pnl_proxy"))
+    if focal_pnl is None:
+        return "INCONCLUSIVE"
+    peer_values = sorted(_values(peer_rows, "realized_pnl_proxy"))
+    p90 = percentile_value(peer_values, 0.90)
+    if without_focal_total > 0:
+        return "OUTLIER_WITHIN_POSITIVE_PEER_COHORT" if p90 is not None and focal_pnl > p90 else "REPRESENTATIVE_OF_POSITIVE_PEER_COHORT"
+    return "OUTLIER_WITHIN_WEAK_OR_NEGATIVE_PEER_COHORT" if p90 is not None and focal_pnl > p90 else "INCONCLUSIVE"
+
+
+def inv_005_focal_trade_peer_comparisons(assignments: Mapping[str, Any]) -> dict[str, Any]:
+    comparisons = []
+    for assignment in assignments.get("assignments", []):
+        focal = assignment.get("focal_trade", {})
+        peer_rows = assignment.get("peer_rows", [])
+        values = sorted(_values(peer_rows, "realized_pnl_proxy"))
+        focal_pnl = _number(focal.get("realized_pnl_proxy"))
+        focal_id = focal.get("research_record_id")
+        without_focal = [row for row in peer_rows if row.get("research_record_id") != focal_id]
+        ex_top = [row for row in peer_rows if row.get("research_record_id") not in {item.get("research_record_id") for item in percentile_slice(peer_rows, 0.10, low=False)}]
+        comparisons.append(
+            {
+                "focal_trade_id": focal_id,
+                "selected_peer_level": assignment.get("selected_peer_level"),
+                "peer_count": len(peer_rows),
+                "focal_realized_pnl_proxy": focal_pnl,
+                "peer_median": _median(values),
+                "peer_75th_percentile": percentile_value(values, 0.75),
+                "peer_90th_percentile": percentile_value(values, 0.90),
+                "focal_percentile_within_peer": percentile_rank(values, focal_pnl) if focal_pnl is not None else None,
+                "peer_total_realized_pnl_proxy": investigation_metrics(peer_rows).get("total_realized_pnl_proxy"),
+                "peer_total_excluding_focal": investigation_metrics(without_focal).get("total_realized_pnl_proxy"),
+                "peer_total_excluding_top_10_percent": investigation_metrics(ex_top).get("total_realized_pnl_proxy"),
+                "classification": inv_005_peer_classification(focal, peer_rows, _number(investigation_metrics(without_focal).get("total_realized_pnl_proxy")) or 0.0),
+            }
+        )
+    result = {"schema_version": "inv_005_focal_trade_peer_comparisons_v1", "comparisons": comparisons, "guardrails": dict(GUARDRAILS)}
+    result["deterministic_fingerprint"] = _fingerprint(_fingerprint_payload(result))
+    return result
+
+
+def inv_005_recurring_traits(rows: Sequence[Mapping[str, Any]], top_rows: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
+    traits: dict[str, list[dict[str, Any]]] = {}
+    for field in ("strategy_id", "lane_id", "session", "side", "regime", "exit_policy", "exit_reason", "contract"):
+        field_records = []
+        for value, count in _distribution((inv_005_field_value(row, field) for row in top_rows), limit=30).items():
+            peer_rows = [row for row in rows if str(inv_005_field_value(row, field)) == value]
+            top_count = sum(1 for row in top_rows if str(inv_005_field_value(row, field)) == value)
+            top_ids = {row.get("research_record_id") for row in top_rows if str(inv_005_field_value(row, field)) == value}
+            excluding_top = [row for row in peer_rows if row.get("research_record_id") not in top_ids]
+            field_records.append(
+                {
+                    "value": value,
+                    "top_winner_count": top_count,
+                    "all_nq_peer_count": len(peer_rows),
+                    "top_winner_share": _rate(top_count, len(top_rows)),
+                    "peer_metrics": investigation_metrics(peer_rows),
+                    "peer_metrics_excluding_top_winners": investigation_metrics(excluding_top),
+                    "ra8_coverage": cohort_evidence(peer_rows)["ra8_coverage"],
+                    "missingness": _missing_field_counts(peer_rows),
+                }
+            )
+        traits[field] = sorted(field_records, key=lambda item: (-int(item.get("top_winner_count") or 0), str(item.get("value"))))
+    leading_strategy = next(iter(traits.get("strategy_id", [])), {})
+    result = {
+        "schema_version": "inv_005_recurring_traits_v1",
+        "traits": traits,
+        "summary": {
+            "finding": f"Top winners most frequently share strategy {leading_strategy.get('value')} ({leading_strategy.get('top_winner_count')} of {len(top_rows)} top winners).",
+            "top_winner_count": len(top_rows),
+        },
+        "guardrails": dict(GUARDRAILS),
+    }
+    result["deterministic_fingerprint"] = _fingerprint(_fingerprint_payload(result))
+    return result
+
+
+def inv_005_field_value(row: Mapping[str, Any], field: str) -> str:
+    aliases = {
+        "strategy_id": "strategy",
+        "lane_id": "lane",
+    }
+    value = row.get(field)
+    if value in (None, "") and field in aliases:
+        value = row.get(aliases[field])
+    return str(value or "UNKNOWN")
+
+
+def inv_005_trade_detail(row: Mapping[str, Any]) -> dict[str, Any]:
+    if "strategy" in row or "lane" in row:
+        detail = dict(row)
+        detail.setdefault("instrument", row.get("instrument"))
+        detail.setdefault("strategy", row.get("strategy_id"))
+        detail.setdefault("lane", row.get("lane_id"))
+        return detail
+    return nq_trade_detail(row)
+
+
+def inv_005_breadth_fragility_classification(top_winner_cohorts: Mapping[str, Any], peer_metrics: Mapping[str, Any], recurring_traits: Mapping[str, Any]) -> dict[str, Any]:
+    top_10_share = _number(top_winner_cohorts.get("top_10_percent", {}).get("percentage_of_total_nq_pnl"))
+    top_10_total = _number(top_winner_cohorts.get("top_10_percent", {}).get("total_realized_pnl_proxy")) or 0.0
+    positive_ex_top_10_total = _number(top_winner_cohorts.get("positive_excluding_top_10_percent", {}).get("total_realized_pnl_proxy")) or 0.0
+    usable = int(peer_metrics.get("summary", {}).get("usable_peer_cohort_count") or 0)
+    positive_without = int(peer_metrics.get("summary", {}).get("positive_without_focal_count") or 0)
+    nonpositive_without = int(peer_metrics.get("summary", {}).get("nonpositive_without_focal_count") or 0)
+    leading_trait = next(iter(recurring_traits.get("traits", {}).get("strategy_id", [])), {})
+    leading_share = _number(leading_trait.get("top_winner_share")) or 0.0
+    if usable == 0:
+        classification = "INSUFFICIENT_EVIDENCE"
+    elif positive_without >= max(2, math.ceil(usable * 0.60)) and positive_ex_top_10_total > 0 and leading_share < 0.60:
+        classification = "REPEATABLE_ACROSS_MULTIPLE_PEER_COHORTS"
+    elif nonpositive_without >= math.ceil(usable * 0.50) and positive_ex_top_10_total <= 0:
+        classification = "HIGHLY_FRAGILE_AND_OUTLIER_DEPENDENT"
+    elif positive_ex_top_10_total <= 0 or (top_10_share is not None and top_10_share > 1.0):
+        classification = "POSITIVE_BUT_TAIL_DEPENDENT"
+    else:
+        classification = "MIXED_OR_INCONCLUSIVE"
+    return {
+        "schema_version": "inv_005_breadth_fragility_classification_v1",
+        "classification": classification,
+        "threshold_logic": {
+            "REPEATABLE_ACROSS_MULTIPLE_PEER_COHORTS": ">=60% usable peer cohorts remain positive without focal winners, positive trades excluding top 10% remain positive, and top winners are not dominated by one trait.",
+            "POSITIVE_BUT_TAIL_DEPENDENT": "aggregate positive result weakens materially or turns negative after top-winner removal.",
+            "HIGHLY_FRAGILE_AND_OUTLIER_DEPENDENT": "at least half of usable peer cohorts are nonpositive without focal winners and positive ex-top-10 result is nonpositive.",
+            "MIXED_OR_INCONCLUSIVE": "evidence is mixed across peer persistence, time, and composition.",
+            "INSUFFICIENT_EVIDENCE": "no usable peer cohorts meet the minimum sample threshold.",
+        },
+        "inputs": {
+            "top_10_total_realized_pnl_proxy": top_10_total,
+            "top_10_share_of_total_nq_pnl": top_10_share,
+            "positive_excluding_top_10_total_realized_pnl_proxy": positive_ex_top_10_total,
+            "usable_peer_cohort_count": usable,
+            "positive_without_focal_count": positive_without,
+            "nonpositive_without_focal_count": nonpositive_without,
+            "leading_strategy_top_winner_share": leading_share,
+        },
+        "summary": f"Overall NQ winner evidence is classified as {classification}.",
+        "guardrails": dict(GUARDRAILS),
+    }
+
+
+def inv_005_contradictory_evidence(
+    top_winner_cohorts: Mapping[str, Any],
+    peer_metrics: Mapping[str, Any],
+    recurring_traits: Mapping[str, Any],
+    breadth: Mapping[str, Any],
+) -> dict[str, Any]:
+    records = peer_metrics.get("records", [])
+    positive = [record for record in records if record.get("peer_remains_positive_without_focal")]
+    nonpositive = [record for record in records if record.get("peer_count", 0) >= INV_005_MIN_PEER_SAMPLE and not record.get("peer_remains_positive_without_focal")]
+    sparse = [record for record in records if record.get("classification") == "PEER_COHORT_TOO_SPARSE"]
+    top_months = top_winner_cohorts.get("top_20_winners", {}).get("calendar_month_mix", {})
+    summary = []
+    if positive:
+        summary.append("Some top-winner peer cohorts remain positive without the focal winner, weakening a pure isolation hypothesis.")
+    if nonpositive:
+        summary.append("Some top-winner peer cohorts turn nonpositive without the focal winner, weakening a broad repeatability hypothesis.")
+    if sparse:
+        summary.append("Some top winners lack a minimum-sample peer cohort.")
+    if len(top_months) <= 1 and top_months:
+        summary.append("Top winners are concentrated in one calendar month, limiting time-stability evidence.")
+    summary.extend(
+        [
+            "Independent contract point-value provenance is missing, so raw-dollar results are not normalized economics.",
+            "Sparse RA8/path evidence prevents entry-versus-exit path attribution.",
+            "Top-winner removal materially changes aggregate NQ results.",
+        ]
+    )
+    return {
+        "schema_version": "inv_005_contradictory_evidence_v1",
+        "summary": summary,
+        "positive_peer_cohorts": len(positive),
+        "nonpositive_peer_cohorts": len(nonpositive),
+        "sparse_peer_cohorts": len(sparse),
+        "top_winner_calendar_month_mix": top_months,
+        "breadth_classification": breadth.get("classification"),
+        "leading_traits": {
+            "strategy": recurring_traits.get("traits", {}).get("strategy_id", [])[:5],
+            "session": recurring_traits.get("traits", {}).get("session", [])[:5],
+            "side": recurring_traits.get("traits", {}).get("side", [])[:5],
+        },
+        "guardrails": dict(GUARDRAILS),
+    }
+
+
+def percentile_value(values: Sequence[float], percentile: float) -> float | None:
+    if not values:
+        return None
+    sorted_values = sorted(values)
+    if len(sorted_values) == 1:
+        return _round(sorted_values[0])
+    rank = (len(sorted_values) - 1) * percentile
+    lower = math.floor(rank)
+    upper = math.ceil(rank)
+    if lower == upper:
+        return _round(sorted_values[int(rank)])
+    weight = rank - lower
+    return _round(sorted_values[lower] * (1 - weight) + sorted_values[upper] * weight)
+
+
+def percentile_rank(values: Sequence[float], value: float | None) -> float | None:
+    if value is None or not values:
+        return None
+    less_or_equal = sum(1 for item in values if item <= value)
+    return _rate(less_or_equal, len(values))
 
 
 def percentile_slice(rows: Sequence[Mapping[str, Any]], fraction: float, *, low: bool) -> list[Mapping[str, Any]]:
@@ -3099,6 +3626,77 @@ def render_inv_004_html(investigation: Mapping[str, Any]) -> str:
 """
 
 
+def render_inv_005_html(investigation: Mapping[str, Any]) -> str:
+    cohorts = investigation.get("top_winner_cohorts", {})
+    peer_metrics = investigation.get("peer_cohort_metrics", {})
+    comparisons = investigation.get("focal_trade_peer_comparisons", {}).get("comparisons", [])
+    traits = investigation.get("recurring_traits", {}).get("traits", {})
+    breadth = investigation.get("breadth_fragility_classification", {})
+    contradictory = investigation.get("contradictory_evidence_detail", {})
+
+    cohort_rows = "".join(
+        "<tr>"
+        f"<td>{html.escape(_display_label(name))}</td>"
+        f"<td>{cohort.get('trade_count')}</td>"
+        f"<td>{_format_money(cohort.get('total_realized_pnl_proxy'))}</td>"
+        f"<td>{_format_money(cohort.get('average_realized_pnl_proxy'))}</td>"
+        f"<td>{_format_money(cohort.get('median_realized_pnl_proxy'))}</td>"
+        f"<td>{html.escape(str(cohort.get('percentage_of_total_nq_pnl')))}</td>"
+        "</tr>"
+        for name, cohort in cohorts.items()
+        if isinstance(cohort, Mapping) and "trade_count" in cohort
+    )
+    peer_rows = "".join(
+        "<tr>"
+        f"<td>{html.escape(str(item.get('focal_trade_id')))}</td>"
+        f"<td>{html.escape(str(item.get('selected_peer_level')))}</td>"
+        f"<td>{item.get('peer_count')}</td>"
+        f"<td>{html.escape(str(item.get('classification')))}</td>"
+        f"<td>{html.escape(str(item.get('peer_remains_positive_without_focal')))}</td>"
+        f"<td>{_format_money(item.get('peer_without_focal_metrics', {}).get('total_realized_pnl_proxy'))}</td>"
+        "</tr>"
+        for item in peer_metrics.get("records", [])[:20]
+    )
+    comparison_rows = "".join(
+        "<tr>"
+        f"<td>{html.escape(str(item.get('focal_trade_id')))}</td>"
+        f"<td>{_format_money(item.get('focal_realized_pnl_proxy'))}</td>"
+        f"<td>{_format_money(item.get('peer_median'))}</td>"
+        f"<td>{_format_money(item.get('peer_90th_percentile'))}</td>"
+        f"<td>{html.escape(str(item.get('focal_percentile_within_peer')))}</td>"
+        f"<td>{_format_money(item.get('peer_total_excluding_top_10_percent'))}</td>"
+        "</tr>"
+        for item in comparisons[:20]
+    )
+    trait_rows = "".join(
+        "<tr>"
+        f"<td>{html.escape(str(field))}</td>"
+        f"<td>{html.escape(str(item.get('value')))}</td>"
+        f"<td>{item.get('top_winner_count')}</td>"
+        f"<td>{item.get('all_nq_peer_count')}</td>"
+        f"<td>{_format_money(item.get('peer_metrics', {}).get('total_realized_pnl_proxy'))}</td>"
+        f"<td>{_format_money(item.get('peer_metrics_excluding_top_winners', {}).get('total_realized_pnl_proxy'))}</td>"
+        "</tr>"
+        for field in ("strategy_id", "lane_id", "session", "side")
+        for item in traits.get(field, [])[:5]
+    )
+    contrary_rows = "".join(f"<li>{html.escape(str(item))}</li>" for item in contradictory.get("summary", []))
+    return f"""<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>INV-005 NQ Winner Peer Analysis</title>
+<style>body{{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;margin:24px;background:#f6f7f4;color:#1f2933}}main{{max-width:1320px;margin:auto}}section{{background:white;border:1px solid #d9e0df;border-radius:6px;margin:16px 0;padding:16px}}table{{width:100%;border-collapse:collapse;font-size:13px}}th,td{{border-bottom:1px solid #e7ecea;padding:7px;text-align:left;vertical-align:top}}th{{background:#eef2ef}}.warn{{color:#8a5a00;font-weight:700}}</style>
+</head><body><main>
+<h1>INV-005 NQ Winner Concentration And Peer-Cohort Analysis</h1>
+<p class="warn">Descriptive, non-causal, source-integrity-qualified research only. No production recommendation or trading authority.</p>
+<section><h2>Classification</h2><p>{html.escape(str(breadth.get('summary')))}</p><p>Class: <strong>{html.escape(str(breadth.get('classification')))}</strong></p></section>
+<section><h2>Top-Winner Cohorts</h2><table><thead><tr><th>Cohort</th><th>Trades</th><th>Total</th><th>Average</th><th>Median</th><th>% NQ Total</th></tr></thead><tbody>{cohort_rows}</tbody></table></section>
+<section><h2>Peer Cohort Metrics</h2><p>{html.escape(str(peer_metrics.get('summary', {}).get('finding')))}</p><table><thead><tr><th>Focal Trade</th><th>Peer Level</th><th>Peers</th><th>Classification</th><th>Positive Without Focal</th><th>Total Without Focal</th></tr></thead><tbody>{peer_rows}</tbody></table></section>
+<section><h2>Nearest-Peer Comparisons</h2><table><thead><tr><th>Focal Trade</th><th>Focal P&L</th><th>Peer Median</th><th>Peer 90th</th><th>Focal Percentile</th><th>Peer Ex Top 10%</th></tr></thead><tbody>{comparison_rows}</tbody></table></section>
+<section><h2>Recurring Traits</h2><table><thead><tr><th>Field</th><th>Value</th><th>Top Winners</th><th>All NQ Peers</th><th>Peer Total</th><th>Peer Ex Top Winners</th></tr></thead><tbody>{trait_rows}</tbody></table></section>
+<section><h2>Contradictory Evidence</h2><ul>{contrary_rows}</ul></section>
+</main></body></html>
+"""
+
+
 def side_comparisons_by_field(rows: Sequence[Mapping[str, Any]], field: str) -> dict[str, Any]:
     grouped: dict[str, list[Mapping[str, Any]]] = {}
     for row in rows:
@@ -3358,6 +3956,7 @@ def durable_investigation_summary_filename(investigation_id: str) -> str:
         "INV-002": "INV-002-long-short-underperformance.md",
         "INV-003": "INV-003-performance-over-time.md",
         "INV-004": "INV-004-nq-qualified-performance-attribution.md",
+        "INV-005": "INV-005-nq-winner-concentration-peer-cohorts.md",
     }.get(investigation_id, f"{investigation_id}.md")
 
 
@@ -3695,6 +4294,7 @@ def render_presentation_html(analysis: Mapping[str, Any]) -> str:
             ("overview", "Overview"),
             ("population-views", "Population Views"),
             ("inv004", "INV-004 NQ"),
+            ("inv005", "INV-005 Peers"),
             ("cohorts", "Cohort Comparison"),
             ("controlled", "Within-Instrument View"),
             ("distributions", "Distributions"),
@@ -3710,6 +4310,7 @@ def render_presentation_html(analysis: Mapping[str, Any]) -> str:
     population_view_rows = render_population_view_rows(analysis)
     anomaly_rows = render_anomaly_rows(analysis)
     inv_004_rows = render_inv_004_highlight_rows(analysis)
+    inv_005_rows = render_inv_005_highlight_rows(analysis)
     distribution_sections = "".join(
         render_distribution_chart(key, item)
         for key, item in analysis.get("distributions", {}).items()
@@ -3801,6 +4402,11 @@ def render_presentation_html(analysis: Mapping[str, Any]) -> str:
     <h2>INV-004: NQ Qualified Performance Attribution</h2>
     <p>Prepared investigation highlight over the active source-integrity-qualified population. Descriptive only; no causal or production language.</p>
     <table><thead><tr><th>Metric</th><th>Value</th></tr></thead><tbody>{inv_004_rows}</tbody></table>
+  </section>
+  <section id="inv005">
+    <h2>INV-005: NQ Winner Peer Cohorts</h2>
+    <p>Prepared peer-cohort highlight over top NQ winners. Descriptive only; no causal or production language.</p>
+    <table><thead><tr><th>Metric</th><th>Value</th></tr></thead><tbody>{inv_005_rows}</tbody></table>
   </section>
   <section id="cohorts">
     <h2>Cohort Comparison</h2>
@@ -4078,6 +4684,28 @@ def render_inv_004_highlight_rows(analysis: Mapping[str, Any]) -> str:
         ("Top session", top.get("session", {}).get("value")),
         ("Strongest contradictory evidence", "; ".join(str(item) for item in highlight.get("strongest_contradictory_evidence", []))),
         ("Investigation artifact", highlight.get("artifact_path")),
+    ]
+    return "".join(
+        "<tr>"
+        f"<td>{html.escape(str(label))}</td>"
+        f"<td>{html.escape(str(value if value not in (None, '') else 'MISSING'))}</td>"
+        "</tr>"
+        for label, value in rows
+    )
+
+
+def render_inv_005_highlight_rows(analysis: Mapping[str, Any]) -> str:
+    highlight = analysis.get("investigation_highlights", {}).get("INV-005", {})
+    rows = [
+        ("Qualified NQ trades", highlight.get("qualified_nq_trade_count")),
+        ("Top 20 winners", highlight.get("top_20_winner_count")),
+        ("Usable peer cohorts", highlight.get("usable_peer_cohort_count")),
+        ("Positive without focal", highlight.get("positive_without_focal_count")),
+        ("Nonpositive without focal", highlight.get("nonpositive_without_focal_count")),
+        ("Breadth / fragility", highlight.get("breadth_fragility_classification")),
+        ("Strongest contradictory evidence", "; ".join(str(item) for item in highlight.get("strongest_contradictory_evidence", []))),
+        ("Investigation artifact", highlight.get("artifact_path")),
+        ("HTML artifact", highlight.get("html_path")),
     ]
     return "".join(
         "<tr>"

@@ -12,6 +12,7 @@ from mgc_v05l.execution_core.track_b_research_evidence_explorer import (
     build_investigation_records,
     build_loss_attribution,
     build_inv_004,
+    build_inv_005,
     build_research_evidence_explorer,
     build_within_instrument_comparison,
     classify_loss_trade,
@@ -23,10 +24,16 @@ from mgc_v05l.execution_core.track_b_research_evidence_explorer import (
     nq_contradictory_evidence,
     nq_tail_sensitivity,
     nq_rolling_windows,
+    inv_005_breadth_fragility_classification,
+    inv_005_focal_trade_peer_comparisons,
+    inv_005_peer_assignments,
+    inv_005_peer_metrics,
+    inv_005_top_winner_cohorts,
     reconcile_extreme_trade_pnl,
     render_presentation_html,
     render_investigation_index_html,
     render_inv_004_html,
+    render_inv_005_html,
     run_research_evidence_explorer,
     run_research_investigations,
     trimmed_mean,
@@ -412,7 +419,7 @@ def test_investigation_records_have_fingerprints_guardrails_and_ra8_optional(tmp
         explorer_path=tmp_path / "explorer.json",
     )
 
-    assert sorted(records) == ["INV-001", "INV-002", "INV-003", "INV-004"]
+    assert sorted(records) == ["INV-001", "INV-002", "INV-003", "INV-004", "INV-005"]
     assert records["INV-001"]["deterministic_fingerprint"]
     assert records["INV-002"]["conclusion_status"] in {"PARTIALLY_SUPPORTED", "INCONCLUSIVE"}
     assert records["INV-003"]["evidence"]["milestone_periods"]["boundaries"]
@@ -523,6 +530,84 @@ def test_inv_004_explorer_highlight_and_no_hidden_recommendations(tmp_path: Path
     assert analysis["investigation_highlights"]["INV-004"]["qualified_nq_trade_count"] == 60
     assert "INV-004: NQ Qualified Performance Attribution" in rendered
     assert "Descriptive only" in rendered
+
+
+def test_inv_005_top_winner_cohorts_are_deterministic_with_ties() -> None:
+    rows = _nq_rows()
+    rows[-1]["realized_pnl_proxy"] = rows[-2]["realized_pnl_proxy"]
+
+    cohorts = inv_005_top_winner_cohorts(rows)
+
+    assert cohorts["top_1_percent"]["trade_count"] == 1
+    assert cohorts["top_5_percent"]["trade_count"] == 3
+    assert cohorts["top_10_percent"]["trade_count"] == 6
+    assert cohorts["top_20_winners"]["trade_count"] == 20
+    assert cohorts["deterministic_fingerprint"] == inv_005_top_winner_cohorts(rows)["deterministic_fingerprint"]
+
+
+def test_inv_005_peer_level_fallback_and_minimum_thresholds() -> None:
+    rows = _nq_rows()
+    top_rows = inv_005_top_winner_cohorts(rows)["top_20_winners"]["rows"]
+
+    assignments = inv_005_peer_assignments(rows, top_rows)
+
+    usable = [item for item in assignments["assignments"] if item["peer_count"] >= 10]
+    assert usable
+    assert all(item["selected_peer_level"] in {"A", "B", "C", "D"} for item in usable)
+    assert all(item["sample_class"] in {"DESCRIPTIVE_COHORT", "STRONG_COHORT"} for item in usable)
+
+
+def test_inv_005_peer_metrics_exclude_focal_and_top_decile() -> None:
+    rows = _nq_rows()
+    top_rows = inv_005_top_winner_cohorts(rows)["top_20_winners"]["rows"]
+    assignments = inv_005_peer_assignments(rows, top_rows)
+
+    metrics = inv_005_peer_metrics(assignments)
+    comparisons = inv_005_focal_trade_peer_comparisons(assignments)
+
+    first = next(item for item in metrics["records"] if item.get("peer_count", 0) >= 10)
+    comparison = next(item for item in comparisons["comparisons"] if item["focal_trade_id"] == first["focal_trade_id"])
+    assert first["peer_without_focal_metrics"]["trade_count"] == first["peer_count"] - 1
+    assert first["peer_excluding_top_10_percent_metrics"]["trade_count"] < first["peer_count"]
+    assert comparison["focal_percentile_within_peer"] is not None
+    assert first["classification"] in {
+        "REPRESENTATIVE_OF_POSITIVE_PEER_COHORT",
+        "OUTLIER_WITHIN_POSITIVE_PEER_COHORT",
+        "OUTLIER_WITHIN_WEAK_OR_NEGATIVE_PEER_COHORT",
+        "INCONCLUSIVE",
+    }
+
+
+def test_inv_005_breadth_classification_and_html_are_explicit() -> None:
+    rows = _nq_rows()
+    inv = build_inv_005(rows, _common())
+    html = render_inv_005_html(inv)
+
+    assert inv["breadth_fragility_classification"]["classification"] in {
+        "REPEATABLE_ACROSS_MULTIPLE_PEER_COHORTS",
+        "POSITIVE_BUT_TAIL_DEPENDENT",
+        "HIGHLY_FRAGILE_AND_OUTLIER_DEPENDENT",
+        "MIXED_OR_INCONCLUSIVE",
+        "INSUFFICIENT_EVIDENCE",
+    }
+    assert inv["source_contract"]["ra8_required"] is False
+    assert "No production recommendation" in html
+    assert "Peer Cohort Metrics" in html
+
+
+def test_inv_005_explorer_highlight_and_guardrails(tmp_path: Path) -> None:
+    analysis, _, _ = build_research_evidence_explorer(
+        [_crr_row_from_drill(row) for row in _nq_rows()],
+        crr_validation=_crr_validation(),
+        crr_path=tmp_path / "crr.jsonl",
+        crr_validation_path=tmp_path / "validation.json",
+        generated_at=NOW,
+    )
+    rendered = render_presentation_html(analysis)
+
+    assert analysis["investigation_highlights"]["INV-005"]["qualified_nq_trade_count"] == 60
+    assert "INV-005: NQ Winner Peer Cohorts" in rendered
+    assert analysis["guardrails"]["production_recommendation"] is False
 
 
 def test_loss_classification_defaults_to_insufficient_evidence_and_requires_review() -> None:
