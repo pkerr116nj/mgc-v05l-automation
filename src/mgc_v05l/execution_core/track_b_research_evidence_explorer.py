@@ -22,11 +22,19 @@ from mgc_v05l.execution_core.track_b_canonical_research_record import (
     CRR_JSONL,
     VALIDATION_JSON,
 )
+from mgc_v05l.execution_core.track_b_research_eligibility import (
+    DEFAULT_OUTPUT_DIR as DEFAULT_ELIGIBILITY_OUTPUT_DIR,
+    EXCLUDED_SOURCE_INTEGRITY,
+    RECORDS_JSONL as ELIGIBILITY_RECORDS_JSONL,
+    SUMMARY_JSON as ELIGIBILITY_SUMMARY_JSON,
+)
 
 
 DEFAULT_OUTPUT_ROOT = Path("outputs") / "track_b_execution_core"
 DEFAULT_CRR_PATH = DEFAULT_CRR_OUTPUT_DIR / CRR_JSONL
 DEFAULT_CRR_VALIDATION_PATH = DEFAULT_CRR_OUTPUT_DIR / VALIDATION_JSON
+DEFAULT_ELIGIBILITY_RECORDS_PATH = DEFAULT_ELIGIBILITY_OUTPUT_DIR / ELIGIBILITY_RECORDS_JSONL
+DEFAULT_ELIGIBILITY_SUMMARY_PATH = DEFAULT_ELIGIBILITY_OUTPUT_DIR / ELIGIBILITY_SUMMARY_JSON
 DEFAULT_OUTPUT_DIR = DEFAULT_OUTPUT_ROOT / "research_analytics" / "research_evidence_explorer"
 DEFAULT_INVESTIGATION_OUTPUT_DIR = DEFAULT_OUTPUT_ROOT / "research_analytics" / "investigations"
 DEFAULT_INVESTIGATION_DOC_DIR = Path("docs") / "research" / "investigations"
@@ -132,17 +140,25 @@ def run_research_evidence_explorer(
     *,
     crr_path: Path = DEFAULT_CRR_PATH,
     crr_validation_path: Path = DEFAULT_CRR_VALIDATION_PATH,
+    eligibility_records_path: Path = DEFAULT_ELIGIBILITY_RECORDS_PATH,
+    eligibility_summary_path: Path = DEFAULT_ELIGIBILITY_SUMMARY_PATH,
     output_dir: Path = DEFAULT_OUTPUT_DIR,
     now: datetime | str | None = None,
 ) -> ResearchEvidenceExplorerResult:
     generated_at = _coerce_now(now)
     crr_rows = _read_jsonl(crr_path)
     crr_validation = _read_json(crr_validation_path)
+    eligibility_records = _read_jsonl(eligibility_records_path)
+    eligibility_summary = _read_json(eligibility_summary_path)
     analysis, population, validation = build_research_evidence_explorer(
         crr_rows,
         crr_validation=crr_validation,
         crr_path=crr_path,
         crr_validation_path=crr_validation_path,
+        eligibility_records=eligibility_records,
+        eligibility_summary=eligibility_summary,
+        eligibility_records_path=eligibility_records_path,
+        eligibility_summary_path=eligibility_summary_path,
         generated_at=generated_at,
     )
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -178,6 +194,8 @@ def run_research_investigations(
     *,
     crr_path: Path = DEFAULT_CRR_PATH,
     crr_validation_path: Path = DEFAULT_CRR_VALIDATION_PATH,
+    eligibility_records_path: Path = DEFAULT_ELIGIBILITY_RECORDS_PATH,
+    eligibility_summary_path: Path = DEFAULT_ELIGIBILITY_SUMMARY_PATH,
     explorer_output_dir: Path = DEFAULT_OUTPUT_DIR,
     output_dir: Path = DEFAULT_INVESTIGATION_OUTPUT_DIR,
     docs_dir: Path = DEFAULT_INVESTIGATION_DOC_DIR,
@@ -186,11 +204,17 @@ def run_research_investigations(
     generated_at = _coerce_now(now)
     crr_rows = _read_jsonl(crr_path)
     crr_validation = _read_json(crr_validation_path)
+    eligibility_records = _read_jsonl(eligibility_records_path)
+    eligibility_summary = _read_json(eligibility_summary_path)
     analysis, population, _ = build_research_evidence_explorer(
         crr_rows,
         crr_validation=crr_validation,
         crr_path=crr_path,
         crr_validation_path=crr_validation_path,
+        eligibility_records=eligibility_records,
+        eligibility_summary=eligibility_summary,
+        eligibility_records_path=eligibility_records_path,
+        eligibility_summary_path=eligibility_summary_path,
         generated_at=generated_at,
     )
     investigations = build_investigation_records(
@@ -303,18 +327,31 @@ def build_investigation_records(
         "crr_validation": str(crr_validation_path),
         "explorer_analysis": str(explorer_path),
     }
+    eligibility_source = analysis.get("source", {}).get("research_eligibility", {})
+    if eligibility_source.get("records_path"):
+        source_artifacts["research_eligibility_records"] = str(eligibility_source.get("records_path"))
+    if eligibility_source.get("summary_path"):
+        source_artifacts["research_eligibility_summary"] = str(eligibility_source.get("summary_path"))
     source_fingerprints = {
         "crr": _file_sha256(crr_path),
         "crr_validation": _file_sha256(crr_validation_path),
         "explorer_analysis": _file_sha256(explorer_path),
         "explorer_artifact": analysis.get("deterministic_fingerprint"),
     }
+    if eligibility_source.get("records_path"):
+        source_fingerprints["research_eligibility_records"] = _file_sha256(Path(str(eligibility_source.get("records_path"))))
+    if eligibility_source.get("summary_path"):
+        source_fingerprints["research_eligibility_summary"] = _file_sha256(Path(str(eligibility_source.get("summary_path"))))
     common = {
         "schema_version": INVESTIGATION_SCHEMA_VERSION,
         "generated_at": generated_at.isoformat(),
         "source_artifacts": source_artifacts,
         "source_fingerprints": source_fingerprints,
         "population_definition": analysis.get("population", {}).get("population_definition", {}),
+        "active_population_view": analysis.get("population", {}).get("active_population_view"),
+        "population_view_summary": analysis.get("population_views", {}),
+        "source_confirmed_anomalies": analysis.get("source_confirmed_anomalies", []),
+        "review_required_count": analysis.get("population", {}).get("review_required_count", 0),
         "guardrails": dict(GUARDRAILS),
         **GUARDRAILS,
     }
@@ -334,6 +371,10 @@ def build_research_evidence_explorer(
     crr_validation: Mapping[str, Any],
     crr_path: Path,
     crr_validation_path: Path,
+    eligibility_records: Sequence[Mapping[str, Any]] = (),
+    eligibility_summary: Mapping[str, Any] | None = None,
+    eligibility_records_path: Path = DEFAULT_ELIGIBILITY_RECORDS_PATH,
+    eligibility_summary_path: Path = DEFAULT_ELIGIBILITY_SUMMARY_PATH,
     generated_at: datetime,
 ) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
     readiness = list(crr_validation.get("upstream_readiness", []))
@@ -343,30 +384,63 @@ def build_research_evidence_explorer(
         if item.get("source_name") in {"canonical_trade_records", *REQUIRED_LAYERS}
     )
     source_validation_status = str(crr_validation.get("status") or "UNKNOWN")
-    population_rows, exclusions = build_explorer_population(crr_rows, required_sources_ready=required_ready)
+    eligibility_by_id = {str(row.get("research_record_id")): row for row in eligibility_records}
+    excluded_source_integrity_ids = {
+        record_id
+        for record_id, record in eligibility_by_id.items()
+        if record.get("classification") == EXCLUDED_SOURCE_INTEGRITY
+    }
+    population_rows, exclusions = build_explorer_population(
+        crr_rows,
+        required_sources_ready=required_ready,
+        excluded_research_record_ids=excluded_source_integrity_ids,
+        exclusion_reason_override="excluded_confirmed_source_integrity_anomaly",
+        eligibility_by_id=eligibility_by_id,
+    )
     attach_within_instrument_percentiles(population_rows)
     cohorts = build_cohorts(population_rows)
     attach_cohort_memberships(population_rows, cohorts)
     cohort_metrics = {name: cohort_metrics_for(rows, full_population_count=len(population_rows)) for name, rows in cohorts.items()}
     deltas = numeric_metric_deltas(cohort_metrics.get("top_decile", {}), cohort_metrics.get("bottom_decile", {}))
     controlled_comparison = build_within_instrument_comparison(population_rows)
+    population_views = build_population_view_comparisons(
+        crr_rows,
+        required_sources_ready=required_ready,
+        eligibility_by_id=eligibility_by_id,
+        source_integrity_excluded_ids=excluded_source_integrity_ids,
+    )
+    anomaly_table = build_anomaly_classification_table(crr_rows, eligibility_by_id=eligibility_by_id)
+    review_queue = [
+        dict(record)
+        for record in sorted(eligibility_records, key=lambda item: str(item.get("research_record_id")))
+        if record.get("review_required") is True
+    ]
     population = {
         "schema_version": f"{SCHEMA_VERSION}_population",
         "generated_at": generated_at.isoformat(),
+        "active_population_view": "SOURCE_INTEGRITY_QUALIFIED" if eligibility_records else "FULL_HISTORICAL",
         "source_crr_path": str(crr_path),
         "source_crr_fingerprint": _file_sha256(crr_path),
         "source_crr_validation_path": str(crr_validation_path),
         "source_crr_validation_status": source_validation_status,
+        "source_eligibility_records_path": str(eligibility_records_path) if eligibility_records else None,
+        "source_eligibility_summary_path": str(eligibility_summary_path) if eligibility_records else None,
+        "source_eligibility_records_fingerprint": _file_sha256(eligibility_records_path) if eligibility_records else None,
+        "source_eligibility_summary_fingerprint": _file_sha256(eligibility_summary_path) if eligibility_records else None,
         "required_sources_ready": required_ready,
         "population_definition": {
-            "include": "CRR rows with valid required-source readiness, no broken joins, exact CTOL/CTOE/RA7/RA3 joins, and numeric realized P&L proxy.",
+            "include": "CRR rows with valid required-source readiness, no broken joins, exact CTOL/CTOE/RA7/RA3 joins, numeric realized P&L proxy, and no source-confirmed source-integrity exclusion in the active view.",
             "ra8_required": False,
             "tolerance_joins_allowed": False,
+            "source_integrity_qualification": bool(eligibility_records),
         },
         "input_count": len(crr_rows),
         "included_count": len(population_rows),
         "excluded_count": len(exclusions),
         "exclusions": exclusions,
+        "population_views": population_views,
+        "source_confirmed_anomaly_count": len(anomaly_table),
+        "review_required_count": len(review_queue),
         "date_coverage": date_coverage(population_rows),
         "instrument_coverage": _distribution((row.get("instrument") for row in population_rows)),
         "coverage": {
@@ -387,8 +461,14 @@ def build_research_evidence_explorer(
             "crr_validation_status": source_validation_status,
             "crr_validation_fingerprint": _file_sha256(crr_validation_path),
             "upstream_readiness": readiness,
+            "research_eligibility": {
+                "records_path": str(eligibility_records_path) if eligibility_records else None,
+                "summary_path": str(eligibility_summary_path) if eligibility_records else None,
+                "summary_status": (eligibility_summary or {}).get("schema_version"),
+                "classification_counts": (eligibility_summary or {}).get("classification_counts", {}),
+            },
         },
-        "question": "How do the characteristics of the best completed trades differ from the worst completed trades?",
+        "question": "How do source-qualified completed trades differ across outcome cohorts, and how do those results compare to full history?",
         "comparability_disclosure": {
             "global_comparison_interpretation": "Portfolio-outcome analysis.",
             "limitation": "Raw realized P&L proxy can reflect instrument, multiplier, and quantity differences. It is not automatically a strategy-quality comparison.",
@@ -396,6 +476,9 @@ def build_research_evidence_explorer(
             "normalization_policy": "No per-contract or multiplier normalization is invented where contract economics are not present in CRR.",
         },
         "population": population,
+        "population_views": population_views,
+        "source_confirmed_anomalies": anomaly_table,
+        "review_required_queue": review_queue,
         "cohort_definitions": cohort_definitions(len(population_rows)),
         "metric_definitions": metric_definitions(),
         "cohorts": cohort_metrics,
@@ -423,21 +506,34 @@ def build_explorer_population(
     rows: Sequence[Mapping[str, Any]],
     *,
     required_sources_ready: bool,
+    excluded_research_record_ids: set[str] | None = None,
+    exclusion_reason_override: str | None = None,
+    eligibility_by_id: Mapping[str, Mapping[str, Any]] | None = None,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     population: list[dict[str, Any]] = []
     exclusions: list[dict[str, Any]] = []
+    excluded_ids = excluded_research_record_ids or set()
+    eligibility = eligibility_by_id or {}
     for row in rows:
-        reason = exclusion_reason(row, required_sources_ready=required_sources_ready)
+        record_id = str(row.get("research_record_id") or "")
+        reason = exclusion_reason_override if record_id in excluded_ids else exclusion_reason(row, required_sources_ready=required_sources_ready)
         if reason:
             exclusions.append(
                 {
                     "research_record_id": row.get("research_record_id"),
                     "source_trade_id": row.get("trade_identity", {}).get("source_trade_id"),
                     "reason": reason,
+                    "eligibility_classification": eligibility.get(record_id, {}).get("classification"),
                 }
             )
             continue
         normalized = normalize_crr_row(row)
+        if record_id in eligibility:
+            normalized["research_eligibility"] = {
+                "classification": eligibility[record_id].get("classification"),
+                "review_required": eligibility[record_id].get("review_required"),
+                "limitations": eligibility[record_id].get("limitations", []),
+            }
         population.append(normalized)
     population.sort(key=lambda row: (row["exit_time"] or "", row["research_record_id"]))
     return population, exclusions
@@ -718,6 +814,118 @@ def build_within_instrument_comparison(
     }
 
 
+def build_population_view_comparisons(
+    crr_rows: Sequence[Mapping[str, Any]],
+    *,
+    required_sources_ready: bool,
+    eligibility_by_id: Mapping[str, Mapping[str, Any]],
+    source_integrity_excluded_ids: set[str],
+) -> dict[str, Any]:
+    if not eligibility_by_id:
+        rows, exclusions = build_explorer_population(crr_rows, required_sources_ready=required_sources_ready)
+        attach_within_instrument_percentiles(rows)
+        return {
+            "FULL_HISTORICAL": {
+                "view_id": "FULL_HISTORICAL",
+                "included_count": len(rows),
+                "excluded_count": len(exclusions),
+                "excluded_count_by_reason": _distribution(item.get("reason") for item in exclusions),
+                "metrics": investigation_metrics(rows),
+                "long_short_outcomes": {
+                    "long": investigation_metrics([row for row in rows if row.get("side") == "LONG"]),
+                    "short": investigation_metrics([row for row in rows if row.get("side") == "SHORT"]),
+                },
+                "instrument_mix": _distribution(row.get("instrument") for row in rows),
+                "strategy_mix": _distribution((row.get("strategy_id") for row in rows), limit=30),
+                "session_mix": _distribution(row.get("session") for row in rows),
+                "regime_mix": _distribution(row.get("regime") for row in rows),
+                "missingness": _missing_field_counts(rows),
+                "ra8_coverage": {
+                    "exact_count": sum(1 for row in rows if row.get("ra8_coverage_status") == "EXACT"),
+                    "missing_count": sum(1 for row in rows if row.get("ra8_coverage_status") != "EXACT"),
+                    "coverage_rate": _rate(sum(1 for row in rows if row.get("ra8_coverage_status") == "EXACT"), len(rows)),
+                },
+                "comparability_controlled": build_within_instrument_comparison(rows),
+            }
+        }
+    view_definitions = {
+        "FULL_HISTORICAL": set(),
+        "SOURCE_INTEGRITY_QUALIFIED": set(source_integrity_excluded_ids),
+        "ORDINARY_STRATEGY_EVIDENCE": {
+            str(record_id)
+            for record_id, record in eligibility_by_id.items()
+            if record.get("classification")
+            not in {"ELIGIBLE_ORDINARY_STRATEGY_EVIDENCE", "ELIGIBLE_WITH_LIMITATIONS"}
+        },
+        "REVIEW_REQUIRED": {
+            str(row.get("research_record_id"))
+            for row in crr_rows
+            if eligibility_by_id.get(str(row.get("research_record_id")), {}).get("review_required") is not True
+        },
+    }
+    views: dict[str, Any] = {}
+    for view_id, excluded_ids in view_definitions.items():
+        rows, exclusions = build_explorer_population(
+            crr_rows,
+            required_sources_ready=required_sources_ready,
+            excluded_research_record_ids=excluded_ids,
+            exclusion_reason_override=f"not_in_{view_id.lower()}",
+            eligibility_by_id=eligibility_by_id,
+        )
+        attach_within_instrument_percentiles(rows)
+        views[view_id] = {
+            "view_id": view_id,
+            "included_count": len(rows),
+            "excluded_count": len(exclusions),
+            "excluded_count_by_reason": _distribution(item.get("eligibility_classification") or item.get("reason") for item in exclusions),
+            "metrics": investigation_metrics(rows),
+            "long_short_outcomes": {
+                "long": investigation_metrics([row for row in rows if row.get("side") == "LONG"]),
+                "short": investigation_metrics([row for row in rows if row.get("side") == "SHORT"]),
+            },
+            "instrument_mix": _distribution(row.get("instrument") for row in rows),
+            "strategy_mix": _distribution((row.get("strategy_id") for row in rows), limit=30),
+            "session_mix": _distribution(row.get("session") for row in rows),
+            "regime_mix": _distribution(row.get("regime") for row in rows),
+            "missingness": _missing_field_counts(rows),
+            "ra8_coverage": {
+                "exact_count": sum(1 for row in rows if row.get("ra8_coverage_status") == "EXACT"),
+                "missing_count": sum(1 for row in rows if row.get("ra8_coverage_status") != "EXACT"),
+                "coverage_rate": _rate(sum(1 for row in rows if row.get("ra8_coverage_status") == "EXACT"), len(rows)),
+            },
+            "comparability_controlled": build_within_instrument_comparison(rows),
+        }
+    return views
+
+
+def build_anomaly_classification_table(
+    crr_rows: Sequence[Mapping[str, Any]],
+    *,
+    eligibility_by_id: Mapping[str, Mapping[str, Any]],
+) -> list[dict[str, Any]]:
+    rows_by_id = {str(row.get("research_record_id")): row for row in crr_rows}
+    result = []
+    for record_id, eligibility in sorted(eligibility_by_id.items()):
+        if eligibility.get("classification") != EXCLUDED_SOURCE_INTEGRITY:
+            continue
+        row = rows_by_id.get(record_id, {})
+        result.append(
+            {
+                "research_record_id": record_id,
+                "source_trade_id": row.get("trade_identity", {}).get("source_trade_id") or eligibility.get("source_trade_id"),
+                "instrument": row.get("trade_identity", {}).get("instrument"),
+                "side": row.get("trade_identity", {}).get("side"),
+                "realized_pnl_proxy": row.get("outcome_summary", {}).get("realized_pnl_proxy"),
+                "classification": eligibility.get("classification"),
+                "evidence_basis": eligibility.get("evidence_basis"),
+                "confidence": eligibility.get("confidence"),
+                "supporting_ids": eligibility.get("supporting_ids"),
+                "supporting_artifact_paths": eligibility.get("supporting_artifact_paths"),
+            }
+        )
+    return result
+
+
 def add_within_instrument_percentiles(rows: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
     sorted_rows = sorted(rows, key=lambda row: (float(row["realized_pnl_proxy"]), str(row.get("research_record_id"))))
     if len(sorted_rows) == 1:
@@ -940,6 +1148,10 @@ def build_inv_001(rows: Sequence[Mapping[str, Any]], common: Mapping[str, Any]) 
     }
     loss_attribution = build_loss_attribution(rows)
     forensic_audit = build_extreme_trade_forensic_audit(rows)
+    forensic_audit = attach_eligibility_excluded_anomalies(
+        forensic_audit,
+        common.get("source_confirmed_anomalies", []),
+    )
     finding = (
         "Aggregate negative results are materially affected by extreme losses: "
         f"bottom 1% total P&L proxy {cohort_evidence(bottom1)['metrics'].get('total_realized_pnl_proxy')}, "
@@ -1493,6 +1705,97 @@ def build_extreme_trade_forensic_audit(rows: Sequence[Mapping[str, Any]]) -> dic
     }
     audit["deterministic_fingerprint"] = _fingerprint(_fingerprint_payload(audit))
     return audit
+
+
+def attach_eligibility_excluded_anomalies(
+    forensic_audit: Mapping[str, Any],
+    source_confirmed_anomalies: Sequence[Mapping[str, Any]],
+) -> dict[str, Any]:
+    audit = dict(forensic_audit)
+    anomalies = [dict(item) for item in source_confirmed_anomalies]
+    if not anomalies:
+        return audit
+
+    trace_records = [eligibility_anomaly_trace_record(item) for item in anomalies]
+    source_trace = dict(audit.get("anomaly_source_trace", {}))
+    existing_trace_records = list(source_trace.get("records", []))
+    existing_ids = {str(item.get("research_record_id")) for item in existing_trace_records}
+    merged_trace_records = existing_trace_records + [
+        item for item in trace_records if str(item.get("research_record_id")) not in existing_ids
+    ]
+    source_trace.update(
+        {
+            "records": merged_trace_records,
+            "eligibility_excluded_record_count": len(anomalies),
+            "eligibility_excluded_records": anomalies,
+            "active_population_note": "These records are excluded from SOURCE_INTEGRITY_QUALIFIED analysis but retained here as source-confirmed historical anomaly evidence.",
+        }
+    )
+    source_trace["deterministic_fingerprint"] = _fingerprint(_fingerprint_payload(source_trace))
+
+    classification = dict(audit.get("classification", {}))
+    classification.update(
+        {
+            "source_confirmed_excluded_record_count": len(anomalies),
+            "source_confirmed_excluded_records": anomalies,
+        }
+    )
+    classification["deterministic_fingerprint"] = _fingerprint(_fingerprint_payload(classification))
+
+    root_cause = dict(audit.get("anomaly_root_cause", {}))
+    root_summary = dict(root_cause.get("summary", {}))
+    root_summary["source_confirmed_excluded_record_count"] = len(anomalies)
+    root_cause.update(
+        {
+            "summary": root_summary,
+            "source_confirmed_excluded_records": anomalies,
+            "active_population_note": "Root-cause evidence is preserved from the eligibility layer because the active investigation population excludes these records.",
+        }
+    )
+    root_cause["deterministic_fingerprint"] = _fingerprint(_fingerprint_payload(root_cause))
+
+    audit.update(
+        {
+            "eligibility_excluded_source_confirmed_anomalies": anomalies,
+            "eligibility_excluded_source_confirmed_anomaly_count": len(anomalies),
+            "anomaly_source_trace": source_trace,
+            "classification": classification,
+            "anomaly_root_cause": root_cause,
+        }
+    )
+    summary = dict(audit.get("summary", {}))
+    summary["eligibility_excluded_source_confirmed_anomaly_count"] = len(anomalies)
+    audit["summary"] = summary
+    audit["deterministic_fingerprint"] = _fingerprint(_fingerprint_payload(audit))
+    return audit
+
+
+def eligibility_anomaly_trace_record(anomaly: Mapping[str, Any]) -> dict[str, Any]:
+    supporting_ids = dict(anomaly.get("supporting_ids") or {})
+    evidence_basis = list(anomaly.get("evidence_basis") or [])
+    root_classification = next(
+        (
+            str(item).split(" as ", 1)[1].rstrip(".")
+            for item in evidence_basis
+            if "INV-001 classified this record as " in str(item)
+        ),
+        "SOURCE_CONFIRMED_ANOMALY",
+    )
+    return {
+        "research_record_id": anomaly.get("research_record_id"),
+        "source_trade_id": anomaly.get("source_trade_id") or supporting_ids.get("source_trade_id"),
+        "classification": root_classification,
+        "eligibility_classification": anomaly.get("classification"),
+        "selection_status": "EXCLUDED_FROM_SOURCE_INTEGRITY_QUALIFIED_POPULATION",
+        "first_defective_layer": "entry_fill_persistence",
+        "supporting_ids": supporting_ids,
+        "supporting_artifact_paths": list(anomaly.get("supporting_artifact_paths") or []),
+        "evidence_basis": evidence_basis,
+        "confidence": anomaly.get("confidence"),
+        "instrument": anomaly.get("instrument"),
+        "side": anomaly.get("side"),
+        "realized_pnl_proxy": anomaly.get("realized_pnl_proxy"),
+    }
 
 
 def anomaly_source_trace(
@@ -2421,6 +2724,9 @@ def build_investigation_index(
                 "question": investigation.get("question"),
                 "conclusion_status": investigation.get("conclusion_status"),
                 "confidence": investigation.get("confidence"),
+                "active_population_view": investigation.get("active_population_view"),
+                "source_confirmed_anomaly_count": len(investigation.get("source_confirmed_anomalies", [])),
+                "review_required_count": investigation.get("review_required_count"),
                 "fingerprint": investigation.get("deterministic_fingerprint"),
                 "primary_artifact": str(output_dir / str(investigation.get("investigation_id")) / "investigation.json"),
             }
@@ -2449,6 +2755,9 @@ def render_investigation_markdown(investigation: Mapping[str, Any]) -> str:
         f"- Conclusion status: `{investigation.get('conclusion_status')}`",
         f"- Confidence: `{investigation.get('confidence')}`",
         f"- Question: {investigation.get('question')}",
+        f"- Active population view: `{investigation.get('active_population_view')}`",
+        f"- Source-confirmed anomalies: `{len(investigation.get('source_confirmed_anomalies', []))}`",
+        f"- Review-required records: `{investigation.get('review_required_count')}`",
         "",
         "## Findings",
         "",
@@ -2490,6 +2799,12 @@ def render_durable_investigation_summary(investigation: Mapping[str, Any], paths
         "",
         f"`{investigation.get('conclusion_status')}` with `{investigation.get('confidence')}` confidence.",
         "",
+        f"Active population view: `{investigation.get('active_population_view')}`.",
+        "",
+        f"Source-confirmed anomalies surfaced for comparison: `{len(investigation.get('source_confirmed_anomalies', []))}`.",
+        "",
+        f"Review-required records: `{investigation.get('review_required_count')}`.",
+        "",
         "These findings are descriptive, non-causal, and carry no production authority.",
         "",
         "## Generated Evidence",
@@ -2511,11 +2826,15 @@ def render_investigation_index_markdown(index: Mapping[str, Any]) -> str:
     lines = [
         "# Research Investigation Index",
         "",
-        "|investigation|status|confidence|question|",
-        "|---|---|---|---|",
+        "|investigation|status|confidence|population view|source-confirmed anomalies|review required|question|",
+        "|---|---|---|---|---|---|---|",
     ]
     for item in index.get("investigations", []):
-        lines.append(f"|{item.get('investigation_id')}|{item.get('conclusion_status')}|{item.get('confidence')}|{item.get('question')}|")
+        lines.append(
+            f"|{item.get('investigation_id')}|{item.get('conclusion_status')}|{item.get('confidence')}|"
+            f"{item.get('active_population_view')}|{item.get('source_confirmed_anomaly_count')}|"
+            f"{item.get('review_required_count')}|{item.get('question')}|"
+        )
     return "\n".join(lines) + "\n"
 
 
@@ -2526,6 +2845,9 @@ def render_investigation_index_html(index: Mapping[str, Any]) -> str:
         f"<td>{html.escape(str(item.get('title')))}</td>"
         f"<td>{html.escape(str(item.get('conclusion_status')))}</td>"
         f"<td>{html.escape(str(item.get('confidence')))}</td>"
+        f"<td>{html.escape(str(item.get('active_population_view')))}</td>"
+        f"<td>{html.escape(str(item.get('source_confirmed_anomaly_count')))}</td>"
+        f"<td>{html.escape(str(item.get('review_required_count')))}</td>"
         f"<td>{html.escape(str(item.get('question')))}</td>"
         "</tr>"
         for item in index.get("investigations", [])
@@ -2535,7 +2857,7 @@ def render_investigation_index_html(index: Mapping[str, Any]) -> str:
 <head><meta charset="utf-8"><title>Research Investigation Index</title>
 <style>body{{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;margin:24px;background:#f6f7f4;color:#1f2933}}main{{max-width:1100px;margin:auto}}table{{width:100%;border-collapse:collapse;background:white}}th,td{{border-bottom:1px solid #d9e0df;padding:8px;text-align:left}}th{{background:#eef2ef}}</style>
 </head>
-<body><main><h1>Research Investigation Index</h1><p>Prepared research records only. No runtime, broker, strategy, or trading authority.</p><table><thead><tr><th>ID</th><th>Title</th><th>Status</th><th>Confidence</th><th>Question</th></tr></thead><tbody>{rows}</tbody></table></main></body>
+<body><main><h1>Research Investigation Index</h1><p>Prepared research records only. No runtime, broker, strategy, or trading authority. Source-confirmed anomaly counts are disclosed separately from the active qualified population.</p><table><thead><tr><th>ID</th><th>Title</th><th>Status</th><th>Confidence</th><th>Population View</th><th>Source-Confirmed Anomalies</th><th>Review Required</th><th>Question</th></tr></thead><tbody>{rows}</tbody></table></main></body>
 </html>
 """
 def validate_research_evidence_explorer(analysis: Mapping[str, Any]) -> dict[str, Any]:
@@ -2573,6 +2895,10 @@ def data_quality_warnings(population: Mapping[str, Any], crr_validation: Mapping
         warnings.append("ra8_finalized_path_coverage_partial")
     if population.get("excluded_count", 0):
         warnings.append("population_exclusions_present")
+    if population.get("source_confirmed_anomaly_count", 0):
+        warnings.append("source_confirmed_anomalies_excluded_from_active_qualified_view")
+    if population.get("review_required_count", 0):
+        warnings.append("review_required_records_present")
     return warnings
 
 
@@ -2617,8 +2943,11 @@ def render_analysis_markdown(analysis: Mapping[str, Any]) -> str:
         "",
         f"- Question: {analysis.get('question')}",
         f"- CRR validation: `{analysis.get('source', {}).get('crr_validation_status')}`",
+        f"- Active population view: `{population.get('active_population_view')}`",
         f"- Included trades: `{population.get('included_count')}`",
         f"- Excluded trades: `{population.get('excluded_count')}`",
+        f"- Source-confirmed anomalies: `{population.get('source_confirmed_anomaly_count')}`",
+        f"- Review-required records: `{population.get('review_required_count')}`",
         f"- Exit coverage: `{population.get('date_coverage', {}).get('first_exit_time')}` to `{population.get('date_coverage', {}).get('last_exit_time')}`",
         f"- RA8 coverage: `{population.get('coverage', {}).get('ra8_exact_count')}/{population.get('included_count')}`",
         f"- Comparability-controlled view: `{analysis.get('comparability_controlled', {}).get('method')}`",
@@ -2627,11 +2956,39 @@ def render_analysis_markdown(analysis: Mapping[str, Any]) -> str:
         "",
         "The global top-versus-bottom view is portfolio-outcome analysis. Raw realized P&L proxy can reflect instrument, multiplier, and quantity differences, so it is not automatically a strategy-quality comparison.",
         "",
+        "## Population Views",
+        "",
+        "|view|included|excluded|total pnl|average pnl|median pnl|trimmed mean|win rate|RA8 exact|",
+        "|---|---:|---:|---:|---:|---:|---:|---:|---:|",
+    ]
+    for view_id, view in analysis.get("population_views", {}).items():
+        metrics = view.get("metrics", {})
+        ra8 = view.get("ra8_coverage", {})
+        lines.append(
+            f"|{view_id}|{view.get('included_count')}|{view.get('excluded_count')}|{metrics.get('total_realized_pnl_proxy')}|"
+            f"{metrics.get('average_realized_pnl_proxy')}|{metrics.get('median_realized_pnl_proxy')}|{metrics.get('trimmed_mean_5_percent')}|"
+            f"{metrics.get('win_rate')}|{ra8.get('exact_count')}|"
+        )
+    lines.extend([
+        "",
+        "## Source-Confirmed Anomaly Records",
+        "",
+        "|research record|instrument|side|pnl proxy|classification|confidence|",
+        "|---|---|---|---:|---|---|",
+    ])
+    for item in analysis.get("source_confirmed_anomalies", []):
+        lines.append(
+            f"|{item.get('research_record_id')}|{item.get('instrument')}|{item.get('side')}|{item.get('realized_pnl_proxy')}|{item.get('classification')}|{item.get('confidence')}|"
+        )
+    lines.extend([
+        "",
+        "The active qualified view excludes only source-confirmed source-integrity anomalies. Full Historical remains reported for comparison.",
+        "",
         "## Cohort Summary",
         "",
         "|cohort|trades|avg pnl|median pnl|win rate|RA8 coverage|",
         "|---|---:|---:|---:|---:|---:|",
-    ]
+    ])
     for name in ("top_decile", "bottom_decile", "winners", "losers", "long", "short"):
         item = cohorts.get(name, {})
         lines.append(
@@ -2722,6 +3079,7 @@ def render_presentation_html(analysis: Mapping[str, Any]) -> str:
         f'<a href="#{anchor}">{label}</a>'
         for anchor, label in (
             ("overview", "Overview"),
+            ("population-views", "Population Views"),
             ("cohorts", "Cohort Comparison"),
             ("controlled", "Within-Instrument View"),
             ("distributions", "Distributions"),
@@ -2730,6 +3088,12 @@ def render_presentation_html(analysis: Mapping[str, Any]) -> str:
     )
     controlled_rows = render_controlled_rows(analysis)
     controlled_chart = render_controlled_chart(analysis)
+    population_view_options = "".join(
+        f'<option value="{html.escape(str(view_id))}">{html.escape(_display_label(view_id))}</option>'
+        for view_id in analysis.get("population_views", {})
+    )
+    population_view_rows = render_population_view_rows(analysis)
+    anomaly_rows = render_anomaly_rows(analysis)
     distribution_sections = "".join(
         render_distribution_chart(key, item)
         for key, item in analysis.get("distributions", {}).items()
@@ -2802,8 +3166,20 @@ def render_presentation_html(analysis: Mapping[str, Any]) -> str:
       <div class="card"><div class="label">Exit Window</div><div class="value" style="font-size:15px">{_format_timestamp(date_info.get('first_exit_time'))}</div><div class="muted">to {_format_timestamp(date_info.get('last_exit_time'))}</div></div>
     </div>
     <p class="notice">Findings are descriptive and non-causal. The global comparison is portfolio-outcome analysis; raw P&L can reflect instrument, multiplier, and quantity differences.</p>
+    <p class="notice">Active population view: <strong>{html.escape(str(population.get('active_population_view')))}</strong>. Full Historical remains visible for comparison; the active qualified view excludes only source-confirmed source-integrity anomalies.</p>
     <p class="warning">Detailed RA8 path coverage is partial. Missing RA8 is visible and is not treated as invalid CRR evidence.</p>
     <ul>{warnings}</ul>
+  </section>
+  <section id="population-views">
+    <h2>Population Views</h2>
+    <p>All views are deterministic prepared artifacts. No source rows are rewritten or silently hidden.</p>
+    <select id="populationViewSelect">{population_view_options}</select>
+    <div id="populationViewDetails" class="card"></div>
+    <h3>Side-by-Side Summary</h3>
+    <table><thead><tr><th>View</th><th>Included</th><th>Excluded</th><th>Total P&L</th><th>Average</th><th>Median</th><th>Trimmed Mean</th><th>Win Rate</th><th>RA8</th></tr></thead><tbody>{population_view_rows}</tbody></table>
+    <h3>Source-Confirmed Anomaly Records</h3>
+    <table><thead><tr><th>Research Record</th><th>Instrument</th><th>Side</th><th>P&L Proxy</th><th>Classification</th><th>Evidence</th></tr></thead><tbody>{anomaly_rows}</tbody></table>
+    <p class="muted">Review-required records: {population.get('review_required_count')}.</p>
   </section>
   <section id="cohorts">
     <h2>Cohort Comparison</h2>
@@ -2890,8 +3266,26 @@ function renderTrade() {{
     <div class="sources">${{sources || 'No provenance references supplied.'}}</div>
   `;
 }}
+function renderPopulationView() {{
+  const viewId = document.getElementById('populationViewSelect').value;
+  const view = data.population_views?.[viewId] || {{}};
+  const metrics = view.metrics || {{}};
+  const ra8 = view.ra8_coverage || {{}};
+  document.getElementById('populationViewDetails').innerHTML = `
+    <div class="details">
+      ${{detail('View', valueOrMissing(viewId))}}
+      ${{detail('Included / Excluded', `${{valueOrMissing(view.included_count)}} / ${{valueOrMissing(view.excluded_count)}}`)}}
+      ${{detail('Total P&L Proxy', money(metrics.total_realized_pnl_proxy))}}
+      ${{detail('Average / Median', `${{money(metrics.average_realized_pnl_proxy)}} / ${{money(metrics.median_realized_pnl_proxy)}}`)}}
+      ${{detail('Trimmed Mean / Win Rate', `${{money(metrics.trimmed_mean_5_percent)}} / ${{pct(metrics.win_rate)}}`)}}
+      ${{detail('RA8 Coverage', `${{valueOrMissing(ra8.exact_count)}} exact, ${{valueOrMissing(ra8.missing_count)}} missing (${{pct(ra8.coverage_rate)}})`)}}
+    </div>
+  `;
+}}
 select.addEventListener('change', renderTrade);
 renderTrade();
+document.getElementById('populationViewSelect').addEventListener('change', renderPopulationView);
+renderPopulationView();
 document.querySelectorAll('#controlledTable th.sortable').forEach((th, index) => {{
   th.addEventListener('click', () => {{
     const body = th.closest('table').querySelector('tbody');
@@ -3005,6 +3399,46 @@ def render_excluded_instruments(analysis: Mapping[str, Any]) -> str:
         f"{html.escape(str(instrument))}: {item.get('sample_size')} trades, threshold {threshold}"
         for instrument, item in excluded.items()
     )
+
+
+def render_population_view_rows(analysis: Mapping[str, Any]) -> str:
+    rows = []
+    for view_id, view in analysis.get("population_views", {}).items():
+        metrics = view.get("metrics", {})
+        ra8 = view.get("ra8_coverage", {})
+        rows.append(
+            "<tr>"
+            f"<td>{html.escape(str(view_id))}</td>"
+            f"<td>{view.get('included_count')}</td>"
+            f"<td>{view.get('excluded_count')}</td>"
+            f"<td>{_format_money(metrics.get('total_realized_pnl_proxy'))}</td>"
+            f"<td>{_format_money(metrics.get('average_realized_pnl_proxy'))}</td>"
+            f"<td>{_format_money(metrics.get('median_realized_pnl_proxy'))}</td>"
+            f"<td>{_format_money(metrics.get('trimmed_mean_5_percent'))}</td>"
+            f"<td>{_format_percent(metrics.get('win_rate'))}</td>"
+            f"<td>{ra8.get('exact_count')} / {view.get('included_count')} ({_format_percent(ra8.get('coverage_rate'))})</td>"
+            "</tr>"
+        )
+    return "".join(rows)
+
+
+def render_anomaly_rows(analysis: Mapping[str, Any]) -> str:
+    rows = []
+    for item in analysis.get("source_confirmed_anomalies", []):
+        evidence = "; ".join(str(value) for value in item.get("evidence_basis", [])[:2])
+        rows.append(
+            "<tr>"
+            f"<td>{html.escape(str(item.get('research_record_id')))}</td>"
+            f"<td>{html.escape(str(item.get('instrument')))}</td>"
+            f"<td>{html.escape(str(item.get('side')))}</td>"
+            f"<td>{_format_money(item.get('realized_pnl_proxy'))}</td>"
+            f"<td>{html.escape(str(item.get('classification')))}</td>"
+            f"<td>{html.escape(evidence)}</td>"
+            "</tr>"
+        )
+    if not rows:
+        return '<tr><td colspan="6">No source-confirmed anomaly records in the prepared eligibility artifact.</td></tr>'
+    return "".join(rows)
 
 
 def render_distribution_chart(key: str, item: Mapping[str, Any]) -> str:

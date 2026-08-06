@@ -10,6 +10,12 @@ Does long-side underperformance persist after controlling for instrument, sessio
 
 `INCONCLUSIVE` with `PARTIAL` confidence.
 
+Active population view: `SOURCE_INTEGRITY_QUALIFIED`.
+
+Source-confirmed anomalies surfaced for comparison: `5`.
+
+Review-required records: `0`.
+
 These findings are descriptive, non-causal, and carry no production authority.
 
 ## Generated Evidence
@@ -23,7 +29,7 @@ These findings are descriptive, non-causal, and carry no production authority.
 
 ## Findings
 
-- Controlled cells are mixed: 9 long-worse cells and 8 short-worse cells.
+- Controlled cells are mixed: 6 long-worse cells and 11 short-worse cells.
 
 ## Limitations
 

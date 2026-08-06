@@ -11,6 +11,8 @@ from typing import Sequence
 from mgc_v05l.execution_core.track_b_research_evidence_explorer import (
     DEFAULT_CRR_PATH,
     DEFAULT_CRR_VALIDATION_PATH,
+    DEFAULT_ELIGIBILITY_RECORDS_PATH,
+    DEFAULT_ELIGIBILITY_SUMMARY_PATH,
     DEFAULT_INVESTIGATION_DOC_DIR,
     DEFAULT_INVESTIGATION_OUTPUT_DIR,
     DEFAULT_OUTPUT_DIR,
@@ -24,6 +26,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--mode", choices=("explorer", "investigations", "all"), default="explorer")
     parser.add_argument("--crr-path", type=Path, default=DEFAULT_CRR_PATH)
     parser.add_argument("--crr-validation-path", type=Path, default=DEFAULT_CRR_VALIDATION_PATH)
+    parser.add_argument("--eligibility-records-path", type=Path, default=DEFAULT_ELIGIBILITY_RECORDS_PATH)
+    parser.add_argument("--eligibility-summary-path", type=Path, default=DEFAULT_ELIGIBILITY_SUMMARY_PATH)
     parser.add_argument("--output-dir", type=Path, default=DEFAULT_OUTPUT_DIR)
     parser.add_argument("--investigation-output-dir", type=Path, default=DEFAULT_INVESTIGATION_OUTPUT_DIR)
     parser.add_argument("--investigation-docs-dir", type=Path, default=DEFAULT_INVESTIGATION_DOC_DIR)
@@ -39,6 +43,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         result = run_research_evidence_explorer(
             crr_path=args.crr_path,
             crr_validation_path=args.crr_validation_path,
+            eligibility_records_path=args.eligibility_records_path,
+            eligibility_summary_path=args.eligibility_summary_path,
             output_dir=args.output_dir,
             now=args.now,
         )
@@ -46,7 +52,10 @@ def main(argv: Sequence[str] | None = None) -> int:
             "schema_version": result.analysis.get("schema_version"),
             "validation_status": result.validation.get("status"),
             "population_count": result.population.get("included_count"),
+            "active_population_view": result.population.get("active_population_view"),
             "excluded_count": result.population.get("excluded_count"),
+            "source_confirmed_anomaly_count": result.population.get("source_confirmed_anomaly_count"),
+            "review_required_count": result.population.get("review_required_count"),
             "top_decile_count": result.analysis.get("cohorts", {}).get("top_decile", {}).get("trade_count"),
             "bottom_decile_count": result.analysis.get("cohorts", {}).get("bottom_decile", {}).get("trade_count"),
             "ra8_exact_count": result.population.get("coverage", {}).get("ra8_exact_count"),
@@ -63,6 +72,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         investigation_result = run_research_investigations(
             crr_path=args.crr_path,
             crr_validation_path=args.crr_validation_path,
+            eligibility_records_path=args.eligibility_records_path,
+            eligibility_summary_path=args.eligibility_summary_path,
             explorer_output_dir=args.output_dir,
             output_dir=args.investigation_output_dir,
             docs_dir=args.investigation_docs_dir,

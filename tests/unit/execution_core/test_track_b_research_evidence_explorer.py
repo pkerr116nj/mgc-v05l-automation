@@ -8,6 +8,7 @@ from pathlib import Path
 from mgc_v05l.execution_core.track_b_research_evidence_explorer import (
     build_cohorts,
     build_extreme_trade_forensic_audit,
+    build_investigation_index,
     build_investigation_records,
     build_loss_attribution,
     build_research_evidence_explorer,
@@ -17,6 +18,7 @@ from mgc_v05l.execution_core.track_b_research_evidence_explorer import (
     investigation_metrics,
     reconcile_extreme_trade_pnl,
     render_presentation_html,
+    render_investigation_index_html,
     run_research_evidence_explorer,
     run_research_investigations,
     trimmed_mean,
@@ -191,6 +193,126 @@ def test_presentation_renders_distribution_empty_states_and_drilldown_fields() -
     assert "RA8 path available" in rendered
     assert "Detailed RA8 path unavailable" in rendered
     assert "Missing Fields" in rendered
+
+
+def test_eligibility_source_integrity_exclusions_drive_population_views(tmp_path: Path) -> None:
+    rows = [_crr_row("ordinary", pnl=25.0), _crr_row("anomaly", pnl=-1000.0, instrument="GC")]
+    anomaly_id = "crr_anomaly"
+    rows[1]["research_record_id"] = anomaly_id
+    eligibility = [
+        {
+            "research_record_id": "crr_ordinary",
+            "classification": "ELIGIBLE_WITH_LIMITATIONS",
+            "review_required": False,
+            "limitations": ["ra8_source_coverage_limit"],
+        },
+        {
+            "research_record_id": anomaly_id,
+            "source_trade_id": "anomaly",
+            "classification": "EXCLUDED_CONFIRMED_SOURCE_INTEGRITY_ANOMALY",
+            "review_required": False,
+            "confidence": "HIGH",
+            "instrument": "GC",
+            "side": "LONG",
+            "realized_pnl_proxy": -1000.0,
+            "evidence_basis": [
+                "INV-001 classified this record as CONTRACT_MULTIPLIER_OR_SCALE_MISMATCH.",
+                "Entry-fill persistence accepted foreign-domain price evidence.",
+            ],
+            "supporting_ids": {"source_trade_id": "anomaly", "entry_exec_id": "exec_1"},
+            "supporting_artifact_paths": ["outputs/track_b_execution_core/strategy_performance/canonical_trade_records.jsonl"],
+        },
+    ]
+
+    analysis, population, validation = build_research_evidence_explorer(
+        rows,
+        crr_validation=_crr_validation(),
+        crr_path=tmp_path / "crr.jsonl",
+        crr_validation_path=tmp_path / "validation.json",
+        eligibility_records=eligibility,
+        eligibility_summary={"schema_version": "research_eligibility_summary_v1"},
+        eligibility_records_path=tmp_path / "eligibility.jsonl",
+        eligibility_summary_path=tmp_path / "eligibility_summary.json",
+        generated_at=NOW,
+    )
+
+    assert population["active_population_view"] == "SOURCE_INTEGRITY_QUALIFIED"
+    assert population["included_count"] == 1
+    assert population["excluded_count"] == 1
+    assert population["exclusions"][0]["reason"] == "excluded_confirmed_source_integrity_anomaly"
+    assert analysis["population_views"]["FULL_HISTORICAL"]["included_count"] == 2
+    assert analysis["population_views"]["SOURCE_INTEGRITY_QUALIFIED"]["included_count"] == 1
+    assert analysis["source_confirmed_anomalies"][0]["research_record_id"] == anomaly_id
+    assert validation["status"] == "VALID_WITH_WARNINGS"
+
+
+def test_inv_001_preserves_eligibility_excluded_anomaly_evidence(tmp_path: Path) -> None:
+    rows = [_crr_row(f"trade_{index}", pnl=float(index - 30)) for index in range(40)]
+    anomaly = {
+        "research_record_id": "excluded_anomaly",
+        "source_trade_id": "trade_anomaly",
+        "classification": "EXCLUDED_CONFIRMED_SOURCE_INTEGRITY_ANOMALY",
+        "confidence": "HIGH",
+        "instrument": "NQ",
+        "side": "LONG",
+        "realized_pnl_proxy": -500000.0,
+        "evidence_basis": [
+            "INV-001 classified this record as DUPLICATE_OR_REUSED_EXECUTION_EVIDENCE.",
+            "Entry-fill persistence allowed the same broker exec ID to attach to multiple lifecycle/source trade IDs.",
+        ],
+        "supporting_ids": {"source_trade_id": "trade_anomaly", "entry_exec_id": "exec_dup"},
+        "supporting_artifact_paths": ["outputs/track_b_execution_core/research_analytics/investigations/INV-001/anomaly_root_cause.json"],
+    }
+    analysis, _, _ = build_research_evidence_explorer(
+        rows,
+        crr_validation=_crr_validation(),
+        crr_path=tmp_path / "crr.jsonl",
+        crr_validation_path=tmp_path / "validation.json",
+        eligibility_records=[anomaly],
+        eligibility_summary={"schema_version": "research_eligibility_summary_v1"},
+        generated_at=NOW,
+    )
+
+    records = build_investigation_records(
+        analysis,
+        generated_at=NOW,
+        crr_path=tmp_path / "crr.jsonl",
+        crr_validation_path=tmp_path / "validation.json",
+        explorer_path=tmp_path / "explorer.json",
+    )
+
+    audit = records["INV-001"]["extreme_trade_forensic_audit"]
+    trace_records = audit["anomaly_source_trace"]["records"]
+    assert audit["eligibility_excluded_source_confirmed_anomaly_count"] == 1
+    assert trace_records[-1]["research_record_id"] == "excluded_anomaly"
+    assert trace_records[-1]["classification"] == "DUPLICATE_OR_REUSED_EXECUTION_EVIDENCE"
+    assert trace_records[-1]["selection_status"] == "EXCLUDED_FROM_SOURCE_INTEGRITY_QUALIFIED_POPULATION"
+
+
+def test_investigation_index_exposes_population_and_review_counts() -> None:
+    index = build_investigation_index(
+        {
+            "INV-001": {
+                "investigation_id": "INV-001",
+                "title": "Extreme Loss Concentration",
+                "question": "Question?",
+                "conclusion_status": "PARTIALLY_SUPPORTED",
+                "confidence": "PARTIAL",
+                "active_population_view": "SOURCE_INTEGRITY_QUALIFIED",
+                "source_confirmed_anomalies": [{"research_record_id": "a"}],
+                "review_required_count": 2,
+                "deterministic_fingerprint": "fp",
+            }
+        },
+        generated_at=NOW,
+        output_dir=Path("outputs"),
+    )
+    html = render_investigation_index_html(index)
+
+    assert index["investigations"][0]["active_population_view"] == "SOURCE_INTEGRITY_QUALIFIED"
+    assert index["investigations"][0]["source_confirmed_anomaly_count"] == 1
+    assert "Source-Confirmed Anomalies" in html
+    assert "SOURCE_INTEGRITY_QUALIFIED" in html
 
 
 def test_guardrails_and_no_prohibited_imports_or_actions() -> None:

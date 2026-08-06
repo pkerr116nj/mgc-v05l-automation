@@ -10,6 +10,12 @@ Has performance changed materially across the platform's development history?
 
 `PARTIALLY_SUPPORTED` with `PARTIAL` confidence.
 
+Active population view: `SOURCE_INTEGRITY_QUALIFIED`.
+
+Source-confirmed anomalies surfaced for comparison: `5`.
+
+Review-required records: `0`.
+
 These findings are descriptive, non-causal, and carry no production authority.
 
 ## Generated Evidence

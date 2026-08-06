@@ -10,6 +10,12 @@ What explains the unusually large bottom-decile losses?
 
 `PARTIALLY_SUPPORTED` with `PARTIAL` confidence.
 
+Active population view: `SOURCE_INTEGRITY_QUALIFIED`.
+
+Source-confirmed anomalies surfaced for comparison: `5`.
+
+Review-required records: `0`.
+
 These findings are descriptive, non-causal, and carry no production authority.
 
 ## Generated Evidence
@@ -40,9 +46,9 @@ These findings are descriptive, non-causal, and carry no production authority.
 
 ## Findings
 
-- Aggregate negative results are materially affected by extreme losses: bottom 1% total P&L proxy -3212581.96, bottom 5% total P&L proxy -3692935.06.
-- No source-confirmed development, operational, or data-quality exclusions were sufficient to remove the aggregate negative result.
-- Extreme-loss forensic audit found 2 source-backed price-scale anomalies, 3 duplicate/reused execution-evidence anomalies, and 15 unresolved records among the worst 20; no records were removed from the population.
+- Aggregate negative results are materially affected by extreme losses: bottom 1% total P&L proxy -248946.48, bottom 5% total P&L proxy -685277.32.
+- Supported exclusions materially change the aggregate result.
+- Extreme-loss forensic audit found 0 source-backed price-scale anomalies, 0 duplicate/reused execution-evidence anomalies, and 20 unresolved records among the worst 20; no records were removed from the population.
 
 ## Limitations
 
