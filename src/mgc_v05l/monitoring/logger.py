@@ -137,6 +137,12 @@ class StructuredLogger:
     def write_filled_bridge_result_state(self, payload: dict[str, Any]) -> Path:
         return self._write_json("filled_bridge_result_latest.json", payload)
 
+    def log_filled_bridge_result_quarantine(self, payload: dict[str, Any]) -> Path:
+        return self._append_jsonl("filled_bridge_result_quarantine.jsonl", payload)
+
+    def write_filled_bridge_result_quarantine_state(self, payload: dict[str, Any]) -> Path:
+        return self._write_json("filled_bridge_result_quarantine_latest.json", payload)
+
     def write_operator_status(self, payload: dict[str, Any]) -> Path:
         path = self._artifact_dir / "operator_status.json"
         write_bounded_snapshot_json(

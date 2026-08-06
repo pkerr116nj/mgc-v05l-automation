@@ -8,7 +8,7 @@ from dataclasses import replace
 from datetime import datetime, time, timezone
 from decimal import Decimal
 from pathlib import Path
-from typing import Callable, Optional
+from typing import Any, Callable, Mapping, Optional, Sequence
 
 from ..config_models import ExecutionTimeframeRole, StrategySettings
 from ..domain.enums import (
@@ -110,6 +110,214 @@ def _parse_fill_timestamp(value: object) -> datetime | None:
     if parsed.tzinfo is None or parsed.utcoffset() is None:
         return parsed.replace(tzinfo=timezone.utc)
     return parsed
+
+
+def validate_filled_bridge_source_integrity(
+    payload: Mapping[str, object],
+    *,
+    existing_rows: Sequence[Mapping[str, object]] = (),
+) -> dict[str, object]:
+    """Validate source identity before durable filled-bridge persistence."""
+    reasons: list[str] = []
+    symbol = _normalized_text(payload.get("symbol") or payload.get("instrument"))
+    instrument = _normalized_text(payload.get("instrument") or payload.get("symbol"))
+    local_symbol = _normalized_text(payload.get("local_symbol"))
+    con_id = _normalized_text(payload.get("con_id"))
+    lifecycle_id = _normalized_text(payload.get("lifecycle_id"))
+    source_trade_id = _normalized_text(payload.get("source_trade_id") or payload.get("order_intent_id"))
+    fill_role = _fill_role(payload)
+    fill_price = _parse_optional_decimal(payload.get("fill_price"))
+    contract = dict(payload.get("contract") or {}) if isinstance(payload.get("contract"), Mapping) else {}
+
+    required = {
+        "instrument": instrument,
+        "symbol": symbol,
+        "local_symbol": local_symbol,
+        "con_id": con_id,
+        "lifecycle_id": lifecycle_id,
+        "source_trade_id": source_trade_id,
+        "fill_role": fill_role,
+        "fill_price": _normalized_text(payload.get("fill_price")),
+        "fill_timestamp": _normalized_text(payload.get("fill_timestamp")),
+    }
+    missing_required = sorted(key for key, value in required.items() if value == "")
+    reasons.extend(f"missing_required_identity:{key}" for key in missing_required)
+
+    contract_symbol_values = {
+        _normalized_text(contract.get(key))
+        for key in ("symbol", "broker_symbol", "internal_symbol", "trading_class")
+        if _normalized_text(contract.get(key))
+    }
+    if symbol and contract_symbol_values and symbol not in contract_symbol_values:
+        reasons.append("contract_symbol_mismatch")
+    contract_local_symbol = _normalized_text(contract.get("local_symbol") or contract.get("localSymbol"))
+    if local_symbol and contract_local_symbol and local_symbol != contract_local_symbol:
+        reasons.append("contract_local_symbol_mismatch")
+    contract_con_id = _normalized_text(contract.get("con_id") or contract.get("conId") or contract.get("qualified_contract_identifier"))
+    if con_id and contract_con_id and con_id != contract_con_id:
+        reasons.append("contract_con_id_mismatch")
+
+    if fill_price is None or fill_price <= 0:
+        reasons.append("invalid_fill_price")
+    references = _source_backed_price_references(payload)
+    discontinuities = []
+    if fill_price is not None and fill_price > 0:
+        for ref in references:
+            ref_price = _parse_optional_decimal(ref.get("price"))
+            if ref_price is None or ref_price <= 0:
+                continue
+            ratio = max(abs(fill_price), abs(ref_price)) / min(abs(fill_price), abs(ref_price))
+            if ratio >= Decimal("3"):
+                discontinuities.append(
+                    {
+                        "fill_price": str(fill_price),
+                        "reference_price": str(ref_price),
+                        "reference_source": ref.get("source"),
+                        "price_scale_ratio": str(ratio),
+                    }
+                )
+    if discontinuities:
+        reasons.append("foreign_domain_price_discontinuity")
+
+    exec_conflicts = _exec_id_conflicts(payload, existing_rows=existing_rows)
+    if exec_conflicts:
+        reasons.append("exec_id_reused_across_unrelated_position_cycles")
+
+    classification = "SOURCE_INTEGRITY_VALID" if not reasons else "SOURCE_INTEGRITY_QUARANTINE_REQUIRED"
+    return {
+        "schema_version": "filled_bridge_source_integrity_validation_v1",
+        "classification": classification,
+        "valid_for_filled_bridge_persistence": not reasons,
+        "quarantine_required": bool(reasons),
+        "reasons": reasons,
+        "identity": {
+            "instrument": instrument,
+            "symbol": symbol,
+            "local_symbol": local_symbol,
+            "con_id": con_id,
+            "source_trade_id": source_trade_id,
+            "lifecycle_id": lifecycle_id,
+            "fill_role": fill_role,
+            "exec_id": _normalized_text(payload.get("exec_id")),
+            "order_id": _normalized_text(payload.get("broker_order_id")),
+            "perm_id": _normalized_text(payload.get("perm_id")),
+        },
+        "price_reference_count": len(references),
+        "price_discontinuities": discontinuities,
+        "exec_id_conflicts": exec_conflicts,
+        "guardrails": {
+            "diagnostic_only": True,
+            "production_recommendation": False,
+            "trading_gate": False,
+        },
+    }
+
+
+def _normalized_text(value: object) -> str:
+    return str(value or "").strip().upper()
+
+
+def _parse_optional_decimal(value: object) -> Decimal | None:
+    if value in (None, ""):
+        return None
+    try:
+        return Decimal(str(value))
+    except Exception:
+        return None
+
+
+def _fill_role(payload: Mapping[str, object]) -> str:
+    intent_type = _normalized_text(payload.get("intent_type"))
+    if intent_type in {"BUY_TO_OPEN", "SELL_TO_OPEN"}:
+        return "OPENING_FILL"
+    if intent_type in {"BUY_TO_CLOSE", "SELL_TO_CLOSE"}:
+        return "CLOSING_FILL"
+    return intent_type or "UNKNOWN_FILL_ROLE"
+
+
+def _source_backed_price_references(payload: Mapping[str, object]) -> list[dict[str, object]]:
+    references: list[dict[str, object]] = []
+    for key in ("limit_price", "submitted_limit_price", "intended_limit_price", "planned_fill_price"):
+        if payload.get(key) not in (None, ""):
+            references.append({"source": key, "price": payload.get(key)})
+    for container_key in ("entry_execution_pricing", "bridge_order_metadata", "latest_order_status"):
+        container = payload.get(container_key)
+        if not isinstance(container, Mapping):
+            continue
+        for key in ("limit_price", "submitted_limit_price", "intended_limit_price", "price", "avg_fill_price", "last_fill_price"):
+            if container.get(key) not in (None, ""):
+                references.append({"source": f"{container_key}.{key}", "price": container.get(key)})
+    return references
+
+
+def _exec_id_conflicts(
+    payload: Mapping[str, object],
+    *,
+    existing_rows: Sequence[Mapping[str, object]],
+) -> list[dict[str, object]]:
+    exec_id = _normalized_text(payload.get("exec_id"))
+    if not exec_id:
+        return []
+    conflicts = []
+    for row in existing_rows:
+        if _normalized_text(row.get("exec_id")) != exec_id:
+            continue
+        if _same_explicit_fill_cycle(payload, row):
+            continue
+        conflicts.append(
+            {
+                "existing_lifecycle_id": row.get("lifecycle_id"),
+                "existing_source_trade_id": row.get("source_trade_id") or row.get("order_intent_id"),
+                "existing_instrument": row.get("instrument") or row.get("symbol"),
+                "existing_local_symbol": row.get("local_symbol"),
+                "existing_con_id": row.get("con_id"),
+                "existing_order_id": row.get("broker_order_id"),
+                "existing_perm_id": row.get("perm_id"),
+            }
+        )
+    return conflicts
+
+
+def _same_explicit_fill_cycle(left: Mapping[str, object], right: Mapping[str, object]) -> bool:
+    same_contract = (
+        _normalized_text(left.get("instrument") or left.get("symbol")) == _normalized_text(right.get("instrument") or right.get("symbol"))
+        and _normalized_text(left.get("local_symbol")) == _normalized_text(right.get("local_symbol"))
+        and _normalized_text(left.get("con_id")) == _normalized_text(right.get("con_id"))
+    )
+    same_cycle = (
+        _normalized_text(left.get("lifecycle_id")) == _normalized_text(right.get("lifecycle_id"))
+        or _normalized_text(left.get("source_trade_id") or left.get("order_intent_id"))
+        == _normalized_text(right.get("source_trade_id") or right.get("order_intent_id"))
+    )
+    same_order = bool(_normalized_text(left.get("broker_order_id")) and _normalized_text(left.get("broker_order_id")) == _normalized_text(right.get("broker_order_id"))) or bool(
+        _normalized_text(left.get("perm_id")) and _normalized_text(left.get("perm_id")) == _normalized_text(right.get("perm_id"))
+    )
+    explicit_partial = any(
+        bool(item)
+        for item in (
+            left.get("partial_fill_sequence"),
+            left.get("partial_fill_group_id"),
+            right.get("partial_fill_sequence"),
+            right.get("partial_fill_group_id"),
+        )
+    )
+    return same_contract and same_cycle and same_order and _fill_role(left) == _fill_role(right) and explicit_partial
+
+
+def _read_existing_filled_bridge_rows(path: Path) -> list[dict[str, object]]:
+    if not path.exists():
+        return []
+    rows: list[dict[str, object]] = []
+    for line in path.read_text(encoding="utf-8").splitlines():
+        if not line.strip():
+            continue
+        try:
+            parsed = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(parsed, dict):
+            rows.append(parsed)
+    return rows
 
 
 def _blocked_intent_classification(reason: str, submit_attempt: dict[str, object]) -> str:
@@ -2468,49 +2676,7 @@ class StrategyEngine:
             if manifest_path_hint
             else DEFAULT_TRACK_B_POSITION_MANAGEMENT_MANIFEST_ROOT
         )
-        manifest_update = update_manifest_from_filled_bridge_result(
-            filled_bridge_result={
-                "order_intent_id": pending.intent.order_intent_id,
-                "lifecycle_id": submit_attempt.get("lifecycle_id") or f"bridge_fill_{pending.intent.order_intent_id}",
-                "strategy_id": self._runtime_identity.get("standalone_strategy_id") or self._runtime_identity.get("strategy_id"),
-                "lane_id": self._runtime_identity.get("lane_id"),
-                "instrument": self._runtime_identity.get("instrument") or pending.intent.symbol,
-                "symbol": pending.intent.symbol,
-                "action": _intent_side(pending.intent),
-                "quantity": pending.intent.quantity,
-                "broker_order_id": pending.broker_order_id,
-                "account_id": status_payload.get("account_id") or submit_attempt.get("account_id"),
-                "perm_id": status_payload.get("perm_id") or submit_attempt.get("perm_id"),
-                "client_id": status_payload.get("client_id") or submit_attempt.get("client_id"),
-                "exec_id": status_payload.get("execution_id") or submit_attempt.get("execution_id"),
-                "local_symbol": status_payload.get("local_symbol") or submit_attempt.get("local_symbol"),
-                "con_id": status_payload.get("con_id") or submit_attempt.get("con_id"),
-                "contract_key": submit_attempt.get("contract_key"),
-                "contract_month": submit_attempt.get("contract_month") or submit_attempt.get("bridge_contract_month"),
-                "expiry": submit_attempt.get("expiry"),
-                "contract": status_payload.get("contract") or dict(submit_attempt.get("bridge_order_metadata") or {}).get("contract"),
-                "broker_effect_classification": submit_attempt.get("broker_effect_classification"),
-                "broker_effect_observation_id": submit_attempt.get("broker_effect_observation_id"),
-                "fill_price": str(fill_event.fill_price) if fill_event is not None and fill_event.fill_price is not None else status_payload.get("fill_price") or submit_attempt.get("fill_price"),
-                "fill_timestamp": fill_event.fill_timestamp.isoformat() if fill_event is not None else status_payload.get("fill_timestamp") or submit_attempt.get("fill_timestamp"),
-                "managed_exit_policy_id": self._runtime_identity.get("managed_exit_policy_id"),
-                "position_management_manifest_path": submit_attempt.get("position_management_manifest_path"),
-            },
-            output_root=manifest_output_root,
-        )
-        manifest = manifest_update.manifest if manifest_update is not None else {}
-        metadata = resolve_management_metadata(
-            source={
-                "order_intent_id": pending.intent.order_intent_id,
-                "lane_id": self._runtime_identity.get("lane_id"),
-                "strategy_id": self._runtime_identity.get("standalone_strategy_id") or self._runtime_identity.get("strategy_id"),
-                "managed_exit_policy_id": self._runtime_identity.get("managed_exit_policy_id"),
-                "position_management_manifest_path": str(manifest_update.manifest_path)
-                if manifest_update is not None
-                else None,
-            }
-        )
-        payload: dict[str, object] = {
+        source_payload: dict[str, object] = {
             "schema_version": "strategy_managed_filled_bridge_result_v1",
             "artifact_type": "filled_bridge_result",
             "classification": classification,
@@ -2524,6 +2690,7 @@ class StrategyEngine:
             "action": _intent_side(pending.intent),
             "quantity": pending.intent.quantity,
             "order_intent_id": pending.intent.order_intent_id,
+            "source_trade_id": f"trade_{pending.intent.order_intent_id.replace('|', '_').replace(':', '_')}",
             "lifecycle_id": submit_attempt.get("lifecycle_id") or f"bridge_fill_{pending.intent.order_intent_id}",
             "intent_type": pending.intent.intent_type.value,
             "decision_bar_timestamp": pending.intent.created_at.isoformat(),
@@ -2542,17 +2709,27 @@ class StrategyEngine:
             "broker_effect_classification": submit_attempt.get("broker_effect_classification"),
             "broker_effect_observation_id": submit_attempt.get("broker_effect_observation_id"),
             "broker_effect_observed_after_rejection": submit_attempt.get("submit_failure_broker_effect"),
-            "fill_price": str(fill_event.fill_price) if fill_event is not None and fill_event.fill_price is not None else status_payload.get("fill_price") or submit_attempt.get("fill_price"),
-            "fill_timestamp": fill_event.fill_timestamp.isoformat() if fill_event is not None else status_payload.get("fill_timestamp") or submit_attempt.get("fill_timestamp"),
+            "fill_price": str(fill_event.fill_price)
+            if fill_event is not None and fill_event.fill_price is not None
+            else status_payload.get("fill_price") or submit_attempt.get("fill_price"),
+            "fill_timestamp": fill_event.fill_timestamp.isoformat()
+            if fill_event is not None
+            else status_payload.get("fill_timestamp") or submit_attempt.get("fill_timestamp"),
+            "limit_price": submit_attempt.get("limit_price"),
+            "entry_execution_pricing": submit_attempt.get("entry_execution_pricing"),
+            "bridge_order_metadata": submit_attempt.get("bridge_order_metadata"),
+            "latest_order_status": status_payload,
+            "source_provenance": {
+                "producer_module": "mgc_v05l.strategy.strategy_engine",
+                "persistence_function": "_persist_filled_bridge_result",
+                "status_payload_fields": sorted(str(key) for key in status_payload.keys()),
+                "submit_attempt_fields": sorted(str(key) for key in submit_attempt.keys()),
+            },
             "bridge_classification": submit_attempt.get("bridge_classification"),
             "bridge_order_status": submit_attempt.get("bridge_order_status"),
             "route_destination": submit_attempt.get("route_destination"),
-            "managed_exit_policy_id": metadata.managed_exit_policy_id,
-            "position_management_manifest_path": str(manifest_update.manifest_path)
-            if manifest_update is not None
-            else None,
-            "position_management_manifest_status": manifest.get("lifecycle_status"),
-            "position_management_metadata_source": metadata.source,
+            "managed_exit_policy_id": self._runtime_identity.get("managed_exit_policy_id"),
+            "position_management_manifest_path": submit_attempt.get("position_management_manifest_path"),
             "intended_lifecycle_mode": "STRATEGY_MANAGED",
             "lifecycle_state": self._state.strategy_status.value,
             "position_side": self._state.position_side.value,
@@ -2563,7 +2740,61 @@ class StrategyEngine:
             "created_at": datetime.now(timezone.utc).isoformat(),
         }
         if error:
-            payload["error"] = error
+            source_payload["error"] = error
+
+        existing_rows = []
+        if self._structured_logger is not None:
+            existing_rows = _read_existing_filled_bridge_rows(self._structured_logger.artifact_dir / "filled_bridge_results.jsonl")
+        source_integrity = validate_filled_bridge_source_integrity(source_payload, existing_rows=existing_rows)
+        if source_integrity.get("quarantine_required") is True:
+            quarantine_payload = {
+                **source_payload,
+                "classification": "FILLED_BRIDGE_RESULT_QUARANTINED_SOURCE_INTEGRITY",
+                "original_classification": classification,
+                "review_required": True,
+                "persistence_quarantined": True,
+                "source_integrity": source_integrity,
+                "raw_record": dict(source_payload),
+            }
+            if self._structured_logger is not None:
+                if hasattr(self._structured_logger, "log_filled_bridge_result_quarantine"):
+                    self._structured_logger.log_filled_bridge_result_quarantine(quarantine_payload)
+                if hasattr(self._structured_logger, "write_filled_bridge_result_quarantine_state"):
+                    self._structured_logger.write_filled_bridge_result_quarantine_state(quarantine_payload)
+            self._latest_live_intent_summary = {
+                **self._latest_live_intent_summary,
+                "filled_bridge_result": quarantine_payload,
+                "review_required": True,
+                "filled_bridge_result_quarantined": True,
+            }
+            return quarantine_payload
+
+        manifest_update = update_manifest_from_filled_bridge_result(
+            filled_bridge_result=source_payload,
+            output_root=manifest_output_root,
+        )
+        manifest = manifest_update.manifest if manifest_update is not None else {}
+        metadata = resolve_management_metadata(
+            source={
+                "order_intent_id": pending.intent.order_intent_id,
+                "lane_id": self._runtime_identity.get("lane_id"),
+                "strategy_id": self._runtime_identity.get("standalone_strategy_id") or self._runtime_identity.get("strategy_id"),
+                "managed_exit_policy_id": self._runtime_identity.get("managed_exit_policy_id"),
+                "position_management_manifest_path": str(manifest_update.manifest_path)
+                if manifest_update is not None
+                else None,
+            }
+        )
+        payload: dict[str, object] = {
+            **source_payload,
+            "source_integrity": source_integrity,
+            "managed_exit_policy_id": metadata.managed_exit_policy_id,
+            "position_management_manifest_path": str(manifest_update.manifest_path)
+            if manifest_update is not None
+            else None,
+            "position_management_manifest_status": manifest.get("lifecycle_status"),
+            "position_management_metadata_source": metadata.source,
+        }
         try:
             ledger_output_root = (
                 manifest_update.manifest_path.parent.parent / "paper_trade_ledger"
