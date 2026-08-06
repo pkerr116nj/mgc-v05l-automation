@@ -9,6 +9,7 @@ from mgc_v05l.execution_core.track_b_research_evidence_explorer import (
     build_cohorts,
     build_research_evidence_explorer,
     build_within_instrument_comparison,
+    render_presentation_html,
     run_research_evidence_explorer,
 )
 
@@ -130,6 +131,57 @@ def test_run_writes_parseable_artifacts_and_static_presentation(tmp_path: Path) 
     assert "prepared-artifact" in html
     assert "fetch(" not in html
     assert "XMLHttpRequest" not in html
+
+
+def test_presentation_renders_controlled_table_without_visible_raw_json() -> None:
+    rows = [
+        *[_crr_row(f"es_{index}", pnl=float(index), instrument="ES") for index in range(35)],
+        *[_crr_row(f"nq_{index}", pnl=float(index * 10), instrument="NQ", side="SHORT") for index in range(35)],
+    ]
+    analysis, _, _ = build_research_evidence_explorer(
+        rows,
+        crr_validation=_crr_validation(),
+        crr_path=Path("crr.jsonl"),
+        crr_validation_path=Path("validation.json"),
+        generated_at=NOW,
+    )
+
+    rendered = render_presentation_html(analysis)
+    controlled_section = rendered.split('<section id="controlled">', 1)[1].split('<section id="distributions">', 1)[0]
+
+    assert "Within-Instrument Controlled View" in controlled_section
+    assert ">ES<" in controlled_section
+    assert ">NQ<" in controlled_section
+    assert "standardized_within_instrument_realized_pnl_percentile" not in controlled_section
+    assert "{" not in controlled_section
+    assert "$" in controlled_section
+    assert "%" in rendered
+
+
+def test_presentation_renders_distribution_empty_states_and_drilldown_fields() -> None:
+    rows = [
+        _crr_row("trade_1", pnl=-10.0, mfe=None, mae=None, layers=("ctol", "ctoe", "ra7", "ra3")),
+        _crr_row("trade_2", pnl=25.0, side="SHORT", mfe=None, mae=None),
+    ]
+    analysis, _, _ = build_research_evidence_explorer(
+        rows,
+        crr_validation=_crr_validation(status="VALID_WITH_WARNINGS", ra8_ready="SOURCE_COVERAGE_LIMIT"),
+        crr_path=Path("crr.jsonl"),
+        crr_validation_path=Path("validation.json"),
+        generated_at=NOW,
+    )
+
+    rendered = render_presentation_html(analysis)
+
+    assert "Sparse data" in rendered
+    assert "No chartable values are available for this metric." in rendered
+    assert "Research Record ID" in rendered
+    assert "Strategy" in rendered
+    assert "Lane" in rendered
+    assert "Exit Policy / Reason" in rendered
+    assert "RA8 path available" in rendered
+    assert "Detailed RA8 path unavailable" in rendered
+    assert "Missing Fields" in rendered
 
 
 def test_guardrails_and_no_prohibited_imports_or_actions() -> None:

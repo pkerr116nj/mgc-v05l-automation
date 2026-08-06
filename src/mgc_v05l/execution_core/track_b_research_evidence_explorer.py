@@ -136,7 +136,9 @@ def build_research_evidence_explorer(
     )
     source_validation_status = str(crr_validation.get("status") or "UNKNOWN")
     population_rows, exclusions = build_explorer_population(crr_rows, required_sources_ready=required_ready)
+    attach_within_instrument_percentiles(population_rows)
     cohorts = build_cohorts(population_rows)
+    attach_cohort_memberships(population_rows, cohorts)
     cohort_metrics = {name: cohort_metrics_for(rows, full_population_count=len(population_rows)) for name, rows in cohorts.items()}
     deltas = numeric_metric_deltas(cohort_metrics.get("top_decile", {}), cohort_metrics.get("bottom_decile", {}))
     controlled_comparison = build_within_instrument_comparison(population_rows)
@@ -331,6 +333,27 @@ def build_cohorts(rows: Sequence[Mapping[str, Any]]) -> dict[str, list[Mapping[s
     }
 
 
+def attach_within_instrument_percentiles(rows: list[dict[str, Any]]) -> None:
+    by_instrument: dict[str, list[dict[str, Any]]] = {}
+    for row in rows:
+        by_instrument.setdefault(str(row.get("instrument") or "UNKNOWN"), []).append(row)
+    for instrument_rows in by_instrument.values():
+        for ranked in add_within_instrument_percentiles(instrument_rows):
+            for row in instrument_rows:
+                if row.get("research_record_id") == ranked.get("research_record_id"):
+                    row["within_instrument_pnl_percentile"] = ranked["within_instrument_pnl_percentile"]
+                    break
+
+
+def attach_cohort_memberships(rows: list[dict[str, Any]], cohorts: Mapping[str, Sequence[Mapping[str, Any]]]) -> None:
+    memberships: dict[str, list[str]] = {str(row.get("research_record_id")): [] for row in rows}
+    for name, cohort_rows in cohorts.items():
+        for row in cohort_rows:
+            memberships.setdefault(str(row.get("research_record_id")), []).append(name)
+    for row in rows:
+        row["cohort_memberships"] = sorted(memberships.get(str(row.get("research_record_id")), []))
+
+
 def cohort_metrics_for(rows: Sequence[Mapping[str, Any]], *, full_population_count: int) -> dict[str, Any]:
     pnl = _values(rows, "realized_pnl_proxy")
     hold = _values(rows, "hold_seconds")
@@ -388,11 +411,27 @@ def numeric_metric_deltas(top: Mapping[str, Any], bottom: Mapping[str, Any]) -> 
 
 def build_distributions(rows: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
     return {
-        "realized_pnl_proxy": _histogram(_values(rows, "realized_pnl_proxy")),
-        "mfe_points": _histogram(_values(rows, "mfe_points")),
-        "mae_points": _histogram(_values(rows, "mae_points")),
-        "duration_seconds": _histogram(_values(rows, "hold_seconds")),
-        "giveback_points": _histogram(_values(rows, "giveback_points")),
+        "realized_pnl_proxy": metric_distribution(rows, "realized_pnl_proxy", label="Realized P&L proxy", units="currency_proxy"),
+        "duration_seconds": metric_distribution(rows, "hold_seconds", label="Duration", units="seconds"),
+        "mfe_points": metric_distribution(rows, "mfe_points", label="MFE", units="points"),
+        "mae_points": metric_distribution(rows, "mae_points", label="MAE", units="points"),
+        "giveback_points": metric_distribution(rows, "giveback_points", label="Giveback", units="points"),
+    }
+
+
+def metric_distribution(rows: Sequence[Mapping[str, Any]], key: str, *, label: str, units: str) -> dict[str, Any]:
+    values = _values(rows, key)
+    missing = len(rows) - len(values)
+    return {
+        "label": label,
+        "field": key,
+        "units": units,
+        "context": "full_population",
+        "included_sample_count": len(values),
+        "missing_count": missing,
+        "missing_rate": _rate(missing, len(rows)),
+        "histogram": _histogram(values),
+        "sparse_data_warning": len(values) < 30 or _rate(missing, len(rows)) > 0.25,
     }
 
 
@@ -521,6 +560,14 @@ def trade_drill_down_rows(rows: Sequence[Mapping[str, Any]], *, limit: int = 200
             "exit_time": row.get("exit_time"),
             "entry_price": row.get("entry_price"),
             "exit_price": row.get("exit_price"),
+            "quantity": row.get("quantity"),
+            "strategy_id": row.get("strategy_id"),
+            "lane_id": row.get("lane_id"),
+            "session": row.get("session"),
+            "regime": row.get("regime"),
+            "exit_policy": row.get("exit_policy"),
+            "exit_reason": row.get("exit_reason"),
+            "cohort_memberships": row.get("cohort_memberships", []),
             "realized_pnl_proxy": row.get("realized_pnl_proxy"),
             "within_instrument_pnl_percentile": row.get("within_instrument_pnl_percentile"),
             "hold_seconds": row.get("hold_seconds"),
@@ -700,27 +747,55 @@ def render_validation_markdown(validation: Mapping[str, Any]) -> str:
 def render_presentation_html(analysis: Mapping[str, Any]) -> str:
     payload = json.dumps(analysis, sort_keys=True)
     cohorts = analysis.get("cohorts", {})
-    rows = []
+    population = analysis.get("population", {})
+    coverage = population.get("coverage", {})
+    date_info = population.get("date_coverage", {})
+    cohort_rows = []
     for name in ("top_decile", "bottom_decile", "winners", "losers", "long", "short"):
         item = cohorts.get(name, {})
-        rows.append(
+        cohort_rows.append(
             "<tr>"
-            f"<td>{html.escape(name)}</td>"
+            f"<td>{html.escape(_display_label(name))}</td>"
             f"<td>{item.get('trade_count')}</td>"
-            f"<td>{item.get('average_realized_pnl_proxy')}</td>"
-            f"<td>{item.get('median_realized_pnl_proxy')}</td>"
-            f"<td>{item.get('win_rate')}</td>"
-            f"<td>{item.get('ra8_coverage_percentage')}</td>"
+            f"<td>{_format_money(item.get('average_realized_pnl_proxy'))}</td>"
+            f"<td>{_format_money(item.get('median_realized_pnl_proxy'))}</td>"
+            f"<td>{_format_percent(item.get('win_rate'))}</td>"
+            f"<td>{item.get('ra8_coverage_count')} / {item.get('trade_count')} ({_format_percent(item.get('ra8_coverage_percentage'))})</td>"
             "</tr>"
         )
-    warnings = "".join(f"<li>{html.escape(str(warning))}</li>" for warning in analysis.get("warnings", []))
-    instrument_coverage = html.escape(json.dumps(analysis.get("population", {}).get("instrument_coverage", {}), sort_keys=True))
-    controlled = html.escape(json.dumps(analysis.get("comparability_controlled", {}), sort_keys=True))
-    date_coverage = analysis.get("population", {}).get("date_coverage", {})
+    delta_rows = "".join(
+        "<tr>"
+        f"<td>{html.escape(_display_label(name))}</td>"
+        f"<td>{_format_delta(value, percent=name.endswith('rate') or name.endswith('percentage'))}</td>"
+        "</tr>"
+        for name, value in analysis.get("deltas", {}).get("top_decile_minus_bottom_decile", {}).items()
+        if value is not None
+    )
+    warnings = "".join(f"<li>{html.escape(_display_label(str(warning)))}</li>" for warning in analysis.get("warnings", []))
+    nav = "".join(
+        f'<a href="#{anchor}">{label}</a>'
+        for anchor, label in (
+            ("overview", "Overview"),
+            ("cohorts", "Cohort Comparison"),
+            ("controlled", "Within-Instrument View"),
+            ("distributions", "Distributions"),
+            ("drilldown", "Trade Drill-Down"),
+        )
+    )
+    controlled_rows = render_controlled_rows(analysis)
+    controlled_chart = render_controlled_chart(analysis)
+    distribution_sections = "".join(
+        render_distribution_chart(key, item)
+        for key, item in analysis.get("distributions", {}).items()
+    )
+    cohort_cards = render_cohort_cards(analysis)
+    cohort_bars = render_cohort_bars(analysis)
     drill = "".join(
         "<option value='{idx}'>{label}</option>".format(
             idx=index,
-            label=html.escape(f"{row.get('instrument')} {row.get('side')} {row.get('realized_pnl_proxy')} {row.get('exit_time')}"),
+            label=html.escape(
+                f"{row.get('instrument')} {row.get('side')} {_format_money(row.get('realized_pnl_proxy'))} {row.get('exit_time')}"
+            ),
         )
         for index, row in enumerate(analysis.get("trade_drill_down", [])[:200])
     )
@@ -730,67 +805,363 @@ def render_presentation_html(analysis: Mapping[str, Any]) -> str:
   <meta charset="utf-8">
   <title>Research Evidence Explorer v1</title>
   <style>
-    body {{ font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; margin: 24px; background: #f7f7f4; color: #1d2527; }}
-    main {{ max-width: 1180px; margin: 0 auto; }}
-    section {{ margin: 22px 0; padding: 18px; background: #fff; border: 1px solid #d8ddd9; border-radius: 6px; }}
+    :root {{ --ink:#1f2933; --muted:#68737d; --line:#d9e0df; --panel:#ffffff; --wash:#f6f7f4; --good:#28665a; --bad:#9a3f35; --mid:#486581; --warn:#8a5a00; }}
+    html {{ scroll-behavior: smooth; }}
+    body {{ font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; margin: 0; background: var(--wash); color: var(--ink); }}
+    main {{ max-width: 1240px; margin: 0 auto; padding: 24px; }}
+    nav {{ position: sticky; top: 0; z-index: 2; display: flex; gap: 10px; flex-wrap: wrap; padding: 10px 24px; background: rgba(246,247,244,.96); border-bottom: 1px solid var(--line); }}
+    nav a {{ color: var(--ink); text-decoration: none; padding: 7px 10px; border: 1px solid var(--line); border-radius: 5px; background: #fff; font-size: 13px; }}
+    section {{ margin: 18px 0; padding: 18px; background: var(--panel); border: 1px solid var(--line); border-radius: 6px; }}
+    h1 {{ margin: 8px 0 4px; font-size: 30px; }}
+    h2 {{ margin: 0 0 14px; font-size: 20px; }}
+    h3 {{ margin: 16px 0 8px; font-size: 15px; }}
+    p {{ line-height: 1.45; }}
     table {{ width: 100%; border-collapse: collapse; font-size: 14px; }}
-    th, td {{ border-bottom: 1px solid #e5e8e5; padding: 8px; text-align: left; }}
-    th {{ background: #eef2ef; }}
-    .warning {{ color: #7a4b00; font-weight: 600; }}
-    .bars {{ display: grid; grid-template-columns: repeat(5, 1fr); gap: 8px; align-items: end; min-height: 140px; }}
-    .bar {{ background: #587c7a; color: white; padding: 6px; min-height: 20px; display: flex; align-items: end; }}
-    pre {{ white-space: pre-wrap; background: #f1f3f2; padding: 12px; border-radius: 6px; max-height: 380px; overflow: auto; }}
+    th, td {{ border-bottom: 1px solid #e7ecea; padding: 8px; text-align: left; vertical-align: top; }}
+    th {{ background: #eef2ef; cursor: default; }}
+    th.sortable {{ cursor: pointer; }}
+    .muted {{ color: var(--muted); }}
+    .warning {{ color: var(--warn); font-weight: 700; }}
+    .notice {{ border-left: 4px solid var(--warn); padding: 10px 12px; background: #fff8e8; }}
+    .grid {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 12px; }}
+    .card {{ border: 1px solid var(--line); border-radius: 6px; padding: 12px; background: #fbfcfb; }}
+    .label {{ font-size: 12px; color: var(--muted); text-transform: uppercase; letter-spacing: .04em; }}
+    .value {{ font-size: 22px; font-weight: 750; margin-top: 4px; }}
+    .barrow {{ display: grid; grid-template-columns: 170px 1fr 90px; gap: 10px; align-items: center; margin: 8px 0; }}
+    .track {{ height: 16px; background: #e7ecea; border-radius: 4px; overflow: hidden; }}
+    .fill {{ height: 100%; background: var(--mid); }}
+    .fill.good {{ background: var(--good); }}
+    .fill.bad {{ background: var(--bad); }}
+    .hist {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(54px, 1fr)); gap: 6px; align-items: end; min-height: 150px; margin-top: 12px; }}
+    .histbar {{ background: var(--mid); min-height: 3px; color: white; font-size: 11px; display: flex; align-items: end; justify-content: center; padding: 3px; border-radius: 3px 3px 0 0; }}
+    .empty {{ padding: 16px; border: 1px dashed var(--line); color: var(--muted); background: #fafafa; }}
+    .pill {{ display: inline-block; padding: 3px 7px; border-radius: 999px; background: #edf2f2; margin: 2px; font-size: 12px; }}
+    .details {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 10px; }}
+    .detail {{ border-bottom: 1px solid #edf0ef; padding: 7px 0; }}
+    .sources {{ max-height: 120px; overflow: auto; font-size: 12px; }}
+    select {{ width: 100%; max-width: 760px; padding: 8px; }}
   </style>
 </head>
 <body>
+<nav>{nav}</nav>
 <main>
   <h1>Research Evidence Explorer v1</h1>
-  <p>{html.escape(str(analysis.get('question')))}</p>
-  <section>
+  <p class="muted">{html.escape(str(analysis.get('question')))}</p>
+  <section id="overview">
     <h2>Overview</h2>
-    <p>Population: <strong>{analysis.get('population', {}).get('included_count')}</strong> trades. CRR readiness: <strong>{html.escape(str(analysis.get('source', {}).get('crr_validation_status')))}</strong>.</p>
-    <p>Exit coverage: <strong>{html.escape(str(date_coverage.get('first_exit_time')))}</strong> to <strong>{html.escape(str(date_coverage.get('last_exit_time')))}</strong>.</p>
-    <p>Instrument coverage: <code>{instrument_coverage}</code></p>
-    <p><strong>Comparability:</strong> Global top/bottom is portfolio-outcome analysis. Raw P&L can reflect instrument, multiplier, and quantity differences.</p>
-    <p class="warning">RA8 coverage: {analysis.get('population', {}).get('coverage', {}).get('ra8_exact_count')} / {analysis.get('population', {}).get('included_count')} exact finalized captures. Missing RA8 is visible and not treated as broken.</p>
+    <div class="grid">
+      <div class="card"><div class="label">Population</div><div class="value">{population.get('included_count')}</div><div class="muted">{population.get('excluded_count')} excluded</div></div>
+      <div class="card"><div class="label">CRR Readiness</div><div class="value">{html.escape(str(analysis.get('source', {}).get('crr_validation_status')))}</div></div>
+      <div class="card"><div class="label">RA8 Coverage</div><div class="value">{coverage.get('ra8_exact_count')} / {population.get('included_count')}</div><div class="muted">{_format_percent(coverage.get('ra8_coverage_rate'))}</div></div>
+      <div class="card"><div class="label">Exit Window</div><div class="value" style="font-size:15px">{_format_timestamp(date_info.get('first_exit_time'))}</div><div class="muted">to {_format_timestamp(date_info.get('last_exit_time'))}</div></div>
+    </div>
+    <p class="notice">Findings are descriptive and non-causal. The global comparison is portfolio-outcome analysis; raw P&L can reflect instrument, multiplier, and quantity differences.</p>
+    <p class="warning">Detailed RA8 path coverage is partial. Missing RA8 is visible and is not treated as invalid CRR evidence.</p>
     <ul>{warnings}</ul>
   </section>
-  <section>
+  <section id="cohorts">
     <h2>Cohort Comparison</h2>
-    <table><thead><tr><th>Cohort</th><th>Trades</th><th>Average P&L</th><th>Median P&L</th><th>Win Rate</th><th>RA8 Coverage</th></tr></thead><tbody>{''.join(rows)}</tbody></table>
+    {cohort_cards}
+    <h3>Average P&L by Cohort</h3>
+    {cohort_bars}
+    <table><thead><tr><th>Cohort</th><th>Trades</th><th>Average P&L</th><th>Median P&L</th><th>Win Rate</th><th>RA8 Coverage</th></tr></thead><tbody>{''.join(cohort_rows)}</tbody></table>
+    <h3>Top Minus Bottom Numeric Deltas</h3>
+    <table><thead><tr><th>Metric</th><th>Delta</th></tr></thead><tbody>{delta_rows}</tbody></table>
   </section>
-  <section>
+  <section id="controlled">
     <h2>Within-Instrument Controlled View</h2>
-    <p>Standardized within-instrument realized P&L percentiles avoid inventing unavailable multiplier normalization. Sample sizes and excluded instruments are included.</p>
-    <pre>{controlled}</pre>
+    <p>Standardized within-instrument realized P&L percentiles avoid inventing unavailable multiplier normalization. Click table headers to sort.</p>
+    {controlled_chart}
+    <table id="controlledTable"><thead><tr><th class="sortable" data-type="text">Instrument</th><th class="sortable">Sample</th><th>Top Count</th><th>Bottom Count</th><th class="sortable">Top Avg P&L</th><th>Top Median P&L</th><th class="sortable">Bottom Avg P&L</th><th>Bottom Median P&L</th><th class="sortable">Avg Delta</th><th>Long/Short Mix</th><th>RA8 Coverage</th></tr></thead><tbody>{controlled_rows}</tbody></table>
+    <p class="muted">Excluded instruments below threshold: {render_excluded_instruments(analysis)}</p>
   </section>
-  <section>
+  <section id="distributions">
     <h2>Distributions</h2>
-    <p>Restrained distribution bins are precomputed in the analytics artifact.</p>
-    <pre id="distributions"></pre>
+    {distribution_sections}
   </section>
-  <section>
+  <section id="drilldown">
     <h2>Trade Drill-Down</h2>
     <select id="tradeSelect">{drill}</select>
-    <pre id="tradeDetails"></pre>
+    <div id="tradeDetails" class="card"></div>
   </section>
 </main>
 <script type="application/json" id="prepared-artifact">{html.escape(payload)}</script>
 <script>
 const data = JSON.parse(document.getElementById('prepared-artifact').textContent);
-document.getElementById('distributions').textContent = JSON.stringify(data.distributions, null, 2);
 const select = document.getElementById('tradeSelect');
 const details = document.getElementById('tradeDetails');
+const missing = '<span class="warning">MISSING</span>';
+function label(value) {{
+  return String(value || 'UNKNOWN').toLowerCase().split('_').map(x => x ? x[0].toUpperCase() + x.slice(1) : x).join(' ');
+}}
+function money(value) {{
+  if (value === null || value === undefined || value === '') return missing;
+  return new Intl.NumberFormat('en-US', {{style:'currency', currency:'USD', maximumFractionDigits: 2}}).format(Number(value));
+}}
+function pct(value) {{
+  if (value === null || value === undefined || value === '') return missing;
+  return (Number(value) * 100).toFixed(1) + '%';
+}}
+function duration(value) {{
+  if (value === null || value === undefined || value === '') return missing;
+  const seconds = Number(value);
+  if (seconds >= 86400) return (seconds / 86400).toFixed(1) + ' days';
+  if (seconds >= 3600) return (seconds / 3600).toFixed(1) + ' hrs';
+  if (seconds >= 60) return (seconds / 60).toFixed(1) + ' min';
+  return seconds.toFixed(0) + ' sec';
+}}
+function valueOrMissing(value) {{
+  if (value === null || value === undefined || value === '') return missing;
+  return String(value);
+}}
+function detail(labelText, value) {{
+  return `<div class="detail"><div class="label">${{labelText}}</div><div>${{value}}</div></div>`;
+}}
 function renderTrade() {{
   const row = data.trade_drill_down[Number(select.value || 0)] || {{}};
-  details.textContent = JSON.stringify(row, null, 2);
+  const ra8 = row.path_status?.ra8 === 'EXACT' ? 'RA8 path available' : 'Detailed RA8 path unavailable';
+  const sources = (row.source_provenance || []).map(src => `<span class="pill">${{label(src.source_name)}}: ${{valueOrMissing(src.path || src.record_fingerprint)}}</span>`).join(' ');
+  details.innerHTML = `
+    <div class="details">
+      ${{detail('Research Record ID', valueOrMissing(row.research_record_id))}}
+      ${{detail('Instrument / Contract', `${{valueOrMissing(row.instrument)}} / ${{valueOrMissing(row.contract)}}`)}}
+      ${{detail('Side / Quantity', `${{label(row.side)}} / ${{valueOrMissing(row.quantity)}}`)}}
+      ${{detail('Strategy', valueOrMissing(row.strategy_id))}}
+      ${{detail('Lane', valueOrMissing(row.lane_id))}}
+      ${{detail('Session / Regime', `${{label(row.session)}} / ${{label(row.regime)}}`)}}
+      ${{detail('Entry', `${{valueOrMissing(row.entry_time)}} at ${{valueOrMissing(row.entry_price)}}`)}}
+      ${{detail('Exit', `${{valueOrMissing(row.exit_time)}} at ${{valueOrMissing(row.exit_price)}}`)}}
+      ${{detail('Realized P&L Proxy', money(row.realized_pnl_proxy))}}
+      ${{detail('Duration', duration(row.hold_seconds))}}
+      ${{detail('MFE / MAE / Giveback', `${{valueOrMissing(row.outcome_summary?.mfe_points)}} / ${{valueOrMissing(row.outcome_summary?.mae_points)}} / ${{valueOrMissing(row.outcome_summary?.giveback_points)}}`)}}
+      ${{detail('Exit Policy / Reason', `${{label(row.exit_policy)}} / ${{label(row.exit_reason)}}`)}}
+      ${{detail('Path Status', `RA7: ${{label(row.path_status?.ra7)}}<br>${{ra8}}`)}}
+      ${{detail('Attribution', `Entry: ${{label(row.attribution_status?.entry)}}<br>Exit: ${{label(row.attribution_status?.exit)}}`)}}
+      ${{detail('Cohorts', (row.cohort_memberships || []).map(label).join(', ') || 'None')}}
+      ${{detail('Missing Fields', (row.missing_fields || []).map(label).join(', ') || 'None')}}
+    </div>
+    <h3>Source Provenance</h3>
+    <div class="sources">${{sources || 'No provenance references supplied.'}}</div>
+  `;
 }}
 select.addEventListener('change', renderTrade);
 renderTrade();
+document.querySelectorAll('#controlledTable th.sortable').forEach((th, index) => {{
+  th.addEventListener('click', () => {{
+    const body = th.closest('table').querySelector('tbody');
+    const rows = Array.from(body.querySelectorAll('tr'));
+    const numeric = th.dataset.type !== 'text';
+    rows.sort((a, b) => {{
+      const av = a.children[index].dataset.sort || a.children[index].textContent;
+      const bv = b.children[index].dataset.sort || b.children[index].textContent;
+      return numeric ? Number(bv) - Number(av) : av.localeCompare(bv);
+    }});
+    rows.forEach(row => body.appendChild(row));
+  }});
+}});
 </script>
 </body>
 </html>
 """
+
+
+def render_cohort_cards(analysis: Mapping[str, Any]) -> str:
+    cohorts = analysis.get("cohorts", {})
+    cards = []
+    for name in ("top_decile", "bottom_decile", "winners", "losers", "long", "short"):
+        item = cohorts.get(name, {})
+        cards.append(
+            '<div class="card">'
+            f'<div class="label">{html.escape(_display_label(name))}</div>'
+            f'<div class="value">{_format_money(item.get("average_realized_pnl_proxy"))}</div>'
+            f'<div class="muted">{item.get("trade_count")} trades, median {_format_money(item.get("median_realized_pnl_proxy"))}, win rate {_format_percent(item.get("win_rate"))}</div>'
+            "</div>"
+        )
+    return f'<div class="grid">{"".join(cards)}</div>'
+
+
+def render_cohort_bars(analysis: Mapping[str, Any]) -> str:
+    cohorts = analysis.get("cohorts", {})
+    values = [
+        _number(cohorts.get(name, {}).get("average_realized_pnl_proxy")) or 0.0
+        for name in ("top_decile", "bottom_decile", "winners", "losers", "long", "short")
+    ]
+    max_abs = max([abs(value) for value in values] or [1.0]) or 1.0
+    rows = []
+    for name, value in zip(("top_decile", "bottom_decile", "winners", "losers", "long", "short"), values, strict=True):
+        width = max(2.0, abs(value) / max_abs * 100.0)
+        css = "good" if value >= 0 else "bad"
+        rows.append(
+            '<div class="barrow">'
+            f'<div>{html.escape(_display_label(name))}</div>'
+            f'<div class="track"><div class="fill {css}" style="width:{width:.1f}%"></div></div>'
+            f'<div>{_format_money(value)}</div>'
+            "</div>"
+        )
+    return "".join(rows)
+
+
+def render_controlled_rows(analysis: Mapping[str, Any]) -> str:
+    rows = []
+    for instrument, item in analysis.get("comparability_controlled", {}).get("included_instruments", {}).items():
+        top = item.get("top_within_instrument", {})
+        bottom = item.get("bottom_within_instrument", {})
+        delta = _number(top.get("average_realized_pnl_proxy")) - _number(bottom.get("average_realized_pnl_proxy")) if _number(top.get("average_realized_pnl_proxy")) is not None and _number(bottom.get("average_realized_pnl_proxy")) is not None else None
+        mix = _format_mix(top.get("long_short_mix", {}), bottom.get("long_short_mix", {}))
+        ra8 = f'{top.get("ra8_coverage_count")} / {top.get("trade_count")} top; {bottom.get("ra8_coverage_count")} / {bottom.get("trade_count")} bottom'
+        rows.append(
+            "<tr>"
+            f'<td data-sort="{html.escape(str(instrument))}">{html.escape(str(instrument))}</td>'
+            f'<td data-sort="{item.get("sample_size")}">{item.get("sample_size")}</td>'
+            f'<td>{top.get("trade_count")}</td>'
+            f'<td>{bottom.get("trade_count")}</td>'
+            f'<td data-sort="{top.get("average_realized_pnl_proxy")}">{_format_money(top.get("average_realized_pnl_proxy"))}</td>'
+            f'<td>{_format_money(top.get("median_realized_pnl_proxy"))}</td>'
+            f'<td data-sort="{bottom.get("average_realized_pnl_proxy")}">{_format_money(bottom.get("average_realized_pnl_proxy"))}</td>'
+            f'<td>{_format_money(bottom.get("median_realized_pnl_proxy"))}</td>'
+            f'<td data-sort="{delta}">{_format_money(delta)}</td>'
+            f"<td>{mix}</td>"
+            f"<td>{ra8}</td>"
+            "</tr>"
+        )
+    return "".join(rows)
+
+
+def render_controlled_chart(analysis: Mapping[str, Any]) -> str:
+    items = analysis.get("comparability_controlled", {}).get("included_instruments", {})
+    deltas: list[tuple[str, float]] = []
+    for instrument, item in items.items():
+        top = _number(item.get("top_within_instrument", {}).get("average_realized_pnl_proxy"))
+        bottom = _number(item.get("bottom_within_instrument", {}).get("average_realized_pnl_proxy"))
+        if top is not None and bottom is not None:
+            deltas.append((str(instrument), top - bottom))
+    max_abs = max([abs(delta) for _, delta in deltas] or [1.0]) or 1.0
+    rows = []
+    for instrument, delta in sorted(deltas, key=lambda item: abs(item[1]), reverse=True):
+        width = max(2.0, abs(delta) / max_abs * 100.0)
+        rows.append(
+            '<div class="barrow">'
+            f"<div>{html.escape(instrument)}</div>"
+            f'<div class="track"><div class="fill" style="width:{width:.1f}%"></div></div>'
+            f"<div>{_format_money(delta)}</div>"
+            "</div>"
+        )
+    return "".join(rows)
+
+
+def render_excluded_instruments(analysis: Mapping[str, Any]) -> str:
+    controlled = analysis.get("comparability_controlled", {})
+    excluded = controlled.get("excluded_instruments", {})
+    threshold = controlled.get("minimum_sample_size")
+    if not excluded:
+        return f"None. Minimum sample threshold: {threshold}."
+    return "; ".join(
+        f"{html.escape(str(instrument))}: {item.get('sample_size')} trades, threshold {threshold}"
+        for instrument, item in excluded.items()
+    )
+
+
+def render_distribution_chart(key: str, item: Mapping[str, Any]) -> str:
+    histogram = item.get("histogram", {})
+    bins = histogram.get("bins", [])
+    label = html.escape(str(item.get("label") or key))
+    included = item.get("included_sample_count")
+    missing = item.get("missing_count")
+    units = html.escape(str(item.get("units") or ""))
+    warning = '<p class="warning">Sparse data: this metric is incomplete for the current population.</p>' if item.get("sparse_data_warning") else ""
+    if not bins:
+        return (
+            f"<div class=\"card\"><h3>{label}</h3>"
+            f"<p class=\"muted\">Included sample count: {included}; missing: {missing}; units: {units}; context: full population.</p>"
+            '<div class="empty">No chartable values are available for this metric.</div>'
+            f"{warning}</div>"
+        )
+    max_count = max((int(bin_item.get("count", 0)) for bin_item in bins), default=1) or 1
+    bars = []
+    for bin_item in bins:
+        count = int(bin_item.get("count", 0))
+        height = max(3.0, count / max_count * 140.0)
+        bars.append(
+            f'<div title="{_format_value(bin_item.get("low"))} to {_format_value(bin_item.get("high"))}: {count}" class="histbar" style="height:{height:.1f}px">{count}</div>'
+        )
+    return (
+        f'<div class="card"><h3>{label}</h3>'
+        f'<p class="muted">Included sample count: {included}; missing: {missing}; units: {units}; context: full population.</p>'
+        f"{warning}"
+        f'<div class="hist">{"".join(bars)}</div></div>'
+    )
+
+
+def _display_label(value: Any) -> str:
+    raw = str(value or "UNKNOWN").replace("-", "_")
+    words = [word for word in raw.split("_") if word]
+    return " ".join(word.capitalize() for word in words) if words else "Unknown"
+
+
+def _format_money(value: Any) -> str:
+    number = _number(value)
+    if number is None:
+        return "MISSING"
+    sign = "-" if number < 0 else ""
+    return f"{sign}${abs(number):,.2f}"
+
+
+def _format_percent(value: Any) -> str:
+    number = _number(value)
+    if number is None:
+        return "MISSING"
+    return f"{number * 100:.1f}%"
+
+
+def _format_delta(value: Any, *, percent: bool = False) -> str:
+    number = _number(value)
+    if number is None:
+        return "MISSING"
+    sign = "+" if number > 0 else ""
+    if percent:
+        return f"{sign}{number * 100:.1f} pp"
+    return f"{sign}{_format_value(number)}"
+
+
+def _format_duration(value: Any) -> str:
+    seconds = _number(value)
+    if seconds is None:
+        return "MISSING"
+    if seconds >= 86400:
+        return f"{seconds / 86400:.1f} days"
+    if seconds >= 3600:
+        return f"{seconds / 3600:.1f} hrs"
+    if seconds >= 60:
+        return f"{seconds / 60:.1f} min"
+    return f"{seconds:.0f} sec"
+
+
+def _format_timestamp(value: Any) -> str:
+    if value in (None, ""):
+        return "MISSING"
+    text = str(value)
+    try:
+        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        return text
+    return parsed.astimezone(UTC).strftime("%Y-%m-%d %H:%M:%S UTC")
+
+
+def _format_value(value: Any) -> str:
+    number = _number(value)
+    if number is None:
+        return "MISSING"
+    return f"{number:,.2f}"
+
+
+def _format_mix(top_mix: Mapping[str, Any], bottom_mix: Mapping[str, Any]) -> str:
+    keys = sorted(set(top_mix) | set(bottom_mix))
+    if not keys:
+        return "MISSING"
+    return "; ".join(
+        f"{html.escape(_display_label(key))}: top {top_mix.get(key, 0)}, bottom {bottom_mix.get(key, 0)}"
+        for key in keys
+    )
 
 
 def _histogram(values: Sequence[float], *, bins: int = 8) -> dict[str, Any]:
