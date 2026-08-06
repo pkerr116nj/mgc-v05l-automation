@@ -58,6 +58,14 @@ ANOMALY_ROOT_CAUSE_JSON = "anomaly_root_cause.json"
 ANOMALY_REPAIR_PLAN_JSON = "anomaly_repair_plan.json"
 ANOMALY_BEFORE_AFTER_JSON = "anomaly_before_after.json"
 ANOMALY_ROOT_CAUSE_HTML = "anomaly_root_cause_review.html"
+INV_004_PERFORMANCE_SUMMARY_JSON = "performance_summary.json"
+INV_004_CONCENTRATION_JSON = "concentration_by_dimension.json"
+INV_004_TAIL_SENSITIVITY_JSON = "tail_sensitivity.json"
+INV_004_ROLLING_WINDOWS_JSON = "rolling_windows.json"
+INV_004_CONTROLLED_COMPARISONS_JSON = "controlled_comparisons.json"
+INV_004_TOP_BOTTOM_TRADES_JSON = "top_bottom_trades.json"
+INV_004_CONTRADICTORY_EVIDENCE_JSON = "contradictory_evidence.json"
+INV_004_HTML = "nq_performance_attribution.html"
 
 SCHEMA_VERSION = "research_evidence_explorer_v1"
 VALIDATION_SCHEMA_VERSION = "research_evidence_explorer_validation_v1"
@@ -283,6 +291,27 @@ def run_research_investigations(
             _write_json(investigation_paths["anomaly_repair_plan_json"], forensic_audit.get("anomaly_repair_plan", {}))
             _write_json(investigation_paths["anomaly_before_after_json"], forensic_audit.get("anomaly_before_after", {}))
             investigation_paths["anomaly_root_cause_review_html"].write_text(render_anomaly_root_cause_html(investigation), encoding="utf-8")
+        if investigation_id == "INV-004":
+            investigation_paths.update(
+                {
+                    "performance_summary_json": investigation_dir / INV_004_PERFORMANCE_SUMMARY_JSON,
+                    "concentration_by_dimension_json": investigation_dir / INV_004_CONCENTRATION_JSON,
+                    "tail_sensitivity_json": investigation_dir / INV_004_TAIL_SENSITIVITY_JSON,
+                    "rolling_windows_json": investigation_dir / INV_004_ROLLING_WINDOWS_JSON,
+                    "controlled_comparisons_json": investigation_dir / INV_004_CONTROLLED_COMPARISONS_JSON,
+                    "top_bottom_trades_json": investigation_dir / INV_004_TOP_BOTTOM_TRADES_JSON,
+                    "contradictory_evidence_json": investigation_dir / INV_004_CONTRADICTORY_EVIDENCE_JSON,
+                    "nq_performance_attribution_html": investigation_dir / INV_004_HTML,
+                }
+            )
+            _write_json(investigation_paths["performance_summary_json"], investigation.get("performance_summary", {}))
+            _write_json(investigation_paths["concentration_by_dimension_json"], investigation.get("concentration_by_dimension", {}))
+            _write_json(investigation_paths["tail_sensitivity_json"], investigation.get("tail_sensitivity", {}))
+            _write_json(investigation_paths["rolling_windows_json"], investigation.get("rolling_windows", {}))
+            _write_json(investigation_paths["controlled_comparisons_json"], investigation.get("controlled_comparisons", {}))
+            _write_json(investigation_paths["top_bottom_trades_json"], investigation.get("top_bottom_trades", {}))
+            _write_json(investigation_paths["contradictory_evidence_json"], investigation.get("contradictory_evidence_detail", {}))
+            investigation_paths["nq_performance_attribution_html"].write_text(render_inv_004_html(investigation), encoding="utf-8")
         _write_json(investigation_paths["investigation_json"], investigation)
         investigation_paths["investigation_md"].write_text(render_investigation_markdown(investigation), encoding="utf-8")
         _write_json(investigation_paths["population_json"], population_artifact)
@@ -359,6 +388,7 @@ def build_investigation_records(
         "INV-001": build_inv_001(rows, common),
         "INV-002": build_inv_002(rows, common),
         "INV-003": build_inv_003(rows, common),
+        "INV-004": build_inv_004(rows, common),
     }
     for record in records.values():
         record["deterministic_fingerprint"] = _fingerprint(_fingerprint_payload(record))
@@ -479,6 +509,9 @@ def build_research_evidence_explorer(
         "population_views": population_views,
         "source_confirmed_anomalies": anomaly_table,
         "review_required_queue": review_queue,
+        "investigation_highlights": {
+            "INV-004": build_inv_004_highlight(population_rows),
+        },
         "cohort_definitions": cohort_definitions(len(population_rows)),
         "metric_definitions": metric_definitions(),
         "cohorts": cohort_metrics,
@@ -680,6 +713,7 @@ def cohort_metrics_for(rows: Sequence[Mapping[str, Any]], *, full_population_cou
     mae = _values(rows, "mae_points")
     giveback = _values(rows, "giveback_points")
     wins = [value for value in pnl if value > 0.0]
+    ra8_available_count = sum(1 for row in rows if ra8_available(row))
     return {
         "trade_count": len(rows),
         "population_percentage": _rate(len(rows), full_population_count),
@@ -701,8 +735,8 @@ def cohort_metrics_for(rows: Sequence[Mapping[str, Any]], *, full_population_cou
         "session_distribution": _distribution((row.get("session") for row in rows)),
         "regime_distribution": _distribution((row.get("regime") for row in rows)),
         "exit_reason_distribution": _distribution((row.get("exit_reason") for row in rows)),
-        "ra8_coverage_count": sum(1 for row in rows if row.get("ra8_coverage_status") == "EXACT"),
-        "ra8_coverage_percentage": _rate(sum(1 for row in rows if row.get("ra8_coverage_status") == "EXACT"), len(rows)),
+        "ra8_coverage_count": ra8_available_count,
+        "ra8_coverage_percentage": _rate(ra8_available_count, len(rows)),
         "missing_field_counts": _missing_field_counts(rows),
     }
 
@@ -926,6 +960,45 @@ def build_anomaly_classification_table(
     return result
 
 
+def build_inv_004_highlight(rows: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
+    nq_rows = [row for row in rows if str(row.get("instrument") or "").upper() == "NQ"]
+    if not nq_rows:
+        return {
+            "investigation_id": "INV-004",
+            "title": "NQ Qualified Performance Attribution",
+            "qualified_nq_trade_count": 0,
+            "status": "NO_NQ_ROWS",
+        }
+    concentration = nq_concentration_by_dimensions(nq_rows)
+    tail = nq_tail_sensitivity(nq_rows)
+    top_strategy = next(iter(concentration.get("dimensions", {}).get("strategy", [])), {})
+    top_lane = next(iter(concentration.get("dimensions", {}).get("lane", [])), {})
+    top_session = next(iter(concentration.get("dimensions", {}).get("session", [])), {})
+    contradictory = nq_contradictory_evidence(nq_rows, concentration=concentration, tail=tail, rolling=nq_rolling_windows(nq_rows))
+    return {
+        "investigation_id": "INV-004",
+        "title": "NQ Qualified Performance Attribution",
+        "artifact_path": str(DEFAULT_INVESTIGATION_OUTPUT_DIR / "INV-004" / "investigation.json"),
+        "html_path": str(DEFAULT_INVESTIGATION_OUTPUT_DIR / "INV-004" / INV_004_HTML),
+        "qualified_nq_trade_count": len(nq_rows),
+        "total_realized_pnl_proxy": investigation_metrics(nq_rows).get("total_realized_pnl_proxy"),
+        "average_realized_pnl_proxy": investigation_metrics(nq_rows).get("average_realized_pnl_proxy"),
+        "median_realized_pnl_proxy": investigation_metrics(nq_rows).get("median_realized_pnl_proxy"),
+        "win_rate": investigation_metrics(nq_rows).get("win_rate"),
+        "tail_sensitivity": {
+            "excluding_top_10_percent_total": tail.get("excluding_top_10_percent", {}).get("metrics", {}).get("total_realized_pnl_proxy"),
+            "primary_finding": tail.get("primary_finding"),
+        },
+        "top_contributors": {
+            "strategy": top_strategy,
+            "lane": top_lane,
+            "session": top_session,
+        },
+        "strongest_contradictory_evidence": contradictory.get("summary", [])[:3],
+        "guardrails": dict(GUARDRAILS),
+    }
+
+
 def add_within_instrument_percentiles(rows: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
     sorted_rows = sorted(rows, key=lambda row: (float(row["realized_pnl_proxy"]), str(row.get("research_record_id"))))
     if len(sorted_rows) == 1:
@@ -1075,9 +1148,9 @@ def filter_exclusion_reason(row: Mapping[str, Any], filters: Mapping[str, Any]) 
             return "not_winner"
         if filters["winner_loser"] == "loser" and (pnl is None or pnl > 0):
             return "not_loser"
-    if filters.get("ra8") == "available" and row.get("path_status", {}).get("ra8") != "EXACT":
+    if filters.get("ra8") == "available" and not ra8_available(row):
         return "ra8_unavailable"
-    if filters.get("ra8") == "unavailable" and row.get("path_status", {}).get("ra8") == "EXACT":
+    if filters.get("ra8") == "unavailable" and ra8_available(row):
         return "ra8_available"
     date_range = filters.get("date_range") or {}
     exit_time = str(row.get("exit_time") or "")
@@ -1259,6 +1332,475 @@ def build_inv_003(rows: Sequence[Mapping[str, Any]], common: Mapping[str, Any]) 
     }
 
 
+def build_inv_004(rows: Sequence[Mapping[str, Any]], common: Mapping[str, Any]) -> dict[str, Any]:
+    nq_rows = [row for row in rows if str(row.get("instrument") or "").upper() == "NQ"]
+    performance_summary = nq_performance_summary(nq_rows)
+    concentration = nq_concentration_by_dimensions(nq_rows)
+    tail = nq_tail_sensitivity(nq_rows)
+    rolling = nq_rolling_windows(nq_rows)
+    controlled = nq_controlled_comparisons(nq_rows)
+    top_bottom = nq_top_bottom_trades(nq_rows)
+    contradictory = nq_contradictory_evidence(nq_rows, concentration=concentration, tail=tail, rolling=rolling)
+    classification = nq_breadth_classification(tail, concentration)
+    positive_after_tail = tail.get("excluding_top_10_percent", {}).get("metrics", {}).get("total_realized_pnl_proxy")
+    status = "PARTIALLY_SUPPORTED" if (_number(positive_after_tail) or 0) > 0 else "INCONCLUSIVE"
+    finding = (
+        f"NQ contributes {performance_summary.get('metrics', {}).get('total_realized_pnl_proxy')} qualified P&L proxy "
+        f"across {performance_summary.get('trade_count')} trades; breadth is classified as {classification.get('classification')}."
+    )
+    return {
+        **common,
+        "investigation_id": "INV-004",
+        "title": "NQ Qualified Performance Attribution",
+        "status": "DRAFT",
+        "question": "What explains NQ's approximately +907,653 qualified P&L contribution?",
+        "rationale": "The source-integrity-qualified Explorer shows NQ as the dominant positive contributor, requiring a bounded attribution review before forming narrower research questions.",
+        "population": {
+            "count": len(nq_rows),
+            "filters": {"instrument": "NQ", "active_population_view": "SOURCE_INTEGRITY_QUALIFIED"},
+            "exclusions": [],
+            "date_coverage": date_coverage(nq_rows),
+            "contracts": _distribution(row.get("contract") for row in nq_rows),
+            "side_mix": _distribution(row.get("side") for row in nq_rows),
+            "strategy_mix": _distribution((row.get("strategy_id") for row in nq_rows), limit=30),
+            "lane_mix": _distribution((row.get("lane_id") for row in nq_rows), limit=30),
+            "session_mix": _distribution(row.get("session") for row in nq_rows),
+            "regime_mix": _distribution(row.get("regime") for row in nq_rows),
+            "exit_policy_mix": _distribution(row.get("exit_policy") for row in nq_rows),
+            "exit_reason_mix": _distribution(row.get("exit_reason") for row in nq_rows),
+            "ra8_coverage": cohort_evidence(nq_rows)["ra8_coverage"],
+            "missingness": _missing_field_counts(nq_rows),
+            "source_fingerprints": common.get("source_fingerprints", {}),
+        },
+        "filters_and_exclusions": {
+            "source_population": "SOURCE_INTEGRITY_QUALIFIED",
+            "instrument": "NQ",
+            "minimum_controlled_cell_sample": MIN_COMPARISON_CELL_SAMPLE,
+            "raw_dollar_disclosure": "Raw realized P&L proxy can reflect instrument, multiplier, and quantity differences; INV-004 stays within NQ but still does not infer contract economics.",
+        },
+        "methodology": [
+            "Filter the prepared source-integrity-qualified Explorer population to NQ only.",
+            "Attribute NQ contribution by strategy, lane, session, regime, side, exit policy/reason, calendar period, milestone period, contract, and quantity.",
+            "Measure tail sensitivity by removing deterministic top percentile cohorts and the single largest winner.",
+            "Use controlled comparisons only where minimum sample thresholds are met; sparse cells are reported rather than pooled.",
+            "Treat all results as descriptive and non-causal with no production or trading authority.",
+        ],
+        "metrics": {"full_nq_qualified_population": performance_summary.get("metrics", {})},
+        "performance_summary": performance_summary,
+        "concentration_by_dimension": concentration,
+        "tail_sensitivity": tail,
+        "rolling_windows": rolling,
+        "controlled_comparisons": controlled,
+        "top_bottom_trades": top_bottom,
+        "contradictory_evidence_detail": contradictory,
+        "evidence": {
+            "performance_summary": performance_summary,
+            "concentration_by_dimension": concentration,
+            "tail_sensitivity": tail,
+            "rolling_windows": rolling,
+            "controlled_comparisons": controlled,
+            "top_bottom_trades": top_bottom,
+            "breadth_classification": classification,
+        },
+        "contradictory_evidence": contradictory.get("summary", []),
+        "findings": [
+            finding,
+            tail.get("primary_finding"),
+            controlled.get("summary", {}).get("finding"),
+        ],
+        "limitations": [
+            "Independent contract point-value provenance is missing in CRR v1.",
+            "MFE, MAE, giveback, and full path evidence remain sparse, so exit-quality conclusions are limited.",
+            "Concentration and period attribution are descriptive and do not establish causality.",
+            "Raw P&L proxy is not a normalized risk or multiplier-adjusted measure.",
+        ],
+        "confidence": "PARTIAL",
+        "conclusion_status": status,
+        "unresolved_questions": [
+            "Which NQ setup/context fields explain the positive outliers without relying on missing path data?",
+            "Does NQ remain positive after future contract-economics provenance is added?",
+        ],
+        "follow_up_candidates": [
+            "Run a narrow NQ strategy/session attribution experiment with fixed source-integrity-qualified membership.",
+        ],
+    }
+
+
+def nq_performance_summary(rows: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
+    return {
+        "schema_version": "inv_004_nq_performance_summary_v1",
+        "instrument": "NQ",
+        "trade_count": len(rows),
+        "date_coverage": date_coverage(rows),
+        "contracts": _distribution(row.get("contract") for row in rows),
+        "side_mix": _distribution(row.get("side") for row in rows),
+        "strategy_mix": _distribution((row.get("strategy_id") for row in rows), limit=30),
+        "lane_mix": _distribution((row.get("lane_id") for row in rows), limit=30),
+        "session_mix": _distribution(row.get("session") for row in rows),
+        "regime_mix": _distribution(row.get("regime") for row in rows),
+        "exit_policy_mix": _distribution(row.get("exit_policy") for row in rows),
+        "exit_reason_mix": _distribution(row.get("exit_reason") for row in rows),
+        "metrics": investigation_metrics(rows),
+        "best_1_percent": nq_percentile_contribution(rows, fraction=0.01, low=False),
+        "best_5_percent": nq_percentile_contribution(rows, fraction=0.05, low=False),
+        "best_10_percent": nq_percentile_contribution(rows, fraction=0.10, low=False),
+        "worst_1_percent": nq_percentile_contribution(rows, fraction=0.01, low=True),
+        "worst_5_percent": nq_percentile_contribution(rows, fraction=0.05, low=True),
+        "worst_10_percent": nq_percentile_contribution(rows, fraction=0.10, low=True),
+        "ra8_coverage": cohort_evidence(rows)["ra8_coverage"],
+        "missingness": _missing_field_counts(rows),
+        "comparability_disclosure": "Within NQ only; no multiplier or contract-economics normalization is inferred.",
+        "guardrails": dict(GUARDRAILS),
+    }
+
+
+def nq_percentile_contribution(rows: Sequence[Mapping[str, Any]], *, fraction: float, low: bool) -> dict[str, Any]:
+    cohort = percentile_slice(rows, fraction, low=low)
+    total = sum(_values(rows, "realized_pnl_proxy"))
+    cohort_total = sum(_values(cohort, "realized_pnl_proxy"))
+    return {
+        "fraction": fraction,
+        "direction": "worst" if low else "best",
+        "trade_count": len(cohort),
+        "total_realized_pnl_proxy": _round(cohort_total),
+        "percentage_of_nq_total": _rate(cohort_total, total),
+        "metrics": investigation_metrics(cohort),
+        "trade_ids": [row.get("research_record_id") for row in sorted(cohort, key=lambda item: (float(item.get("realized_pnl_proxy") or 0), str(item.get("research_record_id"))), reverse=not low)],
+    }
+
+
+def nq_concentration_by_dimensions(rows: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
+    dimensions = {
+        "strategy": "strategy_id",
+        "lane": "lane_id",
+        "session": "session",
+        "regime": "regime",
+        "side": "side",
+        "exit_policy": "exit_policy",
+        "exit_reason": "exit_reason",
+        "calendar_week": "calendar_week",
+        "calendar_month": "calendar_month",
+        "milestone_period": "milestone_period",
+        "contract": "contract",
+        "quantity": "quantity",
+    }
+    return {
+        "schema_version": "inv_004_nq_concentration_by_dimension_v1",
+        "total_realized_pnl_proxy": _round(sum(_values(rows, "realized_pnl_proxy"))),
+        "dimensions": {
+            name: nq_concentration_by_field(rows, field)
+            for name, field in dimensions.items()
+        },
+        "guardrails": dict(GUARDRAILS),
+    }
+
+
+def nq_concentration_by_field(rows: Sequence[Mapping[str, Any]], field: str) -> list[dict[str, Any]]:
+    grouped: dict[str, list[Mapping[str, Any]]] = {}
+    for row in rows:
+        if field == "calendar_week":
+            key = period_key(row.get("exit_time"), "week")
+        elif field == "calendar_month":
+            key = period_key(row.get("exit_time"), "month")
+        elif field == "milestone_period":
+            key = milestone_label_for_row(row)
+        else:
+            key = str(row.get(field) or "UNKNOWN")
+        grouped.setdefault(key, []).append(row)
+    total = sum(_values(rows, "realized_pnl_proxy"))
+    records = []
+    for value, value_rows in sorted(grouped.items()):
+        metrics = investigation_metrics(value_rows)
+        group_total = _number(metrics.get("total_realized_pnl_proxy")) or 0.0
+        records.append(
+            {
+                "value": value,
+                "count": len(value_rows),
+                "total_realized_pnl_proxy": _round(group_total),
+                "average_realized_pnl_proxy": metrics.get("average_realized_pnl_proxy"),
+                "median_realized_pnl_proxy": metrics.get("median_realized_pnl_proxy"),
+                "trimmed_mean_5_percent": metrics.get("trimmed_mean_5_percent"),
+                "win_rate": metrics.get("win_rate"),
+                "percentage_of_nq_total_contribution": _rate(group_total, total),
+                "missingness": _missing_field_counts(value_rows),
+                "ra8_coverage": cohort_evidence(value_rows)["ra8_coverage"],
+            }
+        )
+    return sorted(records, key=lambda item: abs(_number(item.get("total_realized_pnl_proxy")) or 0.0), reverse=True)
+
+
+def nq_tail_sensitivity(rows: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
+    top_1 = set(row.get("research_record_id") for row in percentile_slice(rows, 0.01, low=False))
+    top_5 = set(row.get("research_record_id") for row in percentile_slice(rows, 0.05, low=False))
+    top_10 = set(row.get("research_record_id") for row in percentile_slice(rows, 0.10, low=False))
+    sorted_top = sorted(rows, key=lambda row: (float(row.get("realized_pnl_proxy") or 0), str(row.get("research_record_id"))), reverse=True)
+    largest = {sorted_top[0].get("research_record_id")} if sorted_top else set()
+    views = {
+        "full_qualified_nq": nq_tail_view(rows, excluded_ids=set()),
+        "excluding_top_1_percent": nq_tail_view(rows, excluded_ids=top_1),
+        "excluding_top_5_percent": nq_tail_view(rows, excluded_ids=top_5),
+        "excluding_top_10_percent": nq_tail_view(rows, excluded_ids=top_10),
+        "excluding_single_largest_winner": nq_tail_view(rows, excluded_ids=largest),
+        "winsorized_top_5_percent": nq_winsorized_view(rows, top_ids=top_5),
+    }
+    full_total = views["full_qualified_nq"]["metrics"].get("total_realized_pnl_proxy")
+    ex10_total = views["excluding_top_10_percent"]["metrics"].get("total_realized_pnl_proxy")
+    primary = (
+        f"NQ remains positive after excluding top 10% winners: {ex10_total} versus full total {full_total}."
+        if (_number(ex10_total) or 0) > 0
+        else f"NQ does not remain positive after excluding top 10% winners: {ex10_total} versus full total {full_total}."
+    )
+    result = {"schema_version": "inv_004_nq_tail_sensitivity_v1", **views, "primary_finding": primary, "guardrails": dict(GUARDRAILS)}
+    result["deterministic_fingerprint"] = _fingerprint(_fingerprint_payload(result))
+    return result
+
+
+def nq_tail_view(rows: Sequence[Mapping[str, Any]], *, excluded_ids: set[Any]) -> dict[str, Any]:
+    included = [row for row in rows if row.get("research_record_id") not in excluded_ids]
+    return {
+        "included_count": len(included),
+        "excluded_count": len(rows) - len(included),
+        "excluded_trade_ids": sorted(str(item) for item in excluded_ids if item),
+        "metrics": investigation_metrics(included),
+    }
+
+
+def nq_winsorized_view(rows: Sequence[Mapping[str, Any]], *, top_ids: set[Any]) -> dict[str, Any]:
+    if not rows or not top_ids:
+        return nq_tail_view(rows, excluded_ids=set())
+    non_top = [row for row in rows if row.get("research_record_id") not in top_ids]
+    cap_values = _values(non_top, "realized_pnl_proxy")
+    cap = max(cap_values) if cap_values else None
+    adjusted = []
+    for row in rows:
+        copied = dict(row)
+        if cap is not None and row.get("research_record_id") in top_ids:
+            copied["realized_pnl_proxy"] = cap
+        adjusted.append(copied)
+    return {
+        "method": "Cap top 5% realized P&L proxy values at the largest non-top-5% value.",
+        "cap_value": _round(cap) if cap is not None else None,
+        "adjusted_trade_count": len(top_ids),
+        "metrics": investigation_metrics(adjusted),
+    }
+
+
+def nq_rolling_windows(rows: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
+    windows = {
+        f"{size}_trade_windows": rolling_window_metrics(rows, window_size=size)
+        for size in (25, 50, 100)
+        if len(rows) >= size
+    }
+    summary: dict[str, Any] = {}
+    for name, window_rows in windows.items():
+        if not window_rows:
+            continue
+        weakest = min(window_rows, key=lambda item: _number(item.get("metrics", {}).get("total_realized_pnl_proxy")) or 0.0)
+        strongest = max(window_rows, key=lambda item: _number(item.get("metrics", {}).get("total_realized_pnl_proxy")) or 0.0)
+        summary[name] = {
+            "window_count": len(window_rows),
+            "weakest_window": weakest,
+            "strongest_window": strongest,
+            "negative_window_count": sum(1 for item in window_rows if (_number(item.get("metrics", {}).get("total_realized_pnl_proxy")) or 0.0) < 0),
+        }
+    return {"schema_version": "inv_004_nq_rolling_windows_v1", "windows": windows, "summary": summary, "guardrails": dict(GUARDRAILS)}
+
+
+def nq_controlled_comparisons(rows: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
+    side_global = nq_side_comparison(rows)
+    field_controls = {
+        "side_within_session": nq_side_comparisons_by_field(rows, "session"),
+        "side_within_strategy": nq_side_comparisons_by_field(rows, "strategy_id"),
+        "side_within_regime": nq_side_comparisons_by_field(rows, "regime"),
+        "side_within_contract": nq_side_comparisons_by_field(rows, "contract"),
+        "strategy_within_session": nq_group_comparisons_within(rows, group_field="session", compare_field="strategy_id"),
+        "session_within_strategy": nq_group_comparisons_within(rows, group_field="strategy_id", compare_field="session"),
+    }
+    cell_count = sum(len(item.get("comparisons", {})) for item in field_controls.values())
+    finding = f"Controlled NQ comparisons produced {cell_count} minimum-sample cells; sparse cells were excluded rather than pooled."
+    return {
+        "schema_version": "inv_004_nq_controlled_comparisons_v1",
+        "minimum_sample": MIN_COMPARISON_CELL_SAMPLE,
+        "global_long_short": side_global,
+        "controls": field_controls,
+        "summary": {"controlled_cell_count": cell_count, "finding": finding},
+        "guardrails": dict(GUARDRAILS),
+    }
+
+
+def nq_side_comparison(rows: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
+    long_rows = [row for row in rows if row.get("side") == "LONG"]
+    short_rows = [row for row in rows if row.get("side") == "SHORT"]
+    return {
+        "long_count": len(long_rows),
+        "short_count": len(short_rows),
+        "long": investigation_metrics(long_rows),
+        "short": investigation_metrics(short_rows),
+        "delta_long_minus_short_average": _round((_number(investigation_metrics(long_rows).get("average_realized_pnl_proxy")) or 0.0) - (_number(investigation_metrics(short_rows).get("average_realized_pnl_proxy")) or 0.0)),
+    }
+
+
+def nq_side_comparisons_by_field(rows: Sequence[Mapping[str, Any]], field: str) -> dict[str, Any]:
+    grouped: dict[str, list[Mapping[str, Any]]] = {}
+    for row in rows:
+        grouped.setdefault(str(row.get(field) or "UNKNOWN"), []).append(row)
+    comparisons: dict[str, Any] = {}
+    excluded: dict[str, Any] = {}
+    for value, value_rows in sorted(grouped.items()):
+        long_rows = [row for row in value_rows if row.get("side") == "LONG"]
+        short_rows = [row for row in value_rows if row.get("side") == "SHORT"]
+        if len(long_rows) < MIN_COMPARISON_CELL_SAMPLE or len(short_rows) < MIN_COMPARISON_CELL_SAMPLE:
+            excluded[value] = {"long_count": len(long_rows), "short_count": len(short_rows), "reason": "below_minimum_side_sample", "minimum_sample": MIN_COMPARISON_CELL_SAMPLE}
+            continue
+        comparisons[value] = {
+            "long": investigation_metrics(long_rows),
+            "short": investigation_metrics(short_rows),
+            "delta_long_minus_short_average": _round((_number(investigation_metrics(long_rows).get("average_realized_pnl_proxy")) or 0.0) - (_number(investigation_metrics(short_rows).get("average_realized_pnl_proxy")) or 0.0)),
+            "sample_size": len(value_rows),
+        }
+    return {"field": field, "comparisons": comparisons, "excluded_cells": excluded}
+
+
+def nq_group_comparisons_within(rows: Sequence[Mapping[str, Any]], *, group_field: str, compare_field: str) -> dict[str, Any]:
+    grouped: dict[str, dict[str, list[Mapping[str, Any]]]] = {}
+    for row in rows:
+        grouped.setdefault(str(row.get(group_field) or "UNKNOWN"), {}).setdefault(str(row.get(compare_field) or "UNKNOWN"), []).append(row)
+    comparisons: dict[str, Any] = {}
+    excluded: dict[str, Any] = {}
+    for group_value, compare_groups in sorted(grouped.items()):
+        eligible = {
+            value: value_rows
+            for value, value_rows in compare_groups.items()
+            if len(value_rows) >= MIN_COMPARISON_CELL_SAMPLE
+        }
+        if len(eligible) < 2:
+            excluded[group_value] = {
+                "reason": "fewer_than_two_cells_meet_minimum_sample",
+                "minimum_sample": MIN_COMPARISON_CELL_SAMPLE,
+                "cell_counts": {value: len(value_rows) for value, value_rows in compare_groups.items()},
+            }
+            continue
+        comparisons[group_value] = {
+            value: {"sample_size": len(value_rows), "metrics": investigation_metrics(value_rows)}
+            for value, value_rows in sorted(eligible.items())
+        }
+    return {"group_field": group_field, "compare_field": compare_field, "comparisons": comparisons, "excluded_cells": excluded}
+
+
+def nq_top_bottom_trades(rows: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
+    sorted_rows = sorted(rows, key=lambda row: (float(row.get("realized_pnl_proxy") or 0.0), str(row.get("research_record_id"))))
+    return {
+        "schema_version": "inv_004_nq_top_bottom_trades_v1",
+        "top_20_winners": [nq_trade_detail(row) for row in reversed(sorted_rows[-20:])],
+        "bottom_20_losers": [nq_trade_detail(row) for row in sorted_rows[:20]],
+        "guardrails": dict(GUARDRAILS),
+    }
+
+
+def nq_trade_detail(row: Mapping[str, Any]) -> dict[str, Any]:
+    return {
+        "research_record_id": row.get("research_record_id"),
+        "canonical_trade_identifiers": {
+            "source_trade_id": row.get("source_trade_id"),
+            "trade_id": row.get("trade_id"),
+            "lifecycle_id": row.get("lifecycle_id"),
+            "con_id": row.get("con_id"),
+        },
+        "contract": row.get("contract"),
+        "side": row.get("side"),
+        "quantity": row.get("quantity"),
+        "strategy": row.get("strategy_id"),
+        "lane": row.get("lane_id"),
+        "session": row.get("session"),
+        "regime": row.get("regime"),
+        "entry_time": row.get("entry_time"),
+        "exit_time": row.get("exit_time"),
+        "duration": row.get("hold_seconds"),
+        "realized_pnl_proxy": row.get("realized_pnl_proxy"),
+        "exit_policy": row.get("exit_policy"),
+        "exit_reason": row.get("exit_reason"),
+        "ra7_status": row.get("path_status", {}).get("ra7"),
+        "ra8_status": row.get("path_status", {}).get("ra8"),
+        "attribution_status": row.get("attribution_status"),
+        "source_provenance": row.get("source_provenance"),
+        "eligibility_classification": row.get("research_eligibility", {}).get("classification"),
+        "missing_fields": row.get("missing_fields"),
+    }
+
+
+def nq_breadth_classification(tail: Mapping[str, Any], concentration: Mapping[str, Any]) -> dict[str, Any]:
+    total = _number(tail.get("full_qualified_nq", {}).get("metrics", {}).get("total_realized_pnl_proxy"))
+    top_view_total = _number(tail.get("excluding_top_10_percent", {}).get("metrics", {}).get("total_realized_pnl_proxy"))
+    if total in (None, 0) or top_view_total is None:
+        classification = "INCONCLUSIVE"
+        ratio = None
+    else:
+        ratio = _round((total - top_view_total) / total)
+        if ratio <= 0.40:
+            classification = "BROADLY_DISTRIBUTED"
+        elif ratio <= 0.65:
+            classification = "MODERATELY_CONCENTRATED"
+        else:
+            classification = "HIGHLY_CONCENTRATED"
+    return {
+        "classification": classification,
+        "top_10_positive_contribution_share": ratio,
+        "thresholds": {
+            "BROADLY_DISTRIBUTED": "top 10% winners contribute <= 40% of total positive NQ qualified result",
+            "MODERATELY_CONCENTRATED": "top 10% winners contribute > 40% and <= 65%",
+            "HIGHLY_CONCENTRATED": "top 10% winners contribute > 65%",
+            "INCONCLUSIVE": "insufficient or non-positive total contribution",
+        },
+    }
+
+
+def nq_contradictory_evidence(
+    rows: Sequence[Mapping[str, Any]],
+    *,
+    concentration: Mapping[str, Any],
+    tail: Mapping[str, Any],
+    rolling: Mapping[str, Any],
+) -> dict[str, Any]:
+    losing_strategies = [
+        item
+        for item in concentration.get("dimensions", {}).get("strategy", [])
+        if (_number(item.get("total_realized_pnl_proxy")) or 0.0) < 0
+    ][:10]
+    losing_sessions = [
+        item
+        for item in concentration.get("dimensions", {}).get("session", [])
+        if (_number(item.get("total_realized_pnl_proxy")) or 0.0) < 0
+    ][:10]
+    negative_windows = []
+    for name, summary in rolling.get("summary", {}).items():
+        if summary.get("negative_window_count", 0):
+            negative_windows.append({"window_set": name, "negative_window_count": summary.get("negative_window_count"), "weakest_window": summary.get("weakest_window")})
+    missingness = _missing_field_counts(rows)
+    summary = []
+    if negative_windows:
+        summary.append("NQ has negative rolling windows despite positive aggregate qualified contribution.")
+    if losing_strategies:
+        summary.append("Some NQ strategies have negative total qualified P&L.")
+    if losing_sessions:
+        summary.append("Some NQ sessions have negative total qualified P&L.")
+    if missingness.get("mfe_points") or missingness.get("mae_points") or missingness.get("ra8_finalized_capture"):
+        summary.append("Sparse path/excursion evidence limits entry-versus-exit attribution.")
+    summary.append("Independent contract point-value provenance is missing, so raw-dollar results are not normalized economics.")
+    return {
+        "schema_version": "inv_004_nq_contradictory_evidence_v1",
+        "summary": summary,
+        "negative_rolling_windows": negative_windows,
+        "losing_strategies": losing_strategies,
+        "losing_sessions": losing_sessions,
+        "tail_sensitivity": {
+            "excluding_top_10_percent_total": tail.get("excluding_top_10_percent", {}).get("metrics", {}).get("total_realized_pnl_proxy"),
+            "excluding_single_largest_winner_total": tail.get("excluding_single_largest_winner", {}).get("metrics", {}).get("total_realized_pnl_proxy"),
+        },
+        "missingness": missingness,
+        "guardrails": dict(GUARDRAILS),
+    }
+
+
 def percentile_slice(rows: Sequence[Mapping[str, Any]], fraction: float, *, low: bool) -> list[Mapping[str, Any]]:
     if not rows:
         return []
@@ -1268,6 +1810,7 @@ def percentile_slice(rows: Sequence[Mapping[str, Any]], fraction: float, *, low:
 
 
 def cohort_evidence(rows: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
+    ra8_available_count = sum(1 for row in rows if ra8_available(row))
     return {
         "sample_size": len(rows),
         "metrics": investigation_metrics(rows),
@@ -1277,10 +1820,17 @@ def cohort_evidence(rows: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
             for field in ("instrument", "strategy_id", "lane_id", "session", "regime", "side", "exit_reason")
         },
         "ra8_coverage": {
-            "available": sum(1 for row in rows if row.get("path_status", {}).get("ra8") == "EXACT"),
-            "missing": sum(1 for row in rows if row.get("path_status", {}).get("ra8") != "EXACT"),
+            "available": ra8_available_count,
+            "missing": len(rows) - ra8_available_count,
         },
     }
+
+
+def ra8_available(row: Mapping[str, Any]) -> bool:
+    path_status = row.get("path_status")
+    if isinstance(path_status, Mapping) and path_status.get("ra8") == "EXACT":
+        return True
+    return row.get("ra8_coverage_status") == "EXACT"
 
 
 def median_trade(rows: Sequence[Mapping[str, Any]]) -> dict[str, Any] | None:
@@ -2486,6 +3036,69 @@ def render_anomaly_root_cause_html(investigation: Mapping[str, Any]) -> str:
 """
 
 
+def render_inv_004_html(investigation: Mapping[str, Any]) -> str:
+    summary = investigation.get("performance_summary", {})
+    metrics = summary.get("metrics", {})
+    concentration = investigation.get("concentration_by_dimension", {}).get("dimensions", {})
+    tail = investigation.get("tail_sensitivity", {})
+    controlled = investigation.get("controlled_comparisons", {})
+    contradictory = investigation.get("contradictory_evidence_detail", {})
+    top_bottom = investigation.get("top_bottom_trades", {})
+
+    def concentration_rows(name: str) -> str:
+        return "".join(
+            "<tr>"
+            f"<td>{html.escape(str(item.get('value')))}</td>"
+            f"<td>{item.get('count')}</td>"
+            f"<td>{_format_money(item.get('total_realized_pnl_proxy'))}</td>"
+            f"<td>{_format_money(item.get('average_realized_pnl_proxy'))}</td>"
+            f"<td>{html.escape(str(item.get('win_rate')))}</td>"
+            f"<td>{html.escape(str(item.get('percentage_of_nq_total_contribution')))}</td>"
+            "</tr>"
+            for item in concentration.get(name, [])[:12]
+        )
+
+    tail_rows = "".join(
+        "<tr>"
+        f"<td>{html.escape(_display_label(name))}</td>"
+        f"<td>{view.get('included_count')}</td>"
+        f"<td>{view.get('excluded_count')}</td>"
+        f"<td>{_format_money(view.get('metrics', {}).get('total_realized_pnl_proxy'))}</td>"
+        f"<td>{_format_money(view.get('metrics', {}).get('average_realized_pnl_proxy'))}</td>"
+        f"<td>{_format_money(view.get('metrics', {}).get('median_realized_pnl_proxy'))}</td>"
+        "</tr>"
+        for name, view in tail.items()
+        if isinstance(view, Mapping) and "metrics" in view
+    )
+    trade_rows = "".join(
+        "<tr>"
+        f"<td>{html.escape(str(row.get('research_record_id')))}</td>"
+        f"<td>{html.escape(str(row.get('side')))}</td>"
+        f"<td>{_format_money(row.get('realized_pnl_proxy'))}</td>"
+        f"<td>{html.escape(str(row.get('strategy')))}</td>"
+        f"<td>{html.escape(str(row.get('session')))}</td>"
+        f"<td>{html.escape(str(row.get('exit_reason')))}</td>"
+        "</tr>"
+        for row in top_bottom.get("top_20_winners", [])[:10]
+    )
+    contrary_rows = "".join(f"<li>{html.escape(str(item))}</li>" for item in contradictory.get("summary", []))
+    return f"""<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>INV-004 NQ Qualified Performance Attribution</title>
+<style>body{{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;margin:24px;background:#f6f7f4;color:#1f2933}}main{{max-width:1240px;margin:auto}}section{{background:white;border:1px solid #d9e0df;border-radius:6px;margin:16px 0;padding:16px}}table{{width:100%;border-collapse:collapse;font-size:13px}}th,td{{border-bottom:1px solid #e7ecea;padding:7px;text-align:left;vertical-align:top}}th{{background:#eef2ef}}.warn{{color:#8a5a00;font-weight:700}}</style>
+</head><body><main>
+<h1>INV-004 NQ Qualified Performance Attribution</h1>
+<p class="warn">Descriptive, non-causal, source-integrity-qualified research only. No production recommendation or trading authority.</p>
+<section><h2>Summary</h2><p>Trades: {summary.get('trade_count')} | Total P&L proxy: {_format_money(metrics.get('total_realized_pnl_proxy'))} | Average: {_format_money(metrics.get('average_realized_pnl_proxy'))} | Median: {_format_money(metrics.get('median_realized_pnl_proxy'))} | Win rate: {metrics.get('win_rate')}</p></section>
+<section><h2>Tail Sensitivity</h2><p>{html.escape(str(tail.get('primary_finding')))}</p><table><thead><tr><th>View</th><th>Included</th><th>Excluded</th><th>Total P&L</th><th>Average</th><th>Median</th></tr></thead><tbody>{tail_rows}</tbody></table></section>
+<section><h2>Top Strategy Contributors</h2><table><thead><tr><th>Strategy</th><th>Count</th><th>Total</th><th>Average</th><th>Win Rate</th><th>% NQ Total</th></tr></thead><tbody>{concentration_rows('strategy')}</tbody></table></section>
+<section><h2>Session Contributors</h2><table><thead><tr><th>Session</th><th>Count</th><th>Total</th><th>Average</th><th>Win Rate</th><th>% NQ Total</th></tr></thead><tbody>{concentration_rows('session')}</tbody></table></section>
+<section><h2>Controlled Comparisons</h2><p>{html.escape(str(controlled.get('summary', {}).get('finding')))}</p></section>
+<section><h2>Strongest Contradictory Evidence</h2><ul>{contrary_rows}</ul></section>
+<section><h2>Top 10 Winners</h2><table><thead><tr><th>Research Record</th><th>Side</th><th>P&L</th><th>Strategy</th><th>Session</th><th>Exit Reason</th></tr></thead><tbody>{trade_rows}</tbody></table></section>
+</main></body></html>
+"""
+
+
 def side_comparisons_by_field(rows: Sequence[Mapping[str, Any]], field: str) -> dict[str, Any]:
     grouped: dict[str, list[Mapping[str, Any]]] = {}
     for row in rows:
@@ -2744,6 +3357,7 @@ def durable_investigation_summary_filename(investigation_id: str) -> str:
         "INV-001": "INV-001-extreme-loss-concentration.md",
         "INV-002": "INV-002-long-short-underperformance.md",
         "INV-003": "INV-003-performance-over-time.md",
+        "INV-004": "INV-004-nq-qualified-performance-attribution.md",
     }.get(investigation_id, f"{investigation_id}.md")
 
 
@@ -3080,6 +3694,7 @@ def render_presentation_html(analysis: Mapping[str, Any]) -> str:
         for anchor, label in (
             ("overview", "Overview"),
             ("population-views", "Population Views"),
+            ("inv004", "INV-004 NQ"),
             ("cohorts", "Cohort Comparison"),
             ("controlled", "Within-Instrument View"),
             ("distributions", "Distributions"),
@@ -3094,6 +3709,7 @@ def render_presentation_html(analysis: Mapping[str, Any]) -> str:
     )
     population_view_rows = render_population_view_rows(analysis)
     anomaly_rows = render_anomaly_rows(analysis)
+    inv_004_rows = render_inv_004_highlight_rows(analysis)
     distribution_sections = "".join(
         render_distribution_chart(key, item)
         for key, item in analysis.get("distributions", {}).items()
@@ -3180,6 +3796,11 @@ def render_presentation_html(analysis: Mapping[str, Any]) -> str:
     <h3>Source-Confirmed Anomaly Records</h3>
     <table><thead><tr><th>Research Record</th><th>Instrument</th><th>Side</th><th>P&L Proxy</th><th>Classification</th><th>Evidence</th></tr></thead><tbody>{anomaly_rows}</tbody></table>
     <p class="muted">Review-required records: {population.get('review_required_count')}.</p>
+  </section>
+  <section id="inv004">
+    <h2>INV-004: NQ Qualified Performance Attribution</h2>
+    <p>Prepared investigation highlight over the active source-integrity-qualified population. Descriptive only; no causal or production language.</p>
+    <table><thead><tr><th>Metric</th><th>Value</th></tr></thead><tbody>{inv_004_rows}</tbody></table>
   </section>
   <section id="cohorts">
     <h2>Cohort Comparison</h2>
@@ -3439,6 +4060,32 @@ def render_anomaly_rows(analysis: Mapping[str, Any]) -> str:
     if not rows:
         return '<tr><td colspan="6">No source-confirmed anomaly records in the prepared eligibility artifact.</td></tr>'
     return "".join(rows)
+
+
+def render_inv_004_highlight_rows(analysis: Mapping[str, Any]) -> str:
+    highlight = analysis.get("investigation_highlights", {}).get("INV-004", {})
+    top = highlight.get("top_contributors", {})
+    rows = [
+        ("Qualified NQ trades", highlight.get("qualified_nq_trade_count")),
+        ("Total P&L proxy", _format_money(highlight.get("total_realized_pnl_proxy"))),
+        ("Average P&L proxy", _format_money(highlight.get("average_realized_pnl_proxy"))),
+        ("Median P&L proxy", _format_money(highlight.get("median_realized_pnl_proxy"))),
+        ("Win rate", _format_percent(highlight.get("win_rate"))),
+        ("After excluding top 10%", _format_money(highlight.get("tail_sensitivity", {}).get("excluding_top_10_percent_total"))),
+        ("Tail sensitivity", highlight.get("tail_sensitivity", {}).get("primary_finding")),
+        ("Top strategy", top.get("strategy", {}).get("value")),
+        ("Top lane", top.get("lane", {}).get("value")),
+        ("Top session", top.get("session", {}).get("value")),
+        ("Strongest contradictory evidence", "; ".join(str(item) for item in highlight.get("strongest_contradictory_evidence", []))),
+        ("Investigation artifact", highlight.get("artifact_path")),
+    ]
+    return "".join(
+        "<tr>"
+        f"<td>{html.escape(str(label))}</td>"
+        f"<td>{html.escape(str(value if value not in (None, '') else 'MISSING'))}</td>"
+        "</tr>"
+        for label, value in rows
+    )
 
 
 def render_distribution_chart(key: str, item: Mapping[str, Any]) -> str:

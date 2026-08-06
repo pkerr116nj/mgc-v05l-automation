@@ -11,14 +11,22 @@ from mgc_v05l.execution_core.track_b_research_evidence_explorer import (
     build_investigation_index,
     build_investigation_records,
     build_loss_attribution,
+    build_inv_004,
     build_research_evidence_explorer,
     build_within_instrument_comparison,
     classify_loss_trade,
     filter_population,
     investigation_metrics,
+    nq_breadth_classification,
+    nq_concentration_by_dimensions,
+    nq_controlled_comparisons,
+    nq_contradictory_evidence,
+    nq_tail_sensitivity,
+    nq_rolling_windows,
     reconcile_extreme_trade_pnl,
     render_presentation_html,
     render_investigation_index_html,
+    render_inv_004_html,
     run_research_evidence_explorer,
     run_research_investigations,
     trimmed_mean,
@@ -404,7 +412,7 @@ def test_investigation_records_have_fingerprints_guardrails_and_ra8_optional(tmp
         explorer_path=tmp_path / "explorer.json",
     )
 
-    assert sorted(records) == ["INV-001", "INV-002", "INV-003"]
+    assert sorted(records) == ["INV-001", "INV-002", "INV-003", "INV-004"]
     assert records["INV-001"]["deterministic_fingerprint"]
     assert records["INV-002"]["conclusion_status"] in {"PARTIALLY_SUPPORTED", "INCONCLUSIVE"}
     assert records["INV-003"]["evidence"]["milestone_periods"]["boundaries"]
@@ -442,6 +450,79 @@ def test_run_investigations_writes_artifacts_and_durable_summaries(tmp_path: Pat
     assert (output_dir / "INV-001" / "anomaly_source_trace.json").exists()
     assert (output_dir / "INV-001" / "anomaly_root_cause_review.html").exists()
     assert json.loads((output_dir / "INV-002" / "validation_report.json").read_text())["status"] in {"VALID", "VALID_WITH_WARNINGS"}
+    assert (output_dir / "INV-004" / "nq_performance_attribution.html").exists()
+    assert (docs_dir / "INV-004-nq-qualified-performance-attribution.md").exists()
+
+
+def test_inv_004_qualified_nq_population_accounting_and_tail_sensitivity() -> None:
+    rows = _nq_rows()
+
+    inv = build_inv_004(rows, _common())
+
+    assert inv["population"]["count"] == 60
+    assert inv["performance_summary"]["metrics"]["total_realized_pnl_proxy"] == 10150.0
+    assert inv["tail_sensitivity"]["excluding_single_largest_winner"]["excluded_count"] == 1
+    assert inv["tail_sensitivity"]["excluding_top_10_percent"]["metrics"]["total_realized_pnl_proxy"] > 0
+    assert inv["top_bottom_trades"]["top_20_winners"][0]["eligibility_classification"] == "ELIGIBLE_WITH_LIMITATIONS"
+    assert inv["conclusion_status"] == "PARTIALLY_SUPPORTED"
+
+
+def test_inv_004_concentration_percentages_and_breadth_are_deterministic() -> None:
+    rows = _nq_rows()
+
+    concentration = nq_concentration_by_dimensions(rows)
+    tail = nq_tail_sensitivity(rows)
+    breadth = nq_breadth_classification(tail, concentration)
+
+    strategy_total_pct = sum(item["percentage_of_nq_total_contribution"] for item in concentration["dimensions"]["strategy"])
+    assert abs(strategy_total_pct - 1.0) < 0.00001
+    assert breadth["classification"] in {"BROADLY_DISTRIBUTED", "MODERATELY_CONCENTRATED", "HIGHLY_CONCENTRATED"}
+    assert tail["deterministic_fingerprint"] == nq_tail_sensitivity(rows)["deterministic_fingerprint"]
+
+
+def test_inv_004_controlled_comparisons_apply_minimum_sample_thresholds() -> None:
+    rows = _nq_rows()
+    sparse_rows = rows[:15]
+
+    controlled = nq_controlled_comparisons(rows)
+    sparse = nq_controlled_comparisons(sparse_rows)
+
+    assert controlled["global_long_short"]["long_count"] == 30
+    assert controlled["global_long_short"]["short_count"] == 30
+    assert controlled["summary"]["controlled_cell_count"] >= 1
+    assert sparse["summary"]["controlled_cell_count"] == 0
+    assert sparse["controls"]["side_within_session"]["excluded_cells"]
+
+
+def test_inv_004_contradictory_evidence_and_html_are_explicit() -> None:
+    rows = _nq_rows()
+    concentration = nq_concentration_by_dimensions(rows)
+    tail = nq_tail_sensitivity(rows)
+    rolling = nq_rolling_windows(rows)
+
+    contradictory = nq_contradictory_evidence(rows, concentration=concentration, tail=tail, rolling=rolling)
+    inv = build_inv_004(rows, _common())
+    html = render_inv_004_html(inv)
+
+    assert contradictory["summary"]
+    assert "Sparse path/excursion evidence limits entry-versus-exit attribution." in contradictory["summary"]
+    assert "No production recommendation" in html
+    assert "Top Strategy Contributors" in html
+
+
+def test_inv_004_explorer_highlight_and_no_hidden_recommendations(tmp_path: Path) -> None:
+    analysis, _, _ = build_research_evidence_explorer(
+        [_crr_row_from_drill(row) for row in _nq_rows()],
+        crr_validation=_crr_validation(),
+        crr_path=tmp_path / "crr.jsonl",
+        crr_validation_path=tmp_path / "validation.json",
+        generated_at=NOW,
+    )
+    rendered = render_presentation_html(analysis)
+
+    assert analysis["investigation_highlights"]["INV-004"]["qualified_nq_trade_count"] == 60
+    assert "INV-004: NQ Qualified Performance Attribution" in rendered
+    assert "Descriptive only" in rendered
 
 
 def test_loss_classification_defaults_to_insufficient_evidence_and_requires_review() -> None:
@@ -692,3 +773,99 @@ def _drill_row(
         "missing_fields": [] if ra8 else ["ra8_finalized_capture"],
         "source_provenance": [{"source_name": "fixture", "record_fingerprint": research_record_id}],
     }
+
+
+def _nq_rows() -> list[dict[str, object]]:
+    rows: list[dict[str, object]] = []
+    pnl_values = [2500.0, 2000.0, 1500.0, 1000.0, 850.0, 700.0, 600.0, 550.0, 500.0, 450.0]
+    pnl_values.extend([400.0] * 20)
+    pnl_values.extend([-300.0] * 20)
+    pnl_values.extend([-250.0] * 10)
+    for index, pnl in enumerate(pnl_values):
+        side = "LONG" if index % 2 == 0 else "SHORT"
+        session = "GLOBEX" if index < 30 else "US_RTH"
+        strategy = "nq_globex_long" if session == "GLOBEX" and side == "LONG" else f"nq_{session.lower()}_{side.lower()}"
+        row = _drill_row(f"nq_{index:03d}", pnl=pnl, instrument="NQ", side=side, session=session, ra8=index < 5)
+        row.update(
+            {
+                "strategy_id": strategy,
+                "lane_id": f"{strategy}_lane",
+                "regime": "HIGH_VOL" if index % 3 == 0 else "NORMAL",
+                "contract": "NQU6",
+                "research_eligibility": {"classification": "ELIGIBLE_WITH_LIMITATIONS"},
+                "calendar_month": "2026-08",
+            }
+        )
+        rows.append(row)
+    return rows
+
+
+def _common() -> dict[str, object]:
+    return {
+        "schema_version": "research_investigation_v1",
+        "generated_at": NOW.isoformat().replace("+00:00", "Z"),
+        "active_population_view": "SOURCE_INTEGRITY_QUALIFIED",
+        "source_artifacts": {
+            "crr": "crr.jsonl",
+            "explorer": "research_evidence_explorer_v1.json",
+        },
+        "source_fingerprints": {"explorer": "fixture"},
+        "guardrails": {
+            "diagnostic_only": True,
+            "production_recommendation": False,
+            "trading_gate": False,
+        },
+        "production_recommendation": False,
+        "trading_gate": False,
+    }
+
+
+def _crr_row_from_drill(row: dict[str, object]) -> dict[str, object]:
+    crr = _crr_row(
+        str(row["research_record_id"]),
+        pnl=float(row["realized_pnl_proxy"]),
+        side=str(row["side"]),
+        instrument=str(row["instrument"]),
+        mfe=None,
+        mae=None,
+    )
+    crr["research_record_id"] = row["research_record_id"]
+    crr["trade_identity"].update(
+        {
+            "trade_id": row["trade_id"],
+            "source_trade_id": row["source_trade_id"],
+            "instrument": row["instrument"],
+            "contract": row["contract"],
+            "side": row["side"],
+            "quantity": row["quantity"],
+        }
+    )
+    crr["entry_anchor"].update(
+        {
+            "entry_time": row["entry_time"],
+            "strategy_id": row["strategy_id"],
+            "lane_id": row["lane_id"],
+        }
+    )
+    crr["exit_anchor"].update(
+        {
+            "exit_time": row["exit_time"],
+            "exit_policy": row["exit_policy"],
+            "exit_reason": row["exit_reason"],
+        }
+    )
+    crr["outcome_summary"]["realized_pnl_proxy"] = row["realized_pnl_proxy"]
+    crr["enrichment_ref"]["context_validity_summary"].update(
+        {
+            "session": row["session"],
+            "market_context_validity_classification": "VALID",
+        }
+    )
+    crr["path_ref"].update(
+        {
+            "canonical_trade_path_id": f"path_{row['research_record_id']}",
+            "capture_id": f"capture_{row['research_record_id']}" if row.get("path_status", {}).get("ra8") == "EXACT" else None,
+        }
+    )
+    crr["source_provenance"] = row["source_provenance"]
+    return crr
