@@ -1,4 +1,4 @@
-import type { OperatorDesktopApi } from "./types";
+import type { OperatorDesktopApi, ResearchControlCenterApi } from "./types";
 
 interface BootstrapShellState {
   state?: string;
@@ -17,6 +17,7 @@ interface BootstrapShellBridge {
 declare global {
   interface Window {
     operatorDesktop?: OperatorDesktopApi;
+    researchControlCenter?: ResearchControlCenterApi;
     __MGC_BOOTSTRAP__?: BootstrapShellBridge;
   }
 }

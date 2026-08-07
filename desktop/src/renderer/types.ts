@@ -248,3 +248,24 @@ export interface OperatorDesktopApi {
   openExternalUrl(url: string): Promise<DesktopCommandResult>;
   copyText(text: string): Promise<DesktopCommandResult>;
 }
+
+
+export type ResearchReadModelName =
+  | "research_questions_and_investigations_v1"
+  | "research_evidence_coverage_v1"
+  | "research_checkpoints_v1"
+  | "research_roadmap_v1";
+
+export type ResearchModelStatus = "HEALTHY" | "VALID_WITH_WARNINGS" | "STALE" | "MISSING" | "INVALID" | "NOT_READY";
+
+export interface ResearchReadModelResult {
+  ok: boolean;
+  model_name: ResearchReadModelName;
+  model_status: ResearchModelStatus;
+  payload: JsonRecord | null;
+  error: string | null;
+}
+
+export interface ResearchControlCenterApi {
+  getReadModel(name: ResearchReadModelName): Promise<ResearchReadModelResult>;
+}

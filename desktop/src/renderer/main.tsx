@@ -1,6 +1,7 @@
 import React from "react";
 import ReactDOM from "react-dom/client";
 import { App } from "./App";
+import { ResearchControlCenterPage } from "./pages/research/ResearchControlCenterPage";
 import {
   BootstrapErrorBoundary,
   BootstrapReadyMarker,
@@ -52,6 +53,14 @@ if (bootstrapScenario === "bootstrap-fatal") {
         detail="This packaged launch intentionally rendered the fatal bootstrap fallback for validation."
         stateCode="FORCED_BOOTSTRAP_FATAL"
       />
+    </React.StrictMode>,
+  );
+} else if (window.researchControlCenter && !window.operatorDesktop) {
+  root.render(
+    <React.StrictMode>
+      <BootstrapErrorBoundary>
+        <ResearchControlCenterPage />
+      </BootstrapErrorBoundary>
     </React.StrictMode>,
   );
 } else if (!window.operatorDesktop) {

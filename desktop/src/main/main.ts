@@ -1,4 +1,6 @@
 import { app, BrowserWindow, Menu, ipcMain } from "electron";
+import { fixtureResearchReadModelResult } from "./shared/researchControlCenter";
+import { researchControlCenterHashRoute, researchControlCenterWindowOptions } from "./researchWindow";
 import fsSync from "node:fs";
 import fs from "node:fs/promises";
 import path from "node:path";
@@ -25,6 +27,7 @@ import {
 } from "./runtime";
 
 let mainWindow: BrowserWindow | null = null;
+let researchControlCenterWindow: BrowserWindow | null = null;
 let createWindowInFlight = false;
 const appLaunchSessionId = `${Date.now()}-${process.pid}`;
 let startupStatusWriteChain: Promise<void> = Promise.resolve();
@@ -299,6 +302,10 @@ function rendererEntry(): string {
   return `file://${path.join(__dirname, "..", "renderer", "index.html")}`;
 }
 
+function researchRendererEntry(): string {
+  return `${rendererEntry()}${researchControlCenterHashRoute()}`;
+}
+
 function startupArtifactPaths(): { statusPath: string; eventsPath: string } {
   const captureTargetPath =
     cliSwitchValue("mgc-capture-path") ||
@@ -418,6 +425,24 @@ function createMenu(): Menu {
       ],
     },
   ]);
+}
+
+async function createResearchControlCenterWindow(): Promise<void> {
+  if (researchControlCenterWindow && !researchControlCenterWindow.isDestroyed()) {
+    if (researchControlCenterWindow.isMinimized()) {
+      researchControlCenterWindow.restore();
+    }
+    researchControlCenterWindow.focus();
+    return;
+  }
+  const preloadPath = path.join(__dirname, "researchPreload.js");
+  const targetEntry = researchRendererEntry();
+  const options = researchControlCenterWindowOptions(preloadPath);
+  researchControlCenterWindow = new BrowserWindow(options);
+  researchControlCenterWindow.on("closed", () => {
+    researchControlCenterWindow = null;
+  });
+  await researchControlCenterWindow.loadURL(targetEntry);
 }
 
 async function createWindow(): Promise<void> {
@@ -540,6 +565,7 @@ function installIpcHandlers(): void {
       { paperTradeLogVisibleRange: options?.paperTradeLogVisibleRange ?? null },
     ),
   );
+  ipcMain.handle("research-control-center:get-read-model", (_event, name: string) => fixtureResearchReadModelResult(name));
   ipcMain.handle("desktop:start-dashboard", () => startDashboard());
   ipcMain.handle("desktop:stop-dashboard", () => stopDashboard());
   ipcMain.handle("desktop:restart-dashboard", () => restartDashboard());
@@ -613,6 +639,10 @@ app.whenReady().then(async () => {
   logStartupStage("app ready");
   await createWindow();
   logStartupStage("whenReady:createWindow:done");
+  if (cliSwitchValue("mgc-open-research-control-center") === "1" || process.env.MGC_OPEN_RESEARCH_CONTROL_CENTER === "1") {
+    await createResearchControlCenterWindow();
+    logStartupStage("whenReady:createResearchControlCenterWindow:done");
+  }
   void prepareDesktopForLaunch()
     .then(() => {
       logStartupStage("service-host:warmup-dispatched");
