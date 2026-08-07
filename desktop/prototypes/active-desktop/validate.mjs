@@ -12,6 +12,7 @@ const requiredFiles = [
   "app.mjs",
   "build_market_tape_snapshot.mjs",
   "build_system_pipeline_snapshot.mjs",
+  "build_exposure_snapshot.mjs",
 ];
 const forbiddenTokens = [
   "runtime state",
@@ -59,6 +60,17 @@ for (const token of ["observatory_system_pipeline_snapshot_v1", "PREPARED_PRODUC
 }
 if (pipelineAdapter.includes("broker_authority: true") || pipelineAdapter.includes("runtime_authority: true")) {
   errors.push("build_system_pipeline_snapshot.mjs grants authority");
+}
+
+const exposureAdapter = fs.readFileSync(path.join(prototypeRoot, "build_exposure_snapshot.mjs"), "utf8");
+for (const token of ["submitOrder", "cancelOrder", "strategy input", "computeSafeState", "computeReadiness"]) {
+  if (exposureAdapter.includes(token)) errors.push(`build_exposure_snapshot.mjs contains forbidden authority token: ${token}`);
+}
+for (const token of ["observatory_exposure_snapshot_v1", "PREPARED_MANAGED_EXPOSURE_ARTIFACTS", "display_only", "trading_input: false", "broker_authority: false"]) {
+  if (!exposureAdapter.includes(token)) errors.push(`build_exposure_snapshot.mjs missing required contract token: ${token}`);
+}
+if (exposureAdapter.includes("broker_authority: true") || exposureAdapter.includes("runtime_authority: true")) {
+  errors.push("build_exposure_snapshot.mjs grants authority");
 }
 
 const html = fs.readFileSync(path.join(prototypeRoot, "index.html"), "utf8");

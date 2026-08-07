@@ -16,6 +16,7 @@ const riverContext = riverMaterial.getContext("2d", { alpha: true });
 let currentScenarioName = new URLSearchParams(window.location.search).get("scenario") || "ATLANTIC_BRIDGE_MIDDAY";
 let preparedMarketTape = null;
 let preparedSystemFlow = null;
+let preparedExposure = null;
 let eventTimer = null;
 
 function stateColor(state) {
@@ -219,6 +220,15 @@ function exposureBands(scenario) {
   return map[scenario.exposure] || [];
 }
 
+function scenarioWithPreparedExposure(scenario) {
+  if (!preparedExposure) return scenario;
+  return {
+    ...scenario,
+    exposure: preparedExposure.visual?.exposure_state || "UNKNOWN",
+    exposureAgeSeconds: preparedExposure.visual?.exposure_age_seconds || 0,
+  };
+}
+
 function drawSediment(scenario, width, centerY, riverHeight) {
   if (scenario.staleAgeSeconds <= 0) return;
   const sediment = Math.min(scenario.staleAgeSeconds / 1200, 1);
@@ -234,6 +244,7 @@ function drawSediment(scenario, width, centerY, riverHeight) {
 }
 
 function drawRiver(scenario) {
+  const exposureScenario = scenarioWithPreparedExposure(scenario);
   const width = riverMaterial.clientWidth;
   const height = riverMaterial.clientHeight;
   riverContext.clearRect(0, 0, width, height);
@@ -261,7 +272,7 @@ function drawRiver(scenario) {
   riverContext.closePath();
   riverContext.fill();
 
-  for (const band of exposureBands(scenario)) {
+  for (const band of exposureBands(exposureScenario)) {
     const x = width * band.x;
     const bandWidth = width * band.width;
     const gradient = riverContext.createRadialGradient(x, centerY, 0, x, centerY, bandWidth);
@@ -356,6 +367,39 @@ async function loadPreparedSystemFlowIfRequested() {
   }
 }
 
+async function loadPreparedExposureIfRequested() {
+  const params = new URLSearchParams(window.location.search);
+  if (params.get("exposure") !== "prepared") return;
+  try {
+    const module = await import(`./exposure_snapshot.generated.mjs?generated=${Date.now()}`);
+    const snapshot = module.exposureSnapshot;
+    if (!snapshot || snapshot.schema_version !== "observatory_exposure_snapshot_v1") {
+      throw new Error("prepared exposure snapshot has an unsupported schema");
+    }
+    preparedExposure = snapshot;
+    app.dataset.exposureSource = snapshot.model_status || "UNKNOWN";
+    app.dataset.exposureDisplayClass = snapshot.visual?.display_class || "UNKNOWN";
+    canvasNote.textContent = `${canvasNote.textContent} Exposure: ${snapshot.model_status}; positions=${snapshot.aggregate?.position_count ?? "UNKNOWN"}; generated ${snapshot.generated_at}.`;
+    renderScenario();
+  } catch (error) {
+    preparedExposure = {
+      schema_version: "observatory_exposure_snapshot_v1",
+      model_status: "MISSING",
+      generated_at: null,
+      aggregate: { position_count: null },
+      visual: {
+        exposure_state: "UNKNOWN",
+        display_class: "UNKNOWN",
+        exposure_age_seconds: 0,
+      },
+    };
+    app.dataset.exposureSource = "MISSING";
+    app.dataset.exposureDisplayClass = "UNKNOWN";
+    canvasNote.textContent = `${canvasNote.textContent} Exposure source missing; no exposure state inferred.`;
+    renderScenario();
+  }
+}
+
 scenarioToggle.addEventListener("click", () => {
   scenarioPanel.hidden = !scenarioPanel.hidden;
 });
@@ -385,3 +429,4 @@ resizeCanvases();
 applyScenario(currentScenarioName);
 loadPreparedMarketTapeIfRequested();
 loadPreparedSystemFlowIfRequested();
+loadPreparedExposureIfRequested();
