@@ -7,6 +7,7 @@ import {
   buildFixtureTriage,
   fixtureResearchReadModel,
   fixtureResearchReadModelResult,
+  researchCheckpointsReadModelResult,
   researchEvidenceCoverageReadModelResult,
   researchQuestionsAndInvestigationsReadModelResult,
   researchReadModelResult,
@@ -108,7 +109,7 @@ test("RCC business logic avoids broker runtime imports and hard-coded local path
   const combined = files.map((file) => fs.readFileSync(path.join(repoRoot, file), "utf8")).join("\n");
   assert.doesNotMatch(combined, /ibapi|mgc_v05l\.broker|mgc_v05l\.runtime|mgc_v05l\.strategy/);
   assert.doesNotMatch(combined, /\/Users\//);
-  assert.doesNotMatch(combined, /open -a|osascript|xdg-open|start /);
+  assert.doesNotMatch(combined.replace(/prospective_start/g, ""), /open -a|osascript|xdg-open|start /);
   assert.doesNotMatch(combined.replace(/production_recommendation/g, ""), /recommend|should adopt|should change|promote|retire/i);
 });
 
@@ -166,10 +167,7 @@ test("unsupported prepared source schema invalidates only the evidence coverage 
   assert.equal(result.model_status, "INVALID");
   assert.match(result.error ?? "", /Unsupported source schema/);
 
-  const checkpoints = researchReadModelResult("research_checkpoints_v1", { artifactRoot });
   const roadmap = researchReadModelResult("research_roadmap_v1", { artifactRoot });
-  assert.equal(checkpoints.ok, true);
-  assert.equal(checkpoints.payload?.source, "fixture");
   assert.equal(roadmap.ok, true);
   assert.equal(roadmap.payload?.source, "fixture");
 });
@@ -276,6 +274,92 @@ test("real investigation read-model is deterministic across repeated generation"
   const artifactRoot = makeInvestigationArtifacts();
   const first = researchQuestionsAndInvestigationsReadModelResult({ artifactRoot });
   const second = researchQuestionsAndInvestigationsReadModelResult({ artifactRoot });
+  assert.equal(first.ok, true);
+  assert.equal(second.ok, true);
+  assert.equal(first.payload?.deterministic_fingerprint, second.payload?.deterministic_fingerprint);
+  assert.deepEqual(first.payload, second.payload);
+});
+
+test("real checkpoint read-model parses NQ prospective monitor artifacts", () => {
+  const artifactRoot = makeCheckpointArtifacts();
+  const result = researchCheckpointsReadModelResult({ artifactRoot });
+  assert.equal(result.ok, true);
+  assert.equal(result.model_status, "VALID_WITH_WARNINGS");
+  const payload = result.payload as Record<string, unknown>;
+  assert.equal(payload.source, "prepared_artifacts");
+  assert.equal(payload.checkpoint_identity, "cohort_id + checkpoint_trade_count");
+  assert.equal(payload.current_prospective_trade_count, 0);
+  assert.equal(payload.validation_state, "NOT_ENOUGH_PROSPECTIVE_DATA");
+  const cohorts = payload.cohorts as Array<Record<string, unknown>>;
+  assert.equal(cohorts.length, 1);
+  assert.equal(cohorts[0].cohort_id, "nq_globex_participation_long");
+});
+
+test("real checkpoint read-model preserves thresholds and zero-trade progress", () => {
+  const artifactRoot = makeCheckpointArtifacts();
+  const result = researchCheckpointsReadModelResult({ artifactRoot });
+  assert.equal(result.ok, true);
+  const payload = result.payload as Record<string, unknown>;
+  assert.deepEqual(payload.thresholds, [10, 20, 50, 100]);
+  const progress = payload.progress as Array<Record<string, unknown>>;
+  assert.deepEqual(progress.map((item) => item.remaining_trade_count), [10, 20, 50, 100]);
+  assert.deepEqual(progress.map((item) => item.reached), [false, false, false, false]);
+});
+
+test("real checkpoint read-model preserves append-only history records", () => {
+  const artifactRoot = makeCheckpointArtifacts({}, [
+    {
+      cohort_id: "nq_globex_participation_long",
+      checkpoint_trade_count: 10,
+      generated_at: "2026-08-08T12:00:00+00:00",
+      validation_state: "CHECKPOINT_REACHED",
+      deterministic_fingerprint: "checkpoint_fp",
+    },
+  ]);
+  const result = researchCheckpointsReadModelResult({ artifactRoot });
+  assert.equal(result.ok, true);
+  const payload = result.payload as Record<string, unknown>;
+  assert.equal(payload.checkpoint_history_count, 1);
+  const history = payload.checkpoint_history as Array<Record<string, unknown>>;
+  assert.equal(history[0].cohort_id, "nq_globex_participation_long");
+  assert.equal(history[0].checkpoint_trade_count, 10);
+});
+
+test("real checkpoint read-model preserves source fingerprints", () => {
+  const artifactRoot = makeCheckpointArtifacts();
+  const result = researchCheckpointsReadModelResult({ artifactRoot });
+  assert.equal(result.ok, true);
+  const fingerprints = (result.payload as Record<string, unknown>).source_fingerprints as Record<string, unknown>;
+  assert.equal(fingerprints.nq_discovery_baselines, "baselines_fp");
+  assert.equal(fingerprints.nq_prospective_population, "population_fp");
+  assert.equal(fingerprints.nq_prospective_validation, "validation_fp");
+});
+
+test("real checkpoint read-model does not synthesize conclusions or confidence", () => {
+  const artifactRoot = makeCheckpointArtifacts();
+  const result = researchCheckpointsReadModelResult({ artifactRoot });
+  assert.equal(result.ok, true);
+  const serialized = JSON.stringify(result.payload);
+  assert.doesNotMatch(serialized.replace(/production_recommendation/g, ""), /confidence|conclusion|significant|recommend/);
+  assert.match(serialized, /NOT_ENOUGH_PROSPECTIVE_DATA/);
+});
+
+test("missing checkpoint source is fail-soft for checkpoint model only", () => {
+  const artifactRoot = makeCheckpointArtifacts({ omit: ["prospective_cohort_results"] });
+  const result = researchCheckpointsReadModelResult({ artifactRoot });
+  assert.equal(result.ok, true);
+  assert.equal(result.model_status, "VALID_WITH_WARNINGS");
+  const sources = (result.payload as Record<string, unknown>).source_artifacts as Array<Record<string, unknown>>;
+  assert.equal(sources.find((source) => source.source_id === "nq_prospective_cohort_results")?.status, "MISSING");
+  const roadmap = researchReadModelResult("research_roadmap_v1", { artifactRoot });
+  assert.equal(roadmap.ok, true);
+  assert.equal(roadmap.payload?.source, "fixture");
+});
+
+test("real checkpoint read-model is deterministic across repeated generation", () => {
+  const artifactRoot = makeCheckpointArtifacts();
+  const first = researchCheckpointsReadModelResult({ artifactRoot });
+  const second = researchCheckpointsReadModelResult({ artifactRoot });
   assert.equal(first.ok, true);
   assert.equal(second.ok, true);
   assert.equal(first.payload?.deterministic_fingerprint, second.payload?.deterministic_fingerprint);
@@ -452,5 +536,104 @@ function makeInvestigationArtifacts(overrides: Record<string, Record<string, unk
     fs.mkdirSync(path.dirname(target), { recursive: true });
     fs.writeFileSync(target, `${JSON.stringify({ ...record, ...(overrides[id] || {}) }, null, 2)}\n`, "utf8");
   }
+  return root;
+}
+
+function makeCheckpointArtifacts(options: { omit?: string[] } = {}, historyRows: Record<string, unknown>[] = []): string {
+  const root = fs.mkdtempSync(path.join(process.env.TMPDIR || "/tmp", "rcc-checkpoints-"));
+  const baseDir = path.join(root, "prospective_nq_cohort_monitor");
+  fs.mkdirSync(baseDir, { recursive: true });
+  const artifacts: Record<string, { file: string; payload: Record<string, unknown> }> = {
+    discovery_baselines: {
+      file: "discovery_baselines.json",
+      payload: {
+        schema_version: "nq_prospective_discovery_baselines_v1",
+        generated_at: "2026-08-06T12:00:00+00:00",
+        deterministic_fingerprint: "baselines_fp",
+        prospective_start: "2026-08-07 00:00:00 America/New_York",
+        baseline_count: 1,
+        baselines: {
+          nq_globex_participation_long: {
+            cohort_id: "nq_globex_participation_long",
+            cohort_definition: { instrument: "NQ", session: "GLOBEX", side: "LONG" },
+            discovery_trade_count: 64,
+            deterministic_fingerprint: "baseline_cohort_fp",
+            metrics: { trade_count: 64, expectancy: 12088.492656 },
+          },
+        },
+      },
+    },
+    prospective_population: {
+      file: "prospective_population.json",
+      payload: {
+        schema_version: "nq_prospective_population_v1",
+        generated_at: "2026-08-06T12:00:00+00:00",
+        deterministic_fingerprint: "population_fp",
+        prospective_start: "2026-08-07 00:00:00 America/New_York",
+        included_count: 0,
+        included_trade_ids: [],
+        excluded_count: 0,
+        pending_unclassified_count: 0,
+      },
+    },
+    prospective_cohort_results: {
+      file: "prospective_cohort_results.json",
+      payload: {
+        schema_version: "nq_prospective_cohort_results_v1",
+        generated_at: "2026-08-06T12:00:00+00:00",
+        deterministic_fingerprint: "results_fp",
+        prospective_start: "2026-08-07 00:00:00 America/New_York",
+        cohorts: {
+          nq_globex_participation_long: {
+            cohort_id: "nq_globex_participation_long",
+            cohort_definition: { instrument: "NQ", session: "GLOBEX", side: "LONG" },
+            prospective_trade_count: 0,
+            validation_state: "NOT_ENOUGH_PROSPECTIVE_DATA",
+            deterministic_fingerprint: "result_cohort_fp",
+            metrics: { trade_count: 0, expectancy: null },
+          },
+        },
+      },
+    },
+    discovery_vs_prospective: {
+      file: "discovery_vs_prospective.json",
+      payload: {
+        schema_version: "nq_discovery_vs_prospective_v1",
+        generated_at: "2026-08-06T12:00:00+00:00",
+        deterministic_fingerprint: "comparison_fp",
+        prospective_start: "2026-08-07 00:00:00 America/New_York",
+        comparisons: {
+          nq_globex_participation_long: {
+            cohort_id: "nq_globex_participation_long",
+            baseline_count: 64,
+            prospective_count: 0,
+            validation_state: "NOT_ENOUGH_PROSPECTIVE_DATA",
+            deltas: {},
+          },
+        },
+      },
+    },
+    validation: {
+      file: "validation_report.json",
+      payload: {
+        schema_version: "nq_prospective_monitor_validation_v1",
+        generated_at: "2026-08-06T12:00:00+00:00",
+        deterministic_fingerprint: "validation_fp",
+        status: "VALID_WITH_WARNINGS",
+        prospective_trade_count: 0,
+        checkpoint_count: historyRows.length,
+        warnings: ["not_enough_prospective_data"],
+        errors: [],
+      },
+    },
+  };
+  const omit = options.omit || [];
+  for (const [key, artifact] of Object.entries(artifacts)) {
+    if (omit.includes(key)) {
+      continue;
+    }
+    fs.writeFileSync(path.join(baseDir, artifact.file), `${JSON.stringify(artifact.payload, null, 2)}\n`, "utf8");
+  }
+  fs.writeFileSync(path.join(baseDir, "checkpoint_history.jsonl"), historyRows.map((row) => JSON.stringify(row)).join("\n") + (historyRows.length ? "\n" : ""), "utf8");
   return root;
 }

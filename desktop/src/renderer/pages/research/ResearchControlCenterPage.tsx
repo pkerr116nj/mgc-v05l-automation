@@ -251,14 +251,68 @@ function EvidenceCoverage(props: { coverage: JsonRecord[]; model?: ResearchReadM
 }
 
 function CheckpointHistory(props: { checkpoints: JsonRecord[]; model?: ResearchReadModelResult }): JSX.Element {
+  const payload = props.model?.payload ?? null;
+  const progress = modelArray(props.model, "progress");
+  const baselines = modelArray(props.model, "discovery_baselines");
+  const cohorts = modelArray(props.model, "cohorts");
+  const history = modelArray(props.model, "checkpoint_history");
+  const checkpointRows = history.length ? history : props.checkpoints;
+  const currentTradeCount = payload?.current_prospective_trade_count ?? "Unknown";
+  const validationState = payload?.validation_state ?? "NOT_READY";
   return (
-    <Panel title="Checkpoint History" subtitle="NQ-specific checkpoint key is cohort_id + checkpoint_trade_count">
+    <Panel title="Checkpoint History" subtitle="NQ prospective monitor only; checkpoint identity is cohort_id + checkpoint_trade_count">
       <ModelStatus model={props.model} />
-      <table className="data-table"><thead><tr><th>Cohort</th><th>Checkpoint</th><th>Confidence</th><th>Contradictory Evidence</th></tr></thead><tbody>
-        {props.checkpoints.map((item) => (
-          <tr key={`${String(item.cohort_id)}-${String(item.checkpoint_trade_count)}`}><td>{String(item.cohort_id)}</td><td>{String(item.checkpoint_trade_count)}</td><td>{String(item.confidence)}</td><td>{asStringArray(item.contradictory_evidence).join("; ")}</td></tr>
+      <KeyValueTable rows={[
+        ["Prospective Start", String(payload?.prospective_start ?? "Missing")],
+        ["Current Prospective Trade Count", String(currentTradeCount)],
+        ["Validation State", String(validationState)],
+        ["Validation Status", String(payload?.validation_status ?? "Missing")],
+      ]} />
+      <h3 className="subsection-title">Checkpoint Progress</h3>
+      <table className="data-table"><thead><tr><th>Checkpoint</th><th>Current</th><th>Remaining</th><th>Reached</th></tr></thead><tbody>
+        {progress.map((item) => (
+          <tr key={String(item.checkpoint_trade_count)}>
+            <td>{String(item.checkpoint_trade_count)}</td>
+            <td>{String(item.current_trade_count)}</td>
+            <td>{String(item.remaining_trade_count)}</td>
+            <td>{String(item.reached)}</td>
+          </tr>
         ))}
       </tbody></table>
+      <h3 className="subsection-title">Frozen Discovery Baselines</h3>
+      <table className="data-table"><thead><tr><th>Cohort</th><th>Discovery Count</th><th>Definition</th></tr></thead><tbody>
+        {baselines.map((item) => (
+          <tr key={String(item.cohort_id)}>
+            <td>{String(item.cohort_id)}</td>
+            <td>{String(item.discovery_trade_count ?? "Missing")}</td>
+            <td>{compactObjectSummary(item.cohort_definition)}</td>
+          </tr>
+        ))}
+      </tbody></table>
+      <h3 className="subsection-title">Prospective Cohorts</h3>
+      <table className="data-table"><thead><tr><th>Cohort</th><th>Prospective Count</th><th>Validation</th><th>Discovery Count</th></tr></thead><tbody>
+        {cohorts.map((item) => (
+          <tr key={String(item.cohort_id)}>
+            <td>{String(item.cohort_id)}</td>
+            <td>{String(item.prospective_trade_count ?? "Missing")}</td>
+            <td><StatusPill status={String(item.validation_state ?? "NOT_ENOUGH_PROSPECTIVE_DATA")} /></td>
+            <td>{String(item.discovery_trade_count ?? "Missing")}</td>
+          </tr>
+        ))}
+      </tbody></table>
+      <h3 className="subsection-title">Checkpoint History</h3>
+      {checkpointRows.length ? (
+        <table className="data-table"><thead><tr><th>Cohort</th><th>Checkpoint</th><th>State</th><th>Generated</th></tr></thead><tbody>
+        {checkpointRows.map((item) => (
+          <tr key={`${String(item.cohort_id)}-${String(item.checkpoint_trade_count)}-${String(item.generated_at ?? "")}`}>
+            <td>{String(item.cohort_id)}</td>
+            <td>{String(item.checkpoint_trade_count)}</td>
+            <td>{String(item.validation_state ?? item.confidence ?? "Missing")}</td>
+            <td>{String(item.generated_at ?? "Missing")}</td>
+          </tr>
+        ))}
+      </tbody></table>
+      ) : <p className="muted-copy">NOT_ENOUGH_PROSPECTIVE_DATA: no checkpoint history records have been produced yet.</p>}
     </Panel>
   );
 }
@@ -321,4 +375,11 @@ function formatCoverage(item: JsonRecord): string {
 
 function uniqueValues(values: unknown[]): string[] {
   return Array.from(new Set(values.map((value) => String(value ?? "Missing")))).sort();
+}
+
+function compactObjectSummary(value: unknown): string {
+  if (!isRecord(value)) {
+    return "Missing";
+  }
+  return Object.entries(value).map(([key, item]) => `${key}=${String(item ?? "null")}`).join(", ");
 }

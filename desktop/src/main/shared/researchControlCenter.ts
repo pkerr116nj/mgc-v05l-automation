@@ -182,6 +182,9 @@ export function researchReadModelResult(name: string, options: ReadModelOptions 
   if (name === "research_evidence_coverage_v1") {
     return researchEvidenceCoverageReadModelResult(options);
   }
+  if (name === "research_checkpoints_v1") {
+    return researchCheckpointsReadModelResult(options);
+  }
   return fixtureResearchReadModelResult(name);
 }
 
@@ -212,6 +215,29 @@ export function researchEvidenceCoverageReadModelResult(options: ReadModelOption
   const modelName: ResearchReadModelName = "research_evidence_coverage_v1";
   try {
     const payload = buildResearchEvidenceCoverageReadModel(options);
+    const validation = validateResearchReadModel(modelName, payload);
+    return {
+      ok: validation.ok,
+      model_name: modelName,
+      model_status: validation.status,
+      payload: validation.ok ? payload : null,
+      error: validation.error,
+    };
+  } catch (error) {
+    return {
+      ok: false,
+      model_name: modelName,
+      model_status: "INVALID",
+      payload: null,
+      error: error instanceof Error ? error.message : String(error),
+    };
+  }
+}
+
+export function researchCheckpointsReadModelResult(options: ReadModelOptions = {}): ResearchReadModelResult {
+  const modelName: ResearchReadModelName = "research_checkpoints_v1";
+  try {
+    const payload = buildResearchCheckpointsReadModel(options);
     const validation = validateResearchReadModel(modelName, payload);
     return {
       ok: validation.ok,
@@ -298,6 +324,11 @@ const SUPPORTED_SOURCE_SCHEMAS = {
   research_eligibility: "research_eligibility_summary_v1",
   prospective_context_coverage: "prospective_market_context_coverage_audit_v1",
   research_evidence_explorer: "research_evidence_explorer_v1",
+  nq_discovery_baselines: "nq_prospective_discovery_baselines_v1",
+  nq_prospective_population: "nq_prospective_population_v1",
+  nq_prospective_cohort_results: "nq_prospective_cohort_results_v1",
+  nq_discovery_vs_prospective: "nq_discovery_vs_prospective_v1",
+  nq_prospective_validation: "nq_prospective_monitor_validation_v1",
 } as const;
 
 const EVIDENCE_SOURCE_RELATIVE_PATHS: Record<"crr_validation" | "research_eligibility" | "prospective_context_coverage" | "research_evidence_explorer", string> = {
@@ -308,6 +339,20 @@ const EVIDENCE_SOURCE_RELATIVE_PATHS: Record<"crr_validation" | "research_eligib
 };
 
 const INVESTIGATION_INDEX_RELATIVE_PATH = path.join("investigations", "investigation_index.json");
+
+const CHECKPOINT_SOURCE_RELATIVE_PATHS: Record<
+  "nq_discovery_baselines" | "nq_prospective_population" | "nq_prospective_cohort_results" | "nq_discovery_vs_prospective" | "nq_prospective_validation",
+  string
+> = {
+  nq_discovery_baselines: path.join("prospective_nq_cohort_monitor", "discovery_baselines.json"),
+  nq_prospective_population: path.join("prospective_nq_cohort_monitor", "prospective_population.json"),
+  nq_prospective_cohort_results: path.join("prospective_nq_cohort_monitor", "prospective_cohort_results.json"),
+  nq_discovery_vs_prospective: path.join("prospective_nq_cohort_monitor", "discovery_vs_prospective.json"),
+  nq_prospective_validation: path.join("prospective_nq_cohort_monitor", "validation_report.json"),
+};
+
+const CHECKPOINT_HISTORY_RELATIVE_PATH = path.join("prospective_nq_cohort_monitor", "checkpoint_history.jsonl");
+const CHECKPOINT_THRESHOLDS = [10, 20, 50, 100] as const;
 
 function defaultArtifactRoot(repoRoot: string): string {
   return path.join(repoRoot, "outputs", "track_b_execution_core", "research_analytics");
@@ -530,6 +575,85 @@ function buildResearchEvidenceCoverageReadModel(options: ReadModelOptions): Rese
   return withFingerprint(payload);
 }
 
+function buildResearchCheckpointsReadModel(options: ReadModelOptions): ResearchReadModelEnvelope {
+  const repoRoot = options.repoRoot || process.env.MGC_REPO_ROOT || process.cwd();
+  const artifactRoot = options.artifactRoot || defaultArtifactRoot(repoRoot);
+  const sources = Object.entries(CHECKPOINT_SOURCE_RELATIVE_PATHS).map(([sourceId, relativePath]) =>
+    readPreparedSource(artifactRoot, sourceId as keyof typeof SUPPORTED_SOURCE_SCHEMAS, relativePath),
+  );
+  const historySource = readPreparedJsonlSource(artifactRoot, "nq_checkpoint_history", CHECKPOINT_HISTORY_RELATIVE_PATH);
+  const invalid = sources.find((source) => source.status === "INVALID");
+  if (invalid) {
+    throw new Error(`Unsupported source schema for ${invalid.source_id}: ${String(invalid.schema_version || "missing")}`);
+  }
+
+  const baselines = sourceData(sources, "nq_discovery_baselines");
+  const population = sourceData(sources, "nq_prospective_population");
+  const results = sourceData(sources, "nq_prospective_cohort_results");
+  const comparisons = sourceData(sources, "nq_discovery_vs_prospective");
+  const validation = sourceData(sources, "nq_prospective_validation");
+  const baselineRecords = isRecord(baselines?.baselines) ? baselines.baselines : {};
+  const resultRecords = isRecord(results?.cohorts) ? results.cohorts : {};
+  const comparisonRecords = isRecord(comparisons?.comparisons) ? comparisons.comparisons : {};
+  const currentTradeCount = numberValue(population?.included_count) ?? numberValue(validation?.prospective_trade_count) ?? 0;
+  const checkpointHistory = historySource.rows.filter(isRecord);
+  const warnings = [
+    ...sources.filter((source) => source.status === "MISSING").map((source) => `missing_source:${source.source_id}`),
+    ...stringArray(validation?.warnings),
+    ...(historySource.status === "MISSING" ? ["missing_source:nq_checkpoint_history"] : []),
+    ...(historySource.status === "INVALID" ? ["invalid_source:nq_checkpoint_history"] : []),
+  ];
+  const cohortIds = Array.from(new Set([...Object.keys(baselineRecords), ...Object.keys(resultRecords), ...Object.keys(comparisonRecords)])).sort();
+  const cohorts = cohortIds.map((cohortId) => {
+    const baseline = isRecord(baselineRecords[cohortId]) ? baselineRecords[cohortId] : {};
+    const result = isRecord(resultRecords[cohortId]) ? resultRecords[cohortId] : {};
+    const comparison = isRecord(comparisonRecords[cohortId]) ? comparisonRecords[cohortId] : {};
+    return {
+      cohort_id: cohortId,
+      cohort_definition: isRecord(baseline.cohort_definition) ? baseline.cohort_definition : isRecord(result.cohort_definition) ? result.cohort_definition : {},
+      discovery_trade_count: numberValue(baseline.discovery_trade_count) ?? numberValue(comparison.baseline_count),
+      prospective_trade_count: numberValue(result.prospective_trade_count) ?? numberValue(comparison.prospective_count) ?? 0,
+      validation_state: stringValue(result.validation_state) ?? stringValue(comparison.validation_state) ?? "NOT_ENOUGH_PROSPECTIVE_DATA",
+      discovery_metrics: isRecord(baseline.metrics) ? baseline.metrics : {},
+      prospective_metrics: isRecord(result.metrics) ? result.metrics : {},
+      discovery_vs_prospective: comparison,
+      deterministic_fingerprint: stringValue(result.deterministic_fingerprint) ?? stringValue(baseline.deterministic_fingerprint) ?? null,
+    };
+  });
+  const payload = {
+    schema_version: "research_checkpoints_v1" as const,
+    generated_at: latestGeneratedAt([...sources, historySource]),
+    model_status: validation?.status === "VALID_WITH_WARNINGS" || warnings.length > 0 ? "VALID_WITH_WARNINGS" as const : "HEALTHY" as const,
+    source: "prepared_artifacts" as const,
+    guardrails: GUARDRAILS,
+    checkpoint_identity: "cohort_id + checkpoint_trade_count",
+    prospective_start: stringValue(baselines?.prospective_start) ?? stringValue(population?.prospective_start) ?? stringValue(results?.prospective_start) ?? stringValue(comparisons?.prospective_start),
+    current_prospective_trade_count: currentTradeCount,
+    thresholds: CHECKPOINT_THRESHOLDS,
+    progress: CHECKPOINT_THRESHOLDS.map((threshold) => ({
+      checkpoint_trade_count: threshold,
+      current_trade_count: currentTradeCount,
+      remaining_trade_count: Math.max(0, threshold - currentTradeCount),
+      reached: currentTradeCount >= threshold,
+    })),
+    validation_state: currentTradeCount === 0 ? "NOT_ENOUGH_PROSPECTIVE_DATA" : stringValue(validation?.status) ?? "MISSING",
+    validation_status: stringValue(validation?.status) ?? sourceStatus(sources, "nq_prospective_validation"),
+    discovery_baselines: cohorts.map((cohort) => ({
+      cohort_id: cohort.cohort_id,
+      cohort_definition: cohort.cohort_definition,
+      discovery_trade_count: cohort.discovery_trade_count,
+      metrics: cohort.discovery_metrics,
+    })),
+    cohorts,
+    checkpoint_history: checkpointHistory,
+    checkpoint_history_count: checkpointHistory.length,
+    source_artifacts: [...sources.map(({ data: _data, ...source }) => source), stripJsonlRows(historySource)],
+    source_fingerprints: Object.fromEntries([...sources, historySource].map((source) => [source.source_id, source.fingerprint ?? null])),
+    warnings: Array.from(new Set(warnings)),
+  };
+  return withFingerprint(payload);
+}
+
 function readPreparedSource(artifactRoot: string, sourceId: keyof typeof SUPPORTED_SOURCE_SCHEMAS, relativePath: string) {
   const artifactPath = path.join(artifactRoot, relativePath);
   const sourceRelativePath = path.join("outputs", "track_b_execution_core", "research_analytics", relativePath);
@@ -566,6 +690,30 @@ function readPreparedSource(artifactRoot: string, sourceId: keyof typeof SUPPORT
     };
   } catch (error) {
     return { source_id: sourceId, path: sourceRelativePath, schema_version: null, generated_at: null, fingerprint: null, status: "INVALID" as const, error: error instanceof Error ? error.message : String(error), data: null };
+  }
+}
+
+function readPreparedJsonlSource(artifactRoot: string, sourceId: string, relativePath: string) {
+  const artifactPath = path.join(artifactRoot, relativePath);
+  const sourceRelativePath = path.join("outputs", "track_b_execution_core", "research_analytics", relativePath);
+  if (!fs.existsSync(artifactPath)) {
+    return { source_id: sourceId, path: sourceRelativePath, schema_version: "jsonl", generated_at: null, fingerprint: null, status: "MISSING" as const, error: "source_artifact_missing", rows: [] as unknown[] };
+  }
+  try {
+    const content = fs.readFileSync(artifactPath, "utf8");
+    const rows = content.split(/\r?\n/).filter((line) => line.trim()).map((line) => JSON.parse(line) as unknown);
+    return {
+      source_id: sourceId,
+      path: sourceRelativePath,
+      schema_version: "jsonl",
+      generated_at: null,
+      fingerprint: derivedSourceFingerprint(rows),
+      status: "HEALTHY" as const,
+      error: null,
+      rows,
+    };
+  } catch (error) {
+    return { source_id: sourceId, path: sourceRelativePath, schema_version: "jsonl", generated_at: null, fingerprint: null, status: "INVALID" as const, error: error instanceof Error ? error.message : String(error), rows: [] as unknown[] };
   }
 }
 
@@ -606,7 +754,7 @@ function unavailableMetric(key: string, detail: string): Record<string, unknown>
   return { key, status: "NOT_READY", available_count: null, missing_count: null, coverage_rate: null, detail };
 }
 
-function latestGeneratedAt(sources: readonly ReturnType<typeof readPreparedSource>[]): string {
+function latestGeneratedAt(sources: readonly { generated_at: string | null }[]): string {
   const generated = sources.map((source) => source.generated_at).filter((value): value is string => Boolean(value)).sort();
   return generated[generated.length - 1] || GENERATED_AT;
 }
@@ -632,6 +780,11 @@ function percentage(numerator: number | null, denominator: number | null): numbe
 
 function derivedSourceFingerprint(payload: unknown): string {
   return `source_${stableFingerprint(payload).replace(/^fixture_/, "")}`;
+}
+
+function stripJsonlRows<T extends { rows: unknown[] }>(source: T): Omit<T, "rows"> {
+  const { rows: _rows, ...rest } = source;
+  return rest;
 }
 
 function duplicateValues(values: readonly string[]): string[] {
