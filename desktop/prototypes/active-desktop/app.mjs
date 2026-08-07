@@ -15,6 +15,7 @@ const riverContext = riverMaterial.getContext("2d", { alpha: true });
 
 let currentScenarioName = new URLSearchParams(window.location.search).get("scenario") || "ATLANTIC_BRIDGE_MIDDAY";
 let preparedMarketTape = null;
+let preparedSystemFlow = null;
 let eventTimer = null;
 
 function stateColor(state) {
@@ -115,11 +116,13 @@ function drawTape(scenario) {
 }
 
 function drawFlow(scenario) {
-  flow.innerHTML = scenario.flow.map((stage, index) => {
+  const sourceFlow = preparedSystemFlow?.stages?.length ? preparedSystemFlow.stages : scenario.flow;
+  flow.innerHTML = sourceFlow.map((stage, index) => {
     const isActiveRecon = stage.texture === "RECONCILING" && scenario.reconciliationState === "ACTIVE";
     const shouldAnimate = isActiveRecon || stage.texture === "PENDING_ORDER" || stage.event;
+    const displayClass = stage.display_class || stage.texture || "UNKNOWN";
     return `
-      <section class="flow-stage" data-texture="${stage.texture}" data-animate="${shouldAnimate ? "true" : "false"}" data-event="${stage.event ? "true" : "false"}" style="--stage-index: ${index}; --data-velocity: ${scenario.dataVelocity}">
+      <section class="flow-stage" data-texture="${stage.texture}" data-display-class="${displayClass}" data-animate="${shouldAnimate ? "true" : "false"}" data-event="${stage.event ? "true" : "false"}" style="--stage-index: ${index}; --data-velocity: ${scenario.dataVelocity}">
         <div class="flow-lens"></div>
         <div class="flow-label">${stage.label}</div>
       </section>
@@ -333,6 +336,26 @@ async function loadPreparedMarketTapeIfRequested() {
   }
 }
 
+async function loadPreparedSystemFlowIfRequested() {
+  const params = new URLSearchParams(window.location.search);
+  if (params.get("systemPipeline") !== "prepared") return;
+  try {
+    const module = await import(`./system_pipeline_snapshot.generated.mjs?generated=${Date.now()}`);
+    const snapshot = module.systemPipelineSnapshot;
+    if (!snapshot || snapshot.schema_version !== "observatory_system_pipeline_snapshot_v1") {
+      throw new Error("prepared system pipeline snapshot has an unsupported schema");
+    }
+    preparedSystemFlow = snapshot;
+    app.dataset.systemPipelineSource = snapshot.model_status || "UNKNOWN";
+    canvasNote.textContent = `${canvasNote.textContent} Pipeline: ${snapshot.model_status}; generated ${snapshot.generated_at}.`;
+    renderScenario();
+  } catch (error) {
+    preparedSystemFlow = null;
+    app.dataset.systemPipelineSource = "MISSING";
+    canvasNote.textContent = `${canvasNote.textContent} Pipeline source missing; fixture river is shown.`;
+  }
+}
+
 scenarioToggle.addEventListener("click", () => {
   scenarioPanel.hidden = !scenarioPanel.hidden;
 });
@@ -361,3 +384,4 @@ document.addEventListener("visibilitychange", () => {
 resizeCanvases();
 applyScenario(currentScenarioName);
 loadPreparedMarketTapeIfRequested();
+loadPreparedSystemFlowIfRequested();

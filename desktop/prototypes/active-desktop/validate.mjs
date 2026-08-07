@@ -5,7 +5,14 @@ import { fileURLToPath } from "node:url";
 import { scenarioNames, validateFixtures } from "./fixtures.mjs";
 
 const prototypeRoot = path.dirname(fileURLToPath(import.meta.url));
-const requiredFiles = ["index.html", "styles.css", "fixtures.mjs", "app.mjs", "build_market_tape_snapshot.mjs"];
+const requiredFiles = [
+  "index.html",
+  "styles.css",
+  "fixtures.mjs",
+  "app.mjs",
+  "build_market_tape_snapshot.mjs",
+  "build_system_pipeline_snapshot.mjs",
+];
 const forbiddenTokens = [
   "runtime state",
   "strategy input",
@@ -41,6 +48,17 @@ for (const token of ["observatory_market_tape_snapshot_v1", "PHASE1_COMPLETED_1M
 }
 if (adapter.includes("broker_authority: true")) {
   errors.push("build_market_tape_snapshot.mjs grants broker authority");
+}
+
+const pipelineAdapter = fs.readFileSync(path.join(prototypeRoot, "build_system_pipeline_snapshot.mjs"), "utf8");
+for (const token of ["submitOrder", "cancelOrder", "strategy input", "computeSafeState", "computeReadiness"]) {
+  if (pipelineAdapter.includes(token)) errors.push(`build_system_pipeline_snapshot.mjs contains forbidden authority token: ${token}`);
+}
+for (const token of ["observatory_system_pipeline_snapshot_v1", "PREPARED_PRODUCER_STATUS_ARTIFACTS", "display_only", "readiness_computation: false", "display_class", "producer_status"]) {
+  if (!pipelineAdapter.includes(token)) errors.push(`build_system_pipeline_snapshot.mjs missing required contract token: ${token}`);
+}
+if (pipelineAdapter.includes("broker_authority: true") || pipelineAdapter.includes("runtime_authority: true")) {
+  errors.push("build_system_pipeline_snapshot.mjs grants authority");
 }
 
 const html = fs.readFileSync(path.join(prototypeRoot, "index.html"), "utf8");
