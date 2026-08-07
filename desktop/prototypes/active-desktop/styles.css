@@ -85,14 +85,17 @@ body {
 
 .market-field {
   position: relative;
-  min-height: 62vh;
+  min-height: 100vh;
   overflow: hidden;
+  isolation: isolate;
+  padding-bottom: 78px;
 }
 
 .sky-layer,
 .atmosphere {
   position: absolute;
   inset: 0;
+  z-index: 1;
 }
 
 .sky-layer {
@@ -130,13 +133,18 @@ body {
 
 .embedded-arc {
   position: absolute;
-  inset: 34px 52px 24px;
+  inset: 14px 24px 82px;
   display: grid;
-  grid-template-rows: auto 1fr auto;
+  grid-template-rows: auto 1fr;
   pointer-events: none;
+  z-index: 3;
 }
 
-.arc-header { width: min(620px, 48vw); }
+.arc-header {
+  position: relative;
+  z-index: 5;
+  width: min(360px, 32vw);
+}
 
 .eyebrow {
   margin: 0 0 8px;
@@ -160,35 +168,72 @@ h1 {
 
 .scenario-clock,
 .canvas-note {
-  margin: 14px 0 0;
+  margin: 0;
   color: var(--muted);
   font-size: 15px;
   line-height: 1.5;
 }
 
+.market-commentary {
+  position: absolute;
+  top: 8vh;
+  left: 50%;
+  z-index: 7;
+  width: min(720px, 56vw);
+  transform: translateX(-50%);
+  text-align: center;
+  pointer-events: none;
+  text-shadow: 0 14px 42px rgba(0, 0, 0, 0.6);
+}
+
+.market-commentary .scenario-clock {
+  color: rgba(240, 200, 121, 0.74);
+  font-size: clamp(15px, 1.5vw, 21px);
+}
+
 .canvas-note {
-  align-self: end;
-  width: min(660px, 56vw);
+  position: relative;
+  z-index: 5;
+  width: 100%;
+  margin-top: 8px;
+  color: rgba(238, 244, 242, 0.72);
+  font-size: clamp(18px, 2.1vw, 34px);
+  line-height: 1.18;
 }
 
 #venue-arc {
   position: absolute;
-  inset: 5% 1% 1%;
-  width: 98%;
-  height: 92%;
-  opacity: 0.97;
+  inset: 6% 0 16%;
+  width: 100%;
+  height: 78%;
+  opacity: 1;
+  filter: drop-shadow(0 30px 100px rgba(0, 0, 0, 0.46));
 }
 
 .earth-wash {
   fill: url(#earthGlow);
-  stroke: rgba(238, 244, 242, 0.055);
+  stroke: rgba(238, 244, 242, 0.08);
   stroke-width: 0.18;
 }
 
-.continent-impression {
-  fill: rgba(33, 57, 59, 0.26);
-  stroke: rgba(238, 244, 242, 0.045);
-  stroke-width: 0.12;
+.atlas-graticule {
+  fill: none;
+  stroke: rgba(238, 244, 242, 0.035);
+  stroke-width: 0.09;
+}
+
+.atlas-land {
+  fill: rgba(32, 58, 56, 0.46);
+  stroke: none;
+}
+
+.atlas-coastline {
+  fill: none;
+  stroke: rgba(229, 237, 228, 0.18);
+  stroke-linejoin: round;
+  stroke-width: 0.22;
+  vector-effect: non-scaling-stroke;
+  filter: drop-shadow(0 0 2px rgba(238, 244, 242, 0.08));
 }
 
 .terminator {
@@ -199,15 +244,15 @@ h1 {
 
 .atlantic-bridge {
   fill: none;
-  stroke: rgba(239, 186, 104, 0.46);
-  stroke-width: 1.2;
+  stroke: rgba(239, 186, 104, 0.18);
+  stroke-width: 0.7;
   stroke-linecap: round;
-  filter: drop-shadow(0 0 10px rgba(239, 186, 104, 0.3));
-  opacity: 0.74;
+  filter: drop-shadow(0 0 12px rgba(239, 186, 104, 0.24));
+  opacity: 0.62;
 }
 
 .venue-harbor {
-  opacity: 0.1;
+  opacity: 0.09;
   transition: opacity 600ms ease, r 600ms ease;
 }
 
@@ -218,7 +263,7 @@ h1 {
 .venue-node[data-state="OPEN"],
 .venue-node[data-state="AUCTION"],
 .venue-node[data-state="CLOSING_SOON"] {
-  filter: drop-shadow(0 0 8px rgba(240, 200, 121, 0.58));
+  filter: drop-shadow(0 0 9px rgba(240, 200, 121, 0.62));
 }
 
 .venue-harbor[data-state="OPEN"],
@@ -234,30 +279,70 @@ h1 {
 
 .venue-node[data-state="CLOSED"],
 .venue-node[data-state="HOLIDAY"] {
-  opacity: 0.42;
+  opacity: 0.46;
+}
+
+.venue-node[data-state="PREOPEN"],
+.venue-node[data-state="AUCTION"] {
+  opacity: 0.78;
+}
+
+.venue-node[data-state="LUNCH_BREAK"] {
+  opacity: 0.62;
+}
+
+.venue-node[data-state="UNKNOWN"],
+.venue-node[data-state="STALE"] {
+  opacity: 0.78;
+  stroke: rgba(238, 244, 242, 0.24);
+  stroke-width: 0.18;
 }
 
 .venue-label {
-  fill: rgba(238, 244, 242, 0.65);
-  font-size: 1.75px;
+  fill: rgba(238, 244, 242, 0.58);
+  font-size: 1.55px;
   letter-spacing: 0;
+  paint-order: stroke;
+  stroke: rgba(2, 6, 8, 0.42);
+  stroke-width: 0.42px;
+}
+
+.venue-label[data-state="OPEN"],
+.venue-label[data-state="AUCTION"],
+.venue-label[data-state="CLOSING_SOON"] {
+  fill: rgba(248, 232, 189, 0.78);
+}
+
+.venue-label[data-state="CLOSED"],
+.venue-label[data-state="HOLIDAY"] {
+  fill: rgba(238, 244, 242, 0.42);
+}
+
+.venue-label[data-state="UNKNOWN"],
+.venue-label[data-state="STALE"] {
+  fill: rgba(226, 218, 200, 0.7);
 }
 
 .tape-horizon {
-  position: relative;
-  height: 56px;
+  position: absolute;
+  left: 16px;
+  right: 16px;
+  bottom: 24px;
+  z-index: 6;
+  height: 38px;
   overflow: hidden;
-  border-block: 1px solid rgba(238, 244, 242, 0.08);
+  border-block: 1px solid rgba(238, 244, 242, 0.07);
   background:
-    linear-gradient(180deg, rgba(0,0,0,0.2), rgba(0,0,0,0.48)),
-    rgba(3, 7, 10, 0.55);
-  backdrop-filter: blur(11px);
+    linear-gradient(180deg, rgba(6, 12, 16, 0.1), rgba(2, 7, 10, 0.34)),
+    rgba(3, 7, 10, 0.28);
+  backdrop-filter: blur(9px);
+  box-shadow: 0 -14px 48px rgba(0, 0, 0, 0.12), 0 14px 60px rgba(0, 0, 0, 0.28);
 }
 
 .market-tape {
   display: flex;
   width: max-content;
-  min-height: 56px;
+  min-height: 38px;
   align-items: center;
   animation: tapeScroll 40s linear infinite;
 }
@@ -269,7 +354,7 @@ h1 {
   display: inline-flex;
   align-items: baseline;
   gap: 10px;
-  padding: 0 24px;
+  padding: 0 22px;
   white-space: nowrap;
   color: rgba(238, 244, 242, 0.8);
   font-variant-numeric: tabular-nums;
@@ -301,16 +386,22 @@ h1 {
 }
 
 .lower-field {
-  position: relative;
-  min-height: calc(38vh - 56px);
-  padding: 42px 56px 38px;
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 58px;
+  z-index: 5;
+  min-height: 24vh;
+  padding: 48px 56px 18px;
   overflow: hidden;
+  background:
+    linear-gradient(180deg, rgba(3, 8, 11, 0), rgba(3, 8, 11, 0.42) 48%, rgba(2, 5, 7, 0.78));
 }
 
 .infrastructure-texture {
   position: absolute;
   inset: 0;
-  opacity: 0.35;
+  opacity: 0.24;
   background-image:
     linear-gradient(rgba(238, 244, 242, 0.03) 1px, transparent 1px),
     linear-gradient(90deg, rgba(238, 244, 242, 0.026) 1px, transparent 1px),
@@ -321,11 +412,11 @@ h1 {
 
 .river-material {
   position: absolute;
-  inset: 8px 0 0;
+  inset: 0;
   width: 100%;
   height: 100%;
   pointer-events: none;
-  opacity: 0.9;
+  opacity: 0.94;
 }
 
 .system-flow {
@@ -334,12 +425,12 @@ h1 {
   grid-template-columns: repeat(7, minmax(0, 1fr));
   gap: 8px;
   align-items: center;
-  min-height: 142px;
+  min-height: 110px;
 }
 
 .flow-stage {
   position: relative;
-  min-height: 108px;
+  min-height: 92px;
   display: grid;
   align-content: center;
   justify-items: center;
@@ -364,8 +455,8 @@ h1 {
 
 .flow-lens {
   position: relative;
-  width: 34px;
-  height: 16px;
+  width: 40px;
+  height: 18px;
   border-radius: 999px;
   background: radial-gradient(ellipse at 35% 35%, rgba(238,244,242,0.34), rgba(121,201,189,0.34) 36%, rgba(20,31,39,0.12) 100%);
   box-shadow: 0 0 26px rgba(121, 201, 189, 0.22), inset 0 1px rgba(255,255,255,0.18);
@@ -433,7 +524,7 @@ h1 {
 }
 
 .flow-label {
-  margin-top: 18px;
+  margin-top: 14px;
   max-width: 118px;
   text-align: center;
   font-size: 12px;
@@ -506,9 +597,23 @@ h1 {
 }
 
 @media (max-width: 920px) {
-  .embedded-arc { inset: 26px 22px 18px; }
+  .embedded-arc { inset: 18px 18px 14px; }
   .arc-header,
-  .canvas-note { width: min(620px, 92vw); }
-  .lower-field { padding-inline: 18px; }
+  .market-commentary { width: min(620px, 92vw); }
+  #venue-arc {
+    inset: 14% -8% 22%;
+    width: 116%;
+    height: 64%;
+  }
+  .tape-horizon {
+    bottom: 18px;
+    height: 36px;
+  }
+  .market-tape { min-height: 36px; }
+  .lower-field {
+    bottom: 52px;
+    min-height: 30vh;
+    padding: 42px 18px 18px;
+  }
   .system-flow { grid-template-columns: repeat(4, minmax(0, 1fr)); }
 }

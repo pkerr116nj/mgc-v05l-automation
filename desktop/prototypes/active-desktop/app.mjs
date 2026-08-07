@@ -62,13 +62,13 @@ function drawVenueArc(scenario) {
   const activeEurope = ["lse", "eurex", "paris", "amsterdam", "six"].some((id) => scenario.venues[id] === "OPEN");
   const activeUs = ["nyse", "nasdaq", "cboe", "cme", "cfe"].some((id) => scenario.venues[id] === "OPEN");
   const bridge = activeEurope && activeUs
-    ? `<path class="atlantic-bridge" d="M 24 42 C 33 30, 39 28, 47 39" />`
+    ? `<path class="atlantic-bridge" d="M 48.5 36.1 C 41 31, 33 33, 27.2 39.4" />`
     : "";
   const world = `
     <defs>
-      <radialGradient id="earthGlow" cx="46%" cy="42%" r="64%">
-        <stop offset="0%" stop-color="rgba(119,154,171,0.18)" />
-        <stop offset="62%" stop-color="rgba(40,69,82,0.12)" />
+      <radialGradient id="earthGlow" cx="48%" cy="46%" r="76%">
+        <stop offset="0%" stop-color="rgba(119,154,171,0.2)" />
+        <stop offset="68%" stop-color="rgba(40,69,82,0.13)" />
         <stop offset="100%" stop-color="rgba(4,10,14,0)" />
       </radialGradient>
       <linearGradient id="terminator" x1="0%" x2="100%">
@@ -77,23 +77,50 @@ function drawVenueArc(scenario) {
         <stop offset="100%" stop-color="rgba(246,210,122,0.08)" />
       </linearGradient>
     </defs>
-    <ellipse class="earth-wash" cx="53" cy="56" rx="44" ry="31" />
-    <path class="continent-impression" d="M 13 43 C 20 36, 27 37, 31 44 C 27 52, 20 55, 15 50 Z" />
-    <path class="continent-impression" d="M 42 36 C 51 29, 60 34, 63 43 C 58 49, 47 49, 42 43 Z" />
-    <path class="continent-impression" d="M 64 50 C 77 42, 91 49, 88 64 C 78 70, 67 64, 64 50 Z" />
+    <path class="earth-wash" d="M 4 50 C 8 29, 25 20, 49 19 C 74 18, 93 30, 97 50 C 93 72, 74 84, 49 83 C 24 82, 8 71, 4 50 Z" />
+    <g class="atlas-graticule" aria-hidden="true">
+      <path d="M 6 39 C 25 35, 57 34, 95 39" />
+      <path d="M 4 50 C 27 47, 61 47, 97 50" />
+      <path d="M 6 61 C 27 65, 58 66, 95 61" />
+      <path d="M 15 31 C 19 43, 19 61, 14 73" />
+      <path d="M 32 24 C 34 40, 34 64, 31 79" />
+      <path d="M 50 20 C 50 37, 50 66, 50 83" />
+      <path d="M 68 24 C 66 40, 67 64, 70 79" />
+      <path d="M 85 31 C 81 43, 82 61, 87 73" />
+    </g>
+    <g class="atlas-land" aria-hidden="true">
+      <path d="M 9 34 C 13 25, 23 23, 31 28 C 38 31, 40 39, 35 47 C 31 46, 28 48, 28 52 C 25 54, 24 58, 20 61 C 18 55, 15 52, 12 49 C 8 45, 7 39, 9 34 Z" />
+      <path d="M 29 54 C 35 55, 41 61, 41 69 C 40 78, 34 84, 30 91 C 25 86, 26 78, 22 73 C 19 68, 23 64, 20 60 C 23 57, 25 55, 29 54 Z" />
+      <path d="M 29 19 C 36 14, 43 16, 46 22 C 43 27, 35 28, 29 24 Z" />
+      <path d="M 45 36 C 50 32, 59 32, 65 37 C 62 42, 54 42, 49 45 C 45 45, 43 40, 45 36 Z" />
+      <path d="M 49 45 C 56 43, 64 48, 66 58 C 68 68, 63 78, 56 84 C 50 76, 46 65, 49 55 C 50 51, 46 48, 49 45 Z" />
+      <path d="M 59 34 C 70 27, 87 32, 95 42 C 102 52, 95 64, 83 62 C 76 60, 72 56, 66 58 C 62 53, 64 48, 60 45 C 55 41, 55 37, 59 34 Z" />
+      <path d="M 76 68 C 83 64, 92 67, 95 73 C 91 78, 81 79, 75 74 C 72 71, 73 69, 76 68 Z" />
+      <path d="M 16 86 C 34 89, 62 90, 88 85 C 76 92, 32 94, 16 86 Z" />
+    </g>
+    <g class="atlas-coastline" aria-hidden="true">
+      <path d="M 9 34 C 13 25, 23 23, 31 28 C 38 31, 40 39, 35 47 C 31 46, 28 48, 28 52 C 25 54, 24 58, 20 61 C 18 55, 15 52, 12 49 C 8 45, 7 39, 9 34 Z" />
+      <path d="M 29 54 C 35 55, 41 61, 41 69 C 40 78, 34 84, 30 91 C 25 86, 26 78, 22 73 C 19 68, 23 64, 20 60 C 23 57, 25 55, 29 54 Z" />
+      <path d="M 29 19 C 36 14, 43 16, 46 22 C 43 27, 35 28, 29 24 Z" />
+      <path d="M 45 36 C 50 32, 59 32, 65 37 C 62 42, 54 42, 49 45 C 45 45, 43 40, 45 36 Z" />
+      <path d="M 49 45 C 56 43, 64 48, 66 58 C 68 68, 63 78, 56 84 C 50 76, 46 65, 49 55 C 50 51, 46 48, 49 45 Z" />
+      <path d="M 59 34 C 70 27, 87 32, 95 42 C 102 52, 95 64, 83 62 C 76 60, 72 56, 66 58 C 62 53, 64 48, 60 45 C 55 41, 55 37, 59 34 Z" />
+      <path d="M 76 68 C 83 64, 92 67, 95 73 C 91 78, 81 79, 75 74 C 72 71, 73 69, 76 68 Z" />
+    </g>
     <path class="terminator" d="${timeTerminatorPath(scenario.timeState)}" />
     ${bridge}
   `;
   const nodes = venues.map((venue) => {
     const state = scenario.venues[venue.id] || "CLOSED";
-    const labelVisible = ["OPEN", "AUCTION", "CLOSING_SOON", "UNKNOWN", "STALE"].includes(state);
+    const labelX = venue.x + (venue.labelDx ?? 1.8);
+    const labelY = venue.y + (venue.labelDy ?? 0.8);
     return `
       <g class="venue-group" data-region="${venue.region}">
         <circle class="venue-harbor" data-state="${state}" cx="${venue.x}" cy="${venue.y}" r="${stateRadius(state) * 3.6}" fill="${stateColor(state)}" />
         <circle class="venue-node" data-state="${state}" cx="${venue.x}" cy="${venue.y}" r="${stateRadius(state)}" fill="${stateColor(state)}">
           <title>${venue.city} - ${venue.label}: ${state}</title>
         </circle>
-        ${labelVisible ? `<text class="venue-label" x="${venue.x + 1.9}" y="${venue.y + 0.75}">${venue.city}</text>` : ""}
+        <text class="venue-label" data-state="${state}" x="${labelX}" y="${labelY}">${venue.city}</text>
       </g>
     `;
   });
