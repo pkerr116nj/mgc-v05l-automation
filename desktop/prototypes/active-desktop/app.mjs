@@ -14,6 +14,7 @@ const atmosphereContext = atmosphere.getContext("2d", { alpha: true });
 const riverContext = riverMaterial.getContext("2d", { alpha: true });
 
 let currentScenarioName = new URLSearchParams(window.location.search).get("scenario") || "ATLANTIC_BRIDGE_MIDDAY";
+let preparedMarketTape = null;
 let eventTimer = null;
 
 function stateColor(state) {
@@ -98,7 +99,8 @@ function drawVenueArc(scenario) {
 }
 
 function drawTape(scenario) {
-  const rows = [...scenario.tape, ...scenario.tape];
+  const sourceRows = preparedMarketTape?.rows?.length ? preparedMarketTape.rows : scenario.tape;
+  const rows = [...sourceRows, ...sourceRows];
   tape.innerHTML = rows.map((row) => {
     const direction = row.changeAbs.trim().startsWith("-") ? "down" : "up";
     return `
@@ -311,6 +313,26 @@ function applyScenario(name) {
   }
 }
 
+async function loadPreparedMarketTapeIfRequested() {
+  const params = new URLSearchParams(window.location.search);
+  if (params.get("marketTape") !== "phase1") return;
+  try {
+    const module = await import(`./market_tape_snapshot.generated.mjs?generated=${Date.now()}`);
+    const snapshot = module.marketTapeSnapshot;
+    if (!snapshot || snapshot.schema_version !== "observatory_market_tape_snapshot_v1") {
+      throw new Error("prepared market tape snapshot has an unsupported schema");
+    }
+    preparedMarketTape = snapshot;
+    app.dataset.marketTapeSource = snapshot.model_status || "UNKNOWN";
+    canvasNote.textContent = `${canvasNote.textContent} Tape: ${snapshot.model_status}; ${snapshot.source_kind}; generated ${snapshot.generated_at}.`;
+    renderScenario();
+  } catch (error) {
+    preparedMarketTape = null;
+    app.dataset.marketTapeSource = "MISSING";
+    canvasNote.textContent = `${canvasNote.textContent} Tape source missing; fixture tape is shown.`;
+  }
+}
+
 scenarioToggle.addEventListener("click", () => {
   scenarioPanel.hidden = !scenarioPanel.hidden;
 });
@@ -338,3 +360,4 @@ document.addEventListener("visibilitychange", () => {
 
 resizeCanvases();
 applyScenario(currentScenarioName);
+loadPreparedMarketTapeIfRequested();

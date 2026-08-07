@@ -5,9 +5,8 @@ import { fileURLToPath } from "node:url";
 import { scenarioNames, validateFixtures } from "./fixtures.mjs";
 
 const prototypeRoot = path.dirname(fileURLToPath(import.meta.url));
-const requiredFiles = ["index.html", "styles.css", "fixtures.mjs", "app.mjs"];
+const requiredFiles = ["index.html", "styles.css", "fixtures.mjs", "app.mjs", "build_market_tape_snapshot.mjs"];
 const forbiddenTokens = [
-  "broker",
   "runtime state",
   "strategy input",
   "submitOrder",
@@ -31,6 +30,17 @@ for (const fileName of requiredFiles) {
   for (const token of forbiddenTokens) {
     if (content.includes(token)) errors.push(`${fileName} contains forbidden token: ${token}`);
   }
+}
+
+const adapter = fs.readFileSync(path.join(prototypeRoot, "build_market_tape_snapshot.mjs"), "utf8");
+for (const token of ["submitOrder", "cancelOrder", "strategy input"]) {
+  if (adapter.includes(token)) errors.push(`build_market_tape_snapshot.mjs contains forbidden authority token: ${token}`);
+}
+for (const token of ["observatory_market_tape_snapshot_v1", "PHASE1_COMPLETED_1M_CANDLE", "display_only", "broker_authority: false"]) {
+  if (!adapter.includes(token)) errors.push(`build_market_tape_snapshot.mjs missing required contract token: ${token}`);
+}
+if (adapter.includes("broker_authority: true")) {
+  errors.push("build_market_tape_snapshot.mjs grants broker authority");
 }
 
 const html = fs.readFileSync(path.join(prototypeRoot, "index.html"), "utf8");
