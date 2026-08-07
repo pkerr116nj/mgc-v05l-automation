@@ -9,6 +9,7 @@ const MODELS: ResearchReadModelName[] = [
 ];
 
 type TabId = "triage" | "investigations" | "evidence" | "checkpoints" | "roadmap";
+type InvestigationSort = "investigation_id" | "generated_at" | "confidence";
 
 export function ResearchControlCenterPage(): JSX.Element {
   const [activeTab, setActiveTab] = useState<TabId>("triage");
@@ -104,21 +105,89 @@ export function ResearchControlCenterPage(): JSX.Element {
 }
 
 function InvestigationLibrary(props: { investigations: JsonRecord[]; model?: ResearchReadModelResult }): JSX.Element {
+  const [sortBy, setSortBy] = useState<InvestigationSort>("investigation_id");
+  const [confidenceFilter, setConfidenceFilter] = useState("ALL");
+  const [conclusionFilter, setConclusionFilter] = useState("ALL");
+  const [populationFilter, setPopulationFilter] = useState("ALL");
+  const [selectedId, setSelectedId] = useState<string | null>(null);
+  const confidences = uniqueValues(props.investigations.map((item) => item.confidence));
+  const conclusions = uniqueValues(props.investigations.map((item) => item.conclusion_status));
+  const populations = uniqueValues(props.investigations.map((item) => item.active_population_view));
+  const visibleInvestigations = props.investigations
+    .filter((item) => confidenceFilter === "ALL" || String(item.confidence) === confidenceFilter)
+    .filter((item) => conclusionFilter === "ALL" || String(item.conclusion_status) === conclusionFilter)
+    .filter((item) => populationFilter === "ALL" || String(item.active_population_view) === populationFilter)
+    .sort((left, right) => String(left[sortBy] ?? "").localeCompare(String(right[sortBy] ?? "")));
+  const selected = visibleInvestigations.find((item) => String(item.investigation_id) === selectedId) ?? visibleInvestigations[0] ?? null;
   return (
-    <Panel title="Investigation Library" subtitle="Question remains embedded in Investigation for v1">
+    <Panel title="Investigation Library" subtitle="Question remains embedded in Investigation for v1; confidence and conclusion status pass through unchanged">
       <ModelStatus model={props.model} />
+      <div className="control-row">
+        <label>Sort <select value={sortBy} onChange={(event) => setSortBy(event.target.value as InvestigationSort)}>
+          <option value="investigation_id">Investigation ID</option>
+          <option value="generated_at">Generated At</option>
+          <option value="confidence">Confidence</option>
+        </select></label>
+        <label>Confidence <select value={confidenceFilter} onChange={(event) => setConfidenceFilter(event.target.value)}>
+          <option value="ALL">All</option>
+          {confidences.map((value) => <option key={value} value={value}>{value}</option>)}
+        </select></label>
+        <label>Conclusion <select value={conclusionFilter} onChange={(event) => setConclusionFilter(event.target.value)}>
+          <option value="ALL">All</option>
+          {conclusions.map((value) => <option key={value} value={value}>{value}</option>)}
+        </select></label>
+        <label>Population <select value={populationFilter} onChange={(event) => setPopulationFilter(event.target.value)}>
+          <option value="ALL">All</option>
+          {populations.map((value) => <option key={value} value={value}>{value}</option>)}
+        </select></label>
+      </div>
       <table className="data-table"><thead><tr><th>Investigation</th><th>Question</th><th>Confidence</th><th>Conclusion</th><th>Contradictions</th></tr></thead><tbody>
-        {props.investigations.map((item) => (
+        {visibleInvestigations.map((item) => (
           <tr key={String(item.investigation_id)}>
-            <td>{String(item.investigation_id)}<br /><span className="muted-copy">{String(item.title)}</span></td>
+            <td><button className="link-button" onClick={() => setSelectedId(String(item.investigation_id))}>{String(item.investigation_id)}</button><br /><span className="muted-copy">{String(item.title)}</span></td>
             <td>{String(item.question)}</td>
             <td>{String(item.confidence)}</td>
             <td>{String(item.conclusion_status)}</td>
-            <td>{asStringArray(item.contradictory_evidence).length}</td>
+            <td>{asStringArray(item.contradictory_evidence).length}{asStringArray(item.limitations).length ? <span className="muted-copy"> / {asStringArray(item.limitations).length} limits</span> : null}</td>
           </tr>
         ))}
       </tbody></table>
+      {selected ? <InvestigationDetail investigation={selected} /> : <p className="muted-copy">No investigations match the current filters.</p>}
     </Panel>
+  );
+}
+
+function InvestigationDetail(props: { investigation: JsonRecord }): JSX.Element {
+  const item = props.investigation;
+  const sourceArtifacts = isRecord(item.source_artifacts) ? Object.entries(item.source_artifacts).map(([key, value]) => `${key}: ${String(value)}`) : [];
+  const sourceFingerprints = isRecord(item.source_fingerprints) ? Object.entries(item.source_fingerprints).map(([key, value]) => `${key}: ${String(value)}`) : [];
+  return (
+    <div className="detail-panel">
+      <h3 className="subsection-title">{String(item.investigation_id)} Detail</h3>
+      <KeyValueTable rows={[
+        ["Title", String(item.title)],
+        ["Generated", String(item.generated_at ?? "Missing")],
+        ["Status", String(item.status)],
+        ["Confidence", String(item.confidence)],
+        ["Conclusion", String(item.conclusion_status)],
+        ["Population View", String(item.active_population_view)],
+        ["Fingerprint", String(item.deterministic_fingerprint ?? "Missing")],
+      ]} />
+      <h3 className="subsection-title">Key Findings</h3>
+      <SimpleList items={asStringArray(item.key_findings)} empty="No producer-authored findings." />
+      <h3 className="subsection-title">Contradictory Evidence</h3>
+      <SimpleList items={asStringArray(item.contradictory_evidence)} empty="No producer-authored contradictory evidence." />
+      <h3 className="subsection-title">Limitations</h3>
+      <SimpleList items={asStringArray(item.limitations)} empty="No producer-authored limitations." />
+      <h3 className="subsection-title">Unresolved Questions</h3>
+      <SimpleList items={asStringArray(item.unresolved_questions)} empty="No producer-authored unresolved questions." />
+      <h3 className="subsection-title">Follow-Up Candidates</h3>
+      <SimpleList items={asStringArray(item.follow_up_candidates)} empty="No producer-authored follow-up candidates." />
+      <h3 className="subsection-title">Source Artifacts</h3>
+      <SimpleList items={sourceArtifacts} empty="No producer-authored source artifacts." />
+      <h3 className="subsection-title">Source Fingerprints</h3>
+      <SimpleList items={sourceFingerprints} empty="No producer-authored source fingerprints." />
+    </div>
   );
 }
 
@@ -248,4 +317,8 @@ function formatCoverage(item: JsonRecord): string {
   const total = item.total_count === null || item.total_count === undefined ? "Unknown" : String(item.total_count);
   const rate = typeof item.coverage_rate === "number" ? `${Math.round(item.coverage_rate * 1000) / 10}%` : "Unknown";
   return `${available} / ${total} (${rate})`;
+}
+
+function uniqueValues(values: unknown[]): string[] {
+  return Array.from(new Set(values.map((value) => String(value ?? "Missing")))).sort();
 }

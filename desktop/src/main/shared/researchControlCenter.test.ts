@@ -8,6 +8,7 @@ import {
   fixtureResearchReadModel,
   fixtureResearchReadModelResult,
   researchEvidenceCoverageReadModelResult,
+  researchQuestionsAndInvestigationsReadModelResult,
   researchReadModelResult,
   researchReadModelNames,
   validateResearchReadModel,
@@ -165,9 +166,12 @@ test("unsupported prepared source schema invalidates only the evidence coverage 
   assert.equal(result.model_status, "INVALID");
   assert.match(result.error ?? "", /Unsupported source schema/);
 
-  const questions = researchReadModelResult("research_questions_and_investigations_v1", { artifactRoot });
-  assert.equal(questions.ok, true);
-  assert.equal(questions.payload?.source, "fixture");
+  const checkpoints = researchReadModelResult("research_checkpoints_v1", { artifactRoot });
+  const roadmap = researchReadModelResult("research_roadmap_v1", { artifactRoot });
+  assert.equal(checkpoints.ok, true);
+  assert.equal(checkpoints.payload?.source, "fixture");
+  assert.equal(roadmap.ok, true);
+  assert.equal(roadmap.payload?.source, "fixture");
 });
 
 test("missing prepared source is fail-soft for the affected evidence subsection", () => {
@@ -188,6 +192,90 @@ test("real evidence coverage read-model is deterministic across repeated generat
   const artifactRoot = makeEvidenceCoverageArtifacts();
   const first = researchEvidenceCoverageReadModelResult({ artifactRoot });
   const second = researchEvidenceCoverageReadModelResult({ artifactRoot });
+  assert.equal(first.ok, true);
+  assert.equal(second.ok, true);
+  assert.equal(first.payload?.deterministic_fingerprint, second.payload?.deterministic_fingerprint);
+  assert.deepEqual(first.payload, second.payload);
+});
+
+test("real investigation read-model parses producer-authored Investigation records", () => {
+  const artifactRoot = makeInvestigationArtifacts();
+  const result = researchQuestionsAndInvestigationsReadModelResult({ artifactRoot });
+  assert.equal(result.ok, true);
+  assert.equal(result.model_status, "HEALTHY");
+  const payload = result.payload as Record<string, unknown>;
+  assert.equal(payload.source, "prepared_artifacts");
+  assert.equal(payload.investigation_count, 2);
+  assert.deepEqual(payload.conclusion_status_counts, { INCONCLUSIVE: 1, PARTIALLY_SUPPORTED: 1 });
+  const investigations = payload.investigations as Array<Record<string, unknown>>;
+  assert.equal(investigations[0].investigation_id, "INV-001");
+  assert.equal(investigations[0].question, "What explains the unusually large bottom-decile losses?");
+  assert.equal(investigations[0].confidence, "PARTIAL");
+  assert.equal(investigations[0].conclusion_status, "PARTIALLY_SUPPORTED");
+});
+
+test("real investigation read-model preserves contradictions, limitations, and fingerprints", () => {
+  const artifactRoot = makeInvestigationArtifacts();
+  const result = researchQuestionsAndInvestigationsReadModelResult({ artifactRoot });
+  assert.equal(result.ok, true);
+  const payload = result.payload as Record<string, unknown>;
+  assert.equal(payload.contradictory_evidence_count, 3);
+  const investigations = payload.investigations as Array<Record<string, unknown>>;
+  assert.deepEqual(investigations[0].contradictory_evidence, ["producer contradiction"]);
+  assert.deepEqual(investigations[0].limitations, ["producer limitation"]);
+  const fingerprints = payload.source_fingerprints as Record<string, unknown>;
+  assert.equal(fingerprints["outputs/track_b_execution_core/research_analytics/investigations/INV-001/investigation.json"], "inv001_fp");
+});
+
+test("real investigation read-model does not synthesize Claims or compute confidence", () => {
+  const artifactRoot = makeInvestigationArtifacts();
+  const result = researchQuestionsAndInvestigationsReadModelResult({ artifactRoot });
+  assert.equal(result.ok, true);
+  const serialized = JSON.stringify(result.payload);
+  assert.doesNotMatch(serialized, /claim_id|claims/);
+  assert.match(serialized, /PARTIAL/);
+  assert.doesNotMatch(serialized, /HIGH_CONFIDENCE|LOW_CONFIDENCE/);
+});
+
+test("duplicate investigation IDs invalidate the investigation model explicitly", () => {
+  const artifactRoot = makeInvestigationArtifacts({
+    "INV-002": { investigation_id: "INV-001" },
+  });
+  const result = researchQuestionsAndInvestigationsReadModelResult({ artifactRoot });
+  assert.equal(result.ok, false);
+  assert.equal(result.model_status, "INVALID");
+  assert.match(result.error ?? "", /Duplicate investigation_id/);
+});
+
+test("malformed investigation record is fail-soft and preserves valid investigations", () => {
+  const artifactRoot = makeInvestigationArtifacts({
+    "INV-002": { schema_version: "research_investigation_record_v2" },
+  });
+  const result = researchQuestionsAndInvestigationsReadModelResult({ artifactRoot });
+  assert.equal(result.ok, true);
+  assert.equal(result.model_status, "VALID_WITH_WARNINGS");
+  const payload = result.payload as Record<string, unknown>;
+  assert.equal(payload.investigation_count, 1);
+  const warnings = payload.warnings as string[];
+  assert.ok(warnings.some((warning) => warning.includes("invalid_investigation_record")));
+});
+
+test("missing investigation artifact is fail-soft and source visible", () => {
+  const artifactRoot = makeInvestigationArtifacts({}, ["INV-002"]);
+  const result = researchQuestionsAndInvestigationsReadModelResult({ artifactRoot });
+  assert.equal(result.ok, true);
+  assert.equal(result.model_status, "VALID_WITH_WARNINGS");
+  const payload = result.payload as Record<string, unknown>;
+  assert.equal(payload.investigation_count, 1);
+  const sources = payload.source_artifacts as Array<Record<string, unknown>>;
+  const missing = sources.find((source) => String(source.path).includes("INV-002"));
+  assert.equal(missing?.status, "MISSING");
+});
+
+test("real investigation read-model is deterministic across repeated generation", () => {
+  const artifactRoot = makeInvestigationArtifacts();
+  const first = researchQuestionsAndInvestigationsReadModelResult({ artifactRoot });
+  const second = researchQuestionsAndInvestigationsReadModelResult({ artifactRoot });
   assert.equal(first.ok, true);
   assert.equal(second.ok, true);
   assert.equal(first.payload?.deterministic_fingerprint, second.payload?.deterministic_fingerprint);
@@ -290,6 +378,79 @@ function makeEvidenceCoverageArtifacts(overrides: Record<string, Record<string, 
     const target = path.join(root, artifact.relativePath);
     fs.mkdirSync(path.dirname(target), { recursive: true });
     fs.writeFileSync(target, `${JSON.stringify({ ...artifact.payload, ...(overrides[key] || {}) }, null, 2)}\n`, "utf8");
+  }
+  return root;
+}
+
+function makeInvestigationArtifacts(overrides: Record<string, Record<string, unknown>> = {}, omit: string[] = []): string {
+  const root = fs.mkdtempSync(path.join(process.env.TMPDIR || "/tmp", "rcc-investigations-"));
+  const records: Record<string, Record<string, unknown>> = {
+    "INV-001": {
+      schema_version: "research_investigation_record_v1",
+      generated_at: "2026-08-06T12:00:00+00:00",
+      deterministic_fingerprint: "inv001_fp",
+      investigation_id: "INV-001",
+      title: "Extreme Loss Concentration",
+      question: "What explains the unusually large bottom-decile losses?",
+      status: "DRAFT",
+      conclusion_status: "PARTIALLY_SUPPORTED",
+      confidence: "PARTIAL",
+      active_population_view: "SOURCE_INTEGRITY_QUALIFIED",
+      findings: ["producer finding"],
+      contradictory_evidence: ["producer contradiction"],
+      limitations: ["producer limitation"],
+      unresolved_questions: ["producer unresolved question"],
+      follow_up_candidates: ["producer follow-up"],
+      source_artifacts: { crr: "outputs/track_b_execution_core/research_analytics/canonical_research_record/canonical_research_records.jsonl" },
+      source_fingerprints: { crr: "crr_fp" },
+      guardrails: { diagnostic_only: true, production_recommendation: false, trading_gate: false },
+    },
+    "INV-002": {
+      schema_version: "research_investigation_record_v1",
+      generated_at: "2026-08-06T12:00:00+00:00",
+      deterministic_fingerprint: "inv002_fp",
+      investigation_id: "INV-002",
+      title: "Long Short Underperformance Control",
+      question: "Does long-side underperformance persist after controlling for instrument, session, strategy, and time period?",
+      status: "DRAFT",
+      conclusion_status: "INCONCLUSIVE",
+      confidence: "PARTIAL",
+      active_population_view: "SOURCE_INTEGRITY_QUALIFIED",
+      findings: ["second producer finding"],
+      contradictory_evidence: ["first second contradiction", "second second contradiction"],
+      limitations: [],
+      unresolved_questions: [],
+      follow_up_candidates: [],
+      source_artifacts: {},
+      source_fingerprints: {},
+      guardrails: { diagnostic_only: true, production_recommendation: false, trading_gate: false },
+    },
+  };
+  const index = {
+    schema_version: "research_investigation_record_v1_index",
+    generated_at: "2026-08-06T12:00:00+00:00",
+    deterministic_fingerprint: "investigation_index_fp",
+    investigations: Object.keys(records).map((id) => ({
+      investigation_id: id,
+      title: records[id].title,
+      question: records[id].question,
+      conclusion_status: records[id].conclusion_status,
+      confidence: records[id].confidence,
+      active_population_view: records[id].active_population_view,
+      primary_artifact: `outputs/track_b_execution_core/research_analytics/investigations/${id}/investigation.json`,
+      fingerprint: records[id].deterministic_fingerprint,
+    })),
+    guardrails: { diagnostic_only: true, production_recommendation: false, trading_gate: false },
+  };
+  fs.mkdirSync(path.join(root, "investigations"), { recursive: true });
+  fs.writeFileSync(path.join(root, "investigations", "investigation_index.json"), `${JSON.stringify(index, null, 2)}\n`, "utf8");
+  for (const [id, record] of Object.entries(records)) {
+    if (omit.includes(id)) {
+      continue;
+    }
+    const target = path.join(root, "investigations", id, "investigation.json");
+    fs.mkdirSync(path.dirname(target), { recursive: true });
+    fs.writeFileSync(target, `${JSON.stringify({ ...record, ...(overrides[id] || {}) }, null, 2)}\n`, "utf8");
   }
   return root;
 }

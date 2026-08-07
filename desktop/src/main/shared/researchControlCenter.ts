@@ -33,7 +33,7 @@ export interface ResearchReadModelResult {
   error: string | null;
 }
 
-interface EvidenceCoverageOptions {
+interface ReadModelOptions {
   repoRoot?: string;
   artifactRoot?: string;
 }
@@ -172,9 +172,12 @@ export function fixtureResearchReadModelResult(name: string): ResearchReadModelR
   };
 }
 
-export function researchReadModelResult(name: string, options: EvidenceCoverageOptions = {}): ResearchReadModelResult {
+export function researchReadModelResult(name: string, options: ReadModelOptions = {}): ResearchReadModelResult {
   if (!isResearchReadModelName(name)) {
     return unsupportedReadModelResult(name);
+  }
+  if (name === "research_questions_and_investigations_v1") {
+    return researchQuestionsAndInvestigationsReadModelResult(options);
   }
   if (name === "research_evidence_coverage_v1") {
     return researchEvidenceCoverageReadModelResult(options);
@@ -182,7 +185,30 @@ export function researchReadModelResult(name: string, options: EvidenceCoverageO
   return fixtureResearchReadModelResult(name);
 }
 
-export function researchEvidenceCoverageReadModelResult(options: EvidenceCoverageOptions = {}): ResearchReadModelResult {
+export function researchQuestionsAndInvestigationsReadModelResult(options: ReadModelOptions = {}): ResearchReadModelResult {
+  const modelName: ResearchReadModelName = "research_questions_and_investigations_v1";
+  try {
+    const payload = buildResearchQuestionsAndInvestigationsReadModel(options);
+    const validation = validateResearchReadModel(modelName, payload);
+    return {
+      ok: validation.ok,
+      model_name: modelName,
+      model_status: validation.status,
+      payload: validation.ok ? payload : null,
+      error: validation.error,
+    };
+  } catch (error) {
+    return {
+      ok: false,
+      model_name: modelName,
+      model_status: "INVALID",
+      payload: null,
+      error: error instanceof Error ? error.message : String(error),
+    };
+  }
+}
+
+export function researchEvidenceCoverageReadModelResult(options: ReadModelOptions = {}): ResearchReadModelResult {
   const modelName: ResearchReadModelName = "research_evidence_coverage_v1";
   try {
     const payload = buildResearchEvidenceCoverageReadModel(options);
@@ -266,27 +292,118 @@ function unsupportedReadModelResult(name: string): ResearchReadModelResult {
 }
 
 const SUPPORTED_SOURCE_SCHEMAS = {
+  investigation_index: "research_investigation_record_v1_index",
+  investigation_record: "research_investigation_record_v1",
   crr_validation: "canonical_research_record_validation_report_v1",
   research_eligibility: "research_eligibility_summary_v1",
   prospective_context_coverage: "prospective_market_context_coverage_audit_v1",
   research_evidence_explorer: "research_evidence_explorer_v1",
 } as const;
 
-const SOURCE_RELATIVE_PATHS: Record<keyof typeof SUPPORTED_SOURCE_SCHEMAS, string> = {
+const EVIDENCE_SOURCE_RELATIVE_PATHS: Record<"crr_validation" | "research_eligibility" | "prospective_context_coverage" | "research_evidence_explorer", string> = {
   crr_validation: path.join("canonical_research_record", "canonical_research_record_validation_report.json"),
   research_eligibility: path.join("research_eligibility", "research_eligibility_summary.json"),
   prospective_context_coverage: path.join("prospective_nq_cohort_monitor", "context_coverage_audit.json"),
   research_evidence_explorer: path.join("research_evidence_explorer", "research_evidence_explorer_v1.json"),
 };
 
+const INVESTIGATION_INDEX_RELATIVE_PATH = path.join("investigations", "investigation_index.json");
+
 function defaultArtifactRoot(repoRoot: string): string {
   return path.join(repoRoot, "outputs", "track_b_execution_core", "research_analytics");
 }
 
-function buildResearchEvidenceCoverageReadModel(options: EvidenceCoverageOptions): ResearchReadModelEnvelope {
+function buildResearchQuestionsAndInvestigationsReadModel(options: ReadModelOptions): ResearchReadModelEnvelope {
   const repoRoot = options.repoRoot || process.env.MGC_REPO_ROOT || process.cwd();
   const artifactRoot = options.artifactRoot || defaultArtifactRoot(repoRoot);
-  const sources = Object.entries(SOURCE_RELATIVE_PATHS).map(([sourceId, relativePath]) =>
+  const indexSource = readPreparedSource(artifactRoot, "investigation_index", INVESTIGATION_INDEX_RELATIVE_PATH);
+  if (indexSource.status === "INVALID") {
+    throw new Error(`Unsupported source schema for ${indexSource.source_id}: ${String(indexSource.schema_version || "missing")}`);
+  }
+
+  const indexData = isRecord(indexSource.data) ? indexSource.data : null;
+  const indexItems = Array.isArray(indexData?.investigations) ? indexData.investigations.filter(isRecord) : [];
+  const recordSources = indexItems.map((item) => {
+    const primaryArtifact = typeof item.primary_artifact === "string" ? item.primary_artifact : "";
+    const relativePath = primaryArtifact.startsWith("outputs/track_b_execution_core/research_analytics/")
+      ? primaryArtifact.replace("outputs/track_b_execution_core/research_analytics/", "")
+      : path.join("investigations", String(item.investigation_id || "missing"), "investigation.json");
+    return readPreparedSource(artifactRoot, "investigation_record", relativePath);
+  });
+  const malformedSources = recordSources.filter((source) => source.status === "INVALID");
+  const sources = [indexSource, ...recordSources];
+  const investigations = recordSources
+    .map((source) => investigationFromSource(source))
+    .filter((item): item is Record<string, unknown> => Boolean(item));
+  const duplicateIds = duplicateValues(investigations.map((item) => String(item.investigation_id || "")));
+  if (duplicateIds.length > 0) {
+    throw new Error(`Duplicate investigation_id values: ${duplicateIds.join(", ")}`);
+  }
+
+  const warnings = [
+    ...sources.filter((source) => source.status === "MISSING").map((source) => `missing_source:${source.path}`),
+    ...malformedSources.map((source) => `invalid_investigation_record:${source.path}`),
+  ];
+  const payload = {
+    schema_version: "research_questions_and_investigations_v1" as const,
+    generated_at: latestGeneratedAt(sources),
+    model_status: warnings.length > 0 || indexSource.status !== "HEALTHY" ? "VALID_WITH_WARNINGS" as const : "HEALTHY" as const,
+    source: "prepared_artifacts" as const,
+    guardrails: GUARDRAILS,
+    source_artifacts: sources.map(({ data: _data, ...source }) => source),
+    source_fingerprints: Object.fromEntries(sources.map((source) => [source.source_id === "investigation_record" ? source.path : source.source_id, source.fingerprint ?? null])),
+    investigation_count: investigations.length,
+    conclusion_status_counts: countValues(investigations.map((item) => item.conclusion_status)),
+    confidence_counts: countValues(investigations.map((item) => item.confidence)),
+    contradictory_evidence_count: investigations.reduce((count, item) => count + (Array.isArray(item.contradictory_evidence) ? item.contradictory_evidence.length : 0), 0),
+    investigations: investigations.sort((left, right) => String(left.investigation_id).localeCompare(String(right.investigation_id))),
+    warnings: Array.from(new Set(warnings)),
+  };
+  return withFingerprint(payload);
+}
+
+function investigationFromSource(source: ReturnType<typeof readPreparedSource>): Record<string, unknown> | null {
+  const data = isRecord(source.data) ? source.data : null;
+  if (!data || source.status !== "HEALTHY") {
+    return null;
+  }
+  const investigationId = stringValue(data.investigation_id);
+  if (!investigationId) {
+    return null;
+  }
+  const guardrails = isRecord(data.guardrails) ? data.guardrails : GUARDRAILS;
+  return {
+    investigation_id: investigationId,
+    title: stringValue(data.title) ?? "Untitled investigation",
+    question: stringValue(data.question) ?? "Missing",
+    status: stringValue(data.status) ?? "MISSING",
+    conclusion_status: stringValue(data.conclusion_status) ?? "MISSING",
+    confidence: stringValue(data.confidence) ?? "MISSING",
+    active_population_view: stringValue(data.active_population_view) ?? "MISSING",
+    generated_at: stringValue(data.generated_at),
+    key_findings: stringArray(data.findings),
+    contradictory_evidence: stringArray(data.contradictory_evidence),
+    limitations: stringArray(data.limitations),
+    unresolved_questions: stringArray(data.unresolved_questions),
+    follow_up_candidates: stringArray(data.follow_up_candidates),
+    source_artifacts: isRecord(data.source_artifacts) ? data.source_artifacts : {},
+    source_fingerprints: isRecord(data.source_fingerprints) ? data.source_fingerprints : {},
+    deterministic_fingerprint: source.fingerprint,
+    primary_artifact: source.path,
+    guardrails: {
+      diagnostic_only: guardrails.diagnostic_only === true,
+      production_recommendation: guardrails.production_recommendation === true,
+      trading_gate: guardrails.trading_gate === true,
+      broker_authority: false,
+      runtime_authority: false,
+    },
+  };
+}
+
+function buildResearchEvidenceCoverageReadModel(options: ReadModelOptions): ResearchReadModelEnvelope {
+  const repoRoot = options.repoRoot || process.env.MGC_REPO_ROOT || process.cwd();
+  const artifactRoot = options.artifactRoot || defaultArtifactRoot(repoRoot);
+  const sources = Object.entries(EVIDENCE_SOURCE_RELATIVE_PATHS).map(([sourceId, relativePath]) =>
     readPreparedSource(artifactRoot, sourceId as keyof typeof SUPPORTED_SOURCE_SCHEMAS, relativePath),
   );
   const invalid = sources.find((source) => source.status === "INVALID");
@@ -515,6 +632,27 @@ function percentage(numerator: number | null, denominator: number | null): numbe
 
 function derivedSourceFingerprint(payload: unknown): string {
   return `source_${stableFingerprint(payload).replace(/^fixture_/, "")}`;
+}
+
+function duplicateValues(values: readonly string[]): string[] {
+  const seen = new Set<string>();
+  const duplicates = new Set<string>();
+  for (const value of values.filter(Boolean)) {
+    if (seen.has(value)) {
+      duplicates.add(value);
+    }
+    seen.add(value);
+  }
+  return Array.from(duplicates).sort();
+}
+
+function countValues(values: readonly unknown[]): Record<string, number> {
+  const counts: Record<string, number> = {};
+  for (const value of values) {
+    const key = String(value || "MISSING");
+    counts[key] = (counts[key] || 0) + 1;
+  }
+  return counts;
 }
 
 function withFingerprint<T extends Omit<ResearchReadModelEnvelope, "deterministic_fingerprint">>(payload: T): T & { deterministic_fingerprint: string } {
