@@ -51,9 +51,9 @@ export function ResearchControlCenterPage(): JSX.Element {
     <main className="page-shell research-control-center-shell">
       <section className="hero-panel compact">
         <div>
-          <p className="eyebrow">Fixture-only Phase 1</p>
+          <p className="eyebrow">Read-only research workspace</p>
           <h1>Research Control Center</h1>
-          <p className="hero-copy">Read-only research triage over bounded fixture read-models. No real artifacts, runtime state, broker state, or operational controls are available in this window.</p>
+          <p className="hero-copy">Read-only research triage over bounded read-models. Evidence Coverage reads prepared research artifacts; investigations, checkpoints, and roadmap remain fixture-backed. No runtime state, broker state, or operational controls are available in this window.</p>
         </div>
       </section>
 
@@ -123,14 +123,60 @@ function InvestigationLibrary(props: { investigations: JsonRecord[]; model?: Res
 }
 
 function EvidenceCoverage(props: { coverage: JsonRecord[]; model?: ResearchReadModelResult }): JSX.Element {
+  const payload = props.model?.payload ?? null;
+  const sourceArtifacts = modelArray(props.model, "source_artifacts");
+  const warnings = asStringArray(payload?.warnings);
+  const generatedAt = payload?.generated_at ? String(payload.generated_at) : "Unknown";
+  const evidenceCoverage = isRecord(payload?.evidence_coverage) ? payload.evidence_coverage : null;
+  const contextCoverage = Array.isArray(evidenceCoverage?.prospective_market_context)
+    ? evidenceCoverage.prospective_market_context.filter(isRecord)
+    : [];
   return (
-    <Panel title="Evidence Coverage" subtitle="Fixture states include healthy, warning, stale, missing, and invalid cases">
+    <Panel title="Evidence Coverage" subtitle="Prepared artifact coverage only; missing producer evidence remains visible">
       <ModelStatus model={props.model} />
+      <p className="muted-copy">Generated from source artifacts at {generatedAt}.</p>
       <table className="data-table"><thead><tr><th>Layer</th><th>Status</th><th>Count</th><th>Detail</th></tr></thead><tbody>
         {props.coverage.map((item) => (
-          <tr key={String(item.key)}><td>{String(item.label)}</td><td><StatusPill status={String(item.status)} /></td><td>{String(item.count)}</td><td>{String(item.detail)}</td></tr>
+          <tr key={String(item.key)}><td>{String(item.label)}</td><td><StatusPill status={String(item.status)} /></td><td>{formatCount(item)}</td><td>{String(item.detail)}</td></tr>
         ))}
       </tbody></table>
+      {contextCoverage.length ? (
+        <>
+          <h3 className="subsection-title">Prospective Context Fields</h3>
+          <table className="data-table"><thead><tr><th>Field</th><th>Status</th><th>Coverage</th><th>Source</th></tr></thead><tbody>
+            {contextCoverage.map((item) => (
+              <tr key={String(item.field)}>
+                <td>{String(item.field)}</td>
+                <td><StatusPill status={String(item.status)} /></td>
+                <td>{formatCoverage(item)}</td>
+                <td>{String(item.source_artifact ?? "Missing")}</td>
+              </tr>
+            ))}
+          </tbody></table>
+        </>
+      ) : null}
+      {warnings.length ? (
+        <>
+          <h3 className="subsection-title">Warnings</h3>
+          <SimpleList items={warnings} empty="No warnings." />
+        </>
+      ) : null}
+      {sourceArtifacts.length ? (
+        <>
+          <h3 className="subsection-title">Source Provenance</h3>
+          <table className="data-table"><thead><tr><th>Source</th><th>Status</th><th>Schema</th><th>Generated</th><th>Fingerprint</th></tr></thead><tbody>
+            {sourceArtifacts.map((item) => (
+              <tr key={String(item.source_id)}>
+                <td>{String(item.source_id)}<br /><span className="muted-copy">{String(item.path)}</span></td>
+                <td><StatusPill status={String(item.status)} /></td>
+                <td>{String(item.schema_version ?? "Missing")}</td>
+                <td>{String(item.generated_at ?? "Missing")}</td>
+                <td className="mono-cell">{String(item.fingerprint ?? "Missing")}</td>
+              </tr>
+            ))}
+          </tbody></table>
+        </>
+      ) : null}
     </Panel>
   );
 }
@@ -190,4 +236,16 @@ function isRecord(value: unknown): value is JsonRecord {
 
 function asStringArray(value: unknown): string[] {
   return Array.isArray(value) ? value.map(String) : [];
+}
+
+function formatCount(item: JsonRecord): string {
+  const count = item.count === null || item.count === undefined ? "Unknown" : String(item.count);
+  return item.total_count === null || item.total_count === undefined ? count : `${count} / ${String(item.total_count)}`;
+}
+
+function formatCoverage(item: JsonRecord): string {
+  const available = item.available_count === null || item.available_count === undefined ? "Unknown" : String(item.available_count);
+  const total = item.total_count === null || item.total_count === undefined ? "Unknown" : String(item.total_count);
+  const rate = typeof item.coverage_rate === "number" ? `${Math.round(item.coverage_rate * 1000) / 10}%` : "Unknown";
+  return `${available} / ${total} (${rate})`;
 }

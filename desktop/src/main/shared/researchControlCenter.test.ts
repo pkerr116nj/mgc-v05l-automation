@@ -7,6 +7,8 @@ import {
   buildFixtureTriage,
   fixtureResearchReadModel,
   fixtureResearchReadModelResult,
+  researchEvidenceCoverageReadModelResult,
+  researchReadModelResult,
   researchReadModelNames,
   validateResearchReadModel,
   type ResearchReadModelResult,
@@ -108,3 +110,186 @@ test("RCC business logic avoids broker runtime imports and hard-coded local path
   assert.doesNotMatch(combined, /open -a|osascript|xdg-open|start /);
   assert.doesNotMatch(combined.replace(/production_recommendation/g, ""), /recommend|should adopt|should change|promote|retire/i);
 });
+
+test("real evidence coverage read-model parses supported prepared artifacts", () => {
+  const artifactRoot = makeEvidenceCoverageArtifacts();
+  const result = researchEvidenceCoverageReadModelResult({ artifactRoot });
+  assert.equal(result.ok, true);
+  assert.equal(result.model_name, "research_evidence_coverage_v1");
+  assert.equal(result.model_status, "VALID_WITH_WARNINGS");
+  const payload = result.payload as Record<string, unknown>;
+  assert.equal(payload.source, "prepared_artifacts");
+  assert.equal(payload.generated_at, "2026-08-06T12:00:00+00:00");
+  const crr = payload.crr as Record<string, unknown>;
+  assert.equal(crr.row_count, 10);
+  assert.equal(crr.broken_join_count, 0);
+  const eligibility = payload.research_eligibility as Record<string, unknown>;
+  assert.equal(eligibility.total_count, 10);
+  assert.equal(eligibility.qualified_count, 8);
+  assert.equal(eligibility.excluded_confirmed_anomaly_count, 2);
+});
+
+test("real evidence coverage preserves source fingerprints and producer statuses", () => {
+  const artifactRoot = makeEvidenceCoverageArtifacts();
+  const result = researchEvidenceCoverageReadModelResult({ artifactRoot });
+  assert.equal(result.ok, true);
+  const payload = result.payload as Record<string, unknown>;
+  const sourceFingerprints = payload.source_fingerprints as Record<string, unknown>;
+  assert.equal(sourceFingerprints.research_eligibility, "eligibility_fixture_fp");
+  assert.equal(sourceFingerprints.prospective_context_coverage, "context_fixture_fp");
+  const sources = payload.source_artifacts as Array<Record<string, unknown>>;
+  const crr = sources.find((source) => source.source_id === "crr_validation");
+  assert.equal(crr?.status, "VALID_WITH_WARNINGS");
+});
+
+test("real evidence coverage exposes producer-authored counts without confidence recomputation", () => {
+  const artifactRoot = makeEvidenceCoverageArtifacts();
+  const result = researchEvidenceCoverageReadModelResult({ artifactRoot });
+  assert.equal(result.ok, true);
+  const payload = result.payload as Record<string, unknown>;
+  const evidence = payload.evidence_coverage as Record<string, unknown>;
+  const ra8 = evidence.ra8 as Record<string, unknown>;
+  assert.equal(ra8.available_count, 4);
+  assert.equal(ra8.missing_count, 6);
+  assert.equal(ra8.coverage_rate, 0.4);
+  const serialized = JSON.stringify(payload);
+  assert.doesNotMatch(serialized, /confidence|claim_id|conclusion_id/);
+});
+
+test("unsupported prepared source schema invalidates only the evidence coverage model", () => {
+  const artifactRoot = makeEvidenceCoverageArtifacts({
+    crr_validation: { schema_version: "canonical_research_record_validation_report_v2" },
+  });
+  const result = researchEvidenceCoverageReadModelResult({ artifactRoot });
+  assert.equal(result.ok, false);
+  assert.equal(result.model_status, "INVALID");
+  assert.match(result.error ?? "", /Unsupported source schema/);
+
+  const questions = researchReadModelResult("research_questions_and_investigations_v1", { artifactRoot });
+  assert.equal(questions.ok, true);
+  assert.equal(questions.payload?.source, "fixture");
+});
+
+test("missing prepared source is fail-soft for the affected evidence subsection", () => {
+  const artifactRoot = makeEvidenceCoverageArtifacts({}, ["prospective_context_coverage"]);
+  const result = researchEvidenceCoverageReadModelResult({ artifactRoot });
+  assert.equal(result.ok, true);
+  assert.equal(result.model_status, "VALID_WITH_WARNINGS");
+  const payload = result.payload as Record<string, unknown>;
+  const sources = payload.source_artifacts as Array<Record<string, unknown>>;
+  const missing = sources.find((source) => source.source_id === "prospective_context_coverage");
+  assert.equal(missing?.status, "MISSING");
+  const coverageItems = payload.coverage_items as Array<Record<string, unknown>>;
+  const context = coverageItems.find((item) => item.key === "prospective_context");
+  assert.equal(context?.status, "MISSING");
+});
+
+test("real evidence coverage read-model is deterministic across repeated generation", () => {
+  const artifactRoot = makeEvidenceCoverageArtifacts();
+  const first = researchEvidenceCoverageReadModelResult({ artifactRoot });
+  const second = researchEvidenceCoverageReadModelResult({ artifactRoot });
+  assert.equal(first.ok, true);
+  assert.equal(second.ok, true);
+  assert.equal(first.payload?.deterministic_fingerprint, second.payload?.deterministic_fingerprint);
+  assert.deepEqual(first.payload, second.payload);
+});
+
+function makeEvidenceCoverageArtifacts(overrides: Record<string, Record<string, unknown>> = {}, omit: string[] = []): string {
+  const root = fs.mkdtempSync(path.join(process.env.TMPDIR || "/tmp", "rcc-evidence-"));
+  const artifacts: Record<string, { relativePath: string; payload: Record<string, unknown> }> = {
+    crr_validation: {
+      relativePath: "canonical_research_record/canonical_research_record_validation_report.json",
+      payload: {
+        schema_version: "canonical_research_record_validation_report_v1",
+        generated_at: "2026-08-06T06:02:38.742548+00:00",
+        status: "VALID_WITH_WARNINGS",
+        counts: {
+          canonical_research_records: 10,
+          expected_completed_canonical_records: 10,
+          broken_join_count: 0,
+          missing_join_count: 6,
+          reconciliation_mismatch_count: 0,
+        },
+        missing_by_layer: { ra8: 6 },
+        broken_by_layer: {},
+        refresh_guidance: ["ra8_source_coverage_limit"],
+        upstream_readiness: [
+          {
+            source_name: "ctol",
+            readiness_classification: "READY",
+            row_count: 10,
+            exact_join_count: 10,
+            missing_join_count: 0,
+            broken_join_count: 0,
+            coverage_percentage: 1,
+            artifact_path: "outputs/track_b_execution_core/trade_outcome_layer/canonical_trade_outcomes.jsonl",
+          },
+        ],
+      },
+    },
+    research_eligibility: {
+      relativePath: "research_eligibility/research_eligibility_summary.json",
+      payload: {
+        schema_version: "research_eligibility_summary_v1",
+        generated_at: "2026-08-06T12:00:00+00:00",
+        deterministic_fingerprint: "eligibility_fixture_fp",
+        eligibility_record_count: 10,
+        input_crr_count: 10,
+        classification_counts: {
+          ELIGIBLE_WITH_LIMITATIONS: 8,
+          EXCLUDED_CONFIRMED_SOURCE_INTEGRITY_ANOMALY: 2,
+        },
+        review_queue: [],
+        source_confirmed_anomalies: [{ id: "a" }, { id: "b" }],
+      },
+    },
+    prospective_context_coverage: {
+      relativePath: "prospective_nq_cohort_monitor/context_coverage_audit.json",
+      payload: {
+        schema_version: "prospective_market_context_coverage_audit_v1",
+        generated_at: "2026-08-06T12:00:00+00:00",
+        deterministic_fingerprint: "context_fixture_fp",
+        fields: {
+          gre: {
+            status: "AVAILABLE_ONLY_AS_VALIDITY_OR_UNAVAILABLE_STATE",
+            source_artifact: "CRR enrichment_ref.context_validity_summary.gre_validity_classification",
+            implementation_requirement: "research producer change",
+            discovery_coverage: { available_count: 3, missing_count: 7, total_count: 10, coverage_rate: 0.3 },
+          },
+          crfd: {
+            status: "ABSENT",
+            source_artifact: "not present in CRR v1",
+            implementation_requirement: "runtime producer change",
+            discovery_coverage: { available_count: 0, missing_count: 10, total_count: 10, coverage_rate: 0 },
+          },
+        },
+      },
+    },
+    research_evidence_explorer: {
+      relativePath: "research_evidence_explorer/research_evidence_explorer_v1.json",
+      payload: {
+        schema_version: "research_evidence_explorer_v1",
+        generated_at: "2026-08-06T12:00:00+00:00",
+        deterministic_fingerprint: "explorer_fixture_fp",
+        population: {
+          coverage: {
+            ra8_exact_count: 4,
+            ra8_missing_count: 6,
+            ra8_coverage_rate: 0.4,
+          },
+        },
+        warnings: ["ra8_finalized_path_coverage_partial"],
+      },
+    },
+  };
+
+  for (const [key, artifact] of Object.entries(artifacts)) {
+    if (omit.includes(key)) {
+      continue;
+    }
+    const target = path.join(root, artifact.relativePath);
+    fs.mkdirSync(path.dirname(target), { recursive: true });
+    fs.writeFileSync(target, `${JSON.stringify({ ...artifact.payload, ...(overrides[key] || {}) }, null, 2)}\n`, "utf8");
+  }
+  return root;
+}

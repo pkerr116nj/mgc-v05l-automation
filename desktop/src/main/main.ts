@@ -1,5 +1,5 @@
 import { app, BrowserWindow, Menu, ipcMain } from "electron";
-import { fixtureResearchReadModelResult } from "./shared/researchControlCenter";
+import { researchReadModelResult } from "./shared/researchControlCenter";
 import { researchControlCenterHashRoute, researchControlCenterWindowOptions } from "./researchWindow";
 import fsSync from "node:fs";
 import fs from "node:fs/promises";
@@ -565,7 +565,9 @@ function installIpcHandlers(): void {
       { paperTradeLogVisibleRange: options?.paperTradeLogVisibleRange ?? null },
     ),
   );
-  ipcMain.handle("research-control-center:get-read-model", (_event, name: string) => fixtureResearchReadModelResult(name));
+  ipcMain.handle("research-control-center:get-read-model", (_event, name: string) =>
+    researchReadModelResult(name, { repoRoot: cliSwitchValue("mgc-repo-root") || process.env.MGC_REPO_ROOT || process.cwd() }),
+  );
   ipcMain.handle("desktop:start-dashboard", () => startDashboard());
   ipcMain.handle("desktop:stop-dashboard", () => stopDashboard());
   ipcMain.handle("desktop:restart-dashboard", () => restartDashboard());
