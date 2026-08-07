@@ -1,4 +1,4 @@
-import type { BrowserWindowConstructorOptions } from "electron";
+import type { BrowserWindowConstructorOptions, MenuItemConstructorOptions } from "electron";
 
 export function researchControlCenterWindowOptions(preloadPath: string): BrowserWindowConstructorOptions {
   return {
@@ -18,4 +18,15 @@ export function researchControlCenterWindowOptions(preloadPath: string): Browser
 
 export function researchControlCenterHashRoute(): string {
   return "#/research-control-center";
+}
+
+export function researchControlCenterMenuItem(
+  openResearchControlCenterWindow: () => void | Promise<void>,
+): MenuItemConstructorOptions {
+  return {
+    label: "Research Control Center",
+    click: () => {
+      void openResearchControlCenterWindow();
+    },
+  };
 }

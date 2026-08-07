@@ -1,6 +1,10 @@
 import { app, BrowserWindow, Menu, ipcMain } from "electron";
 import { researchReadModelResult } from "./shared/researchControlCenter";
-import { researchControlCenterHashRoute, researchControlCenterWindowOptions } from "./researchWindow";
+import {
+  researchControlCenterHashRoute,
+  researchControlCenterMenuItem,
+  researchControlCenterWindowOptions,
+} from "./researchWindow";
 import fsSync from "node:fs";
 import fs from "node:fs/promises";
 import path from "node:path";
@@ -417,6 +421,8 @@ function createMenu(): Menu {
     {
       label: "View",
       submenu: [
+        researchControlCenterMenuItem(createResearchControlCenterWindow),
+        { type: "separator" },
         { role: "toggleDevTools" },
         { role: "resetZoom" },
         { role: "zoomIn" },
