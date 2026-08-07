@@ -17,6 +17,7 @@ let currentScenarioName = new URLSearchParams(window.location.search).get("scena
 let preparedMarketTape = null;
 let preparedSystemFlow = null;
 let preparedExposure = null;
+let preparedVenueSessions = null;
 let eventTimer = null;
 
 function stateColor(state) {
@@ -59,8 +60,11 @@ function timeTerminatorPath(timeState) {
 }
 
 function drawVenueArc(scenario) {
-  const activeEurope = ["lse", "eurex", "paris", "amsterdam", "six"].some((id) => scenario.venues[id] === "OPEN");
-  const activeUs = ["nyse", "nasdaq", "cboe", "cme", "cfe"].some((id) => scenario.venues[id] === "OPEN");
+  const venueStatesById = preparedVenueSessions?.venues
+    ? Object.fromEntries(preparedVenueSessions.venues.map((venue) => [venue.venue_id, venue.session_status || "UNKNOWN"]))
+    : scenario.venues;
+  const activeEurope = ["lse", "eurex", "paris", "amsterdam", "six"].some((id) => venueStatesById[id] === "OPEN");
+  const activeUs = ["nyse", "nasdaq", "cboe", "cme", "cfe"].some((id) => venueStatesById[id] === "OPEN");
   const bridge = activeEurope && activeUs
     ? `<path class="atlantic-bridge" d="M 48.5 36.1 C 41 31, 33 33, 27.2 39.4" />`
     : "";
@@ -111,14 +115,15 @@ function drawVenueArc(scenario) {
     ${bridge}
   `;
   const nodes = venues.map((venue) => {
-    const state = scenario.venues[venue.id] || "CLOSED";
+    const state = venueStatesById[venue.id] || "UNKNOWN";
+    const preparedVenue = preparedVenueSessions?.venues?.find((item) => item.venue_id === venue.id);
     const labelX = venue.x + (venue.labelDx ?? 1.8);
     const labelY = venue.y + (venue.labelDy ?? 0.8);
     return `
       <g class="venue-group" data-region="${venue.region}">
         <circle class="venue-harbor" data-state="${state}" cx="${venue.x}" cy="${venue.y}" r="${stateRadius(state) * 3.6}" fill="${stateColor(state)}" />
         <circle class="venue-node" data-state="${state}" cx="${venue.x}" cy="${venue.y}" r="${stateRadius(state)}" fill="${stateColor(state)}">
-          <title>${venue.city} - ${venue.label}: ${state}</title>
+          <title>${venue.city} - ${venue.label}: ${state}${preparedVenue?.local_time ? ` local ${preparedVenue.local_time}` : ""}</title>
         </circle>
         <text class="venue-label" data-state="${state}" x="${labelX}" y="${labelY}">${venue.city}</text>
       </g>
@@ -365,12 +370,10 @@ async function loadPreparedMarketTapeIfRequested() {
     }
     preparedMarketTape = snapshot;
     app.dataset.marketTapeSource = snapshot.model_status || "UNKNOWN";
-    canvasNote.textContent = `${canvasNote.textContent} Tape: ${snapshot.model_status}; ${snapshot.source_kind}; generated ${snapshot.generated_at}.`;
     renderScenario();
   } catch (error) {
     preparedMarketTape = null;
     app.dataset.marketTapeSource = "MISSING";
-    canvasNote.textContent = `${canvasNote.textContent} Tape source missing; fixture tape is shown.`;
   }
 }
 
@@ -385,12 +388,10 @@ async function loadPreparedSystemFlowIfRequested() {
     }
     preparedSystemFlow = snapshot;
     app.dataset.systemPipelineSource = snapshot.model_status || "UNKNOWN";
-    canvasNote.textContent = `${canvasNote.textContent} Pipeline: ${snapshot.model_status}; generated ${snapshot.generated_at}.`;
     renderScenario();
   } catch (error) {
     preparedSystemFlow = null;
     app.dataset.systemPipelineSource = "MISSING";
-    canvasNote.textContent = `${canvasNote.textContent} Pipeline source missing; fixture river is shown.`;
   }
 }
 
@@ -406,7 +407,6 @@ async function loadPreparedExposureIfRequested() {
     preparedExposure = snapshot;
     app.dataset.exposureSource = snapshot.model_status || "UNKNOWN";
     app.dataset.exposureDisplayClass = snapshot.visual?.display_class || "UNKNOWN";
-    canvasNote.textContent = `${canvasNote.textContent} Exposure: ${snapshot.model_status}; positions=${snapshot.aggregate?.position_count ?? "UNKNOWN"}; generated ${snapshot.generated_at}.`;
     renderScenario();
   } catch (error) {
     preparedExposure = {
@@ -422,7 +422,29 @@ async function loadPreparedExposureIfRequested() {
     };
     app.dataset.exposureSource = "MISSING";
     app.dataset.exposureDisplayClass = "UNKNOWN";
-    canvasNote.textContent = `${canvasNote.textContent} Exposure source missing; no exposure state inferred.`;
+    renderScenario();
+  }
+}
+
+async function loadPreparedVenueSessionsIfRequested() {
+  const params = new URLSearchParams(window.location.search);
+  if (params.get("venues") !== "prepared") return;
+  try {
+    const module = await import(`./venue_session_snapshot.generated.mjs?generated=${Date.now()}`);
+    const snapshot = module.venueSessionSnapshot;
+    if (!snapshot || snapshot.schema_version !== "observatory_global_venue_session_v1") {
+      throw new Error("prepared venue/session snapshot has an unsupported schema");
+    }
+    preparedVenueSessions = snapshot;
+    app.dataset.venueSessionSource = snapshot.model_status || "UNKNOWN";
+    renderScenario();
+  } catch (error) {
+    preparedVenueSessions = {
+      schema_version: "observatory_global_venue_session_v1",
+      model_status: "MISSING",
+      venues: venues.map((venue) => ({ venue_id: venue.id, session_status: "UNKNOWN" })),
+    };
+    app.dataset.venueSessionSource = "MISSING";
     renderScenario();
   }
 }
@@ -457,3 +479,4 @@ applyScenario(currentScenarioName);
 loadPreparedMarketTapeIfRequested();
 loadPreparedSystemFlowIfRequested();
 loadPreparedExposureIfRequested();
+loadPreparedVenueSessionsIfRequested();
