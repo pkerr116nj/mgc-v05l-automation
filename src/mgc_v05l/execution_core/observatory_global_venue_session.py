@@ -28,6 +28,14 @@ GUARDRAILS = {
 
 
 @dataclass(frozen=True)
+class ProductSessionSpec:
+    product_group: str
+    calendar_code: str | None
+    monitored: bool
+    limitation: str | None = None
+
+
+@dataclass(frozen=True)
 class VenueSpec:
     venue_id: str
     city: str
@@ -38,13 +46,32 @@ class VenueSpec:
     calendar_code: str | None
     coverage: str
     limitation: str | None = None
+    product_sessions: tuple[ProductSessionSpec, ...] = ()
 
 
 VENUES: tuple[VenueSpec, ...] = (
     VenueSpec("nyse", "New York", "NYSE", "New York Stock Exchange", 40.7128, -74.0060, "XNYS", "SUPPORTED"),
     VenueSpec("nasdaq", "New York", "Nasdaq", "Nasdaq", 40.7128, -74.0060, "XNAS", "SUPPORTED_WITH_LIMITATION", "exchange_calendars aliases XNAS to XNYS trading hours."),
     VenueSpec("cboe", "New York", "Cboe", "Cboe", 40.7128, -74.0060, "XCBF", "SUPPORTED_WITH_LIMITATION", "Represented by XCBF Cboe Futures calendar; not all Cboe venues."),
-    VenueSpec("cme", "Chicago", "CME", "CME Globex", 41.8781, -87.6298, "CMES", "SUPPORTED"),
+    VenueSpec(
+        "cme",
+        "Chicago",
+        "CME",
+        "CME Globex",
+        41.8781,
+        -87.6298,
+        "CMES",
+        "SUPPORTED",
+        product_sessions=(
+            ProductSessionSpec("Crypto", None, False, "No source-authoritative 24/7 crypto maintenance calendar is configured."),
+            ProductSessionSpec("Equity Index", "CMES", True),
+            ProductSessionSpec("Rates", "CMES", True),
+            ProductSessionSpec("Metals", "CMES", True),
+            ProductSessionSpec("Energy", "CMES", False),
+            ProductSessionSpec("FX", "CMES", False),
+            ProductSessionSpec("Single Stock Futures", None, False, "No source-authoritative single-stock-futures calendar is configured."),
+        ),
+    ),
     VenueSpec("cfe", "Chicago", "CFE", "Cboe Futures Exchange", 41.8781, -87.6298, "XCBF", "SUPPORTED"),
     VenueSpec("tsx", "Toronto", "TSX", "Toronto Stock Exchange", 43.6532, -79.3832, "XTSE", "SUPPORTED"),
     VenueSpec("mx", "Montreal", "MX", "Montreal Exchange", 45.5019, -73.5674, None, "UNSUPPORTED", "No Montreal Exchange calendar found."),
@@ -205,6 +232,7 @@ def venue_record(spec: VenueSpec, generated_at: datetime) -> dict[str, Any]:
         "limitation": spec.limitation,
         "guardrails": dict(GUARDRAILS),
     }
+    product_sessions = _product_session_records(spec, generated_at)
     if not spec.calendar_code:
         return {
             **base,
@@ -216,9 +244,26 @@ def venue_record(spec: VenueSpec, generated_at: datetime) -> dict[str, Any]:
             "holiday": None,
             "special_session": None,
             "calendar_source": None,
+            "venue_operational_state": "UNKNOWN",
+            "product_session_states": product_sessions,
+            "session_aggregation_rule": "UNKNOWN because no venue-level calendar source is configured.",
         }
     try:
-        return {**base, **_status_for_supported(spec, generated_at)}
+        venue_status = _status_for_supported(spec, generated_at)
+        if product_sessions:
+            venue_status["session_status"] = _aggregate_product_session_status(product_sessions)
+            venue_status["session_aggregation_rule"] = (
+                "Ambient state is GREEN/OPEN if any monitored, source-supported CME product family is tradable; "
+                "RED/CLOSED if all monitored supported families are closed; GRAY/UNKNOWN if no supported product-family truth exists."
+            )
+        else:
+            venue_status["session_aggregation_rule"] = "Venue-level exchange calendar status."
+        return {
+            **base,
+            **venue_status,
+            "venue_operational_state": "UNKNOWN",
+            "product_session_states": product_sessions,
+        }
     except Exception as exc:
         return {
             **base,
@@ -230,8 +275,74 @@ def venue_record(spec: VenueSpec, generated_at: datetime) -> dict[str, Any]:
             "holiday": None,
             "special_session": None,
             "calendar_source": spec.calendar_code,
+            "venue_operational_state": "UNKNOWN",
+            "product_session_states": product_sessions,
+            "session_aggregation_rule": "UNKNOWN because calendar query failed.",
             "limitation": f"calendar_query_failed: {type(exc).__name__}: {exc}",
         }
+
+
+def _product_session_records(spec: VenueSpec, generated_at: datetime) -> list[dict[str, Any]]:
+    records: list[dict[str, Any]] = []
+    for product in spec.product_sessions:
+        if not product.calendar_code:
+            records.append(
+                {
+                    "product_group": product.product_group,
+                    "monitored": product.monitored,
+                    "product_session_state": "UNKNOWN",
+                    "calendar_source": None,
+                    "source_limitation": product.limitation or "No source-authoritative product calendar is configured.",
+                }
+            )
+            continue
+        try:
+            status = _status_for_supported(
+                VenueSpec(
+                    venue_id=f"{spec.venue_id}.{product.product_group.lower().replace(' ', '_')}",
+                    city=spec.city,
+                    display_name=f"{spec.display_name} {product.product_group}",
+                    exchange=spec.exchange,
+                    latitude=spec.latitude,
+                    longitude=spec.longitude,
+                    calendar_code=product.calendar_code,
+                    coverage=spec.coverage,
+                ),
+                generated_at,
+            )
+            records.append(
+                {
+                    "product_group": product.product_group,
+                    "monitored": product.monitored,
+                    "product_session_state": status["session_status"],
+                    "calendar_source": product.calendar_code,
+                    "next_transition_at": status["next_transition_at"],
+                    "source_limitation": product.limitation,
+                }
+            )
+        except Exception as exc:
+            records.append(
+                {
+                    "product_group": product.product_group,
+                    "monitored": product.monitored,
+                    "product_session_state": "UNKNOWN",
+                    "calendar_source": product.calendar_code,
+                    "source_limitation": f"calendar_query_failed: {type(exc).__name__}: {exc}",
+                }
+            )
+    return records
+
+
+def _aggregate_product_session_status(product_sessions: list[dict[str, Any]]) -> str:
+    monitored = [row for row in product_sessions if row.get("monitored") is True and row.get("calendar_source")]
+    if not monitored:
+        return "UNKNOWN"
+    statuses = {str(row.get("product_session_state") or "UNKNOWN") for row in monitored}
+    if statuses & {"OPEN", "AUCTION", "CLOSING_SOON"}:
+        return "OPEN"
+    if statuses <= {"CLOSED", "HOLIDAY", "PREOPEN", "LUNCH_BREAK"}:
+        return "CLOSED"
+    return "UNKNOWN"
 
 
 def build_snapshot(generated_at: datetime | None = None) -> dict[str, Any]:

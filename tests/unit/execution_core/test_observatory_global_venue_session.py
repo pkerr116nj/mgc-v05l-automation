@@ -58,6 +58,38 @@ def test_lunch_break_market_when_supported() -> None:
     assert hkex["calendar_source"] == "XHKG"
 
 
+def test_cme_product_sessions_are_separate_from_venue_operational_state() -> None:
+    snapshot = build_snapshot(datetime(2026, 8, 7, 15, 0, tzinfo=UTC))
+    cme = _venue(snapshot, "cme")
+    products = {row["product_group"]: row for row in cme["product_session_states"]}
+    assert cme["venue_operational_state"] == "UNKNOWN"
+    assert cme["session_status"] == "OPEN"
+    assert products["Equity Index"]["product_session_state"] == "OPEN"
+    assert products["Rates"]["product_session_state"] == "OPEN"
+    assert products["Metals"]["product_session_state"] == "OPEN"
+    assert products["Crypto"]["product_session_state"] == "UNKNOWN"
+    assert products["Crypto"]["calendar_source"] is None
+
+
+def test_cme_weekend_traditional_products_closed_without_guessing_crypto() -> None:
+    snapshot = build_snapshot(datetime(2026, 8, 8, 15, 0, tzinfo=UTC))
+    cme = _venue(snapshot, "cme")
+    products = {row["product_group"]: row for row in cme["product_session_states"]}
+    assert cme["session_status"] == "CLOSED"
+    assert products["Equity Index"]["product_session_state"] == "CLOSED"
+    assert products["Rates"]["product_session_state"] == "CLOSED"
+    assert products["Metals"]["product_session_state"] == "CLOSED"
+    assert products["Crypto"]["product_session_state"] == "UNKNOWN"
+
+
+def test_cme_maintenance_window_uses_product_calendar_truth() -> None:
+    snapshot = build_snapshot(datetime(2026, 8, 7, 22, 30, tzinfo=UTC))
+    cme = _venue(snapshot, "cme")
+    monitored = [row for row in cme["product_session_states"] if row["monitored"]]
+    assert cme["session_status"] == "CLOSED"
+    assert {row["product_session_state"] for row in monitored} == {"CLOSED"}
+
+
 def test_unsupported_venue_fails_closed_to_unknown() -> None:
     snapshot = build_snapshot(datetime(2026, 8, 7, 15, 0, tzinfo=UTC))
     montreal = _venue(snapshot, "mx")

@@ -1,4 +1,5 @@
 import { scenarioNames, scenarios, venues } from "./fixtures.mjs";
+import { worldLand110m } from "./world_land_110m.mjs";
 
 const app = document.querySelector("#app");
 const arc = document.querySelector("#venue-arc");
@@ -8,6 +9,9 @@ const scenarioPanel = document.querySelector("#scenario-panel");
 const scenarioToggle = document.querySelector("#scenario-toggle");
 const scenarioClock = document.querySelector("#scenario-clock");
 const canvasNote = document.querySelector("#canvas-note");
+const contextPanel = document.querySelector("#context-panel");
+const contextContent = document.querySelector("#context-content");
+const contextClose = document.querySelector("#context-close");
 const atmosphere = document.querySelector("#atmosphere");
 const riverMaterial = document.querySelector("#river-material");
 const atmosphereContext = atmosphere.getContext("2d", { alpha: true });
@@ -18,56 +22,969 @@ let preparedMarketTape = null;
 let preparedSystemFlow = null;
 let preparedExposure = null;
 let preparedVenueSessions = null;
+let preparedMarketCanvas = null;
+let preparedMacroContext = null;
+let preparedOperationalHealth = null;
+let preparedRuntimeBrokerContext = null;
+let preparedFrameManifest = null;
 let eventTimer = null;
+let solarTimer = null;
+let preparedRefreshTimer = null;
+let selectedContext = null;
+let initialContextApplied = false;
+let currentSolarMinuteKey = null;
+const renderSignatures = {
+  commentary: null,
+  world: null,
+  tape: null,
+  flow: null,
+  atmosphere: null,
+  river: null,
+  controls: null,
+};
+const observatoryPerformance = {
+  counts: {
+    world: 0,
+    tape: 0,
+    flow: 0,
+    atmosphere: 0,
+    river: 0,
+    context: 0,
+  },
+  durations: [],
+};
+window.observatoryPerformance = observatoryPerformance;
+
+const ROBINSON_X = [1, 0.9986, 0.9954, 0.99, 0.9822, 0.973, 0.96, 0.9427, 0.9216, 0.8962, 0.8679, 0.835, 0.7986, 0.7597, 0.7186, 0.6732, 0.6213, 0.5722, 0.5322];
+const ROBINSON_Y = [0, 0.062, 0.124, 0.186, 0.248, 0.31, 0.372, 0.434, 0.4958, 0.5571, 0.6176, 0.6769, 0.7346, 0.7903, 0.8435, 0.8936, 0.9394, 0.9761, 1];
+const ROBINSON_X_SCALE = 0.8487;
+const ROBINSON_Y_SCALE = 1.3523;
+const MAP_WIDTH_UNITS = Math.PI * ROBINSON_X_SCALE * 2;
+const MAP_HEIGHT_UNITS = ROBINSON_Y_SCALE * 2;
+const EARTH_BOUNDARY_PATH = "M -76 48 C -34 -30, 20 -47, 50 -47 C 82 -47, 137 -28, 176 49 C 137 127, 82 145, 50 145 C 17 145, -36 127, -76 48 Z";
+
+function interpolateTable(table, latitude) {
+  const absLatitude = Math.min(90, Math.abs(latitude));
+  const index = Math.min(17, Math.floor(absLatitude / 5));
+  const fraction = (absLatitude - index * 5) / 5;
+  return table[index] + (table[index + 1] - table[index]) * fraction;
+}
+
+function projectLonLat(longitude, latitude, options = {}) {
+  if (!Number.isFinite(longitude) || !Number.isFinite(latitude)) return null;
+  const sourceCoordinate = options.geometryContext
+    ? observatoryGeometryCoordinate(longitude, latitude, options.geometryContext)
+    : { longitude, latitude };
+  const projectedCoordinate = observatoryProjectionV1Coordinate(sourceCoordinate.longitude, sourceCoordinate.latitude);
+  const lonRadians = projectedCoordinate.longitude * Math.PI / 180;
+  const xFactor = interpolateTable(ROBINSON_X, projectedCoordinate.latitude);
+  const yFactor = interpolateTable(ROBINSON_Y, projectedCoordinate.latitude);
+  const rawX = ROBINSON_X_SCALE * xFactor * lonRadians;
+  const rawY = ROBINSON_Y_SCALE * yFactor * Math.sign(projectedCoordinate.latitude);
+  const composedX = rawX + horizontalCompositionOffset(projectedCoordinate.longitude);
+  return {
+    x: 50 + (composedX / MAP_WIDTH_UNITS) * 108,
+    y: 51 - (rawY / MAP_HEIGHT_UNITS) * 77,
+  };
+}
+
+function smoothBand(value, left, right) {
+  const t = Math.max(0, Math.min(1, (value - left) / (right - left)));
+  return t * t * (3 - 2 * t);
+}
+
+function observatoryProjectionV1Coordinate(longitude, latitude) {
+  // Observatory Projection v1 favors immediate operator recognition over strict
+  // cartographic fidelity: plates stay coherent, oceans absorb most spacing.
+  if (longitude >= 166 && latitude >= -50 && latitude <= -30) {
+    const centerLongitude = 172.4;
+    const centerLatitude = -41.2;
+    const dx = longitude - centerLongitude;
+    const dy = latitude - centerLatitude;
+    return {
+      longitude: centerLongitude + 3.2 + dx * 0.74,
+      latitude: centerLatitude + 1.8 + dy * 0.96,
+    };
+  }
+  if (longitude < -38) {
+    const center = -92;
+    const southAmericaUpperLobeGain = longitude > -74 && longitude < -42 && latitude > -24 && latitude < 13
+      ? 1.055
+      : 1;
+    return {
+      longitude: center + (longitude - center) * 1.095 * southAmericaUpperLobeGain,
+      latitude,
+    };
+  }
+  if (longitude >= 46 && longitude < 104) {
+    const center = 58;
+    return {
+      longitude: center + (longitude - center) * 1.18,
+      latitude,
+    };
+  }
+  if (longitude >= 104 && longitude < 146) {
+    const center = 104;
+    return {
+      longitude: center + (longitude - center) * 1.19,
+      latitude,
+    };
+  }
+  return { longitude, latitude };
+}
+
+function horizontalCompositionOffset(longitude) {
+  // Pacific-wrap composition: regions move mostly as rigid plates. Transitions
+  // remain in the Pacific, Atlantic, Indian, and SW Pacific ocean spans.
+  if (longitude < -172) return -0.27;
+  if (longitude < -158) return lerp(-0.27, -0.22, smoothBand(longitude, -172, -158));
+  if (longitude < -42) return -0.22; // Americas plate, moved farther west.
+  if (longitude < -14) return lerp(-0.22, 0.18, smoothBand(longitude, -42, -14)); // wider Atlantic.
+  if (longitude < 46) return 0.18; // Europe/Africa/Madagascar plate.
+  if (longitude < 78) return lerp(0.18, 0.31, smoothBand(longitude, 46, 78)); // Indian Ocean / Central Asia spacing.
+  if (longitude < 104) return 0.31; // West/Central Asia after width restoration.
+  if (longitude < 146) return 0.34; // East Asia / western Pacific opened for venue separation.
+  if (longitude < 160) return lerp(0.34, 0.33, smoothBand(longitude, 146, 160));
+  if (longitude < 166) return 0.33; // Australia plate.
+  if (longitude < 174) return lerp(0.33, 0.48, smoothBand(longitude, 166, 174)); // Tasman / SW Pacific.
+  return 0.48; // New Zealand / Pacific edge.
+}
+
+function lerp(left, right, amount) {
+  return left + (right - left) * amount;
+}
+
+function observatoryGeometryCoordinate(longitude, latitude, context) {
+  if (!context || !Number.isFinite(context.centerLongitude) || !Number.isFinite(context.centerLatitude)) {
+    return { longitude, latitude };
+  }
+  if (context.smallEquatorialIsland) {
+    const scale = context.region === "maritime_southeast_asia" ? 0.78 : 0.82;
+    return {
+      longitude: context.centerLongitude + (longitude - context.centerLongitude) * scale,
+      latitude: context.centerLatitude + (latitude - context.centerLatitude) * scale,
+    };
+  }
+  return { longitude, latitude };
+}
+
+function currentMinuteKey() {
+  return new Date().toISOString().slice(0, 16);
+}
+
+function stableSignature(value) {
+  return JSON.stringify(value);
+}
+
+function measureRender(name, fn) {
+  const started = performance.now();
+  fn();
+  const durationMs = Number((performance.now() - started).toFixed(3));
+  observatoryPerformance.counts[name] = (observatoryPerformance.counts[name] || 0) + 1;
+  observatoryPerformance.durations.push({ name, duration_ms: durationMs, at: new Date().toISOString() });
+  if (observatoryPerformance.durations.length > 80) observatoryPerformance.durations.shift();
+}
+
+function normalizeDegrees(value) {
+  return ((value % 360) + 360) % 360;
+}
+
+function normalizeLongitude(value) {
+  const normalized = normalizeDegrees(value + 180) - 180;
+  return normalized === -180 ? 180 : normalized;
+}
+
+function julianDay(date) {
+  return date.getTime() / 86400000 + 2440587.5;
+}
+
+function solarPosition(date) {
+  const radians = Math.PI / 180;
+  const degrees = 180 / Math.PI;
+  const jd = julianDay(date);
+  const daysSinceEpoch = jd - 2451545.0;
+  const meanLongitude = normalizeDegrees(280.46 + 0.9856474 * daysSinceEpoch);
+  const meanAnomaly = normalizeDegrees(357.528 + 0.9856003 * daysSinceEpoch);
+  const eclipticLongitude = normalizeDegrees(
+    meanLongitude
+      + 1.915 * Math.sin(meanAnomaly * radians)
+      + 0.02 * Math.sin(2 * meanAnomaly * radians)
+  );
+  const obliquity = 23.439 - 0.0000004 * daysSinceEpoch;
+  const rightAscension = Math.atan2(
+    Math.cos(obliquity * radians) * Math.sin(eclipticLongitude * radians),
+    Math.cos(eclipticLongitude * radians)
+  ) * degrees;
+  const declination = Math.asin(
+    Math.sin(obliquity * radians) * Math.sin(eclipticLongitude * radians)
+  ) * degrees;
+  const siderealTime = normalizeDegrees(280.46061837 + 360.98564736629 * daysSinceEpoch);
+  return {
+    declination,
+    subsolarLongitude: normalizeLongitude(rightAscension - siderealTime),
+  };
+}
+
+function solarElevation(longitude, latitude, sun) {
+  const radians = Math.PI / 180;
+  const lat = latitude * radians;
+  const declination = sun.declination * radians;
+  const hourAngle = normalizeLongitude(longitude - sun.subsolarLongitude) * radians;
+  return Math.asin(
+    Math.sin(lat) * Math.sin(declination)
+      + Math.cos(lat) * Math.cos(declination) * Math.cos(hourAngle)
+  ) * (180 / Math.PI);
+}
+
+function solarCellPath(lon0, lat0, lon1, lat1) {
+  const corners = [
+    projectLonLat(lon0, lat0),
+    projectLonLat(lon1, lat0),
+    projectLonLat(lon1, lat1),
+    projectLonLat(lon0, lat1),
+  ];
+  if (corners.some((point) => !point)) return "";
+  return `M ${corners[0].x.toFixed(3)} ${corners[0].y.toFixed(3)} L ${corners[1].x.toFixed(3)} ${corners[1].y.toFixed(3)} L ${corners[2].x.toFixed(3)} ${corners[2].y.toFixed(3)} L ${corners[3].x.toFixed(3)} ${corners[3].y.toFixed(3)} Z`;
+}
+
+function solarIllumination(date = new Date()) {
+  const sun = solarPosition(date);
+  const night = [];
+  const twilight = [];
+  const deepTwilight = [];
+  const daylight = [];
+  const lonStep = 3;
+  const latStep = 3;
+  for (let latitude = -60; latitude < 84; latitude += latStep) {
+    for (let longitude = -180; longitude < 180; longitude += lonStep) {
+      const centerLongitude = longitude + lonStep / 2;
+      const centerLatitude = latitude + latStep / 2;
+      const elevation = solarElevation(centerLongitude, centerLatitude, sun);
+      const path = solarCellPath(longitude, latitude, longitude + lonStep, latitude + latStep);
+      if (!path) continue;
+      if (elevation > 5) {
+        daylight.push(`<path d="${path}" />`);
+      } else if (elevation > -6) {
+        twilight.push(`<path d="${path}" />`);
+      } else if (elevation > -15) {
+        deepTwilight.push(`<path d="${path}" />`);
+      } else {
+        night.push(`<path d="${path}" />`);
+      }
+    }
+  }
+  return {
+    daylight: daylight.join(""),
+    twilight: twilight.join(""),
+    deepTwilight: deepTwilight.join(""),
+    night: night.join(""),
+    sun,
+  };
+}
+
+function geometryMaxLatitude(geometry) {
+  if (!geometry) return -90;
+  const rings = geometry.type === "Polygon"
+    ? geometry.coordinates
+    : geometry.type === "MultiPolygon"
+      ? geometry.coordinates.flatMap((polygon) => polygon)
+      : [];
+  return rings.reduce((maxLatitude, ring) => Math.max(
+    maxLatitude,
+    ...ring.map((coordinate) => coordinate[1]).filter(Number.isFinite)
+  ), -90);
+}
+
+function ringBounds(ring) {
+  return ring.reduce((bounds, coordinate) => {
+    const [longitude, latitude] = coordinate;
+    if (!Number.isFinite(longitude) || !Number.isFinite(latitude)) return bounds;
+    return {
+      minLongitude: Math.min(bounds.minLongitude, longitude),
+      maxLongitude: Math.max(bounds.maxLongitude, longitude),
+      minLatitude: Math.min(bounds.minLatitude, latitude),
+      maxLatitude: Math.max(bounds.maxLatitude, latitude),
+    };
+  }, {
+    minLongitude: Infinity,
+    maxLongitude: -Infinity,
+    minLatitude: Infinity,
+    maxLatitude: -Infinity,
+  });
+}
+
+function geometryContextForRing(ring) {
+  const bounds = ringBounds(ring);
+  if (!Number.isFinite(bounds.minLongitude) || !Number.isFinite(bounds.minLatitude)) return null;
+  const width = bounds.maxLongitude - bounds.minLongitude;
+  const height = bounds.maxLatitude - bounds.minLatitude;
+  const centerLongitude = (bounds.minLongitude + bounds.maxLongitude) / 2;
+  const centerLatitude = (bounds.minLatitude + bounds.maxLatitude) / 2;
+  const inCaribbean = centerLongitude > -86 && centerLongitude < -60 && centerLatitude > 10 && centerLatitude < 24;
+  const inMaritimeSoutheastAsia = centerLongitude > 94 && centerLongitude < 128 && centerLatitude > -10 && centerLatitude < 10;
+  const modestIslandScale = width < 24 && height < 12;
+  if ((inCaribbean || inMaritimeSoutheastAsia) && modestIslandScale) {
+    return {
+      centerLongitude,
+      centerLatitude,
+      smallEquatorialIsland: true,
+      region: inMaritimeSoutheastAsia ? "maritime_southeast_asia" : "caribbean",
+    };
+  }
+  return { centerLongitude, centerLatitude };
+}
+
+function coordinatePath(ring) {
+  let output = "";
+  let previous = null;
+  const geometryContext = geometryContextForRing(ring);
+  for (const coordinate of ring) {
+    const [longitude, latitude] = coordinate;
+    const point = projectLonLat(longitude, latitude, { geometryContext });
+    if (!point) continue;
+    const command = previous && Math.abs(longitude - previous.longitude) <= 180 ? "L" : "M";
+    output += `${command} ${point.x.toFixed(3)} ${point.y.toFixed(3)} `;
+    previous = { longitude, latitude };
+  }
+  return output.trim();
+}
+
+function geometryPath(geometry) {
+  if (!geometry) return "";
+  let rings = [];
+  if (geometry.type === "Polygon") {
+    rings = geometry.coordinates.map(coordinatePath).filter(Boolean);
+  } else if (geometry.type === "MultiPolygon") {
+    rings = geometry.coordinates.flatMap((polygon) => polygon.map(coordinatePath)).filter(Boolean);
+  } else {
+    return "";
+  }
+  return rings.length ? `${rings.join(" Z ")} Z` : "";
+}
+
+const LAND_PATHS = Object.freeze(
+  worldLand110m.features
+    .filter((feature) => geometryMaxLatitude(feature.geometry) > -58)
+    .map((feature) => geometryPath(feature.geometry))
+    .filter(Boolean)
+);
+
+function projectedVenue(venue, preparedVenue) {
+  const latitude = Number(preparedVenue?.latitude ?? venue.latitude);
+  const longitude = Number(preparedVenue?.longitude ?? venue.longitude);
+  const projected = projectLonLat(longitude, latitude);
+  if (projected) return projected;
+  return { x: venue.x, y: venue.y };
+}
+
+const CITY_LABEL_OFFSETS = Object.freeze({
+  "New York": { dx: 2.4, dy: 2.7, anchor: "start" },
+  Chicago: { dx: -4.2, dy: -3.3, anchor: "end" },
+  Toronto: { dx: 2.2, dy: -2.9, anchor: "start" },
+  Montreal: { dx: 2.1, dy: -2.6, anchor: "start" },
+  "Mexico City": { dx: -3.6, dy: 2.4, anchor: "end" },
+  "Sao Paulo": { dx: 2.2, dy: 2.5, anchor: "start" },
+  London: { dx: -2.8, dy: -2.4, anchor: "end" },
+  Frankfurt: { dx: 2.5, dy: -0.2, anchor: "start" },
+  Paris: { dx: -2.6, dy: 2.2, anchor: "end" },
+  Amsterdam: { dx: 2.2, dy: -2.8, anchor: "start" },
+  Zurich: { dx: 2.4, dy: 2.2, anchor: "start" },
+  Tokyo: { dx: 2.4, dy: -1.8, anchor: "start" },
+  Osaka: { dx: 2.5, dy: 2.3, anchor: "start" },
+  "Hong Kong": { dx: 2.2, dy: 2.3, anchor: "start" },
+  Singapore: { dx: 2.3, dy: 2.4, anchor: "start" },
+  Seoul: { dx: -2.4, dy: -2.4, anchor: "end" },
+  Taipei: { dx: 2.4, dy: -1.9, anchor: "start" },
+  Shanghai: { dx: -2.7, dy: -1.9, anchor: "end" },
+  Shenzhen: { dx: -2.5, dy: 2.3, anchor: "end" },
+  Mumbai: { dx: -2.2, dy: 2.1, anchor: "end" },
+  Sydney: { dx: -2.3, dy: 2.2, anchor: "end" },
+  Auckland: { dx: -2.4, dy: 2.0, anchor: "end" },
+});
+
+const MARKET_CENTER_IDS = Object.freeze({
+  "New York": "new_york",
+  Chicago: "chicago",
+  Toronto: "toronto",
+  Montreal: "montreal",
+  "Mexico City": "mexico_city",
+  "Sao Paulo": "sao_paulo",
+  London: "london",
+  Frankfurt: "frankfurt",
+  Paris: "paris",
+  Amsterdam: "amsterdam",
+  Zurich: "zurich",
+  Tokyo: "tokyo",
+  Osaka: "osaka",
+  "Hong Kong": "hong_kong",
+  Singapore: "singapore",
+  Seoul: "seoul",
+  Taipei: "taipei",
+  Shanghai: "shanghai",
+  Shenzhen: "shenzhen",
+  Mumbai: "mumbai",
+  Sydney: "sydney",
+  Auckland: "auckland",
+});
+
+const MARKET_CENTER_BENCHMARKS = Object.freeze({
+  "New York": ["SPY", "QQQ", "DIA", "IWM"],
+  Chicago: [],
+  London: [],
+  Tokyo: [],
+  Sydney: [],
+  "Sao Paulo": [],
+});
+
+const MARKET_DOMAIN_DEFINITIONS = Object.freeze([
+  { id: "equities", label: "Equities", symbols: ["ES", "NQ", "SPY", "QQQ", "DIA", "IWM"], noun: "US equities" },
+  { id: "gold", label: "Gold", symbols: ["GC", "MGC"], noun: "Gold" },
+  { id: "rates", label: "Rates", symbols: ["ZB", "ZN", "ZF", "ZT"], noun: "Treasury futures" },
+]);
+
+function escapeHtml(value) {
+  return String(value ?? "")
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;")
+    .replaceAll("'", "&#039;");
+}
+
+const STATUS_WEIGHT = Object.freeze({
+  OPEN: 8,
+  AUCTION: 7,
+  CLOSING_SOON: 6,
+  PREOPEN: 5,
+  LUNCH_BREAK: 4,
+  STALE: 3,
+  UNKNOWN: 2,
+  HOLIDAY: 1,
+  CLOSED: 0,
+});
+
+function strongestVenueStatus(statuses) {
+  return statuses.reduce((strongest, status) => (
+    (STATUS_WEIGHT[status] ?? -1) > (STATUS_WEIGHT[strongest] ?? -1) ? status : strongest
+  ), "UNKNOWN");
+}
 
 function stateColor(state) {
   return {
-    PREOPEN: "#8aaed1",
-    AUCTION: "#f4c87b",
-    OPEN: "#f8d68a",
-    CLOSING_SOON: "#d7aa72",
-    CLOSED: "#42535d",
-    LUNCH_BREAK: "#7296a2",
-    HOLIDAY: "#515b64",
-    UNKNOWN: "#9da0ad",
-    STALE: "#a88976",
-  }[state] || "#8b91a4";
+    PREOPEN: "#8a9189",
+    AUCTION: "#79c990",
+    OPEN: "#65d18b",
+    CLOSING_SOON: "#74ca8c",
+    CLOSED: "#c26f67",
+    LUNCH_BREAK: "#7f8782",
+    HOLIDAY: "#a56560",
+    UNKNOWN: "#858d8d",
+    STALE: "#d2a65f",
+  }[state] || "#858d8d";
 }
 
 function stateRadius(state) {
   return {
-    OPEN: 1.55,
-    AUCTION: 1.35,
-    CLOSING_SOON: 1.2,
-    PREOPEN: 1,
-    LUNCH_BREAK: 0.86,
-    STALE: 0.82,
-    UNKNOWN: 0.76,
-    HOLIDAY: 0.6,
-    CLOSED: 0.46,
-  }[state] || 0.7;
+    OPEN: 0.68,
+    AUCTION: 0.62,
+    CLOSING_SOON: 0.58,
+    PREOPEN: 0.52,
+    LUNCH_BREAK: 0.48,
+    STALE: 0.46,
+    UNKNOWN: 0.42,
+    HOLIDAY: 0.32,
+    CLOSED: 0.28,
+  }[state] || 0.42;
 }
 
-function timeTerminatorPath(timeState) {
+function macroRowsBySymbol() {
+  return Object.fromEntries((preparedMacroContext?.observations || []).map((row) => [row.symbol, row]));
+}
+
+function tapeRowsBySymbol() {
+  return Object.fromEntries((preparedMarketTape?.rows || []).map((row) => [row.symbol, row]));
+}
+
+function preparedVenueById() {
+  return preparedVenueSessions?.venues
+    ? Object.fromEntries(preparedVenueSessions.venues.map((venue) => [venue.venue_id, venue]))
+    : {};
+}
+
+function parseTimestamp(value) {
+  if (!value) return null;
+  const timestamp = Date.parse(value);
+  return Number.isFinite(timestamp) ? timestamp : null;
+}
+
+function evidenceAgeSeconds(value) {
+  const timestamp = parseTimestamp(value);
+  if (timestamp === null) return null;
+  return Math.max(0, Math.round((Date.now() - timestamp) / 1000));
+}
+
+function relativeAge(value) {
+  const seconds = evidenceAgeSeconds(value);
+  if (seconds === null) return "unknown";
+  if (seconds < 90) return `${seconds}s ago`;
+  const minutes = Math.round(seconds / 60);
+  if (minutes < 90) return `${minutes}m ago`;
+  const hours = Math.round(minutes / 60);
+  if (hours < 48) return `${hours}h ago`;
+  return `${Math.round(hours / 24)}d ago`;
+}
+
+function freshnessFromEvidence(evidence = {}) {
+  if (typeof evidence === "string") return evidence;
+  if (evidence.freshness && typeof evidence.freshness === "string") return evidence.freshness;
+  const staleAfter = parseTimestamp(evidence.stale_after || evidence.expires_at || evidence.fresh_until);
+  if (staleAfter !== null && Date.now() > staleAfter) return "STALE";
+  const generatedAt = evidence.generated_at || evidence.source_timestamp;
+  const age = evidenceAgeSeconds(generatedAt);
+  if (age === null) return "UNKNOWN";
+  if (age <= 120) return "FRESH";
+  if (age <= 900) return "AGING";
+  return "STALE";
+}
+
+function displayFreshness(value) {
+  if (!value) return "UNKNOWN";
+  const normalized = String(value).toUpperCase();
+  if (["FRESH", "AGING", "STALE", "UNKNOWN"].includes(normalized)) return normalized;
+  if (normalized === "UNAVAILABLE") return "UNKNOWN";
+  return "UNKNOWN";
+}
+
+function venueEvidenceFreshness(venue) {
+  return freshnessFromEvidence({
+    generated_at: venue?.generated_at || preparedVenueSessions?.generated_at,
+    stale_after: venue?.freshness?.stale_after,
+  });
+}
+
+function effectiveVenueStatus(venue, fallbackStatus) {
+  if (!venue) return fallbackStatus || "UNKNOWN";
+  const freshness = venueEvidenceFreshness(venue);
+  if (freshness === "STALE") return "STALE";
+  return venue.session_status || fallbackStatus || "UNKNOWN";
+}
+
+function venueStateById(scenario = scenarios[currentScenarioName]) {
+  return preparedVenueSessions?.venues
+    ? Object.fromEntries(preparedVenueSessions.venues.map((venue) => [venue.venue_id, effectiveVenueStatus(venue, scenario.venues?.[venue.venue_id])]))
+    : scenario.venues;
+}
+
+function venueLedState(status) {
+  if (["OPEN", "AUCTION", "CLOSING_SOON"].includes(status)) return "GREEN";
+  if (["CLOSED", "HOLIDAY"].includes(status)) return "RED";
+  if (status === "STALE") return "AMBER";
+  return "GRAY";
+}
+
+function statusLabel(status) {
   return {
-    "0300_ET": "M 2 18 C 28 38, 58 42, 98 24 L 98 96 L 2 96 Z",
-    "0800_ET": "M 4 30 C 30 43, 56 45, 96 35 L 96 96 L 4 96 Z",
-    "1100_ET": "M 6 42 C 28 46, 58 46, 94 42 L 94 96 L 6 96 Z",
-    "1400_ET": "M 5 50 C 30 45, 60 42, 96 44 L 96 96 L 5 96 Z",
-    "1600_ET": "M 5 58 C 31 48, 62 40, 96 42 L 96 96 L 5 96 Z",
-    "2000_ET": "M 4 24 C 29 34, 62 40, 96 61 L 96 96 L 4 96 Z",
-  }[timeState] || "M 6 42 C 28 46, 58 46, 94 42 L 94 96 L 6 96 Z";
+    GREEN: "GREEN",
+    AMBER: "AMBER",
+    RED: "RED",
+    GRAY: "GRAY",
+  }[status] || "GRAY";
+}
+
+function ledStateForDisplayClass(displayClass) {
+  return {
+    HEALTHY: "GREEN",
+    VALID_WITH_WARNINGS: "AMBER",
+    DEGRADED: "AMBER",
+    STALE: "AMBER",
+    EVIDENCE_UNRELIABLE: "AMBER",
+    NOT_READY: "GRAY",
+    UNKNOWN: "GRAY",
+    INVALID: "RED",
+  }[displayClass] || "GRAY";
+}
+
+function changePhrase(rows, noun) {
+  const usable = rows.filter((row) => row && typeof row.change_pct === "number");
+  if (!usable.length) return `${noun} unavailable`;
+  const positives = usable.filter((row) => row.change_pct > 0.005).length;
+  const negatives = usable.filter((row) => row.change_pct < -0.005).length;
+  if (positives && negatives) return `${noun} mixed`;
+  if (positives) return `${noun} firm`;
+  if (negatives) return `${noun} softer`;
+  return `${noun} steady`;
+}
+
+function domainState(domain) {
+  const bySymbol = macroRowsBySymbol();
+  const rows = domain.symbols.map((symbol) => bySymbol[symbol]).filter(Boolean);
+  const available = rows.filter((row) => row.status === "AVAILABLE");
+  const stale = rows.some((row) => row.status === "STALE" || row.freshness === "STALE");
+  return {
+    ...domain,
+    rows,
+    phrase: changePhrase(available, domain.noun),
+    ledState: available.length ? (stale ? "AMBER" : "GREEN") : "GRAY",
+  };
+}
+
+function sourceAge(value) {
+  return relativeAge(value);
+}
+
+function formatChangePct(row) {
+  if (!row || typeof row.change_pct !== "number") return "n/a";
+  return `${row.change_pct >= 0 ? "+" : ""}${row.change_pct.toFixed(2)}%`;
+}
+
+function contextRows(rows) {
+  return rows
+    .filter(([, value]) => value !== undefined && value !== null && value !== "")
+    .map(([label, value]) => `
+      <div class="context-row">
+        <span>${escapeHtml(label)}</span>
+        <strong>${escapeHtml(value)}</strong>
+      </div>
+    `).join("");
+}
+
+function contextSection(title, rows) {
+  const body = Array.isArray(rows) ? contextRows(rows) : rows;
+  if (!body) return "";
+  return `
+    <section class="context-section">
+      <h4>${escapeHtml(title)}</h4>
+      ${body}
+    </section>
+  `;
+}
+
+function sourceFooter({ label, generatedAt, freshness, source }) {
+  const shownFreshness = displayFreshness(freshness || freshnessFromEvidence({ generated_at: generatedAt }));
+  return `
+    <footer class="context-footer">
+      <div>${escapeHtml(label || "Prepared source")}</div>
+      <div>Updated ${escapeHtml(relativeAge(generatedAt))} · ${escapeHtml(shownFreshness)}</div>
+    </footer>
+  `;
+}
+
+function technicalDetail(rows) {
+  const body = contextRows(rows);
+  if (!body) return "";
+  return `
+    <details class="context-technical">
+      <summary>Technical detail</summary>
+      ${body}
+    </details>
+  `;
+}
+
+function openContext(selection) {
+  selectedContext = selection;
+  contextPanel.hidden = false;
+  contextPanel.dataset.open = "true";
+  contextPanel.dataset.selection = `${selection.type}:${selection.id}`;
+  contextContent.innerHTML = renderContext(selection);
+  observatoryPerformance.counts.context += 1;
+}
+
+function closeContext() {
+  selectedContext = null;
+  contextPanel.dataset.open = "false";
+  contextPanel.dataset.selection = "";
+  contextPanel.hidden = true;
+  contextContent.innerHTML = "";
+}
+
+function panelStatusLine(label, state) {
+  return `<p class="context-status" data-led-state="${escapeHtml(state)}"><span></span>${escapeHtml(label)}</p>`;
+}
+
+function sourceLine(source) {
+  if (!source) return "Prepared or fixture source unavailable";
+  return source;
+}
+
+function renderMarketCenterContext(centerId) {
+  const cityName = Object.entries(MARKET_CENTER_IDS).find(([, id]) => id === centerId)?.[0]
+    || centerId.replaceAll("_", " ");
+  const preparedVenuesById = preparedVenueById();
+  const venueStates = venueStateById();
+  const cityVenues = venues.filter((venue) => (MARKET_CENTER_IDS[venue.city] || "") === centerId);
+  const benchmarkRows = (MARKET_CENTER_BENCHMARKS[cityName] || [])
+    .map((symbol) => macroRowsBySymbol()[symbol])
+    .filter(Boolean);
+  const venueRows = cityVenues.map((venue) => {
+    const prepared = preparedVenuesById[venue.id];
+    const status = effectiveVenueStatus(prepared, venueStates[venue.id]);
+    return [venue.label, `${status} · ${venueLedState(status)}`];
+  });
+  const benchmarkBody = benchmarkRows.length
+    ? benchmarkRows.map((row) => [`${row.symbol}${row.source_type === "ETF_PROXY" ? " proxy" : ""}`, `${formatChangePct(row)}${row.source_type === "ETF_PROXY" ? " · ETF proxy" : ""}`])
+    : [["Benchmarks", "No source-backed local benchmark values available"]];
+  const updated = preparedVenueSessions?.generated_at || preparedMacroContext?.generated_at;
+  const venueFreshness = freshnessFromEvidence({
+    generated_at: preparedVenueSessions?.generated_at,
+    stale_after: preparedVenueSessions?.venues?.[0]?.freshness?.stale_after,
+  });
+  return `
+    <h3>${escapeHtml(cityName)}</h3>
+    ${panelStatusLine(`Market center · ${venueFreshness}`, venueFreshness === "STALE" ? "AMBER" : "GRAY")}
+    ${contextSection("Venues", venueRows)}
+    ${contextSection("Benchmarks", benchmarkBody)}
+    ${contextSection("Operator note", [
+      ["Identity", "One city label with separate exchange indicators"],
+      ["Coordinates", "Markers remain anchored to projected latitude/longitude"],
+    ])}
+    ${sourceFooter({
+      label: "Venue Calendar",
+      generatedAt: updated,
+      freshness: venueFreshness,
+      source: preparedVenueSessions?.source_authority,
+    })}
+    ${technicalDetail([
+      ["source_authority", preparedVenueSessions?.source_authority || "fixture"],
+      ["source_authority_version", preparedVenueSessions?.source_authority_version || "unknown"],
+      ["generated_at", preparedVenueSessions?.generated_at || "unknown"],
+      ["stale_after", preparedVenueSessions?.venues?.[0]?.freshness?.stale_after || "unknown"],
+      ["model_status", preparedVenueSessions?.model_status || "fixture"],
+    ])}
+  `;
+}
+
+function renderVenueContext(venueId) {
+  const venue = venues.find((item) => item.id === venueId);
+  const prepared = preparedVenueById()[venueId];
+  const status = effectiveVenueStatus(prepared, venueStateById()[venueId]);
+  const ledState = venueLedState(status);
+  if (!venue) return `<h3>Unknown venue</h3>${panelStatusLine("UNKNOWN", "GRAY")}`;
+  const rawStatus = prepared?.session_status || "UNKNOWN";
+  const freshness = venueEvidenceFreshness(prepared);
+  const productRows = Array.isArray(prepared?.product_session_states)
+    ? prepared.product_session_states.map((row) => [
+      row.product_group,
+      `${row.product_session_state || "UNKNOWN"}${row.source_limitation ? ` · ${row.source_limitation}` : ""}`,
+    ])
+    : [];
+  return `
+    <h3>${escapeHtml(venue.label)}</h3>
+    ${panelStatusLine(`${status} · ${ledState}`, ledState)}
+    ${contextSection("Venue", [
+      ["City", venue.city],
+      ["Exchange", prepared?.exchange || venue.label],
+      ["Venue operational state", prepared?.venue_operational_state || "unknown"],
+      ["Local time", prepared?.local_time || "unknown"],
+      ["Session status", status === "STALE" ? "stale evidence" : rawStatus],
+      ["Next transition", prepared?.next_transition_at || "unknown"],
+    ])}
+    ${productRows.length ? contextSection("Product sessions", productRows) : ""}
+    ${prepared?.limitation ? contextSection("Limitations", [["Source limitation", prepared.limitation]]) : ""}
+    ${sourceFooter({
+      label: "Venue Calendar",
+      generatedAt: prepared?.generated_at || preparedVenueSessions?.generated_at,
+      freshness,
+      source: prepared?.calendar_source || preparedVenueSessions?.source_authority,
+    })}
+    ${technicalDetail([
+      ["producer_status", rawStatus],
+      ["display_status", status],
+      ["source_authority", prepared?.source_authority || preparedVenueSessions?.source_authority || "unknown"],
+      ["source_authority_version", prepared?.source_authority_version || preparedVenueSessions?.source_authority_version || "unknown"],
+      ["timezone", prepared?.timezone || "unknown"],
+      ["generated_at", prepared?.generated_at || preparedVenueSessions?.generated_at || "unknown"],
+      ["stale_after", prepared?.freshness?.stale_after || "unknown"],
+      ["coverage", prepared?.coverage || "unknown"],
+      ["session_aggregation", prepared?.session_aggregation_rule || "venue-level"],
+    ])}
+  `;
+}
+
+function producerStageByContextId(contextId) {
+  const stages = displayFlowStages(preparedSystemFlow?.stages?.length ? preparedSystemFlow.stages : scenarios[currentScenarioName].flow);
+  return stages.find((stage) => (stage.context_id || stage.label) === contextId || stage.label === contextId);
+}
+
+function renderSystemStageContext(contextId) {
+  const stage = producerStageByContextId(contextId) || { label: contextId, display_class: "UNKNOWN", producer_status: "UNKNOWN" };
+  const ledState = stage.led_state || ledStateForDisplayClass(stage.display_class || stage.texture);
+  const freshness = freshnessFromEvidence({
+    generated_at: stage.generated_at,
+    stale_after: stage.freshness?.expires_at || stage.freshness?.fresh_until,
+  });
+  const operatorRows = [
+    ["Reason", explanationForStage(stage)],
+    ["Last updated", relativeAge(stage.generated_at)],
+  ];
+  const runtime = preparedRuntimeBrokerContext?.runtime;
+  const broker = preparedRuntimeBrokerContext?.broker;
+  const extra = [];
+  if (stage.label === "Magic Runtime" && runtime) {
+    operatorRows.push(["Mode", runtime.mode || "unknown"]);
+    operatorRows.push(["PID", runtime.source_pid ?? "unknown"]);
+    operatorRows.push(["Lanes", runtime.active_lane_count ?? "unknown"]);
+    operatorRows.push(["Submit authority", runtime.submit_authority === true ? "Enabled" : "Disabled"]);
+    extra.push(["Runtime classification", runtime.classification || "unknown"]);
+    extra.push(["Mode", runtime.mode || "unknown"]);
+  }
+  if (stage.label === "Broker / TWS" && broker) {
+    operatorRows.push(["Mode", broker.mode || "unknown"]);
+    operatorRows.push(["Positions", broker.broker_position_count ?? "unknown"]);
+    operatorRows.push(["Open orders", broker.open_order_count ?? "unknown"]);
+    operatorRows.push(["Unknown orders", broker.unknown_open_order_count ?? "unknown"]);
+    operatorRows.push(["Submit authority", broker.submit_authority === true ? "Enabled" : "Disabled"]);
+    extra.push(["Reconciliation", broker.reconciliation_classification || "unknown"]);
+  }
+  return `
+    <h3>${escapeHtml(displayLabelForStage(stage.label))}</h3>
+    ${panelStatusLine(ledState, ledState)}
+    ${contextSection("Operator view", operatorRows)}
+    ${extra.length ? contextSection("Prepared detail", extra) : ""}
+    ${sourceFooter({
+      label: displayLabelForStage(stage.label),
+      generatedAt: stage.generated_at,
+      freshness,
+      source: stage.source_artifact,
+    })}
+    ${technicalDetail([
+      ["producer_status", stage.producer_status || "UNKNOWN"],
+      ["display_class", stage.display_class || stage.texture || "UNKNOWN"],
+      ["source_artifact", sourceLine(stage.source_artifact)],
+      ["generated_at", stage.generated_at || "unknown"],
+      ["freshness", JSON.stringify(stage.freshness || {})],
+      ["schema_version", preparedSystemFlow?.schema_version || "fixture"],
+      ["detail", stage.detail || "none"],
+    ])}
+    <p class="context-note">Display only. This panel does not compute readiness, Safe-State, broker coherence, or trading authority.</p>
+  `;
+}
+
+function renderMarketDomainContext(domainId) {
+  const domain = MARKET_DOMAIN_DEFINITIONS.find((item) => item.id === domainId);
+  if (!domain) return `<h3>Market context</h3>${panelStatusLine("UNKNOWN", "GRAY")}`;
+  const state = domainState(domain);
+  const rows = state.rows.length
+    ? state.rows.map((row) => [
+      row.symbol,
+      `${row.value ?? row.last ?? "n/a"} · ${row.change_abs ?? "n/a"} · ${formatChangePct(row)} · ${row.freshness || row.status}`,
+    ])
+    : [["Evidence", "No prepared factual observations available"]];
+  const latest = state.rows.find((row) => row.generated_at)?.generated_at || preparedMacroContext?.generated_at;
+  return `
+    <h3>${escapeHtml(domain.label)}</h3>
+    ${panelStatusLine(`${state.phrase} · ${state.ledState}`, state.ledState)}
+    ${contextSection("Current instruments", rows)}
+    ${contextSection("Factual context", [
+      ["Classifier", "No bullish/bearish/risk-on/risk-off classifier in this slice"],
+      ["Evidence", state.rows.length ? "Prepared macro-market observations" : "No current prepared observations"],
+    ])}
+    ${sourceFooter({
+      label: "Macro Market Context",
+      generatedAt: latest,
+      freshness: freshnessFromEvidence({ generated_at: latest }),
+      source: "prepared macro-market context snapshot",
+    })}
+    ${technicalDetail([
+      ["schema_version", preparedMacroContext?.schema_version || "unknown"],
+      ["status", preparedMacroContext?.status || "unknown"],
+      ["generated_at", preparedMacroContext?.generated_at || "unknown"],
+      ["domain_symbols", domain.symbols.join(", ")],
+      ["regime_classifier", "none"],
+    ])}
+  `;
+}
+
+function renderTickerContext(symbol) {
+  const row = tapeRowsBySymbol()[symbol] || macroRowsBySymbol()[symbol];
+  const macro = macroRowsBySymbol()[symbol];
+  if (!row) return `<h3>${escapeHtml(symbol)}</h3>${panelStatusLine("No prepared row", "GRAY")}`;
+  const generatedAt = row.source_timestamp || macro?.source_timestamp || preparedMarketTape?.generated_at;
+  const freshness = freshnessFromEvidence({ generated_at: generatedAt });
+  return `
+    <h3>${escapeHtml(row.display_symbol || row.symbol || symbol)}</h3>
+    ${panelStatusLine(row.market_status || macro?.market_status || "DISPLAY ONLY", "GRAY")}
+    ${contextSection("Tape", [
+      ["Last", row.last ?? macro?.value ?? "n/a"],
+      ["Change", `${row.changeAbs ?? macro?.change_abs ?? "n/a"} ${row.changePct ?? formatChangePct(macro)}`],
+      ["Market status", row.market_status || macro?.market_status || "unknown"],
+    ])}
+    ${contextSection("Guardrails", [
+      ["Display only", "true"],
+      ["Trading input", "false"],
+    ])}
+    ${sourceFooter({
+      label: preparedMarketTape?.source_kind || macro?.source_dataset || "Prepared snapshot",
+      generatedAt,
+      freshness,
+      source: row.source_artifact || macro?.source_artifact,
+    })}
+    ${technicalDetail([
+      ["source_timestamp", row.source_timestamp || macro?.source_timestamp || "unknown"],
+      ["source_id", row.source_id || macro?.source_provenance?.source_id || "unknown"],
+      ["source_dataset", macro?.source_dataset || "unknown"],
+      ["source_artifact", row.source_artifact || macro?.source_artifact || "unknown"],
+      ["schema_version", preparedMarketTape?.schema_version || macro?.schema_version || "unknown"],
+    ])}
+  `;
+}
+
+function renderMarketBriefingContext() {
+  const briefing = macroContextNote();
+  const domainSections = MARKET_DOMAIN_DEFINITIONS.map((domain) => {
+    const state = domainState(domain);
+    return [domain.label, `${state.phrase} · ${state.ledState}`];
+  });
+  return `
+    <h3>Market briefing</h3>
+    ${panelStatusLine("Factual prepared context", "GRAY")}
+    <p class="context-lead">${escapeHtml(briefing?.primary || scenarios[currentScenarioName].canvasNote)}</p>
+    ${contextSection("Domains", domainSections)}
+    ${contextSection("Detail", [
+      ["Values", briefing?.detail || "Detailed values unavailable"],
+      ["Regime classifier", "none"],
+    ])}
+    ${sourceFooter({
+      label: "Macro Market Context",
+      generatedAt: preparedMacroContext?.generated_at,
+      freshness: freshnessFromEvidence({ generated_at: preparedMacroContext?.generated_at }),
+      source: "prepared macro-market context snapshot",
+    })}
+    ${technicalDetail([
+      ["schema_version", preparedMacroContext?.schema_version || "fixture"],
+      ["generated_at", preparedMacroContext?.generated_at || "fixture fallback"],
+      ["domain_source", "MARKET_DOMAIN_DEFINITIONS"],
+      ["regime_classifier", "none"],
+    ])}
+  `;
+}
+
+function renderContext(selection) {
+  if (!selection) return "";
+  const actionBoundary = technicalDetail([
+    ["action_boundary", "Future action layers, including click-to-trade, are deferred."],
+    ["authority", "Display evidence only; no broker, runtime, strategy, or research authority."],
+  ]);
+  if (selection.type === "market-center") return `${renderMarketCenterContext(selection.id)}${actionBoundary}`;
+  if (selection.type === "venue") return `${renderVenueContext(selection.id)}${actionBoundary}`;
+  if (selection.type === "system-stage") return `${renderSystemStageContext(selection.id)}${actionBoundary}`;
+  if (selection.type === "market-domain") return `${renderMarketDomainContext(selection.id)}${actionBoundary}`;
+  if (selection.type === "ticker") return `${renderTickerContext(selection.id)}${actionBoundary}`;
+  if (selection.type === "market-briefing") return `${renderMarketBriefingContext()}${actionBoundary}`;
+  return `<h3>Context</h3>${panelStatusLine("UNKNOWN", "GRAY")}${actionBoundary}`;
 }
 
 function drawVenueArc(scenario) {
-  const venueStatesById = preparedVenueSessions?.venues
-    ? Object.fromEntries(preparedVenueSessions.venues.map((venue) => [venue.venue_id, venue.session_status || "UNKNOWN"]))
-    : scenario.venues;
+  const venueStatesById = venueStateById(scenario);
+  const preparedVenuesById = preparedVenueById();
   const activeEurope = ["lse", "eurex", "paris", "amsterdam", "six"].some((id) => venueStatesById[id] === "OPEN");
   const activeUs = ["nyse", "nasdaq", "cboe", "cme", "cfe"].some((id) => venueStatesById[id] === "OPEN");
+  const london = projectedVenue(venues.find((venue) => venue.id === "lse"), preparedVenuesById.lse);
+  const newYork = projectedVenue(venues.find((venue) => venue.id === "nyse"), preparedVenuesById.nyse);
   const bridge = activeEurope && activeUs
-    ? `<path class="atlantic-bridge" d="M 48.5 36.1 C 41 31, 33 33, 27.2 39.4" />`
+    ? `<path class="atlantic-bridge" d="M ${london.x.toFixed(2)} ${london.y.toFixed(2)} C 43 31, 35 33, ${newYork.x.toFixed(2)} ${newYork.y.toFixed(2)}" />`
     : "";
+  const land = LAND_PATHS.map((path) => `<path d="${path}" />`).join("");
+  const illumination = solarIllumination();
   const world = `
     <defs>
       <radialGradient id="earthGlow" cx="48%" cy="46%" r="76%">
@@ -75,92 +992,254 @@ function drawVenueArc(scenario) {
         <stop offset="68%" stop-color="rgba(40,69,82,0.13)" />
         <stop offset="100%" stop-color="rgba(4,10,14,0)" />
       </radialGradient>
-      <linearGradient id="terminator" x1="0%" x2="100%">
-        <stop offset="0%" stop-color="rgba(2,7,11,0.44)" />
-        <stop offset="48%" stop-color="rgba(2,7,11,0.03)" />
-        <stop offset="100%" stop-color="rgba(246,210,122,0.08)" />
-      </linearGradient>
+      <filter id="solarSoftness" x="-4%" y="-4%" width="108%" height="108%">
+        <feGaussianBlur stdDeviation="0.72" />
+      </filter>
+      <filter id="twilightSoftness" x="-5%" y="-5%" width="110%" height="110%">
+        <feGaussianBlur stdDeviation="1.15" />
+      </filter>
+      <clipPath id="earthMapClip">
+        <path d="${EARTH_BOUNDARY_PATH}" />
+      </clipPath>
     </defs>
-    <path class="earth-wash" d="M 4 50 C 8 29, 25 20, 49 19 C 74 18, 93 30, 97 50 C 93 72, 74 84, 49 83 C 24 82, 8 71, 4 50 Z" />
-    <g class="atlas-graticule" aria-hidden="true">
-      <path d="M 6 39 C 25 35, 57 34, 95 39" />
-      <path d="M 4 50 C 27 47, 61 47, 97 50" />
-      <path d="M 6 61 C 27 65, 58 66, 95 61" />
-      <path d="M 15 31 C 19 43, 19 61, 14 73" />
-      <path d="M 32 24 C 34 40, 34 64, 31 79" />
-      <path d="M 50 20 C 50 37, 50 66, 50 83" />
-      <path d="M 68 24 C 66 40, 67 64, 70 79" />
-      <path d="M 85 31 C 81 43, 82 61, 87 73" />
+    <rect class="earth-ocean" x="-78" y="-45" width="256" height="190" rx="96" />
+    <path class="earth-wash" d="${EARTH_BOUNDARY_PATH}" />
+    <g clip-path="url(#earthMapClip)">
+      <g class="atlas-graticule" aria-hidden="true">
+        <path d="M -1 36 C 22 32, 75 32, 101 36" />
+        <path d="M -3 50 C 22 47, 76 47, 103 50" />
+        <path d="M -1 64 C 22 68, 75 68, 101 64" />
+        <path d="M 16 21 C 20 39, 20 64, 15 81" />
+        <path d="M 33 15 C 35 36, 35 68, 32 86" />
+        <path d="M 50 13 C 50 34, 50 70, 50 87" />
+        <path d="M 67 15 C 65 36, 66 68, 69 86" />
+        <path d="M 84 21 C 80 39, 81 64, 86 81" />
+      </g>
+      <g class="solar-daylight" aria-hidden="true">${illumination.daylight}</g>
+      <g class="atlas-land" aria-hidden="true">${land}</g>
+      <g class="atlas-coastline" aria-hidden="true">${land}</g>
+      <g class="solar-twilight" aria-hidden="true">${illumination.twilight}</g>
+      <g class="solar-deep-twilight" aria-hidden="true">${illumination.deepTwilight}</g>
+      <g class="solar-night" aria-hidden="true">${illumination.night}</g>
     </g>
-    <g class="atlas-land" aria-hidden="true">
-      <path d="M 9 34 C 13 25, 23 23, 31 28 C 38 31, 40 39, 35 47 C 31 46, 28 48, 28 52 C 25 54, 24 58, 20 61 C 18 55, 15 52, 12 49 C 8 45, 7 39, 9 34 Z" />
-      <path d="M 29 54 C 35 55, 41 61, 41 69 C 40 78, 34 84, 30 91 C 25 86, 26 78, 22 73 C 19 68, 23 64, 20 60 C 23 57, 25 55, 29 54 Z" />
-      <path d="M 29 19 C 36 14, 43 16, 46 22 C 43 27, 35 28, 29 24 Z" />
-      <path d="M 45 36 C 50 32, 59 32, 65 37 C 62 42, 54 42, 49 45 C 45 45, 43 40, 45 36 Z" />
-      <path d="M 49 45 C 56 43, 64 48, 66 58 C 68 68, 63 78, 56 84 C 50 76, 46 65, 49 55 C 50 51, 46 48, 49 45 Z" />
-      <path d="M 59 34 C 70 27, 87 32, 95 42 C 102 52, 95 64, 83 62 C 76 60, 72 56, 66 58 C 62 53, 64 48, 60 45 C 55 41, 55 37, 59 34 Z" />
-      <path d="M 76 68 C 83 64, 92 67, 95 73 C 91 78, 81 79, 75 74 C 72 71, 73 69, 76 68 Z" />
-      <path d="M 16 86 C 34 89, 62 90, 88 85 C 76 92, 32 94, 16 86 Z" />
-    </g>
-    <g class="atlas-coastline" aria-hidden="true">
-      <path d="M 9 34 C 13 25, 23 23, 31 28 C 38 31, 40 39, 35 47 C 31 46, 28 48, 28 52 C 25 54, 24 58, 20 61 C 18 55, 15 52, 12 49 C 8 45, 7 39, 9 34 Z" />
-      <path d="M 29 54 C 35 55, 41 61, 41 69 C 40 78, 34 84, 30 91 C 25 86, 26 78, 22 73 C 19 68, 23 64, 20 60 C 23 57, 25 55, 29 54 Z" />
-      <path d="M 29 19 C 36 14, 43 16, 46 22 C 43 27, 35 28, 29 24 Z" />
-      <path d="M 45 36 C 50 32, 59 32, 65 37 C 62 42, 54 42, 49 45 C 45 45, 43 40, 45 36 Z" />
-      <path d="M 49 45 C 56 43, 64 48, 66 58 C 68 68, 63 78, 56 84 C 50 76, 46 65, 49 55 C 50 51, 46 48, 49 45 Z" />
-      <path d="M 59 34 C 70 27, 87 32, 95 42 C 102 52, 95 64, 83 62 C 76 60, 72 56, 66 58 C 62 53, 64 48, 60 45 C 55 41, 55 37, 59 34 Z" />
-      <path d="M 76 68 C 83 64, 92 67, 95 73 C 91 78, 81 79, 75 74 C 72 71, 73 69, 76 68 Z" />
-    </g>
-    <path class="terminator" d="${timeTerminatorPath(scenario.timeState)}" />
     ${bridge}
   `;
+  const cityGroups = new Map();
   const nodes = venues.map((venue) => {
     const state = venueStatesById[venue.id] || "UNKNOWN";
-    const preparedVenue = preparedVenueSessions?.venues?.find((item) => item.venue_id === venue.id);
-    const labelX = venue.x + (venue.labelDx ?? 1.8);
-    const labelY = venue.y + (venue.labelDy ?? 0.8);
+    const preparedVenue = preparedVenuesById[venue.id];
+    const point = projectedVenue(venue, preparedVenue);
+    const city = cityGroups.get(venue.city) || {
+      city: venue.city,
+      region: venue.region,
+      point,
+      states: [],
+      labels: [],
+    };
+    city.states.push(state);
+    city.labels.push(venue.label);
+    city.venueIds = [...(city.venueIds || []), venue.id];
+    cityGroups.set(venue.city, city);
+    const ledState = venueLedState(state);
     return `
-      <g class="venue-group" data-region="${venue.region}">
-        <circle class="venue-harbor" data-state="${state}" cx="${venue.x}" cy="${venue.y}" r="${stateRadius(state) * 3.6}" fill="${stateColor(state)}" />
-        <circle class="venue-node" data-state="${state}" cx="${venue.x}" cy="${venue.y}" r="${stateRadius(state)}" fill="${stateColor(state)}">
+      <g class="venue-group selectable" data-region="${venue.region}" data-context-type="venue" data-context-id="${venue.id}" tabindex="0" role="button" aria-label="${venue.city} ${venue.label} ${state}">
+        <circle class="venue-harbor" data-state="${state}" cx="${point.x.toFixed(2)}" cy="${point.y.toFixed(2)}" r="${stateRadius(state) * 4.2}" fill="${stateColor(state)}" />
+        <circle class="venue-node" data-state="${state}" data-led-state="${ledState}" cx="${point.x.toFixed(2)}" cy="${point.y.toFixed(2)}" r="${stateRadius(state)}" fill="${stateColor(state)}">
           <title>${venue.city} - ${venue.label}: ${state}${preparedVenue?.local_time ? ` local ${preparedVenue.local_time}` : ""}</title>
         </circle>
-        <text class="venue-label" data-state="${state}" x="${labelX}" y="${labelY}">${venue.city}</text>
       </g>
     `;
   });
-  arc.innerHTML = `${world}${nodes.join("")}`;
+  const labels = [...cityGroups.values()].map((city) => {
+    const offset = CITY_LABEL_OFFSETS[city.city] || { dx: 2, dy: 1.8, anchor: "start" };
+    const state = strongestVenueStatus(city.states);
+    const x = city.point.x + offset.dx;
+    const y = city.point.y + offset.dy;
+    const centerId = MARKET_CENTER_IDS[city.city] || city.city.toLowerCase().replaceAll(" ", "_");
+    return `
+      <text class="venue-label selectable" data-state="${state}" data-context-type="market-center" data-context-id="${centerId}" x="${x.toFixed(2)}" y="${y.toFixed(2)}" text-anchor="${offset.anchor}" tabindex="0" role="button">
+        <title>${city.city}: ${city.labels.join(" / ")}</title>${city.city}
+      </text>
+    `;
+  });
+  arc.innerHTML = `${world}${nodes.join("")}${labels.join("")}`;
 }
 
 function drawTape(scenario) {
   const sourceRows = preparedMarketTape?.rows?.length ? preparedMarketTape.rows : scenario.tape;
   const rows = [...sourceRows, ...sourceRows];
   tape.innerHTML = rows.map((row) => {
-    const direction = row.changeAbs.trim().startsWith("-") ? "down" : "up";
+    const numericChange = Number.parseFloat(String(row.changeAbs || "0").replace(/,/g, ""));
+    const direction = numericChange > 0 ? "up" : numericChange < 0 ? "down" : "flat";
     return `
-      <span class="tape-item">
+      <button class="tape-item selectable" type="button" data-context-type="ticker" data-context-id="${escapeHtml(row.symbol)}" aria-label="${escapeHtml(row.symbol)} market tape context">
         <span class="tape-symbol">${row.symbol}</span>
         <span class="split-flap">${row.last}</span>
         <span class="tape-change" data-direction="${direction}">${row.changeAbs} ${row.changePct}</span>
         <span class="tape-freshness">${row.freshness}</span>
-      </span>
+      </button>
     `;
   }).join("");
 }
 
 function drawFlow(scenario) {
-  const sourceFlow = preparedSystemFlow?.stages?.length ? preparedSystemFlow.stages : scenario.flow;
+  const baseFlow = preparedSystemFlow?.stages?.length ? preparedSystemFlow.stages : scenario.flow;
+  const sourceFlow = displayFlowStages(baseFlow);
+  const healthByLabel = preparedOperationalHealth?.indicators
+    ? Object.fromEntries(preparedOperationalHealth.indicators.map((indicator) => [indicator.label, indicator]))
+    : {};
   flow.innerHTML = sourceFlow.map((stage, index) => {
     const isActiveRecon = stage.texture === "RECONCILING" && scenario.reconciliationState === "ACTIVE";
     const shouldAnimate = isActiveRecon || stage.texture === "PENDING_ORDER" || stage.event;
     const displayClass = stage.display_class || stage.texture || "UNKNOWN";
+    const health = healthByLabel[stage.label];
+    const ledState = stage.led_state || health?.led_state || ledStateForDisplayClass(displayClass);
+    const displayLabel = displayLabelForStage(stage.label);
     return `
-      <section class="flow-stage" data-texture="${stage.texture}" data-display-class="${displayClass}" data-animate="${shouldAnimate ? "true" : "false"}" data-event="${stage.event ? "true" : "false"}" style="--stage-index: ${index}; --data-velocity: ${scenario.dataVelocity}">
+      <section class="flow-stage selectable" data-context-type="${stage.context_type || "system-stage"}" data-context-id="${stage.context_id || stage.label}" data-texture="${stage.texture}" data-display-class="${displayClass}" data-led-state="${ledState}" data-animate="${shouldAnimate ? "true" : "false"}" data-event="${stage.event ? "true" : "false"}" style="--stage-index: ${index}; --data-velocity: ${scenario.dataVelocity}" tabindex="0" role="button" aria-label="${displayLabel} ${ledState}">
+        <span class="flow-led" aria-hidden="true"></span>
         <div class="flow-lens"></div>
-        <div class="flow-label">${stage.label}</div>
+        <div class="flow-label">${displayLabel}</div>
       </section>
     `;
   }).join("");
+}
+
+function displayFlowStages(baseFlow) {
+  const stageByLabel = Object.fromEntries(baseFlow.map((stage) => [stage.label, stage]));
+  const domains = MARKET_DOMAIN_DEFINITIONS.map((domain) => {
+    const state = domainState(domain);
+    return {
+      label: domain.label,
+      texture: state.ledState === "GREEN" ? "HEALTHY" : state.ledState === "AMBER" ? "LOW_CONFIDENCE_DATA" : "LOW_CONFIDENCE_DATA",
+      display_class: state.ledState === "GREEN" ? "HEALTHY" : state.ledState === "AMBER" ? "VALID_WITH_WARNINGS" : "UNKNOWN",
+      led_state: state.ledState,
+      context_type: "market-domain",
+      context_id: domain.id,
+      producer_status: state.phrase,
+      event: false,
+    };
+  });
+  return [
+    stageByLabel["Market Data"],
+    ...domains,
+    stageByLabel["Magic Runtime"],
+    stageByLabel["Broker / TWS"],
+    stageByLabel["Trade Evidence"],
+    stageByLabel["CRR / Research"],
+    stageByLabel["Prospective Validation"],
+  ].filter(Boolean);
+}
+
+function displayLabelForStage(label) {
+  return {
+    "Trade Evidence": "Trade Lifecycle",
+    "Prospective Validation": "Forward Validation",
+  }[label] || label;
+}
+
+function explanationForStage(stage) {
+  const status = stage.producer_status || stage.texture || "UNKNOWN";
+  const detail = stage.detail || "";
+  const prospectiveTrades = detail.match(/prospective_trades=(\d+)/)?.[1];
+  if (stage.label === "Market Data" && status === "PHASE1_DATABENTO_LIVE_LISTENER_RUNNING") return "Feed live";
+  if (stage.label === "Regime / Context" && status === "NOT_READY") {
+    return preparedMacroContext?.observations?.length ? "Regime unavailable · macro live" : "No current regime producer";
+  }
+  if (stage.label === "Magic Runtime" && status === "STALE_RUNTIME_TRUTH") return "Runtime truth stale";
+  if (stage.label === "Magic Runtime" && status === "COMMIT_MISMATCH") return "Commit mismatch";
+  if (stage.label === "Broker / TWS" && status === "BROKER_SESSION_AUTHORITY_ORDER_STATUS_UNRELIABLE") return "Order-status evidence unreliable";
+  if (stage.label === "Trade Evidence" && status === "NO_ELIGIBLE_EXITS") return "No eligible exits";
+  if (stage.label === "Trade Evidence" && status === "TRACK_B_MANAGED_EXIT_SERVICE_POST_BROKER_MUTATION_REFRESH_RUNNING") return "Managed Exit active";
+  if (stage.label === "Trade Evidence" && status === "APPLY_SUCCEEDED") return "Exit apply succeeded";
+  if (stage.label === "CRR / Research" && status === "VALID_WITH_WARNINGS") return "Valid with warnings";
+  if (stage.label === "Prospective Validation" && status === "VALID_WITH_WARNINGS") {
+    return prospectiveTrades ? `Valid with warnings · ${prospectiveTrades} trades` : "Valid with warnings";
+  }
+  if (stage.display_class === "STALE") return "Evidence stale";
+  if (stage.display_class === "NOT_READY") return "Not ready";
+  if (stage.display_class === "EVIDENCE_UNRELIABLE") return "Evidence unreliable";
+  if (stage.display_class === "VALID_WITH_WARNINGS") return "Valid with warnings";
+  if (stage.display_class === "HEALTHY") return "Healthy";
+  return "Unknown";
+}
+
+function macroContextNote() {
+  const rows = preparedMacroContext?.observations?.filter((row) => row.status === "AVAILABLE") || [];
+  if (!rows.length) return null;
+  const bySymbol = Object.fromEntries(rows.map((row) => [row.symbol, row]));
+  const available = (symbols) => symbols.map((symbol) => bySymbol[symbol]).filter((row) => row && typeof row.change_pct === "number");
+  const toneFor = (items, noun) => {
+    if (!items.length) return null;
+    const positives = items.filter((row) => row.change_pct > 0.005).length;
+    const negatives = items.filter((row) => row.change_pct < -0.005).length;
+    if (positives && negatives) return `${noun} mixed`;
+    if (positives) return `${noun} firm`;
+    if (negatives) return `${noun} softer`;
+    return `${noun} steady`;
+  };
+  const primary = [
+    toneFor(available(["ES", "NQ", "SPY", "QQQ", "DIA", "IWM"]), "US equities"),
+    toneFor(available(["GC", "MGC"]), "Gold"),
+    toneFor(available(["ZB", "ZN", "ZF", "ZT"]), "Treasury futures"),
+  ].filter(Boolean);
+  const detail = ["ES", "NQ", "GC", "ZN"]
+    .map((symbol) => bySymbol[symbol])
+    .filter((row) => row && typeof row.change_pct === "number")
+    .map((row) => `${row.symbol} ${row.change_pct >= 0 ? "+" : ""}${row.change_pct.toFixed(2)}%`);
+  if (!primary.length) return null;
+  return {
+    primary: primary.join(" • "),
+    detail: detail.length ? detail.join(" · ") : "Detailed values unavailable",
+  };
+}
+
+function sessionPhaseNote(scenario) {
+  const venueStatesById = preparedVenueSessions?.venues
+    ? Object.fromEntries(preparedVenueSessions.venues.map((venue) => [venue.venue_id, venue.session_status || "UNKNOWN"]))
+    : scenario.venues;
+  if (preparedVenueSessions?.venues?.length) {
+    const venueFreshness = freshnessFromEvidence({
+      generated_at: preparedVenueSessions.generated_at,
+      stale_after: preparedVenueSessions.venues[0]?.freshness?.stale_after,
+    });
+    if (venueFreshness === "STALE") {
+      return "Venue status stale";
+    }
+  }
+  const active = (ids) => ids.some((id) => ["OPEN", "AUCTION", "CLOSING_SOON"].includes(venueStatesById[id]));
+  const asia = active(["jpx", "osaka", "hkex", "sgx", "krx", "twse", "sse", "szse", "nse", "asx", "nzx"]);
+  const europe = active(["lse", "eurex", "paris", "amsterdam", "six"]);
+  const americas = active(["nyse", "nasdaq", "cboe", "cme", "cfe", "tsx", "mx", "bmv", "b3"]);
+  if (europe && americas) return "Atlantic overlap";
+  if (americas) return "New York afternoon";
+  if (europe) return "London active";
+  if (asia) return "Asia active";
+  return "Global markets quiet";
+}
+
+function updateCommentary(scenario) {
+  scenarioClock.textContent = sessionPhaseNote(scenario);
+  scenarioClock.title = preparedVenueSessions?.generated_at
+    ? `Venue snapshot generated at ${preparedVenueSessions.generated_at}`
+    : `Fixture scenario time ${scenario.clock}`;
+  canvasNote.classList.add("selectable");
+  canvasNote.dataset.contextType = "market-briefing";
+  canvasNote.dataset.contextId = "market_context";
+  canvasNote.setAttribute("tabindex", "0");
+  canvasNote.setAttribute("role", "button");
+  const briefing = macroContextNote();
+  if (briefing) {
+    canvasNote.innerHTML = `
+      <span class="briefing-primary">${briefing.primary}</span>
+      <span class="briefing-detail">${briefing.detail}</span>
+    `;
+  } else {
+    canvasNote.innerHTML = `
+      <span class="briefing-primary">${scenario.canvasNote}</span>
+      <span class="briefing-detail">${scenario.clock.split(" / ")[0]}</span>
+    `;
+  }
 }
 
 function drawScenarioControls() {
@@ -183,11 +1262,29 @@ function resizeCanvases() {
   resizeCanvas(riverMaterial, riverContext);
 }
 
+function marketCanvasForScenario(scenario) {
+  if (!preparedMarketCanvas?.dimensions) return scenario.marketCanvas;
+  const neutral = {
+    coherence: 0.22,
+    spread: 0.18,
+    magnitude: 0.12,
+    edge: 0.28,
+  };
+  const output = { ...neutral };
+  for (const key of ["coherence", "spread", "magnitude", "edge"]) {
+    const dimension = preparedMarketCanvas.dimensions[key];
+    if (dimension?.status === "VALID" && typeof dimension.value === "number") {
+      output[key] = Math.max(0, Math.min(1, dimension.value));
+    }
+  }
+  return output;
+}
+
 function drawAtmosphere(scenario) {
   const width = atmosphere.clientWidth;
   const height = atmosphere.clientHeight;
   atmosphereContext.clearRect(0, 0, width, height);
-  const { coherence, spread, magnitude, edge } = scenario.marketCanvas;
+  const { coherence, spread, magnitude, edge } = marketCanvasForScenario(scenario);
   const count = Math.round(18 + spread * 46 + magnitude * 22);
   const blurRadius = 18 + spread * 44 - edge * 24;
   const grainLength = 18 + coherence * 88;
@@ -281,28 +1378,31 @@ function drawRiver(scenario) {
   const height = riverMaterial.clientHeight;
   riverContext.clearRect(0, 0, width, height);
 
-  const centerY = height * 0.45;
-  const riverHeight = height * 0.34;
+  const centerY = height * 0.66;
+  const riverHeight = height * 0.055;
   const velocity = Math.max(0, Math.min(scenario.dataVelocity, 1));
   const base = riverContext.createLinearGradient(0, centerY - riverHeight, width, centerY + riverHeight);
-  base.addColorStop(0, "rgba(178, 225, 218, 0.018)");
-  base.addColorStop(0.42, `rgba(112, 194, 184, ${0.12 + velocity * 0.09})`);
-  base.addColorStop(0.62, `rgba(238, 207, 141, ${0.05 + velocity * 0.07})`);
-  base.addColorStop(1, "rgba(20, 31, 39, 0.02)");
+  base.addColorStop(0, "rgba(178, 225, 218, 0.038)");
+  base.addColorStop(0.36, `rgba(112, 194, 184, ${0.19 + velocity * 0.11})`);
+  base.addColorStop(0.66, `rgba(238, 207, 141, ${0.09 + velocity * 0.085})`);
+  base.addColorStop(1, "rgba(20, 31, 39, 0.052)");
   riverContext.fillStyle = base;
   riverContext.beginPath();
   for (let x = 0; x <= width; x += 16) {
     const wave = Math.sin(x * 0.018) * (3 + velocity * 7) + Math.sin(x * 0.041) * (1 + velocity * 3);
-    const y = centerY - riverHeight * 0.36 + wave;
+    const y = centerY - riverHeight * 0.46 + wave;
     if (x === 0) riverContext.moveTo(x, y);
     else riverContext.lineTo(x, y);
   }
   for (let x = width; x >= 0; x -= 16) {
     const wave = Math.sin(x * 0.015) * (4 + velocity * 6) + Math.cos(x * 0.035) * (1 + velocity * 3);
-    riverContext.lineTo(x, centerY + riverHeight * 0.48 + wave);
+    riverContext.lineTo(x, centerY + riverHeight * 0.58 + wave);
   }
   riverContext.closePath();
   riverContext.fill();
+  riverContext.strokeStyle = `rgba(190, 229, 219, ${0.056 + velocity * 0.046})`;
+  riverContext.lineWidth = 1.35;
+  riverContext.stroke();
 
   for (const band of exposureBands(exposureScenario)) {
     const x = width * band.x;
@@ -320,14 +1420,95 @@ function drawRiver(scenario) {
   drawSediment(scenario, width, centerY, riverHeight);
 }
 
+function initialContextFromUrl() {
+  const raw = new URLSearchParams(window.location.search).get("context");
+  if (!raw) return null;
+  const [type, ...idParts] = raw.split(":");
+  const id = idParts.join(":");
+  if (!type || !id) return null;
+  return { type, id };
+}
+
+function syncContextPanel() {
+  if (selectedContext && !contextPanel.hidden) {
+    contextContent.innerHTML = renderContext(selectedContext);
+    return;
+  }
+  if (!initialContextApplied) {
+    const initialContext = initialContextFromUrl();
+    initialContextApplied = true;
+    if (initialContext) openContext(initialContext);
+  }
+}
+
 function renderScenario() {
   const scenario = scenarios[currentScenarioName];
-  drawVenueArc(scenario);
-  drawTape(scenario);
-  drawFlow(scenario);
-  drawAtmosphere(scenario);
-  drawRiver(scenario);
-  drawScenarioControls();
+  const solarMinute = currentMinuteKey();
+  const venueStates = venueStateById(scenario);
+  const canvas = marketCanvasForScenario(scenario);
+  const exposureScenario = scenarioWithPreparedExposure(scenario);
+  const signatures = {
+    commentary: stableSignature({
+      scenario: currentScenarioName,
+      venues: preparedVenueSessions?.generated_at,
+      macro: preparedMacroContext?.deterministic_fingerprint || preparedMacroContext?.generated_at,
+    }),
+    world: stableSignature({
+      scenario: currentScenarioName,
+      solarMinute,
+      venues: venueStates,
+      generated_at: preparedVenueSessions?.generated_at,
+    }),
+    tape: stableSignature({
+      scenario: currentScenarioName,
+      tape: preparedMarketTape?.generated_at || preparedMarketTape?.rows || scenario.tape,
+    }),
+    flow: stableSignature({
+      scenario: currentScenarioName,
+      pipeline: preparedSystemFlow?.generated_at || preparedSystemFlow?.stages,
+      health: preparedOperationalHealth?.deterministic_fingerprint || preparedOperationalHealth?.generated_at,
+      macro: preparedMacroContext?.deterministic_fingerprint || preparedMacroContext?.generated_at,
+    }),
+    atmosphere: stableSignature({ scenario: currentScenarioName, canvas }),
+    river: stableSignature({
+      scenario: currentScenarioName,
+      exposure: exposureScenario.exposure,
+      exposureAgeSeconds: Math.floor((exposureScenario.exposureAgeSeconds || 0) / 30) * 30,
+      velocity: scenario.dataVelocity,
+      staleAgeSeconds: scenario.staleAgeSeconds,
+    }),
+    controls: stableSignature({ names: scenarioNames(), currentScenarioName }),
+  };
+  if (renderSignatures.commentary !== signatures.commentary) {
+    measureRender("commentary", () => updateCommentary(scenario));
+    renderSignatures.commentary = signatures.commentary;
+  }
+  if (renderSignatures.world !== signatures.world) {
+    measureRender("world", () => drawVenueArc(scenario));
+    renderSignatures.world = signatures.world;
+    currentSolarMinuteKey = solarMinute;
+  }
+  if (renderSignatures.tape !== signatures.tape) {
+    measureRender("tape", () => drawTape(scenario));
+    renderSignatures.tape = signatures.tape;
+  }
+  if (renderSignatures.flow !== signatures.flow) {
+    measureRender("flow", () => drawFlow(scenario));
+    renderSignatures.flow = signatures.flow;
+  }
+  if (renderSignatures.atmosphere !== signatures.atmosphere) {
+    measureRender("atmosphere", () => drawAtmosphere(scenario));
+    renderSignatures.atmosphere = signatures.atmosphere;
+  }
+  if (renderSignatures.river !== signatures.river) {
+    measureRender("river", () => drawRiver(scenario));
+    renderSignatures.river = signatures.river;
+  }
+  if (renderSignatures.controls !== signatures.controls) {
+    measureRender("controls", () => drawScenarioControls());
+    renderSignatures.controls = signatures.controls;
+  }
+  syncContextPanel();
 }
 
 function applyScenario(name) {
@@ -340,16 +1521,16 @@ function applyScenario(name) {
   app.dataset.tapeIntensity = scenario.tapeIntensity;
   app.dataset.exposure = scenario.exposure;
   app.dataset.fixtureEvent = scenario.fixtureEvent;
-  app.style.setProperty("--canvas-coherence", String(scenario.marketCanvas.coherence));
-  app.style.setProperty("--canvas-spread", String(scenario.marketCanvas.spread));
-  app.style.setProperty("--canvas-magnitude", String(scenario.marketCanvas.magnitude));
-  app.style.setProperty("--canvas-edge", String(scenario.marketCanvas.edge));
-  app.style.setProperty("--canvas-skew", `${(scenario.marketCanvas.coherence - 0.5) * -14}deg`);
-  app.style.setProperty("--canvas-rotation", `${(1 - scenario.marketCanvas.coherence) * -5}deg`);
-  app.style.setProperty("--canvas-spread-scale-a", String(0.96 + scenario.marketCanvas.spread * 0.1));
-  app.style.setProperty("--canvas-spread-scale-b", String(0.98 + scenario.marketCanvas.spread * 0.08));
-  scenarioClock.textContent = scenario.clock;
-  canvasNote.textContent = scenario.canvasNote;
+  const canvas = marketCanvasForScenario(scenario);
+  app.style.setProperty("--canvas-coherence", String(canvas.coherence));
+  app.style.setProperty("--canvas-spread", String(canvas.spread));
+  app.style.setProperty("--canvas-magnitude", String(canvas.magnitude));
+  app.style.setProperty("--canvas-edge", String(canvas.edge));
+  app.style.setProperty("--canvas-skew", `${(canvas.coherence - 0.5) * -14}deg`);
+  app.style.setProperty("--canvas-rotation", `${(1 - canvas.coherence) * -5}deg`);
+  app.style.setProperty("--canvas-spread-scale-a", String(0.96 + canvas.spread * 0.1));
+  app.style.setProperty("--canvas-spread-scale-b", String(0.98 + canvas.spread * 0.08));
+  for (const key of Object.keys(renderSignatures)) renderSignatures[key] = null;
   renderScenario();
   app.classList.remove("fixture-event");
   if (eventTimer) window.clearTimeout(eventTimer);
@@ -449,6 +1630,130 @@ async function loadPreparedVenueSessionsIfRequested() {
   }
 }
 
+async function loadPreparedMarketCanvasIfRequested() {
+  const params = new URLSearchParams(window.location.search);
+  if (params.get("marketCanvas") !== "prepared") return;
+  try {
+    const module = await import(`./market_canvas_snapshot.generated.mjs?generated=${Date.now()}`);
+    const snapshot = module.marketCanvasSnapshot;
+    if (!snapshot || snapshot.schema_version !== "observatory_market_canvas_v1") {
+      throw new Error("prepared Market Canvas snapshot has an unsupported schema");
+    }
+    preparedMarketCanvas = snapshot;
+    app.dataset.marketCanvasSource = snapshot.status || "UNKNOWN";
+    renderScenario();
+  } catch (error) {
+    preparedMarketCanvas = {
+      schema_version: "observatory_market_canvas_v1",
+      status: "MISSING",
+      dimensions: {},
+    };
+    app.dataset.marketCanvasSource = "MISSING";
+    renderScenario();
+  }
+}
+
+async function loadPreparedMacroContextIfRequested() {
+  const params = new URLSearchParams(window.location.search);
+  if (params.get("macro") !== "prepared") return;
+  try {
+    const module = await import(`./macro_market_context_snapshot.generated.mjs?generated=${Date.now()}`);
+    const snapshot = module.macroMarketContextSnapshot;
+    if (!snapshot || snapshot.schema_version !== "observatory_macro_market_context_v1") {
+      throw new Error("prepared macro context snapshot has an unsupported schema");
+    }
+    preparedMacroContext = snapshot;
+    app.dataset.macroContextSource = snapshot.status || "UNKNOWN";
+    renderScenario();
+  } catch (error) {
+    preparedMacroContext = null;
+    app.dataset.macroContextSource = "MISSING";
+    renderScenario();
+  }
+}
+
+async function loadPreparedOperationalHealthIfRequested() {
+  const params = new URLSearchParams(window.location.search);
+  if (params.get("health") !== "prepared") return;
+  try {
+    const module = await import(`./operational_health_snapshot.generated.mjs?generated=${Date.now()}`);
+    const snapshot = module.operationalHealthSnapshot;
+    if (!snapshot || snapshot.schema_version !== "observatory_operational_health_v1") {
+      throw new Error("prepared health snapshot has an unsupported schema");
+    }
+    preparedOperationalHealth = snapshot;
+    app.dataset.operationalHealthSource = snapshot.status || "UNKNOWN";
+    renderScenario();
+  } catch (error) {
+    preparedOperationalHealth = null;
+    app.dataset.operationalHealthSource = "MISSING";
+    renderScenario();
+  }
+}
+
+async function loadPreparedRuntimeBrokerContextIfRequested() {
+  const params = new URLSearchParams(window.location.search);
+  if (params.get("runtimeBroker") !== "prepared") return;
+  try {
+    const module = await import(`./runtime_broker_context_snapshot.generated.mjs?generated=${Date.now()}`);
+    const snapshot = module.runtimeBrokerContextSnapshot;
+    if (!snapshot || snapshot.schema_version !== "observatory_runtime_broker_context_v1") {
+      throw new Error("prepared runtime/broker context snapshot has an unsupported schema");
+    }
+    preparedRuntimeBrokerContext = snapshot;
+    app.dataset.runtimeBrokerContextSource = snapshot.status || "UNKNOWN";
+    renderScenario();
+  } catch (error) {
+    preparedRuntimeBrokerContext = null;
+    app.dataset.runtimeBrokerContextSource = "MISSING";
+    renderScenario();
+  }
+}
+
+async function loadPreparedFrameManifestIfRequested() {
+  const params = new URLSearchParams(window.location.search);
+  const preparedRequested = [
+    params.get("marketTape") === "phase1",
+    params.get("systemPipeline") === "prepared",
+    params.get("exposure") === "prepared",
+    params.get("venues") === "prepared",
+    params.get("marketCanvas") === "prepared",
+    params.get("macro") === "prepared",
+    params.get("health") === "prepared",
+    params.get("runtimeBroker") === "prepared",
+  ].some(Boolean);
+  if (!preparedRequested) return;
+  try {
+    const module = await import(`./observatory_frame_manifest.generated.mjs?generated=${Date.now()}`);
+    const snapshot = module.observatoryFrameManifest;
+    if (!snapshot || snapshot.schema_version !== "observatory_frame_manifest_v1") {
+      throw new Error("prepared frame manifest has an unsupported schema");
+    }
+    preparedFrameManifest = snapshot;
+    app.dataset.frameFreshness = snapshot.overall_frame_freshness || "UNKNOWN";
+  } catch (error) {
+    preparedFrameManifest = null;
+    app.dataset.frameFreshness = "MISSING";
+  }
+}
+
+async function refreshPreparedSnapshots() {
+  await Promise.allSettled([
+    loadPreparedMarketTapeIfRequested(),
+    loadPreparedSystemFlowIfRequested(),
+    loadPreparedExposureIfRequested(),
+    loadPreparedVenueSessionsIfRequested(),
+    loadPreparedMarketCanvasIfRequested(),
+    loadPreparedMacroContextIfRequested(),
+    loadPreparedOperationalHealthIfRequested(),
+    loadPreparedRuntimeBrokerContextIfRequested(),
+    loadPreparedFrameManifestIfRequested(),
+  ]);
+  if (selectedContext) {
+    contextContent.innerHTML = renderContext(selectedContext);
+  }
+}
+
 scenarioToggle.addEventListener("click", () => {
   scenarioPanel.hidden = !scenarioPanel.hidden;
 });
@@ -460,9 +1765,44 @@ scenarioPanel.addEventListener("click", (event) => {
 });
 
 window.addEventListener("keydown", (event) => {
+  if (event.key === "Escape") {
+    closeContext();
+    scenarioPanel.hidden = true;
+    return;
+  }
   if (event.key === "`" || event.key.toLowerCase() === "s") {
     scenarioPanel.hidden = !scenarioPanel.hidden;
   }
+});
+
+contextClose.addEventListener("click", (event) => {
+  event.stopPropagation();
+  closeContext();
+});
+
+contextPanel.addEventListener("click", (event) => {
+  event.stopPropagation();
+});
+
+document.addEventListener("click", (event) => {
+  const selectable = event.target.closest("[data-context-type]");
+  if (selectable) {
+    event.preventDefault();
+    event.stopPropagation();
+    openContext({ type: selectable.dataset.contextType, id: selectable.dataset.contextId });
+    return;
+  }
+  if (!event.target.closest("#scenario-panel") && !event.target.closest("#scenario-toggle")) {
+    closeContext();
+  }
+});
+
+document.addEventListener("keydown", (event) => {
+  if (!["Enter", " "].includes(event.key)) return;
+  const selectable = event.target.closest("[data-context-type]");
+  if (!selectable) return;
+  event.preventDefault();
+  openContext({ type: selectable.dataset.contextType, id: selectable.dataset.contextId });
 });
 
 window.addEventListener("resize", () => {
@@ -474,9 +1814,14 @@ document.addEventListener("visibilitychange", () => {
   if (!document.hidden) renderScenario();
 });
 
+solarTimer = window.setInterval(() => {
+  if (!document.hidden) renderScenario();
+}, 60000);
+
+preparedRefreshTimer = window.setInterval(() => {
+  if (!document.hidden) refreshPreparedSnapshots();
+}, 15000);
+
 resizeCanvases();
 applyScenario(currentScenarioName);
-loadPreparedMarketTapeIfRequested();
-loadPreparedSystemFlowIfRequested();
-loadPreparedExposureIfRequested();
-loadPreparedVenueSessionsIfRequested();
+refreshPreparedSnapshots();
