@@ -4,9 +4,79 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Active Desktop Prototype - The Observatory</title>
-    <link rel="stylesheet" href="./styles.css" />
+    <link rel="stylesheet" href="./styles.css?v=observatory-acceptance-v1" />
   </head>
   <body>
+    <script>
+      (() => {
+        const startedAt = performance.now();
+        const startedAtIso = new Date().toISOString();
+        const records = [];
+        const errors = [];
+        const panel = document.createElement("pre");
+        panel.id = "observatory-init-diagnostics";
+        panel.hidden = new URLSearchParams(location.search).get("debug") !== "init";
+        panel.setAttribute("aria-live", "polite");
+        document.body.append(panel);
+
+        const formatError = (value) => {
+          if (value instanceof Error) return `${value.name}: ${value.message}`;
+          if (typeof value === "string") return value;
+          try { return JSON.stringify(value); } catch { return String(value); }
+        };
+        const render = () => {
+          const latest = records[records.length - 1];
+          const lines = [
+            "OBSERVATORY INITIALIZATION",
+            `origin ${location.protocol}//${location.host || "local-file"}`,
+            ...records.map((entry) => `${entry.elapsed_ms.toFixed(1).padStart(7)} ms  ${entry.stage}`),
+            ...errors.map((entry) => `ERROR ${entry.kind}: ${entry.message}`),
+          ];
+          panel.textContent = lines.join("\n");
+          panel.dataset.stage = latest?.stage || "NONE";
+        };
+        const record = (stage, detail = null) => {
+          if (records.some((entry) => entry.stage === stage)) return;
+          const entry = {
+            stage,
+            timestamp: new Date().toISOString(),
+            elapsed_ms: performance.now() - startedAt,
+            detail,
+          };
+          records.push(entry);
+          console.info("[Observatory initialization]", entry);
+          render();
+        };
+        const fail = (kind, value) => {
+          const entry = {
+            kind,
+            message: formatError(value),
+            timestamp: new Date().toISOString(),
+            elapsed_ms: performance.now() - startedAt,
+          };
+          errors.push(entry);
+          console.error("[Observatory initialization error]", entry, value);
+          render();
+        };
+        const pending = (label, elapsedMs) => {
+          console.warn("[Observatory initialization pending]", { label, elapsed_ms: elapsedMs });
+          panel.dataset.pending = label;
+          render();
+        };
+
+        window.observatoryInitialization = { started_at: startedAtIso, records, errors };
+        window.__recordObservatoryStage = record;
+        window.__observatoryInit = { record, fail, pending };
+        window.onerror = (message, source, line, column, error) => {
+          fail("window.onerror", error || `${message} at ${source}:${line}:${column}`);
+          return false;
+        };
+        window.onunhandledrejection = (event) => {
+          fail("unhandledrejection", event.reason);
+        };
+        record("BOOT");
+      })();
+    </script>
     <main id="app" class="active-desktop" data-scenario="QUIET_ASIA_HEALTHY">
       <section class="market-field" aria-label="Market canvas">
         <div class="sky-layer sky-layer-a"></div>
@@ -21,7 +91,7 @@
             <p class="eyebrow">Active Desktop Prototype</p>
             <h1>The Observatory</h1>
           </header>
-          <svg id="venue-arc" viewBox="0 0 100 100" role="img" aria-label="Fixture venue states"></svg>
+          <svg id="venue-arc" viewBox="0 0 100 100" overflow="visible" role="img" aria-label="Fixture venue states"></svg>
         </section>
 
         <section class="tape-horizon" aria-label="Fixture market tape">
@@ -45,6 +115,19 @@
       </button>
       <aside id="scenario-panel" class="scenario-panel" aria-label="Fixture scenario switcher" hidden></aside>
     </main>
-    <script type="module" src="./app.mjs"></script>
+    <script>
+      (() => {
+        const moduleScript = document.createElement("script");
+        moduleScript.type = "module";
+        moduleScript.src = "./app.mjs?v=observatory-init-v1";
+        moduleScript.onerror = () => {
+          const hint = location.protocol === "file:"
+            ? "ES modules cannot initialize from file:// in ordinary browsers. Launch through http://127.0.0.1:8765/."
+            : `Module graph failed to load from ${moduleScript.src}`;
+          window.__observatoryInit.fail("MODULE_GRAPH_LOAD", hint);
+        };
+        document.body.append(moduleScript);
+      })();
+    </script>
   </body>
 </html>

@@ -38,31 +38,31 @@ export const riverTextures = Object.freeze([
 ]);
 
 export const venues = Object.freeze([
-  { id: "nyse", city: "New York", label: "NYSE", region: "North America", latitude: 40.7128, longitude: -74.006, x: 27.2, y: 39.4, labelDx: 2.6, labelDy: -4.9 },
-  { id: "nasdaq", city: "New York", label: "Nasdaq", region: "North America", latitude: 40.7128, longitude: -74.006, x: 28.2, y: 40.4, labelDx: 3.2, labelDy: -2.1 },
-  { id: "cboe", city: "New York", label: "Cboe", region: "North America", latitude: 40.7128, longitude: -74.006, x: 29.2, y: 41.4, labelDx: 3.0, labelDy: 0.6 },
-  { id: "cme", city: "Chicago", label: "CME", region: "North America", latitude: 41.8781, longitude: -87.6298, x: 22.6, y: 39.8, labelDx: -9.8, labelDy: -3.5 },
-  { id: "cfe", city: "Chicago", label: "CFE", region: "North America", latitude: 41.8781, longitude: -87.6298, x: 21.8, y: 42.2, labelDx: -9.4, labelDy: -0.4 },
-  { id: "tsx", city: "Toronto", label: "TSX", region: "North America", latitude: 43.6532, longitude: -79.3832, x: 25.1, y: 35.8, labelDx: -9.2, labelDy: -5.8 },
-  { id: "mx", city: "Montreal", label: "MX", region: "North America", latitude: 45.5019, longitude: -73.5674, x: 29.1, y: 35.4, labelDx: 2.7, labelDy: -6.9 },
-  { id: "bmv", city: "Mexico City", label: "BMV", region: "North America", latitude: 19.4326, longitude: -99.1332, x: 19.3, y: 52.8, labelDx: -10.4, labelDy: 2.8 },
-  { id: "b3", city: "Sao Paulo", label: "B3", region: "South America", latitude: -23.5558, longitude: -46.6396, x: 36.2, y: 73.8, labelDx: 1.8, labelDy: 2.4 },
-  { id: "lse", city: "London", label: "LSE / ICE", region: "Europe", latitude: 51.5072, longitude: -0.1276, x: 48.5, y: 36.1, labelDx: -9.6, labelDy: -5.8 },
-  { id: "eurex", city: "Frankfurt", label: "Deutsche Borse / Eurex", region: "Europe", latitude: 50.1109, longitude: 8.6821, x: 52.1, y: 38.8, labelDx: 2.9, labelDy: -3.0 },
-  { id: "paris", city: "Paris", label: "Euronext Paris", region: "Europe", latitude: 48.8566, longitude: 2.3522, x: 50.3, y: 42.0, labelDx: -9.3, labelDy: 2.1 },
-  { id: "amsterdam", city: "Amsterdam", label: "Euronext Amsterdam", region: "Europe", latitude: 52.3676, longitude: 4.9041, x: 51.0, y: 36.3, labelDx: 2.7, labelDy: -6.7 },
-  { id: "six", city: "Zurich", label: "SIX", region: "Europe", latitude: 47.3769, longitude: 8.5417, x: 53.1, y: 42.5, labelDx: 2.6, labelDy: 4.0 },
-  { id: "jpx", city: "Tokyo", label: "JPX / TSE", region: "Asia-Pacific", latitude: 35.6762, longitude: 139.6503, x: 85.4, y: 45.4, labelDx: 2.6, labelDy: -5.3 },
-  { id: "osaka", city: "Osaka", label: "Osaka", region: "Asia-Pacific", latitude: 34.6937, longitude: 135.5023, x: 83.6, y: 48.8, labelDx: 3.0, labelDy: 2.9 },
-  { id: "hkex", city: "Hong Kong", label: "HKEX", region: "Asia-Pacific", latitude: 22.3193, longitude: 114.1694, x: 75.6, y: 55.9, labelDx: 2.8, labelDy: 3.8 },
-  { id: "sgx", city: "Singapore", label: "SGX", region: "Asia-Pacific", latitude: 1.3521, longitude: 103.8198, x: 73.5, y: 66.3, labelDx: 2.0, labelDy: 3.0 },
-  { id: "krx", city: "Seoul", label: "KRX", region: "Asia-Pacific", latitude: 37.5665, longitude: 126.978, x: 80.8, y: 45.3, labelDx: -8.2, labelDy: -4.6 },
-  { id: "twse", city: "Taipei", label: "TWSE", region: "Asia-Pacific", latitude: 25.033, longitude: 121.5654, x: 78.6, y: 52.7, labelDx: 3.0, labelDy: -2.2 },
-  { id: "sse", city: "Shanghai", label: "Shanghai", region: "Asia-Pacific", latitude: 31.2304, longitude: 121.4737, x: 76.9, y: 49.9, labelDx: -11.4, labelDy: -3.3 },
-  { id: "szse", city: "Shenzhen", label: "Shenzhen", region: "Asia-Pacific", latitude: 22.5431, longitude: 114.0579, x: 76.1, y: 54.8, labelDx: -11.3, labelDy: 2.8 },
-  { id: "nse", city: "Mumbai", label: "NSE / BSE", region: "Asia-Pacific", latitude: 19.076, longitude: 72.8777, x: 64.5, y: 59.2, labelDx: -8.8, labelDy: 2.6 },
-  { id: "asx", city: "Sydney", label: "ASX", region: "Asia-Pacific", latitude: -33.8688, longitude: 151.2093, x: 85.3, y: 80.0, labelDx: -7.2, labelDy: 2.0 },
-  { id: "nzx", city: "Auckland", label: "NZX", region: "Asia-Pacific", latitude: -36.8509, longitude: 174.7645, x: 93.0, y: 83.5, labelDx: -10.2, labelDy: 1.8 },
+  { id: "nyse", city: "New York", label: "NYSE", region: "North America", latitude: 40.7128, longitude: -74.006 },
+  { id: "nasdaq", city: "New York", label: "Nasdaq", region: "North America", latitude: 40.7128, longitude: -74.006 },
+  { id: "cboe", city: "New York", label: "Cboe", region: "North America", latitude: 40.7128, longitude: -74.006 },
+  { id: "cme", city: "Chicago", label: "CME", region: "North America", latitude: 41.8781, longitude: -87.6298 },
+  { id: "cfe", city: "Chicago", label: "CFE", region: "North America", latitude: 41.8781, longitude: -87.6298 },
+  { id: "tsx", city: "Toronto", label: "TSX", region: "North America", latitude: 43.6532, longitude: -79.3832 },
+  { id: "mx", city: "Montreal", label: "MX", region: "North America", latitude: 45.5019, longitude: -73.5674 },
+  { id: "bmv", city: "Mexico City", label: "BMV", region: "North America", latitude: 19.4326, longitude: -99.1332 },
+  { id: "b3", city: "Sao Paulo", label: "B3", region: "South America", latitude: -23.5558, longitude: -46.6396 },
+  { id: "lse", city: "London", label: "LSE / ICE", region: "Europe", latitude: 51.5072, longitude: -0.1276 },
+  { id: "eurex", city: "Frankfurt", label: "Deutsche Borse / Eurex", region: "Europe", latitude: 50.1109, longitude: 8.6821 },
+  { id: "paris", city: "Paris", label: "Euronext Paris", region: "Europe", latitude: 48.8566, longitude: 2.3522 },
+  { id: "amsterdam", city: "Amsterdam", label: "Euronext Amsterdam", region: "Europe", latitude: 52.3676, longitude: 4.9041 },
+  { id: "six", city: "Zurich", label: "SIX", region: "Europe", latitude: 47.3769, longitude: 8.5417 },
+  { id: "jpx", city: "Tokyo", label: "JPX / TSE", region: "Asia-Pacific", latitude: 35.6762, longitude: 139.6503 },
+  { id: "osaka", city: "Osaka", label: "Osaka", region: "Asia-Pacific", latitude: 34.6937, longitude: 135.5023 },
+  { id: "hkex", city: "Hong Kong", label: "HKEX", region: "Asia-Pacific", latitude: 22.3193, longitude: 114.1694 },
+  { id: "sgx", city: "Singapore", label: "SGX", region: "Asia-Pacific", latitude: 1.3521, longitude: 103.8198 },
+  { id: "krx", city: "Seoul", label: "KRX", region: "Asia-Pacific", latitude: 37.5665, longitude: 126.978 },
+  { id: "twse", city: "Taipei", label: "TWSE", region: "Asia-Pacific", latitude: 25.033, longitude: 121.5654 },
+  { id: "sse", city: "Shanghai", label: "Shanghai", region: "Asia-Pacific", latitude: 31.2304, longitude: 121.4737 },
+  { id: "szse", city: "Shenzhen", label: "Shenzhen", region: "Asia-Pacific", latitude: 22.5431, longitude: 114.0579 },
+  { id: "nse", city: "Mumbai", label: "NSE / BSE", region: "Asia-Pacific", latitude: 19.076, longitude: 72.8777 },
+  { id: "asx", city: "Sydney", label: "ASX", region: "Asia-Pacific", latitude: -33.8688, longitude: 151.2093 },
+  { id: "nzx", city: "Auckland", label: "NZX", region: "Asia-Pacific", latitude: -36.8509, longitude: 174.7645 },
 ]);
 
 const baseTape = Object.freeze([
@@ -537,7 +537,12 @@ export function validateFixtures() {
     }
   }
   for (const venue of venues) {
-    if (!Number.isFinite(venue.x) || !Number.isFinite(venue.y)) errors.push(`invalid venue coordinate: ${venue.id}`);
+    if (!Number.isFinite(venue.latitude) || venue.latitude < -90 || venue.latitude > 90) {
+      errors.push(`invalid venue latitude: ${venue.id}`);
+    }
+    if (!Number.isFinite(venue.longitude) || venue.longitude < -180 || venue.longitude > 180) {
+      errors.push(`invalid venue longitude: ${venue.id}`);
+    }
   }
   for (const [name, candidate] of Object.entries(scenarios)) {
     if (!timeStates.includes(candidate.timeState)) errors.push(`${name} has invalid time state ${candidate.timeState}`);

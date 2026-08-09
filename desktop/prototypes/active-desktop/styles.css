@@ -4,7 +4,7 @@
   --muted: rgba(238, 244, 242, 0.62);
   --gold: #f0c879;
   --aqua: #79c9bd;
-  --bg: #05090c;
+  --bg: #010203;
 }
 
 * { box-sizing: border-box; }
@@ -23,10 +23,7 @@ body {
   position: relative;
   min-height: 100%;
   overflow: hidden;
-  background:
-    radial-gradient(circle at 42% 8%, rgba(55, 92, 115, 0.32), transparent 34%),
-    radial-gradient(circle at 74% 22%, rgba(113, 93, 74, 0.18), transparent 38%),
-    linear-gradient(180deg, #101b23 0%, #071016 55%, #04070a 100%);
+  background: #010203;
 }
 
 .active-desktop::after {
@@ -34,53 +31,35 @@ body {
   position: absolute;
   inset: 0;
   pointer-events: none;
-  opacity: 0.14;
-  background-image:
-    radial-gradient(circle at 20% 30%, rgba(255,255,255,0.18) 0 1px, transparent 1.4px),
-    radial-gradient(circle at 80% 70%, rgba(255,255,255,0.12) 0 1px, transparent 1.3px);
-  background-size: 19px 23px, 29px 31px;
-  mix-blend-mode: overlay;
+  display: none;
 }
 
-.active-desktop[data-time-state="0300_ET"] {
-  background:
-    radial-gradient(circle at 54% -8%, rgba(43, 82, 112, 0.24), transparent 35%),
-    linear-gradient(180deg, #07111a 0%, #071016 56%, #030608 100%);
+.active-desktop[data-time-state] { background: #010203; }
+
+#observatory-init-diagnostics {
+  position: fixed;
+  top: 10px;
+  right: 10px;
+  z-index: 1000;
+  max-width: min(560px, 48vw);
+  margin: 0;
+  border: 1px solid rgba(121, 201, 189, 0.22);
+  border-radius: 4px;
+  background: rgba(1, 2, 3, 0.9);
+  color: rgba(210, 229, 224, 0.72);
+  padding: 8px 10px;
+  font: 10px/1.35 ui-monospace, SFMono-Regular, Menlo, monospace;
+  pointer-events: none;
+  white-space: pre-wrap;
 }
 
-.active-desktop[data-time-state="0800_ET"] {
-  background:
-    radial-gradient(circle at 36% 8%, rgba(234, 170, 111, 0.22), transparent 31%),
-    radial-gradient(circle at 74% 24%, rgba(76, 126, 151, 0.18), transparent 38%),
-    linear-gradient(180deg, #172532 0%, #09141c 56%, #04070a 100%);
+#observatory-init-diagnostics[hidden] {
+  display: none;
 }
 
-.active-desktop[data-time-state="1100_ET"] {
-  background:
-    radial-gradient(circle at 50% 10%, rgba(238, 200, 121, 0.2), transparent 30%),
-    radial-gradient(circle at 34% 34%, rgba(94, 159, 170, 0.18), transparent 42%),
-    linear-gradient(180deg, #142534 0%, #07131a 56%, #04070a 100%);
-}
-
-.active-desktop[data-time-state="1400_ET"] {
-  background:
-    radial-gradient(circle at 64% 12%, rgba(153, 186, 185, 0.16), transparent 34%),
-    radial-gradient(circle at 26% 30%, rgba(220, 174, 102, 0.12), transparent 38%),
-    linear-gradient(180deg, #122230 0%, #07131a 55%, #04070a 100%);
-}
-
-.active-desktop[data-time-state="1600_ET"] {
-  background:
-    radial-gradient(circle at 78% 18%, rgba(238, 171, 102, 0.2), transparent 36%),
-    radial-gradient(circle at 34% 18%, rgba(75, 116, 151, 0.15), transparent 42%),
-    linear-gradient(180deg, #162232 0%, #081119 56%, #04070a 100%);
-}
-
-.active-desktop[data-time-state="2000_ET"] {
-  background:
-    radial-gradient(circle at 65% 2%, rgba(64, 97, 134, 0.18), transparent 33%),
-    radial-gradient(circle at 24% 25%, rgba(47, 72, 90, 0.16), transparent 41%),
-    linear-gradient(180deg, #090f17 0%, #071016 58%, #030608 100%);
+#observatory-init-diagnostics[data-stage="OBSERVATORY_READY"] {
+  border-color: rgba(121, 201, 189, 0.4);
+  color: rgba(210, 229, 224, 0.48);
 }
 
 .market-field {
@@ -138,6 +117,29 @@ body {
   grid-template-rows: auto 1fr;
   pointer-events: none;
   z-index: 3;
+}
+
+.embedded-arc::before,
+.embedded-arc::after {
+  content: "";
+  position: fixed;
+  top: -18vh;
+  bottom: -18vh;
+  width: 22vw;
+  border-radius: 50%;
+  pointer-events: none;
+}
+
+.embedded-arc::before {
+  left: -21.75vw;
+  border-right: 1px solid rgba(133, 183, 198, 0.1);
+  box-shadow: 3px 0 5px -4px rgba(133, 183, 198, 0.08);
+}
+
+.embedded-arc::after {
+  right: -21.75vw;
+  border-left: 1px solid rgba(133, 183, 198, 0.1);
+  box-shadow: -3px 0 5px -4px rgba(133, 183, 198, 0.08);
 }
 
 .arc-header {
@@ -219,6 +221,7 @@ h1 {
   inset: -10vh -132vw 8vh;
   width: 364vw;
   height: 126vh;
+  overflow: visible;
   opacity: 1;
   filter: drop-shadow(0 42px 150px rgba(0, 0, 0, 0.46));
 }
@@ -233,16 +236,13 @@ h1 {
   outline-offset: 4px;
 }
 
-.earth-ocean {
-  fill: rgba(4, 13, 18, 0.08);
-  stroke: none;
+.space-black {
+  fill: #010203;
 }
 
-.earth-wash {
-  fill: url(#earthGlow);
-  stroke: none;
-  filter: blur(1.1px);
-  opacity: 0.42;
+.space-stars {
+  fill: rgba(224, 231, 229, 0.86);
+  pointer-events: none;
 }
 
 .atlas-graticule {
@@ -252,7 +252,7 @@ h1 {
 }
 
 .atlas-land {
-  fill: rgba(34, 58, 55, 0.31);
+  fill: rgba(32, 57, 56, 0.33);
   stroke: rgba(229, 237, 228, 0.022);
   stroke-width: 0.04;
   vector-effect: non-scaling-stroke;
@@ -260,54 +260,59 @@ h1 {
 
 .atlas-coastline {
   fill: none;
-  stroke: rgba(229, 237, 228, 0.19);
+  stroke: rgba(194, 213, 210, 0.245);
   stroke-linejoin: round;
-  stroke-width: 0.066;
+  stroke-linecap: round;
+  stroke-width: 0.072;
   vector-effect: non-scaling-stroke;
-  filter: drop-shadow(0 0 2px rgba(238, 244, 242, 0.045));
+}
+
+.solar-daylight {
+  filter: url("#solarSoftness");
+  mix-blend-mode: screen;
 }
 
 .solar-daylight path {
-  fill: rgba(244, 218, 154, 0.024);
-  filter: url("#solarSoftness");
-  mix-blend-mode: screen;
+  fill: rgba(244, 218, 154, 0.04);
   stroke: none;
 }
 
-.solar-twilight path {
-  fill: rgba(236, 153, 87, 0.092);
+.solar-twilight,
+.solar-deep-twilight {
   filter: url("#twilightSoftness");
   mix-blend-mode: screen;
+}
+
+.solar-twilight path {
+  fill: rgba(229, 148, 86, 0.075);
   stroke: none;
 }
 
 .solar-deep-twilight path {
-  fill: rgba(54, 91, 136, 0.112);
-  filter: url("#twilightSoftness");
-  mix-blend-mode: screen;
+  fill: rgba(52, 88, 133, 0.105);
   stroke: none;
+}
+
+.solar-night {
+  filter: url("#solarSoftness");
+  mix-blend-mode: multiply;
 }
 
 .solar-night path {
-  fill: rgba(1, 7, 15, 0.34);
-  filter: url("#solarSoftness");
-  mix-blend-mode: multiply;
+  fill: rgba(1, 7, 15, 0.3);
   stroke: none;
 }
 
-.atlantic-bridge {
-  fill: none;
-  stroke: rgba(239, 186, 104, 0.105);
-  stroke-width: 0.38;
-  stroke-linecap: round;
-  filter: drop-shadow(0 0 8px rgba(239, 186, 104, 0.18));
-  opacity: 0.44;
+.atlantic-overlap-wash {
+  fill: url("#atlanticWarmth");
+  filter: url("#atlanticSoftness");
+  mix-blend-mode: screen;
+  opacity: 0.28;
 }
 
 .venue-harbor {
-  opacity: 0.06;
+  opacity: 0.075;
   transition: opacity 600ms ease, r 600ms ease;
-  filter: blur(0.6px);
 }
 
 .venue-node {
@@ -317,13 +322,13 @@ h1 {
 .venue-node[data-state="OPEN"],
 .venue-node[data-state="AUCTION"],
 .venue-node[data-state="CLOSING_SOON"] {
-  filter: drop-shadow(0 0 5px rgba(112, 214, 145, 0.72));
+  filter: drop-shadow(0 0 3px rgba(112, 214, 145, 0.56));
 }
 
 .venue-harbor[data-state="OPEN"],
 .venue-harbor[data-state="AUCTION"],
 .venue-harbor[data-state="CLOSING_SOON"] {
-  opacity: 0.24;
+  opacity: 0.15;
 }
 
 .venue-harbor[data-state="STALE"],
@@ -331,12 +336,35 @@ h1 {
 .venue-harbor[data-state="PREOPEN"],
 .venue-harbor[data-state="LUNCH_BREAK"] {
   opacity: 0.16;
-  filter: blur(0.7px);
 }
 
 .venue-node[data-state="CLOSED"],
 .venue-node[data-state="HOLIDAY"] {
-  opacity: 0.36;
+  opacity: 0.58;
+  filter: drop-shadow(0 0 1.8px rgba(194, 111, 103, 0.25));
+}
+
+.venue-harbor[data-state="CLOSED"],
+.venue-harbor[data-state="HOLIDAY"] {
+  opacity: 0.12;
+}
+
+.market-center-group[data-featured="false"] .venue-harbor {
+  opacity: 0.045;
+}
+
+.market-center-group[data-featured="false"] .venue-node {
+  opacity: 0.4;
+}
+
+.market-center-hit-target {
+  fill: transparent;
+  pointer-events: all;
+}
+
+.market-center-group .venue-harbor,
+.market-center-group .venue-node {
+  pointer-events: none;
 }
 
 .venue-node[data-state="PREOPEN"],
@@ -373,7 +401,7 @@ h1 {
 
 .venue-label[data-state="CLOSED"],
 .venue-label[data-state="HOLIDAY"] {
-  fill: rgba(225, 178, 172, 0.34);
+  fill: rgba(225, 178, 172, 0.46);
 }
 
 .venue-label[data-state="UNKNOWN"],
@@ -384,6 +412,13 @@ h1 {
 
 .venue-label[data-state="STALE"] {
   fill: rgba(238, 211, 166, 0.48);
+}
+
+.venue-label-leader {
+  stroke: rgba(198, 210, 205, 0.22);
+  stroke-width: 0.07;
+  stroke-linecap: round;
+  vector-effect: non-scaling-stroke;
 }
 
 .tape-horizon {
@@ -506,7 +541,7 @@ h1 {
 }
 
 .flow-stage:hover,
-.venue-group:hover .venue-node,
+.market-center-group:hover .venue-node,
 .venue-label:hover,
 .tape-item:hover {
   filter: drop-shadow(0 0 8px rgba(240, 200, 121, 0.18));

@@ -1,5 +1,28 @@
 import { scenarioNames, scenarios, venues } from "./fixtures.mjs";
 import { worldLand110m } from "./world_land_110m.mjs";
+import {
+  isPrimaryMarketCenter,
+  labelLayoutDiagnostics,
+  layoutCityLabels,
+} from "./observatory_map_layout.mjs";
+
+const markInitializationStage = (stage, detail = null) => {
+  window.__recordObservatoryStage?.(stage, detail);
+};
+
+async function diagnoseInitializationAwait(label, promise, warningAfterMs = 2500) {
+  const startedAt = performance.now();
+  const warningTimer = window.setTimeout(() => {
+    window.__observatoryInit?.pending(label, performance.now() - startedAt);
+  }, warningAfterMs);
+  try {
+    return await promise;
+  } finally {
+    window.clearTimeout(warningTimer);
+  }
+}
+
+markInitializationStage("MODULE_IMPORTS_READY");
 
 const app = document.querySelector("#app");
 const arc = document.querySelector("#venue-arc");
@@ -32,10 +55,14 @@ let solarTimer = null;
 let preparedRefreshTimer = null;
 let selectedContext = null;
 let initialContextApplied = false;
+let initializationInProgress = true;
 let currentSolarMinuteKey = null;
 const renderSignatures = {
   commentary: null,
   world: null,
+  solar: null,
+  marketCenters: null,
+  labels: null,
   tape: null,
   flow: null,
   atmosphere: null,
@@ -45,6 +72,9 @@ const renderSignatures = {
 const observatoryPerformance = {
   counts: {
     world: 0,
+    solar: 0,
+    marketCenters: 0,
+    labels: 0,
     tape: 0,
     flow: 0,
     atmosphere: 0,
@@ -61,7 +91,23 @@ const ROBINSON_X_SCALE = 0.8487;
 const ROBINSON_Y_SCALE = 1.3523;
 const MAP_WIDTH_UNITS = Math.PI * ROBINSON_X_SCALE * 2;
 const MAP_HEIGHT_UNITS = ROBINSON_Y_SCALE * 2;
-const EARTH_BOUNDARY_PATH = "M -76 48 C -34 -30, 20 -47, 50 -47 C 82 -47, 137 -28, 176 49 C 137 127, 82 145, 50 145 C 17 145, -36 127, -76 48 Z";
+const SPACE_STARS = Object.freeze([
+  [1.1, 4.8, 0.055, 0.34], [5.8, 7.9, 0.038, 0.22], [12.7, 2.4, 0.072, 0.42],
+  [20.4, 6.1, 0.043, 0.24], [28.9, 1.7, 0.052, 0.3], [39.6, 4.2, 0.035, 0.2],
+  [53.8, 1.2, 0.065, 0.36], [65.3, 5.3, 0.041, 0.24], [74.9, 2.8, 0.052, 0.29],
+  [84.6, 6.7, 0.036, 0.2], [93.1, 3.5, 0.069, 0.38], [98.7, 9.2, 0.044, 0.25],
+  [0.8, 18.6, 0.04, 0.24], [7.4, 15.2, 0.061, 0.34], [91.8, 17.9, 0.047, 0.27],
+  [99.1, 23.8, 0.071, 0.4], [1.7, 31.4, 0.049, 0.29], [97.8, 36.1, 0.036, 0.21],
+  [0.5, 46.7, 0.074, 0.39], [99.3, 51.8, 0.048, 0.25], [1.4, 61.9, 0.038, 0.23],
+  [98.1, 66.3, 0.066, 0.36], [0.9, 76.8, 0.051, 0.3], [96.6, 79.1, 0.04, 0.22],
+  [4.2, 87.4, 0.069, 0.37], [10.9, 92.6, 0.037, 0.22], [18.8, 96.4, 0.054, 0.31],
+  [30.5, 91.8, 0.041, 0.24], [42.1, 98.2, 0.063, 0.35], [57.6, 94.5, 0.036, 0.21],
+  [68.7, 98.7, 0.049, 0.28], [78.4, 92.1, 0.07, 0.39], [88.9, 96.8, 0.042, 0.24],
+  [95.7, 89.3, 0.057, 0.32], [2.9, 11.7, 0.03, 0.17], [16.5, 4.1, 0.032, 0.18],
+  [47.2, 2.6, 0.039, 0.23], [70.8, 1.1, 0.031, 0.18], [96.1, 13.4, 0.035, 0.2],
+  [2.2, 71.2, 0.032, 0.18], [7.6, 95.8, 0.035, 0.2], [24.3, 98.9, 0.03, 0.17],
+  [62.4, 97.1, 0.034, 0.2], [90.7, 93.6, 0.031, 0.18], [98.9, 72.7, 0.034, 0.19],
+]);
 
 function interpolateTable(table, latitude) {
   const absLatitude = Math.min(90, Math.abs(latitude));
@@ -181,6 +227,7 @@ function measureRender(name, fn) {
   fn();
   const durationMs = Number((performance.now() - started).toFixed(3));
   observatoryPerformance.counts[name] = (observatoryPerformance.counts[name] || 0) + 1;
+  app.dataset[`render${name[0].toUpperCase()}${name.slice(1)}Count`] = String(observatoryPerformance.counts[name]);
   observatoryPerformance.durations.push({ name, duration_ms: durationMs, at: new Date().toISOString() });
   if (observatoryPerformance.durations.length > 80) observatoryPerformance.durations.shift();
 }
@@ -262,14 +309,18 @@ function solarIllumination(date = new Date()) {
       const elevation = solarElevation(centerLongitude, centerLatitude, sun);
       const path = solarCellPath(longitude, latitude, longitude + lonStep, latitude + latStep);
       if (!path) continue;
-      if (elevation > 5) {
-        daylight.push(`<path d="${path}" />`);
-      } else if (elevation > -6) {
-        twilight.push(`<path d="${path}" />`);
-      } else if (elevation > -15) {
-        deepTwilight.push(`<path d="${path}" />`);
+      if (elevation > 6) {
+        const strength = 0.56 + 0.44 * smoothBand(elevation, 6, 24);
+        daylight.push(`<path d="${path}" opacity="${strength.toFixed(3)}" />`);
+      } else if (elevation > -7) {
+        const strength = 0.48 + 0.52 * (1 - Math.abs(elevation + 0.5) / 7.5);
+        twilight.push(`<path d="${path}" opacity="${Math.max(0.34, strength).toFixed(3)}" />`);
+      } else if (elevation > -18) {
+        const strength = 0.5 + 0.5 * smoothBand(-elevation, 7, 18);
+        deepTwilight.push(`<path d="${path}" opacity="${strength.toFixed(3)}" />`);
       } else {
-        night.push(`<path d="${path}" />`);
+        const strength = 0.58 + 0.42 * smoothBand(-elevation, 18, 32);
+        night.push(`<path d="${path}" opacity="${strength.toFixed(3)}" />`);
       }
     }
   }
@@ -374,33 +425,8 @@ function projectedVenue(venue, preparedVenue) {
   const longitude = Number(preparedVenue?.longitude ?? venue.longitude);
   const projected = projectLonLat(longitude, latitude);
   if (projected) return projected;
-  return { x: venue.x, y: venue.y };
+  throw new Error(`Unable to project authoritative latitude/longitude for venue ${venue.id}`);
 }
-
-const CITY_LABEL_OFFSETS = Object.freeze({
-  "New York": { dx: 2.4, dy: 2.7, anchor: "start" },
-  Chicago: { dx: -4.2, dy: -3.3, anchor: "end" },
-  Toronto: { dx: 2.2, dy: -2.9, anchor: "start" },
-  Montreal: { dx: 2.1, dy: -2.6, anchor: "start" },
-  "Mexico City": { dx: -3.6, dy: 2.4, anchor: "end" },
-  "Sao Paulo": { dx: 2.2, dy: 2.5, anchor: "start" },
-  London: { dx: -2.8, dy: -2.4, anchor: "end" },
-  Frankfurt: { dx: 2.5, dy: -0.2, anchor: "start" },
-  Paris: { dx: -2.6, dy: 2.2, anchor: "end" },
-  Amsterdam: { dx: 2.2, dy: -2.8, anchor: "start" },
-  Zurich: { dx: 2.4, dy: 2.2, anchor: "start" },
-  Tokyo: { dx: 2.4, dy: -1.8, anchor: "start" },
-  Osaka: { dx: 2.5, dy: 2.3, anchor: "start" },
-  "Hong Kong": { dx: 2.2, dy: 2.3, anchor: "start" },
-  Singapore: { dx: 2.3, dy: 2.4, anchor: "start" },
-  Seoul: { dx: -2.4, dy: -2.4, anchor: "end" },
-  Taipei: { dx: 2.4, dy: -1.9, anchor: "start" },
-  Shanghai: { dx: -2.7, dy: -1.9, anchor: "end" },
-  Shenzhen: { dx: -2.5, dy: 2.3, anchor: "end" },
-  Mumbai: { dx: -2.2, dy: 2.1, anchor: "end" },
-  Sydney: { dx: -2.3, dy: 2.2, anchor: "end" },
-  Auckland: { dx: -2.4, dy: 2.0, anchor: "end" },
-});
 
 const MARKET_CENTER_IDS = Object.freeze({
   "New York": "new_york",
@@ -426,6 +452,28 @@ const MARKET_CENTER_IDS = Object.freeze({
   Sydney: "sydney",
   Auckland: "auckland",
 });
+
+const AMBIENT_MARKET_CENTER_OVERRIDES = Object.freeze({
+  cboe: "Chicago",
+});
+
+const MARKET_CENTER_ANCHOR_VENUES = Object.freeze({
+  "New York": "nyse",
+  Chicago: "cme",
+  Toronto: "tsx",
+  "Mexico City": "bmv",
+});
+
+const MARKET_CENTER_VENUE_ORDER = Object.freeze({
+  "New York": ["nyse", "nasdaq"],
+  Chicago: ["cme", "cboe", "cfe"],
+  Toronto: ["tsx"],
+  "Mexico City": ["bmv"],
+});
+
+function ambientMarketCenterCity(venue) {
+  return AMBIENT_MARKET_CENTER_OVERRIDES[venue.id] || venue.city;
+}
 
 const MARKET_CENTER_BENCHMARKS = Object.freeze({
   "New York": ["SPY", "QQQ", "DIA", "IWM"],
@@ -465,8 +513,8 @@ const STATUS_WEIGHT = Object.freeze({
 
 function strongestVenueStatus(statuses) {
   return statuses.reduce((strongest, status) => (
-    (STATUS_WEIGHT[status] ?? -1) > (STATUS_WEIGHT[strongest] ?? -1) ? status : strongest
-  ), "UNKNOWN");
+    strongest === null || (STATUS_WEIGHT[status] ?? -1) > (STATUS_WEIGHT[strongest] ?? -1) ? status : strongest
+  ), null) || "UNKNOWN";
 }
 
 function stateColor(state) {
@@ -485,16 +533,26 @@ function stateColor(state) {
 
 function stateRadius(state) {
   return {
-    OPEN: 0.68,
-    AUCTION: 0.62,
-    CLOSING_SOON: 0.58,
-    PREOPEN: 0.52,
-    LUNCH_BREAK: 0.48,
-    STALE: 0.46,
-    UNKNOWN: 0.42,
-    HOLIDAY: 0.32,
-    CLOSED: 0.28,
-  }[state] || 0.42;
+    OPEN: 0.5,
+    AUCTION: 0.48,
+    CLOSING_SOON: 0.46,
+    PREOPEN: 0.43,
+    LUNCH_BREAK: 0.4,
+    STALE: 0.4,
+    UNKNOWN: 0.36,
+    HOLIDAY: 0.31,
+    CLOSED: 0.32,
+  }[state] || 0.36;
+}
+
+function haloRadius(state) {
+  return stateRadius(state) * ({
+    OPEN: 3.8,
+    AUCTION: 3.7,
+    CLOSING_SOON: 3.7,
+    CLOSED: 3.55,
+    HOLIDAY: 3.45,
+  }[state] || 3.5);
 }
 
 function macroRowsBySymbol() {
@@ -711,7 +769,14 @@ function renderMarketCenterContext(centerId) {
     || centerId.replaceAll("_", " ");
   const preparedVenuesById = preparedVenueById();
   const venueStates = venueStateById();
-  const cityVenues = venues.filter((venue) => (MARKET_CENTER_IDS[venue.city] || "") === centerId);
+  const orderedVenueIds = MARKET_CENTER_VENUE_ORDER[cityName] || [];
+  const cityVenues = venues
+    .filter((venue) => (MARKET_CENTER_IDS[ambientMarketCenterCity(venue)] || "") === centerId)
+    .sort((left, right) => {
+      const leftIndex = orderedVenueIds.indexOf(left.id);
+      const rightIndex = orderedVenueIds.indexOf(right.id);
+      return (leftIndex === -1 ? 999 : leftIndex) - (rightIndex === -1 ? 999 : rightIndex);
+    });
   const benchmarkRows = (MARKET_CENTER_BENCHMARKS[cityName] || [])
     .map((symbol) => macroRowsBySymbol()[symbol])
     .filter(Boolean);
@@ -723,6 +788,12 @@ function renderMarketCenterContext(centerId) {
   const benchmarkBody = benchmarkRows.length
     ? benchmarkRows.map((row) => [`${row.symbol}${row.source_type === "ETF_PROXY" ? " proxy" : ""}`, `${formatChangePct(row)}${row.source_type === "ETF_PROXY" ? " · ETF proxy" : ""}`])
     : [["Benchmarks", "No source-backed local benchmark values available"]];
+  const cmeProductRows = cityName === "Chicago"
+    ? (preparedVenuesById.cme?.product_session_states || []).map((product) => [
+      product.product_group,
+      `${product.product_session_state || "UNKNOWN"}${product.monitored ? " · monitored" : " · informational"}`,
+    ])
+    : [];
   const updated = preparedVenueSessions?.generated_at || preparedMacroContext?.generated_at;
   const venueFreshness = freshnessFromEvidence({
     generated_at: preparedVenueSessions?.generated_at,
@@ -732,10 +803,11 @@ function renderMarketCenterContext(centerId) {
     <h3>${escapeHtml(cityName)}</h3>
     ${panelStatusLine(`Market center · ${venueFreshness}`, venueFreshness === "STALE" ? "AMBER" : "GRAY")}
     ${contextSection("Venues", venueRows)}
+    ${contextSection("CME Product Sessions", cmeProductRows)}
     ${contextSection("Benchmarks", benchmarkBody)}
     ${contextSection("Operator note", [
-      ["Identity", "One city label with separate exchange indicators"],
-      ["Coordinates", "Markers remain anchored to projected latitude/longitude"],
+      ["Identity", "One ambient market-center dot; venue detail remains in this panel"],
+      ["Coordinates", "Market center remains anchored to projected latitude/longitude"],
     ])}
     ${sourceFooter({
       label: "Venue Calendar",
@@ -973,38 +1045,33 @@ function renderContext(selection) {
   return `<h3>Context</h3>${panelStatusLine("UNKNOWN", "GRAY")}${actionBoundary}`;
 }
 
-function drawVenueArc(scenario) {
-  const venueStatesById = venueStateById(scenario);
-  const preparedVenuesById = preparedVenueById();
-  const activeEurope = ["lse", "eurex", "paris", "amsterdam", "six"].some((id) => venueStatesById[id] === "OPEN");
-  const activeUs = ["nyse", "nasdaq", "cboe", "cme", "cfe"].some((id) => venueStatesById[id] === "OPEN");
-  const london = projectedVenue(venues.find((venue) => venue.id === "lse"), preparedVenuesById.lse);
-  const newYork = projectedVenue(venues.find((venue) => venue.id === "nyse"), preparedVenuesById.nyse);
-  const bridge = activeEurope && activeUs
-    ? `<path class="atlantic-bridge" d="M ${london.x.toFixed(2)} ${london.y.toFixed(2)} C 43 31, 35 33, ${newYork.x.toFixed(2)} ${newYork.y.toFixed(2)}" />`
-    : "";
+function drawWorldBase() {
   const land = LAND_PATHS.map((path) => `<path d="${path}" />`).join("");
-  const illumination = solarIllumination();
-  const world = `
+  const stars = SPACE_STARS.map(([x, y, radius, opacity]) => (
+    `<circle cx="${x}" cy="${y}" r="${radius}" opacity="${opacity}" />`
+  )).join("");
+  arc.innerHTML = `
     <defs>
-      <radialGradient id="earthGlow" cx="48%" cy="46%" r="76%">
-        <stop offset="0%" stop-color="rgba(119,154,171,0.2)" />
-        <stop offset="68%" stop-color="rgba(40,69,82,0.13)" />
-        <stop offset="100%" stop-color="rgba(4,10,14,0)" />
+      <radialGradient id="atlanticWarmth">
+        <stop offset="0%" stop-color="rgba(224,159,90,0.2)" />
+        <stop offset="58%" stop-color="rgba(210,139,76,0.08)" />
+        <stop offset="100%" stop-color="rgba(210,139,76,0)" />
       </radialGradient>
-      <filter id="solarSoftness" x="-4%" y="-4%" width="108%" height="108%">
-        <feGaussianBlur stdDeviation="0.72" />
+      <filter id="solarSoftness" x="-7%" y="-7%" width="114%" height="114%">
+        <feGaussianBlur stdDeviation="1.45" />
       </filter>
-      <filter id="twilightSoftness" x="-5%" y="-5%" width="110%" height="110%">
-        <feGaussianBlur stdDeviation="1.15" />
+      <filter id="twilightSoftness" x="-9%" y="-9%" width="118%" height="118%">
+        <feGaussianBlur stdDeviation="2.05" />
       </filter>
-      <clipPath id="earthMapClip">
-        <path d="${EARTH_BOUNDARY_PATH}" />
-      </clipPath>
+      <filter id="atlanticSoftness" x="-20%" y="-45%" width="140%" height="190%">
+        <feGaussianBlur stdDeviation="3.2" />
+      </filter>
     </defs>
-    <rect class="earth-ocean" x="-78" y="-45" width="256" height="190" rx="96" />
-    <path class="earth-wash" d="${EARTH_BOUNDARY_PATH}" />
-    <g clip-path="url(#earthMapClip)">
+    <g class="space-layer" data-background-model="open-black-space" aria-hidden="true">
+      <rect class="space-black" x="-120" y="-80" width="340" height="260" />
+      <g class="space-stars">${stars}</g>
+    </g>
+    <g>
       <g class="atlas-graticule" aria-hidden="true">
         <path d="M -1 36 C 22 32, 75 32, 101 36" />
         <path d="M -3 50 C 22 47, 76 47, 103 50" />
@@ -1015,54 +1082,135 @@ function drawVenueArc(scenario) {
         <path d="M 67 15 C 65 36, 66 68, 69 86" />
         <path d="M 84 21 C 80 39, 81 64, 86 81" />
       </g>
-      <g class="solar-daylight" aria-hidden="true">${illumination.daylight}</g>
+      <g id="solar-daylight-layer" class="solar-daylight" aria-hidden="true"></g>
+      <g id="solar-twilight-layer" class="solar-twilight" aria-hidden="true"></g>
+      <g id="solar-deep-twilight-layer" class="solar-deep-twilight" aria-hidden="true"></g>
+      <g id="solar-night-layer" class="solar-night" aria-hidden="true"></g>
       <g class="atlas-land" aria-hidden="true">${land}</g>
       <g class="atlas-coastline" aria-hidden="true">${land}</g>
-      <g class="solar-twilight" aria-hidden="true">${illumination.twilight}</g>
-      <g class="solar-deep-twilight" aria-hidden="true">${illumination.deepTwilight}</g>
-      <g class="solar-night" aria-hidden="true">${illumination.night}</g>
     </g>
-    ${bridge}
+    <g id="atlantic-overlap-layer" aria-hidden="true"></g>
+    <g id="market-center-layer"></g>
+    <g id="market-center-labels-layer"></g>
   `;
+}
+
+function drawSolarLayer(date = new Date()) {
+  const illumination = solarIllumination(date);
+  arc.querySelector("#solar-daylight-layer").innerHTML = illumination.daylight;
+  arc.querySelector("#solar-twilight-layer").innerHTML = illumination.twilight;
+  arc.querySelector("#solar-deep-twilight-layer").innerHTML = illumination.deepTwilight;
+  arc.querySelector("#solar-night-layer").innerHTML = illumination.night;
+}
+
+function cityGroupsForScenario(scenario) {
+  const venueStatesById = venueStateById(scenario);
+  const preparedVenuesById = preparedVenueById();
   const cityGroups = new Map();
-  const nodes = venues.map((venue) => {
+  for (const venue of venues) {
     const state = venueStatesById[venue.id] || "UNKNOWN";
-    const preparedVenue = preparedVenuesById[venue.id];
-    const point = projectedVenue(venue, preparedVenue);
-    const city = cityGroups.get(venue.city) || {
-      city: venue.city,
+    const ambientCity = ambientMarketCenterCity(venue);
+    const city = cityGroups.get(ambientCity) || {
+      city: ambientCity,
       region: venue.region,
-      point,
+      point: null,
       states: [],
       labels: [],
     };
     city.states.push(state);
     city.labels.push(venue.label);
     city.venueIds = [...(city.venueIds || []), venue.id];
-    cityGroups.set(venue.city, city);
+    cityGroups.set(ambientCity, city);
+  }
+  for (const city of cityGroups.values()) {
+    const anchorVenueId = MARKET_CENTER_ANCHOR_VENUES[city.city]
+      || city.venueIds.find((venueId) => venues.find((venue) => venue.id === venueId)?.city === city.city)
+      || city.venueIds[0];
+    const anchorVenue = venues.find((venue) => venue.id === anchorVenueId);
+    city.point = projectedVenue(anchorVenue, preparedVenuesById[anchorVenueId]);
+  }
+  return cityGroups;
+}
+
+function venueGeometryInputs() {
+  const preparedVenuesById = preparedVenueById();
+  return venues.map((venue) => ({
+    id: venue.id,
+    latitude: Number(preparedVenuesById[venue.id]?.latitude ?? venue.latitude),
+    longitude: Number(preparedVenuesById[venue.id]?.longitude ?? venue.longitude),
+  }));
+}
+
+function drawMarketCenterLayer(scenario) {
+  const venueStatesById = venueStateById(scenario);
+  const preparedVenuesById = preparedVenueById();
+  const cityGroups = cityGroupsForScenario(scenario);
+  const nodes = [...cityGroups.values()].map((city) => {
+    const state = strongestVenueStatus(city.states);
+    const point = city.point;
+    const featured = isPrimaryMarketCenter(city.city, city.region);
+    const scale = featured ? 1 : 0.72;
     const ledState = venueLedState(state);
+    const centerId = MARKET_CENTER_IDS[city.city] || city.city.toLowerCase().replaceAll(" ", "_");
     return `
-      <g class="venue-group selectable" data-region="${venue.region}" data-context-type="venue" data-context-id="${venue.id}" tabindex="0" role="button" aria-label="${venue.city} ${venue.label} ${state}">
-        <circle class="venue-harbor" data-state="${state}" cx="${point.x.toFixed(2)}" cy="${point.y.toFixed(2)}" r="${stateRadius(state) * 4.2}" fill="${stateColor(state)}" />
-        <circle class="venue-node" data-state="${state}" data-led-state="${ledState}" cx="${point.x.toFixed(2)}" cy="${point.y.toFixed(2)}" r="${stateRadius(state)}" fill="${stateColor(state)}">
-          <title>${venue.city} - ${venue.label}: ${state}${preparedVenue?.local_time ? ` local ${preparedVenue.local_time}` : ""}</title>
+      <g class="market-center-group selectable" data-city="${escapeHtml(city.city)}" data-region="${city.region}" data-featured="${featured}" data-context-type="market-center" data-context-id="${centerId}" tabindex="0" role="button" aria-label="${city.city} market center ${state}">
+        <circle class="market-center-hit-target" cx="${point.x.toFixed(2)}" cy="${point.y.toFixed(2)}" r="0.74" />
+        <circle class="venue-harbor" data-state="${state}" cx="${point.x.toFixed(2)}" cy="${point.y.toFixed(2)}" r="${(haloRadius(state) * scale).toFixed(3)}" fill="${stateColor(state)}" />
+        <circle class="venue-node" data-state="${state}" data-led-state="${ledState}" cx="${point.x.toFixed(2)}" cy="${point.y.toFixed(2)}" r="${(stateRadius(state) * scale).toFixed(3)}" fill="${stateColor(state)}">
+          <title>${city.city}: ${city.labels.join(" / ")} · ${state}</title>
         </circle>
       </g>
     `;
   });
-  const labels = [...cityGroups.values()].map((city) => {
-    const offset = CITY_LABEL_OFFSETS[city.city] || { dx: 2, dy: 1.8, anchor: "start" };
+
+  arc.querySelector("#market-center-layer").innerHTML = nodes.join("");
+  const active = (ids) => ids.some((id) => ["OPEN", "AUCTION", "CLOSING_SOON"].includes(venueStatesById[id]));
+  const atlanticLayer = arc.querySelector("#atlantic-overlap-layer");
+  if (active(["lse", "eurex", "paris", "amsterdam", "six"]) && active(["nyse", "nasdaq", "cboe", "cme", "cfe"])) {
+    const london = projectedVenue(venues.find((venue) => venue.id === "lse"), preparedVenuesById.lse);
+    const newYork = projectedVenue(venues.find((venue) => venue.id === "nyse"), preparedVenuesById.nyse);
+    const centerX = (london.x + newYork.x) / 2;
+    const centerY = (london.y + newYork.y) / 2;
+    const distance = Math.hypot(london.x - newYork.x, london.y - newYork.y);
+    const angle = Math.atan2(london.y - newYork.y, london.x - newYork.x) * 180 / Math.PI;
+    atlanticLayer.innerHTML = `<ellipse class="atlantic-overlap-wash" cx="${centerX.toFixed(2)}" cy="${centerY.toFixed(2)}" rx="${(distance * 0.58).toFixed(2)}" ry="4.8" transform="rotate(${angle.toFixed(2)} ${centerX.toFixed(2)} ${centerY.toFixed(2)})" />`;
+  } else {
+    atlanticLayer.innerHTML = "";
+  }
+  updateMarketCenterLabelStates(cityGroups);
+}
+
+function drawMarketCenterLabels(scenario) {
+  const cityGroups = cityGroupsForScenario(scenario);
+  const anchors = [...cityGroups.values()].map((city) => ({ city: city.city, region: city.region, x: city.point.x, y: city.point.y }));
+  const layout = layoutCityLabels(anchors);
+  const labels = layout.map((label) => {
+    const city = cityGroups.get(label.city);
     const state = strongestVenueStatus(city.states);
-    const x = city.point.x + offset.dx;
-    const y = city.point.y + offset.dy;
     const centerId = MARKET_CENTER_IDS[city.city] || city.city.toLowerCase().replaceAll(" ", "_");
+    const leader = label.leader
+      ? `<line class="venue-label-leader" data-city="${escapeHtml(city.city)}" x1="${label.anchorX.toFixed(2)}" y1="${label.anchorY.toFixed(2)}" x2="${label.x.toFixed(2)}" y2="${label.y.toFixed(2)}" />`
+      : "";
     return `
-      <text class="venue-label selectable" data-state="${state}" data-context-type="market-center" data-context-id="${centerId}" x="${x.toFixed(2)}" y="${y.toFixed(2)}" text-anchor="${offset.anchor}" tabindex="0" role="button">
+      ${leader}
+      <text class="venue-label selectable" data-city="${escapeHtml(city.city)}" data-state="${state}" data-placement="${label.placement}" data-anchor-x="${label.anchorX.toFixed(3)}" data-anchor-y="${label.anchorY.toFixed(3)}" data-label-distance="${label.distance.toFixed(3)}" data-context-type="market-center" data-context-id="${centerId}" x="${label.x.toFixed(2)}" y="${label.y.toFixed(2)}" text-anchor="${label.anchor}" tabindex="0" role="button">
         <title>${city.city}: ${city.labels.join(" / ")}</title>${city.city}
       </text>
     `;
   });
-  arc.innerHTML = `${world}${nodes.join("")}${labels.join("")}`;
+  arc.querySelector("#market-center-labels-layer").innerHTML = labels.join("");
+  window.observatoryMapDiagnostics = {
+    anchors,
+    labels: layout,
+    labelLayout: labelLayoutDiagnostics(layout),
+  };
+}
+
+function updateMarketCenterLabelStates(cityGroups) {
+  for (const label of arc.querySelectorAll(".venue-label")) {
+    const city = cityGroups.get(label.dataset.city);
+    if (city) label.dataset.state = strongestVenueStatus(city.states);
+  }
 }
 
 function drawTape(scenario) {
@@ -1442,23 +1590,23 @@ function syncContextPanel() {
 }
 
 function renderScenario() {
+  if (initializationInProgress) return;
   const scenario = scenarios[currentScenarioName];
   const solarMinute = currentMinuteKey();
   const venueStates = venueStateById(scenario);
   const canvas = marketCanvasForScenario(scenario);
   const exposureScenario = scenarioWithPreparedExposure(scenario);
+  const venueGeometry = venueGeometryInputs();
   const signatures = {
     commentary: stableSignature({
       scenario: currentScenarioName,
       venues: preparedVenueSessions?.generated_at,
       macro: preparedMacroContext?.deterministic_fingerprint || preparedMacroContext?.generated_at,
     }),
-    world: stableSignature({
-      scenario: currentScenarioName,
-      solarMinute,
-      venues: venueStates,
-      generated_at: preparedVenueSessions?.generated_at,
-    }),
+    world: "observatory-world-atlas-v13-css-peripheral-limbs",
+    solar: solarMinute,
+    marketCenters: stableSignature({ venueStates, venueGeometry }),
+    labels: stableSignature({ venueGeometry, layout: "bounded-collision-v1" }),
     tape: stableSignature({
       scenario: currentScenarioName,
       tape: preparedMarketTape?.generated_at || preparedMarketTape?.rows || scenario.tape,
@@ -1484,13 +1632,25 @@ function renderScenario() {
     renderSignatures.commentary = signatures.commentary;
   }
   if (renderSignatures.world !== signatures.world) {
-    measureRender("world", () => drawVenueArc(scenario));
+    measureRender("world", drawWorldBase);
     renderSignatures.world = signatures.world;
-    currentSolarMinuteKey = solarMinute;
+    markInitializationStage("WORLD_BASE_READY");
   }
-  if (renderSignatures.tape !== signatures.tape) {
-    measureRender("tape", () => drawTape(scenario));
-    renderSignatures.tape = signatures.tape;
+  if (renderSignatures.solar !== signatures.solar) {
+    measureRender("solar", drawSolarLayer);
+    renderSignatures.solar = signatures.solar;
+    currentSolarMinuteKey = solarMinute;
+    markInitializationStage("SOLAR_READY");
+  }
+  if (renderSignatures.marketCenters !== signatures.marketCenters) {
+    measureRender("marketCenters", () => drawMarketCenterLayer(scenario));
+    renderSignatures.marketCenters = signatures.marketCenters;
+    markInitializationStage("VENUES_READY");
+  }
+  if (renderSignatures.labels !== signatures.labels) {
+    measureRender("labels", () => drawMarketCenterLabels(scenario));
+    renderSignatures.labels = signatures.labels;
+    markInitializationStage("LABELS_READY");
   }
   if (renderSignatures.flow !== signatures.flow) {
     measureRender("flow", () => drawFlow(scenario));
@@ -1503,6 +1663,12 @@ function renderScenario() {
   if (renderSignatures.river !== signatures.river) {
     measureRender("river", () => drawRiver(scenario));
     renderSignatures.river = signatures.river;
+    markInitializationStage("LOWER_SYSTEM_READY");
+  }
+  if (renderSignatures.tape !== signatures.tape) {
+    measureRender("tape", () => drawTape(scenario));
+    renderSignatures.tape = signatures.tape;
+    markInitializationStage("TAPE_READY");
   }
   if (renderSignatures.controls !== signatures.controls) {
     measureRender("controls", () => drawScenarioControls());
@@ -1822,6 +1988,17 @@ preparedRefreshTimer = window.setInterval(() => {
   if (!document.hidden) refreshPreparedSnapshots();
 }, 15000);
 
-resizeCanvases();
-applyScenario(currentScenarioName);
-refreshPreparedSnapshots();
+async function initializeObservatory() {
+  await diagnoseInitializationAwait("refreshPreparedSnapshots", refreshPreparedSnapshots());
+  markInitializationStage("PREPARED_SNAPSHOTS_READY");
+  resizeCanvases();
+  initializationInProgress = false;
+  applyScenario(currentScenarioName);
+  markInitializationStage("INTERACTIONS_READY");
+  markInitializationStage("OBSERVATORY_READY", {
+    protocol: window.location.protocol,
+    user_agent: navigator.userAgent,
+  });
+}
+
+void initializeObservatory();
