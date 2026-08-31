@@ -199,9 +199,37 @@ price window and in-process candle state:
 - latest completed five-minute bars
 
 Each panel's `/data` chart payload returns the latest 72 five-minute candles,
-including the currently forming five-minute candle when present. Each visible
-price axis is scaled independently in the browser to the high/low range of that
-panel's displayed candles with modest padding.
+including the currently forming five-minute candle when present. The active
+candle is also exposed separately as `chart.active_candle`, with
+`completed: false`; completed bars remain immutable. When the shared SQLite
+OHLCV store is configured, it remains the authoritative completed-bar source.
+The monitor merges only its newer local completed tail and active candle onto
+that history, without overwriting any shared completed candle.
+
+The update boundaries are deliberately independent:
+
+- accepted Databento trade events update the active candle immediately;
+- active five-minute aggregation has no timer and finalizes only at its
+  five-minute UTC bucket boundary;
+- the browser polls and coalesces visual updates at 250 ms, redrawing a canvas
+  only when chart bars changed;
+- shared SQLite storage contains completed five-minute bars only and is not on
+  the live chart-update path.
+
+Individual trade messages are not written to stdout or journald. Successful
+`/data` polling is also suppressed from the Werkzeug access log; errors remain
+visible. Routing keeps only bounded diagnostic metadata, so enabling the live
+visualization feed does not turn normal market activity into an unbounded log
+stream.
+
+`databento_feed_enabled` must remain `true` for a live provisional candle. A
+shared-store-only configuration can display finalized history but cannot create
+an intrabar candle because that store intentionally has no trade stream.
+
+Regime decisions, directional-agreement scores, and trade-quality scores retain
+their completed shared-bar semantics when the shared store is enabled. The
+chart's price, OHLC, volume, canvas MA20, and canvas VWAP include the active
+candle and therefore update intrabar.
 
 State is persisted atomically to:
 
@@ -266,6 +294,8 @@ Example:
   ],
   "reconnect_interval": 5.0,
   "chart_bar_limit": 72,
+  "shared_ohlcv_db_path": "/var/lib/mgc-v05l/phase1/shared_live_ohlcv.sqlite3",
+  "databento_feed_enabled": true,
   "state_dir_env": "REGIME_MONITOR_STATE_DIR",
   "state_dir": "/var/lib/regime-monitor",
   "host": "0.0.0.0",
@@ -307,12 +337,36 @@ systemctl status regime-monitor-ubuntu.service
 journalctl -u regime-monitor-ubuntu.service -f
 ```
 
+## Controlled Atlas Deployment
+
+The live-candle deployment is source-managed in
+`deploy_atlas_live_candle.yml`. It backs up the deployed Python file and
+production config before changing only the application and
+`databento_feed_enabled` value, then restarts only this service. Run it from a
+checked-out Regime Monitor branch on the Mac:
+
+```bash
+cd /private/tmp/regime-monitor-live-candle
+export ATLAS_ANSIBLE_CONFIG=/path/to/homelab/ansible/ansible.cfg
+export ATLAS_SSH_KEY=~/.ssh/id_ed25519_homelab
+ANSIBLE_CONFIG="$ATLAS_ANSIBLE_CONFIG" \
+ansible-playbook regime_monitor_ubuntu/deploy_atlas_live_candle.yml \
+  -e ansible_ssh_private_key_file="$ATLAS_SSH_KEY" -K
+```
+
+`-K` prompts the operator for the Atlas sudo password; the playbook does not
+read, store, or print that credential. Its output records the remote backup
+paths. `chart.active_candle` may be `null` when no live trade has been observed
+yet; validation must use routed-record and observed-trade activity rather than
+cash-session time-of-day assumptions.
+
 ## Dashboard Behavior
 
 - Served directly by Ubuntu Flask at `http://192.168.1.80:5000/`.
 - 2 columns by 2 rows at the 1920x1080 AntiX kiosk resolution.
 - Panel order: MNQ top-left, MES top-right, MGC bottom-left, MBT bottom-right.
-- Browser polls `/data` every `250 ms`.
+- Browser polls `/data` every `250 ms` and redraws a chart only when its candle
+  data changes; this bounds visual work independently from trade-event cadence.
 - Only changed fields are updated in the DOM.
 - The browser renders candlesticks with native canvas JavaScript, with no CDN
   dependency.

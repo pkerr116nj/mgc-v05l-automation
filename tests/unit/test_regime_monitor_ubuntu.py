@@ -1,8 +1,11 @@
 from __future__ import annotations
 
 import builtins
+import contextlib
 import importlib.util
+import io
 import json
+import logging
 import subprocess
 import sys
 import threading
@@ -270,6 +273,9 @@ def test_multi_instrument_monitor_charts_prefer_shared_ohlcv_store_and_catalog_l
     assert mnq["chart"]["source"] == "track_b_shared_live_ohlcv_store"
     assert mnq["chart"]["latest_bar_age_seconds"] >= 0
     assert mnq["chart"]["generated_at"]
+    # No live trade was supplied to this state; this is intentionally not a
+    # market-session or time-of-day inference.
+    assert mnq["chart"]["active_candle"] is None
     assert [row["time"] for row in mnq["chart"]["bars"]] == [bar["bar_end"] for bar in bars]
 
 
@@ -537,6 +543,62 @@ def test_successful_databento_stream_clears_package_missing_status() -> None:
     assert snapshot.error is None
 
 
+def test_databento_trade_ingest_does_not_write_each_tick_to_stdout(tmp_path: Path) -> None:
+    state = regime_monitor.MultiInstrumentMonitorState(
+        instruments=regime_monitor.DEFAULT_INSTRUMENTS,
+        state_dir=tmp_path,
+        persist_interval=0,
+    )
+    stop = threading.Event()
+
+    class FakeLiveClient:
+        def __init__(self, *, key: str) -> None:
+            assert key == "test_key"
+
+        def subscribe(self, **_kwargs: object) -> None:
+            pass
+
+        def __iter__(self) -> object:
+            yield SimpleNamespace(symbol="MNQ.v.0", px=100_000_000_000, ts_event="2026-07-19T00:00:05+00:00")
+            stop.set()
+
+        def close(self) -> None:
+            pass
+
+    output = io.StringIO()
+    with contextlib.redirect_stdout(output):
+        regime_monitor.run_databento_feed(
+            config=regime_monitor.DatabentoFeedConfig(api_key="test_key"),
+            state=state,
+            stop=stop,
+            live_factory=FakeLiveClient,
+        )
+
+    assert output.getvalue() == ""
+    assert state.payload()["routing"]["records_routed"] == 1
+
+
+def test_successful_data_poll_logs_are_suppressed_but_errors_remain_visible() -> None:
+    log_filter = regime_monitor._SuccessfulDataPollLogFilter()
+
+    successful_poll = logging.LogRecord(
+        "werkzeug", logging.INFO, __file__, 1,
+        '192.0.2.1 - - [31/Aug/2026] "GET /data?seq=7 HTTP/1.1" 200 -', (), None,
+    )
+    failed_poll = logging.LogRecord(
+        "werkzeug", logging.INFO, __file__, 1,
+        '192.0.2.1 - - [31/Aug/2026] "GET /data?seq=7 HTTP/1.1" 500 -', (), None,
+    )
+    dashboard_request = logging.LogRecord(
+        "werkzeug", logging.INFO, __file__, 1,
+        '192.0.2.1 - - [31/Aug/2026] "GET / HTTP/1.1" 200 -', (), None,
+    )
+
+    assert not log_filter.filter(successful_poll)
+    assert log_filter.filter(failed_poll)
+    assert log_filter.filter(dashboard_request)
+
+
 def test_successful_multi_instrument_stream_clears_package_missing_status(tmp_path: Path) -> None:
     state = regime_monitor.MultiInstrumentMonitorState(
         instruments=regime_monitor.DEFAULT_INSTRUMENTS,
@@ -641,6 +703,107 @@ def test_chart_payload_updates_forming_bar_from_live_trades(tmp_path: Path) -> N
         "completed": False,
         "source_bar_count": 2,
     }]
+    assert payload["active_candle"] == payload["bars"][-1]
+    assert payload["completed_bar_count"] == 0
+
+
+def test_shared_completed_chart_merges_the_live_provisional_candle_without_rewriting_history(tmp_path: Path) -> None:
+    db_path = tmp_path / "shared.sqlite3"
+    store = SharedLiveOhlcvStore(db_path)
+    shared_bar = {
+        "bar_start": "2026-07-19T00:00:00+00:00",
+        "bar_end": "2026-07-19T00:05:00+00:00",
+        "open": "90",
+        "high": "101",
+        "low": "89",
+        "close": "100",
+        "volume": 12,
+        "completed": True,
+    }
+    store.upsert_mapping_bars(symbol="MNQ", timeframe="5m", bars=[shared_bar], source="DATABENTO_REALTIME_PHASE1")
+    state = regime_monitor.MultiInstrumentMonitorState(
+        instruments=regime_monitor.DEFAULT_INSTRUMENTS,
+        state_dir=tmp_path,
+        persist_interval=0,
+        shared_ohlcv_db_path=db_path,
+    )
+
+    for timestamp, price in [
+        ("2026-07-19T00:05:01+00:00", 100),
+        ("2026-07-19T00:05:02+00:00", 104),
+        ("2026-07-19T00:05:03+00:00", 98),
+    ]:
+        state.record_message(SimpleNamespace(symbol="MNQ.v.0", px=price * 1_000_000_000, ts_event=timestamp))
+
+    chart = state.payload()["instruments"]["MNQ"]["chart"]
+
+    assert chart["source"] == "regime_monitor_shared_completed_with_live_provisional"
+    assert chart["latest_bar_ts"] == shared_bar["bar_end"]
+    assert chart["bars"][0]["close"] == 100.0  # Shared history wins and remains immutable.
+    assert chart["active_candle"] == {
+        "time": "2026-07-19T00:10:00+00:00",
+        "start": "2026-07-19T00:05:00+00:00",
+        "open": 100.0,
+        "high": 104.0,
+        "low": 98.0,
+        "close": 98.0,
+        "volume": 3.0,
+        "completed": False,
+        "source_bar_count": 3,
+    }
+    assert chart["bars"][-1] == chart["active_candle"]
+
+
+def test_provisional_candle_rolls_to_one_final_bar_and_recovers_after_restart(tmp_path: Path) -> None:
+    db_path = tmp_path / "shared.sqlite3"
+    store = SharedLiveOhlcvStore(db_path)
+    store.upsert_mapping_bars(
+        symbol="MNQ",
+        timeframe="5m",
+        bars=[
+            {
+                "bar_start": "2026-07-19T00:00:00+00:00",
+                "bar_end": "2026-07-19T00:05:00+00:00",
+                "open": "90",
+                "high": "101",
+                "low": "89",
+                "close": "100",
+                "volume": 12,
+            }
+        ],
+        source="DATABENTO_REALTIME_PHASE1",
+    )
+    first = regime_monitor.MultiInstrumentMonitorState(
+        instruments=regime_monitor.DEFAULT_INSTRUMENTS,
+        state_dir=tmp_path,
+        persist_interval=0,
+        shared_ohlcv_db_path=db_path,
+    )
+    for timestamp, price in [
+        ("2026-07-19T00:05:01+00:00", 100),
+        ("2026-07-19T00:05:02+00:00", 104),
+        ("2026-07-19T00:05:03+00:00", 98),
+    ]:
+        first.record_message(SimpleNamespace(symbol="MNQ.v.0", px=price * 1_000_000_000, ts_event=timestamp))
+    before_rollover = first.payload()["instruments"]["MNQ"]["chart"]["active_candle"]
+    first.record_message(SimpleNamespace(symbol="MNQ.v.0", px=102_000_000_000, ts_event="2026-07-19T00:10:00+00:00"))
+
+    second = regime_monitor.MultiInstrumentMonitorState(
+        instruments=regime_monitor.DEFAULT_INSTRUMENTS,
+        state_dir=tmp_path,
+        persist_interval=0,
+        shared_ohlcv_db_path=db_path,
+    )
+    chart = second.payload()["instruments"]["MNQ"]["chart"]
+
+    assert [bar["time"] for bar in chart["bars"]] == [
+        "2026-07-19T00:05:00+00:00",
+        "2026-07-19T00:10:00+00:00",
+        "2026-07-19T00:15:00+00:00",
+    ]
+    assert chart["bars"][1] == {**before_rollover, "completed": True}
+    assert chart["active_candle"]["time"] == "2026-07-19T00:15:00+00:00"
+    assert chart["active_candle"]["open"] == chart["active_candle"]["close"] == 102.0
 
 
 def test_chart_payload_replaces_active_bar_by_bucket(tmp_path: Path) -> None:
@@ -1022,6 +1185,8 @@ def test_dashboard_axis_labels_are_kiosk_readable_and_spaced() -> None:
     assert 'class="indicators"' in html
     assert 'Market: <span id="footer-market">--' in html
     assert 'id="footer-session">--' in html
+    assert 'chartSource === "regime_monitor_shared_completed_with_live_provisional"' in html
+    assert '"SQLite 5m + live"' in html
     assert 'AGE: <span id="footer-age">--' in html
     assert 'id="footer-data">--' in html
     assert "function updateFooterStatus(payload, instruments)" in html

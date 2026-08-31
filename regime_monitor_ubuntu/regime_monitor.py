@@ -61,6 +61,20 @@ DIRECTIONAL_AGREEMENT_BANDS: tuple[tuple[int, int, str], ...] = (
 CLIENT_DIAGNOSTICS: deque[dict[str, Any]] = deque(maxlen=CLIENT_DIAGNOSTIC_LIMIT)
 
 
+class _SuccessfulDataPollLogFilter(logging.Filter):
+    """Keep normal browser polling from becoming a high-rate journal stream."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        message = record.getMessage()
+        return not ('"GET /data' in message and '" 200 ' in message)
+
+
+def _configure_werkzeug_poll_logging() -> None:
+    logger = logging.getLogger("werkzeug")
+    if not any(isinstance(item, _SuccessfulDataPollLogFilter) for item in logger.filters):
+        logger.addFilter(_SuccessfulDataPollLogFilter())
+
+
 @dataclass(frozen=True)
 class RegimeSnapshot:
     regime: str
@@ -250,6 +264,112 @@ def _shared_ohlcv_chart_payload(
         return None
 
 
+def _chart_active_candle(chart: dict[str, Any] | None) -> dict[str, Any] | None:
+    """Return the explicitly exposed provisional candle, if the chart has one."""
+    if not isinstance(chart, dict):
+        return None
+    active = chart.get("active_candle")
+    if isinstance(active, dict) and active.get("completed") is False:
+        return dict(active)
+    bars = chart.get("bars")
+    if not isinstance(bars, list):
+        return None
+    for bar in reversed(bars):
+        if isinstance(bar, dict) and bar.get("completed") is False:
+            return dict(bar)
+    return None
+
+
+def _merge_shared_chart_with_provisional_candle(
+    *,
+    shared_chart: dict[str, Any],
+    provisional_chart: dict[str, Any],
+    limit: int,
+) -> dict[str, Any]:
+    """Keep shared completed bars immutable while displaying the live active bar.
+
+    The shared SQLite source deliberately stores only finalized bars.  The
+    monitor's own trade stream is therefore used only for a newer local tail:
+    completed bars not yet durable at rollover and the current provisional bar.
+    It can never overwrite a completed shared bar with the same end timestamp.
+    """
+    shared_bars = shared_chart.get("bars")
+    local_bars = provisional_chart.get("bars")
+    completed_by_time: dict[str, dict[str, Any]] = {}
+    if isinstance(shared_bars, list):
+        for raw in shared_bars:
+            if not isinstance(raw, dict) or _parse_datetime_or_none(raw.get("time")) is None:
+                continue
+            bar = dict(raw)
+            bar["completed"] = True
+            completed_by_time[str(bar["time"])] = bar
+
+    shared_ends = [
+        parsed
+        for time_text in completed_by_time
+        if (parsed := _parse_datetime_or_none(time_text)) is not None
+    ]
+    latest_shared_end = max(shared_ends, default=None)
+    has_local_completed_tail = False
+    if isinstance(local_bars, list):
+        for raw in local_bars:
+            if not isinstance(raw, dict) or raw.get("completed") is not True:
+                continue
+            end = _parse_datetime_or_none(raw.get("time"))
+            if end is None or (latest_shared_end is not None and end <= latest_shared_end):
+                continue
+            completed_by_time[end.isoformat()] = dict(raw)
+            has_local_completed_tail = True
+
+    active = _chart_active_candle(provisional_chart)
+    active_end = None if active is None else _parse_datetime_or_none(active.get("time"))
+    if active_end is None or (latest_shared_end is not None and active_end <= latest_shared_end):
+        active = None
+    elif active is not None:
+        active["completed"] = False
+        # A malformed local state must not produce both a completed and active
+        # candle for the same five-minute interval.
+        completed_by_time.pop(active_end.isoformat(), None)
+
+    if active is None and not has_local_completed_tail:
+        # Keep the established completed-only source identity while explicitly
+        # communicating that no current trade has formed an active candle yet.
+        payload = dict(shared_chart)
+        payload["active_candle"] = None
+        payload["completed_bar_count"] = len(completed_by_time)
+        return payload
+
+    completed_bars = [
+        completed_by_time[key]
+        for key in sorted(completed_by_time, key=_parse_datetime_for_sort)
+    ]
+    bars = completed_bars + ([] if active is None else [active])
+    bars = bars[-max(1, int(limit)) :]
+    payload = dict(shared_chart)
+    payload.update(
+        {
+            "schema_version": "regime_monitor_shared_completed_with_provisional_chart_v1",
+            "source": "regime_monitor_shared_completed_with_live_provisional",
+            "source_detail": (
+                "immutable completed 5m bars from shared SQLite plus current 5m candle "
+                "from the monitor Databento trade stream"
+            ),
+            "completed_source": shared_chart.get("source"),
+            "provisional_source": provisional_chart.get("source"),
+            "bar_limit": max(1, int(limit)),
+            "bar_count": len(bars),
+            "completed_bar_count": len(completed_bars),
+            "active_candle": active,
+            "bars": bars,
+            # This remains the latest completed shared timestamp so callers
+            # that intentionally calculate on closed bars keep that boundary.
+            "latest_bar_ts": shared_chart.get("latest_bar_ts"),
+            "generated_at": utc_now_text(),
+        }
+    )
+    return payload
+
+
 DEFAULT_INSTRUMENTS: tuple[InstrumentConfig, ...] = load_default_instruments_from_catalog()
 DEFAULT_DATABENTO_SYMBOLS: tuple[str, ...] = tuple(config.symbol for config in DEFAULT_INSTRUMENTS)
 
@@ -398,8 +518,9 @@ class RollingCandleState:
     def payload(self) -> dict[str, Any]:
         with self._lock:
             bars = [bar.to_payload() for bar in self._completed_5m]
-            if self._current_5m is not None:
-                bars.append(self._current_5m.to_payload())
+            active_candle = None if self._current_5m is None else self._current_5m.to_payload()
+            if active_candle is not None:
+                bars.append(active_candle)
             bars = sorted(bars, key=lambda bar: _parse_datetime_for_sort(bar["time"]))[-self.bar_limit :]
             error = self._last_error
         return {
@@ -410,6 +531,8 @@ class RollingCandleState:
             "timeframe": "5m",
             "bar_limit": self.bar_limit,
             "bar_count": len(bars),
+            "completed_bar_count": sum(1 for bar in bars if bar["completed"] is True),
+            "active_candle": active_candle,
             "generated_at": utc_now_text(),
             "state_path": str(self.state_path),
             "bars": bars,
@@ -1511,6 +1634,7 @@ class MultiInstrumentMonitorState:
         now = datetime.now(timezone.utc)
         for config in self.instruments:
             item = self._instrument_by_key[config.key].payload()
+            provisional_chart = item["chart"]
             shared_chart = _shared_ohlcv_chart_payload(
                 path=self.shared_ohlcv_db_path,
                 symbol=config.key,
@@ -1518,7 +1642,11 @@ class MultiInstrumentMonitorState:
                 limit=self.bar_limit,
             )
             if shared_chart is not None:
-                item["chart"] = shared_chart
+                item["chart"] = _merge_shared_chart_with_provisional_candle(
+                    shared_chart=shared_chart,
+                    provisional_chart=provisional_chart,
+                    limit=self.bar_limit,
+                )
             if self.shared_ohlcv_db_path is not None:
                 calculation = calculate_regime_from_chart_payload(shared_chart)
                 item["regime"] = calculation.decision
@@ -1529,10 +1657,14 @@ class MultiInstrumentMonitorState:
                 item["regime_source_bar_timestamp"] = calculation.source_bar_timestamp
                 item["regime_stale_reason"] = calculation.stale_reason
                 item["regime_error_reason"] = calculation.error_reason
-            agreement = calculate_directional_agreement_score(item.get("chart"), trend=str(item.get("regime") or ""))
+            # Preserve the existing completed-bar semantics for backend regime
+            # display scores when the shared source is enabled.  The browser's
+            # chart values intentionally use item["chart"], including active.
+            score_chart = shared_chart if self.shared_ohlcv_db_path is not None else item.get("chart")
+            agreement = calculate_directional_agreement_score(score_chart, trend=str(item.get("regime") or ""))
             item["directional_agreement_score"] = agreement.to_payload()
             item["trade_quality_score"] = calculate_trade_quality_score(
-                item.get("chart"),
+                score_chart,
                 directional_agreement=agreement,
                 now=now,
             ).to_payload()
@@ -1967,7 +2099,6 @@ def run_databento_feed(
             for msg in client:
                 if stop.is_set():
                     break
-                print(msg, flush=True)
                 state.record_message(msg)
             if not stop.is_set():
                 _mark_feed_state(state, "DISCONNECTED", "Databento live feed ended")
@@ -2006,6 +2137,7 @@ def create_app(
     state: PriceRegimeState | MultiInstrumentMonitorState,
     candle_source: RollingCandleState | None = None,
 ) -> Flask:
+    _configure_werkzeug_poll_logging()
     app = Flask(__name__)
 
     @app.get("/")
@@ -2641,7 +2773,10 @@ DASHBOARD_HTML = """<!doctype html>
         nodes.connection.textContent = status;
       }
       updateText(nodes, "timestamp", formatSourceTime(payload.regime_source_bar_timestamp || metrics.latestTime));
-      const source = payload.chart && payload.chart.source === "track_b_shared_live_ohlcv_store" ? "SQLite 5m" : "local 5m";
+      const chartSource = payload.chart && payload.chart.source;
+      const source = chartSource === "regime_monitor_shared_completed_with_live_provisional"
+        ? "SQLite 5m + live"
+        : chartSource === "track_b_shared_live_ohlcv_store" ? "SQLite 5m" : "local 5m";
       const route = `${source} - ${status}`;
       updateText(nodes, "route", route);
       const error = payload.error || payload.regime_error_reason || payload.regime_stale_reason || "";

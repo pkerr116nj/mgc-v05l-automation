@@ -1,0 +1,135 @@
+---
+- name: Deploy the Regime Monitor live-candle display fix to Atlas
+  hosts: atlas
+  gather_facts: false
+  become: true
+  vars:
+    regime_monitor_service: regime-monitor-ubuntu.service
+    regime_monitor_code_path: /opt/regime-monitor-ubuntu/regime_monitor.py
+    regime_monitor_config_path: /etc/regime-monitor/config.json
+    regime_monitor_python: /opt/regime-monitor-ubuntu/venv/bin/python
+    regime_monitor_data_url: http://127.0.0.1:5000/data
+    regime_monitor_page_url: http://127.0.0.1:5000/
+
+  pre_tasks:
+    - name: Require the canonical Atlas host
+      ansible.builtin.command:
+        argv: [hostnamectl, --static]
+      changed_when: false
+      register: regime_monitor_hostname
+
+    - name: Refuse an unexpected deployment target
+      ansible.builtin.assert:
+        that:
+          - regime_monitor_hostname.stdout | trim | lower == 'atlas'
+        fail_msg: Refusing to deploy the Regime Monitor live-candle change anywhere except Atlas.
+
+    - name: Confirm the authoritative service is currently active
+      ansible.builtin.command:
+        argv: [systemctl, is-active, '{{ regime_monitor_service }}']
+      changed_when: false
+      register: regime_monitor_service_before
+
+    - name: Require the currently active service
+      ansible.builtin.assert:
+        that:
+          - regime_monitor_service_before.stdout | trim == 'active'
+
+    - name: Verify the locally selected source contains the live-candle implementation
+      ansible.builtin.command:
+        argv: [grep, -q, 'regime_monitor_shared_completed_with_live_provisional', '{{ playbook_dir }}/regime_monitor.py']
+      delegate_to: localhost
+      become: false
+      changed_when: false
+
+  tasks:
+    - name: Back up and install the Regime Monitor application code
+      ansible.builtin.copy:
+        src: '{{ playbook_dir }}/regime_monitor.py'
+        dest: '{{ regime_monitor_code_path }}'
+        owner: root
+        group: root
+        mode: '0644'
+        backup: true
+      register: regime_monitor_code_install
+
+    - name: Enable only the Regime Monitor direct Databento display feed
+      ansible.builtin.replace:
+        path: '{{ regime_monitor_config_path }}'
+        regexp: '"databento_feed_enabled"\s*:\s*false'
+        replace: '"databento_feed_enabled": true'
+        backup: true
+      register: regime_monitor_config_install
+
+    - name: Compile the installed application before restart
+      ansible.builtin.command:
+        argv: ['{{ regime_monitor_python }}', -m, py_compile, '{{ regime_monitor_code_path }}']
+      changed_when: false
+
+    - name: Restart only the Regime Monitor service
+      ansible.builtin.systemd_service:
+        name: '{{ regime_monitor_service }}'
+        state: restarted
+
+  post_tasks:
+    - name: Confirm the restarted service is active
+      ansible.builtin.command:
+        argv: [systemctl, is-active, '{{ regime_monitor_service }}']
+      changed_when: false
+      register: regime_monitor_service_after
+
+    - name: Read the structural dashboard data endpoint
+      ansible.builtin.uri:
+        url: '{{ regime_monitor_data_url }}'
+        return_content: true
+        status_code: 200
+      register: regime_monitor_data
+
+    - name: Decode the structural dashboard data endpoint
+      ansible.builtin.set_fact:
+        regime_monitor_payload: '{{ regime_monitor_data.content | from_json }}'
+        regime_monitor_charts: >-
+          {{ (regime_monitor_data.content | from_json).instruments
+             | dict2items | map(attribute='value.chart') | list }}
+
+    - name: Require the explicit active-candle API contract
+      ansible.builtin.assert:
+        that:
+          - regime_monitor_service_after.stdout | trim == 'active'
+          - regime_monitor_charts | length == 4
+          - regime_monitor_charts | selectattr('active_candle', 'defined') | list | length == 4
+        fail_msg: The service restarted but the active-candle API contract is absent; use the recorded backups to roll back.
+
+    - name: Read the ordinary production dashboard page
+      ansible.builtin.uri:
+        url: '{{ regime_monitor_page_url }}'
+        return_content: true
+        status_code: 200
+      register: regime_monitor_page
+
+    - name: Require the bounded live-render path in the dashboard
+      ansible.builtin.assert:
+        that:
+          - '"POLL_INTERVAL_MS = 250" in regime_monitor_page.content'
+          - '"SQLite 5m + live" in regime_monitor_page.content'
+
+    - name: Capture post-restart Regime Monitor CPU and RSS
+      ansible.builtin.shell: >-
+        ps -p "$(systemctl show -p MainPID --value {{ regime_monitor_service }})"
+        -o pid=,etimes=,%cpu=,%mem=,rss=,args=
+      args:
+        executable: /bin/bash
+      changed_when: false
+      register: regime_monitor_resource_baseline
+
+    - name: Report rollback evidence and structural validation
+      ansible.builtin.debug:
+        msg:
+          code_backup: '{{ regime_monitor_code_install.backup_file | default("unchanged") }}'
+          config_backup: '{{ regime_monitor_config_install.backup_file | default("unchanged") }}'
+          data_generated_at: '{{ regime_monitor_payload.generated_at | default("unknown") }}'
+          resource_baseline: '{{ regime_monitor_resource_baseline.stdout | trim }}'
+          live_validation_note: >-
+            A null active_candle is valid before any live trade is observed. Confirm routed
+            records and repeated active-candle OHLC updates, then observe one five-minute
+            rollover before declaring live validation complete.
