@@ -1,0 +1,189 @@
+"""Validated NDX/NDXP vertical order construction and locked mutation gateway."""
+
+from __future__ import annotations
+
+import os
+import re
+from dataclasses import dataclass
+from decimal import Decimal, InvalidOperation
+from typing import Any
+
+from ..production_link.client import SchwabBrokerHttpClient
+
+
+# This requires a reviewed source change before any Schwab mutation can leave the app.
+LIVE_TRANSMISSION_COMPILED = False
+_OPTION_RE = re.compile(r"^([A-Z0-9.$]{1,6})\s*(\d{6})([CP])(\d{8})$")
+_ALLOWED_ROOTS = {"NDX", "NDXP"}
+
+
+class SpreadValidationError(ValueError):
+    """Raised when a proposed spread is not an exact, defined-risk NDX vertical."""
+
+
+class TransmissionDisabledError(RuntimeError):
+    """Raised before a broker mutation while the pilot gate is closed."""
+
+
+@dataclass(frozen=True)
+class ParsedOptionSymbol:
+    raw: str
+    root: str
+    expiration: str
+    option_type: str
+    strike: Decimal
+
+
+@dataclass(frozen=True)
+class NdxpSpreadRequest:
+    account_hash: str
+    short_symbol: str
+    long_symbol: str
+    quantity: int
+    net_credit: Decimal
+    duration: str = "DAY"
+    session: str = "NORMAL"
+
+    @classmethod
+    def from_json(cls, payload: dict[str, Any]) -> "NdxpSpreadRequest":
+        try:
+            quantity = int(payload.get("quantity"))
+            net_credit = Decimal(str(payload.get("net_credit")))
+        except (TypeError, ValueError, InvalidOperation) as exc:
+            raise SpreadValidationError("Quantity and net credit must be valid numbers.") from exc
+        request = cls(
+            account_hash=str(payload.get("account_hash") or "").strip(),
+            short_symbol=str(payload.get("short_symbol") or "").strip().upper(),
+            long_symbol=str(payload.get("long_symbol") or "").strip().upper(),
+            quantity=quantity,
+            net_credit=net_credit,
+            duration=str(payload.get("duration") or "DAY").strip().upper(),
+            session=str(payload.get("session") or "NORMAL").strip().upper(),
+        )
+        validate_spread_request(request)
+        return request
+
+
+def parse_option_symbol(symbol: str) -> ParsedOptionSymbol:
+    text = str(symbol or "").strip().upper()
+    match = _OPTION_RE.fullmatch(text)
+    if not match:
+        raise SpreadValidationError(f"Unrecognized Schwab option symbol: {symbol!r}.")
+    root, expiration, option_type, strike_raw = match.groups()
+    return ParsedOptionSymbol(
+        raw=text,
+        root=root.rstrip(),
+        expiration=expiration,
+        option_type="CALL" if option_type == "C" else "PUT",
+        strike=Decimal(strike_raw) / Decimal("1000"),
+    )
+
+
+def validate_spread_request(request: NdxpSpreadRequest, *, required_width: Decimal = Decimal("10")) -> dict[str, Any]:
+    if not request.account_hash:
+        raise SpreadValidationError("A live-verified Schwab account hash is required.")
+    if request.quantity <= 0 or request.quantity > 100:
+        raise SpreadValidationError("Quantity must be between 1 and 100 contracts.")
+    if request.net_credit <= 0 or request.net_credit >= required_width:
+        raise SpreadValidationError("Net credit must be greater than zero and below the spread width.")
+    if request.duration != "DAY" or request.session != "NORMAL":
+        raise SpreadValidationError("The initial NDXP terminal permits NORMAL-session DAY orders only.")
+
+    short = parse_option_symbol(request.short_symbol)
+    long = parse_option_symbol(request.long_symbol)
+    if short.root not in _ALLOWED_ROOTS or long.root not in _ALLOWED_ROOTS:
+        raise SpreadValidationError("Both legs must be NDX or NDXP options supplied by Schwab.")
+    if short.root != long.root or short.expiration != long.expiration or short.option_type != long.option_type:
+        raise SpreadValidationError("Vertical legs must share the same root, expiration, and option type.")
+    width = abs(short.strike - long.strike)
+    if width != required_width:
+        raise SpreadValidationError(f"The initial terminal requires an exact {required_width}-point spread.")
+    if short.option_type == "CALL" and short.strike >= long.strike:
+        raise SpreadValidationError("A call credit spread must sell the lower strike and buy the higher strike.")
+    if short.option_type == "PUT" and short.strike <= long.strike:
+        raise SpreadValidationError("A put credit spread must sell the higher strike and buy the lower strike.")
+
+    gross_width_dollars = width * Decimal("100") * request.quantity
+    premium_dollars = request.net_credit * Decimal("100") * request.quantity
+    return {
+        "root": short.root,
+        "expiration": short.expiration,
+        "option_type": short.option_type,
+        "short_strike": str(short.strike),
+        "long_strike": str(long.strike),
+        "width_points": str(width),
+        "quantity": request.quantity,
+        "net_credit": str(request.net_credit),
+        "gross_width_dollars": str(gross_width_dollars),
+        "premium_dollars": str(premium_dollars),
+        "maximum_loss_dollars": str(gross_width_dollars - premium_dollars),
+    }
+
+
+def build_vertical_order_payload(request: NdxpSpreadRequest) -> dict[str, Any]:
+    validate_spread_request(request)
+    return {
+        "session": "NORMAL",
+        "duration": "DAY",
+        "orderType": "NET_CREDIT",
+        "complexOrderStrategyType": "VERTICAL",
+        "price": _format_price(request.net_credit),
+        "orderStrategyType": "SINGLE",
+        "orderLegCollection": [
+            {
+                "instruction": "SELL_TO_OPEN",
+                "quantity": request.quantity,
+                "instrument": {"symbol": request.short_symbol, "assetType": "OPTION"},
+            },
+            {
+                "instruction": "BUY_TO_OPEN",
+                "quantity": request.quantity,
+                "instrument": {"symbol": request.long_symbol, "assetType": "OPTION"},
+            },
+        ],
+    }
+
+
+class LockedSchwabMutationGateway:
+    """Implemented broker mutation methods that fail closed until a reviewed pilot unlock."""
+
+    def __init__(self, client: SchwabBrokerHttpClient) -> None:
+        self._client = client
+
+    @property
+    def enabled(self) -> bool:
+        return LIVE_TRANSMISSION_COMPILED and os.environ.get("MGC_NDXP_LIVE_TRANSMISSION_ENABLED") == "1"
+
+    def submit(self, request: NdxpSpreadRequest) -> dict[str, Any]:
+        self._assert_enabled("submission")
+        return self._client.submit_order(request.account_hash, build_vertical_order_payload(request))
+
+    def cancel(self, *, account_hash: str, broker_order_id: str) -> dict[str, Any]:
+        self._assert_enabled("cancellation")
+        if not account_hash.strip() or not broker_order_id.strip():
+            raise SpreadValidationError("Cancellation requires account_hash and broker_order_id.")
+        return self._client.cancel_order(account_hash.strip(), broker_order_id.strip())
+
+    def replace(self, *, broker_order_id: str, request: NdxpSpreadRequest) -> dict[str, Any]:
+        self._assert_enabled("replacement")
+        if not broker_order_id.strip():
+            raise SpreadValidationError("Replacement requires broker_order_id.")
+        return self._client.replace_order(
+            request.account_hash,
+            broker_order_id.strip(),
+            build_vertical_order_payload(request),
+        )
+
+    def _assert_enabled(self, operation: str) -> None:
+        if not LIVE_TRANSMISSION_COMPILED:
+            raise TransmissionDisabledError(
+                f"Schwab {operation} is source-locked. LIVE_TRANSMISSION_COMPILED is False pending Patrick's live-pilot authorization."
+            )
+        if os.environ.get("MGC_NDXP_LIVE_TRANSMISSION_ENABLED") != "1":
+            raise TransmissionDisabledError(
+                f"Schwab {operation} is runtime-locked. MGC_NDXP_LIVE_TRANSMISSION_ENABLED is not 1."
+            )
+
+
+def _format_price(value: Decimal) -> str:
+    return f"{value.quantize(Decimal('0.01')):.2f}"

@@ -2,6 +2,8 @@
 
 Research-first trading strategy platform with legacy v0.5l benchmark support, SQLite-backed evidence storage, and a Schwab market-data integration path that normalizes into the same internal bar model used by replay and research flows.
 
+The initial Schwab-only NDX/NDXP credit-spread terminal is documented in [docs/NDXP_TERMINAL_RUNBOOK.md](docs/NDXP_TERMINAL_RUNBOOK.md). Its live-data and order-preview paths are available while every Schwab order mutation remains source-locked pending a separately authorized live pilot.
+
 Governing framework:
 - new strategy work follows the research-first platform charter in `docs/specs/RESEARCH_FIRST_STRATEGY_PLATFORM_CHARTER.md`
 - Thinkorswim parity remains available as a benchmark lane, not as the platform's global objective

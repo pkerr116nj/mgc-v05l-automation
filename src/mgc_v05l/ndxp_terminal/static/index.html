@@ -1,0 +1,88 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>NDXP Credit Terminal</title>
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <header>
+      <div>
+        <div class="eyebrow">SCHWAB EXECUTION CONSOLE</div>
+        <h1>NDXP Credit Terminal</h1>
+      </div>
+      <div class="header-status">
+        <span id="transmission" class="pill locked">TRANSMISSION LOCKED</span>
+        <span id="clock" class="mono">—</span>
+      </div>
+    </header>
+
+    <main>
+      <section class="market-strip panel">
+        <div><label>NDX</label><strong id="spot">—</strong></div>
+        <div><label>Quote age</label><strong id="quote-age">—</strong></div>
+        <div><label>Schwab market</label><strong id="market-latency">—</strong></div>
+        <div><label>Broker truth</label><strong id="broker-latency">—</strong></div>
+        <div><label>Diagnostic</label><strong id="diagnostic" class="status-good">STARTING</strong></div>
+        <button id="access-check" class="secondary">Verify API access</button>
+      </section>
+
+      <div id="notice" class="notice hidden"></div>
+
+      <div class="workspace">
+        <section class="panel chain-panel">
+          <div class="panel-title">
+            <div><span class="kicker">LIVE CHAIN</span><h2>Select the short leg</h2></div>
+            <div class="selectors">
+              <select id="expiration" aria-label="Expiration"></select>
+              <div class="segmented" role="group" aria-label="Option type">
+                <button id="calls" class="active">Calls</button>
+                <button id="puts">Puts</button>
+              </div>
+            </div>
+          </div>
+          <div class="chain-head mono"><span>Strike</span><span>Bid</span><span>Ask</span><span>Mid</span><span>Delta</span><span>Gamma</span><span>Theta</span><span></span></div>
+          <div id="chain" class="chain"></div>
+        </section>
+
+        <aside class="panel ticket-panel">
+          <div class="panel-title"><div><span class="kicker">ORDER PREVIEW</span><h2>10-point credit vertical</h2></div></div>
+          <label class="field">Account<select id="account"></select></label>
+          <div class="leg-card short"><span>SELL TO OPEN</span><strong id="short-leg">Choose a strike</strong></div>
+          <div class="leg-card long"><span>BUY TO OPEN</span><strong id="long-leg">Paired automatically</strong></div>
+          <div class="field-row">
+            <label class="field">Contracts<input id="quantity" type="number" min="1" max="100" value="20" /></label>
+            <label class="field">Net credit<input id="credit" type="number" min="0.01" max="9.99" step="0.05" placeholder="0.00" /></label>
+          </div>
+          <div class="risk-grid">
+            <div><label>Premium</label><strong id="premium">—</strong></div>
+            <div><label>Gross width</label><strong id="gross-risk">—</strong></div>
+            <div class="risk"><label>Maximum loss</label><strong id="max-loss">—</strong></div>
+            <div><label>Distance</label><strong id="distance">—</strong></div>
+          </div>
+          <label class="confirm"><input id="reviewed" type="checkbox" /> I reviewed the expiration, strikes, size, and credit.</label>
+          <button id="preview" class="primary">Build Schwab order preview</button>
+          <button id="submit" class="danger" disabled>Transmit to Schwab — locked</button>
+          <div id="preview-result" class="preview-result"><span>Select a short strike to construct a spread.</span></div>
+        </aside>
+      </div>
+
+      <div class="lower-grid">
+        <section class="panel">
+          <div class="panel-title"><div><span class="kicker">BROKER TRUTH</span><h2>NDX positions</h2></div></div>
+          <div id="positions" class="empty">Waiting for Schwab…</div>
+        </section>
+        <section class="panel">
+          <div class="panel-title"><div><span class="kicker">ORDER CONTROL</span><h2>Working NDX orders</h2></div></div>
+          <div id="orders" class="empty">Waiting for Schwab…</div>
+        </section>
+        <section class="panel diagnostics-panel">
+          <div class="panel-title"><div><span class="kicker">FAULT ISOLATION</span><h2>Feed diagnostics</h2></div></div>
+          <dl id="diagnostic-detail"></dl>
+        </section>
+      </div>
+    </main>
+    <script src="/app.js"></script>
+  </body>
+</html>
