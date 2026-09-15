@@ -19,6 +19,8 @@ from .service import NdxpTerminalService
 
 
 STATIC_ROOT = Path(__file__).with_name("static")
+DEMO_STRIKE_INTERVAL = 10
+DEMO_STRIKES_EACH_SIDE = 30
 
 
 class NdxpTerminalHandler(BaseHTTPRequestHandler):
@@ -163,7 +165,10 @@ class DemoSchwabAdapter:
             days = max(0, (day - date.today()).days)
             calls: dict[str, Any] = {}
             puts: dict[str, Any] = {}
-            for strike in range(29220, 29431, 10):
+            center_strike = round(spot / DEMO_STRIKE_INTERVAL) * DEMO_STRIKE_INTERVAL
+            first_strike = center_strike - DEMO_STRIKES_EACH_SIDE * DEMO_STRIKE_INTERVAL
+            last_strike = center_strike + DEMO_STRIKES_EACH_SIDE * DEMO_STRIKE_INTERVAL
+            for strike in range(first_strike, last_strike + DEMO_STRIKE_INTERVAL, DEMO_STRIKE_INTERVAL):
                 distance = strike - spot
                 call_mid = max(0.15, 15 - distance * 0.16)
                 put_mid = max(0.15, 15 + distance * 0.16)

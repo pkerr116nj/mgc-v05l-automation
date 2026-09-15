@@ -16,6 +16,7 @@ The September 14 Thinkorswim iPad references establish these initial chain requi
 
 - calls and puts appear side by side around a central strike-pair column;
 - each row represents a selectable 10-point vertical rather than an unpaired contract;
+- the chain provides at least 25 shared call-and-put strike levels below spot and 25 above spot, with an on-screen coverage warning if Schwab returns less;
 - the page scrolls vertically through strikes and the chain scrolls horizontally through fields;
 - quote fields, net and percentage change, Greeks, IV, volume, and open interest are selectable display columns;
 - tapping a positive bid launches a sell-to-open credit ticket and tapping a positive ask launches the inverse buy-to-close debit ticket;
@@ -24,6 +25,8 @@ The September 14 Thinkorswim iPad references establish these initial chain requi
 - until a Thinkorswim order-entry screenshot is available, the ticket uses the terminal's explicit risk and preview layout rather than guessing at Thinkorswim's precise order-entry presentation.
 
 The displayed spread delta is position delta per one short credit spread: `long-leg delta - short-leg delta`. Total position delta multiplies that result by ticket quantity. Derived theta and gamma use the same signed position convention. These are transparent leg-derived values, not Schwab-provided complex-spread Greeks; they still inherit any error in Schwab's individual-leg inputs. IV is therefore labeled as short-leg IV rather than represented as a net spread IV. A separately derived observed delta based on synchronized changes in spread mid versus NDX remains a future diagnostic enhancement.
+
+The live Schwab chain request asks for 120 strike levels, providing a buffer beyond the 25-per-side display requirement. The demo supplies 30 levels on each side. On first load and after an expiration change, the terminal centers the page on the spread row containing spot; all returned rows remain vertically scrollable.
 
 ## Safety state
 

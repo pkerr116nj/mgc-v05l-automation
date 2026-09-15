@@ -20,6 +20,9 @@ from ..market_data.schwab_models import HttpRequest
 from ..production_link.client import SchwabBrokerHttpClient
 
 
+NDXP_CHAIN_STRIKE_COUNT = 120
+
+
 class NdxpSchwabAdapter:
     mode = "SCHWAB_LIVE_READ_ONLY"
 
@@ -54,7 +57,7 @@ class NdxpSchwabAdapter:
                 query={
                     "symbol": chain_symbol,
                     "contractType": "ALL",
-                    "strikeCount": 120,
+                    "strikeCount": NDXP_CHAIN_STRIKE_COUNT,
                     "includeUnderlyingQuote": True,
                     "strategy": "SINGLE",
                 },

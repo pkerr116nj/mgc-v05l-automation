@@ -7,6 +7,7 @@ const columnDefinitions = [
   ["volume", "Volume", 0], ["open_interest", "Open Int", 0],
 ];
 const defaultColumns = ["last", "percent_change", "mark", "bid", "ask", "net_change", "spread_delta", "theta", "gamma", "iv"];
+const minimumStrikesEachSide = 25;
 let visibleColumns = loadColumns();
 let state = null;
 let selectedShort = null;
@@ -15,6 +16,7 @@ let selectedAction = "OPEN";
 let selectedMetrics = null;
 let lastHeartbeat = performance.now();
 let lastStateReceived = performance.now();
+let centeredExpiration = null;
 
 const money = (value) => value == null || !Number.isFinite(Number(value)) ? "—" : new Intl.NumberFormat("en-US", { style: "currency", currency: "USD", maximumFractionDigits: 0 }).format(Number(value));
 const number = (value, digits = 2) => value == null || !Number.isFinite(Number(value)) ? "—" : Number(value).toLocaleString("en-US", { minimumFractionDigits: digits, maximumFractionDigits: digits });
@@ -132,6 +134,7 @@ function gridTemplate() {
 
 function renderChain(chain, spot) {
   const rows = verticalRows(chain);
+  renderChainCoverage(chain, spot);
   ui["chain-table"].style.gridTemplateColumns = gridTemplate();
   const fragments = [];
   const callGroup = cell("CALLS", "group-head calls-head"); callGroup.style.gridColumn = `span ${visibleColumns.length}`;
@@ -153,6 +156,24 @@ function renderChain(chain, spot) {
     empty.style.gridColumn = "1 / -1"; fragments.push(empty);
   }
   ui["chain-table"].replaceChildren(...fragments);
+  const expiration = state?.market?.selected_expiration || "";
+  if (rows.length && expiration !== centeredExpiration) {
+    centeredExpiration = expiration;
+    requestAnimationFrame(() => ui["chain-table"].querySelector(".spread-strikes.near")?.scrollIntoView({ block: "center", inline: "nearest" }));
+  }
+}
+
+function renderChainCoverage(chain, spot) {
+  const calls = new Set((chain.CALL || []).map((row) => Number(row.strike)).filter(Number.isFinite));
+  const commonStrikes = (chain.PUT || []).map((row) => Number(row.strike)).filter((strike) => Number.isFinite(strike) && calls.has(strike));
+  const below = commonStrikes.filter((strike) => strike < Number(spot)).length;
+  const above = commonStrikes.filter((strike) => strike > Number(spot)).length;
+  const complete = below >= minimumStrikesEachSide && above >= minimumStrikesEachSide;
+  ui["chain-coverage"].textContent = `${below} below · ${above} above${complete ? "" : " · LIMITED"}`;
+  ui["chain-coverage"].className = `chain-coverage ${complete ? "status-good" : "status-warn"}`;
+  ui["chain-coverage"].title = complete
+    ? `At least ${minimumStrikesEachSide} call-and-put strike levels are available on each side of spot.`
+    : `Schwab returned fewer than ${minimumStrikesEachSide} shared call-and-put strike levels on one or both sides of spot.`;
 }
 
 function cell(text, className = "") {

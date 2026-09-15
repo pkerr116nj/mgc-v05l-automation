@@ -134,6 +134,11 @@ def test_demo_service_builds_preview_but_never_transmits(tmp_path: Path) -> None
             time.sleep(0.02)
             snapshot = service.snapshot()
         calls = snapshot["market"]["selected_chain"]["CALL"]
+        puts = snapshot["market"]["selected_chain"]["PUT"]
+        spot = snapshot["market"]["spot"]
+        shared_strikes = {row["strike"] for row in calls} & {row["strike"] for row in puts}
+        assert len([strike for strike in shared_strikes if strike < spot]) >= 25
+        assert len([strike for strike in shared_strikes if strike > spot]) >= 25
         assert calls[0]["net_change"] == 0.0
         assert calls[0]["percent_change"] == 0.0
         short = next(row for row in calls if any(other["strike"] == row["strike"] + 10 for other in calls))
