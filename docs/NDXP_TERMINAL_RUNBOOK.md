@@ -18,9 +18,12 @@ The September 14 Thinkorswim iPad references establish these initial chain requi
 - each row represents a selectable 10-point vertical rather than an unpaired contract;
 - the page scrolls vertically through strikes and the chain scrolls horizontally through fields;
 - quote fields, net and percentage change, Greeks, IV, volume, and open interest are selectable display columns;
-- tapping a positive bid launches a sell-credit ticket populated with the correct short and protective long legs;
+- tapping a positive bid launches a sell-to-open credit ticket and tapping a positive ask launches the inverse buy-to-close debit ticket;
+- both opening and closing tickets default their limit price to the displayed spread mid, not the touched bid or ask;
 - ticket quantity defaults to 20 contracts; and
 - until a Thinkorswim order-entry screenshot is available, the ticket uses the terminal's explicit risk and preview layout rather than guessing at Thinkorswim's precise order-entry presentation.
+
+The displayed spread delta is position delta per one short credit spread: `long-leg delta - short-leg delta`. Total position delta multiplies that result by ticket quantity. Derived theta and gamma use the same signed position convention. These are transparent leg-derived values, not Schwab-provided complex-spread Greeks; they still inherit any error in Schwab's individual-leg inputs. IV is therefore labeled as short-leg IV rather than represented as a net spread IV. A separately derived observed delta based on synchronized changes in spread mid versus NDX remains a future diagnostic enhancement.
 
 ## Safety state
 

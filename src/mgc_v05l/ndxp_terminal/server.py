@@ -186,6 +186,9 @@ class DemoSchwabAdapter:
 
     def fetch_broker_truth(self) -> dict[str, Any]:
         now = datetime.now(timezone.utc).isoformat()
+        expiration = date.today().strftime("%y%m%d")
+        short_call = f"NDXP  {expiration}C29330000"
+        long_call = f"NDXP  {expiration}C29340000"
         return {
             "account_numbers": [{"accountNumber": "12345678", "hashValue": "demo-account-hash"}],
             "accounts": [
@@ -193,7 +196,22 @@ class DemoSchwabAdapter:
                     "securitiesAccount": {
                         "accountNumber": "12345678",
                         "type": "MARGIN",
-                        "positions": [],
+                        "positions": [
+                            {
+                                "instrument": {"symbol": short_call, "assetType": "OPTION", "description": "Demo short call leg"},
+                                "longQuantity": 0,
+                                "shortQuantity": 20,
+                                "averagePrice": 4.25,
+                                "marketValue": -8500,
+                            },
+                            {
+                                "instrument": {"symbol": long_call, "assetType": "OPTION", "description": "Demo protective call leg"},
+                                "longQuantity": 20,
+                                "shortQuantity": 0,
+                                "averagePrice": 2.10,
+                                "marketValue": 4200,
+                            },
+                        ],
                     }
                 }
             ],

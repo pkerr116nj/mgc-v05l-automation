@@ -40,7 +40,8 @@ class NdxpSpreadRequest:
     short_symbol: str
     long_symbol: str
     quantity: int
-    net_credit: Decimal
+    limit_price: Decimal
+    action: str = "OPEN"
     duration: str = "DAY"
     session: str = "NORMAL"
 
@@ -48,15 +49,16 @@ class NdxpSpreadRequest:
     def from_json(cls, payload: dict[str, Any]) -> "NdxpSpreadRequest":
         try:
             quantity = int(payload.get("quantity"))
-            net_credit = Decimal(str(payload.get("net_credit")))
+            limit_price = Decimal(str(payload.get("limit_price", payload.get("net_credit"))))
         except (TypeError, ValueError, InvalidOperation) as exc:
-            raise SpreadValidationError("Quantity and net credit must be valid numbers.") from exc
+            raise SpreadValidationError("Quantity and limit price must be valid numbers.") from exc
         request = cls(
             account_hash=str(payload.get("account_hash") or "").strip(),
             short_symbol=str(payload.get("short_symbol") or "").strip().upper(),
             long_symbol=str(payload.get("long_symbol") or "").strip().upper(),
             quantity=quantity,
-            net_credit=net_credit,
+            limit_price=limit_price,
+            action=str(payload.get("action") or "OPEN").strip().upper(),
             duration=str(payload.get("duration") or "DAY").strip().upper(),
             session=str(payload.get("session") or "NORMAL").strip().upper(),
         )
@@ -84,8 +86,10 @@ def validate_spread_request(request: NdxpSpreadRequest, *, required_width: Decim
         raise SpreadValidationError("A live-verified Schwab account hash is required.")
     if request.quantity <= 0 or request.quantity > 100:
         raise SpreadValidationError("Quantity must be between 1 and 100 contracts.")
-    if request.net_credit <= 0 or request.net_credit >= required_width:
-        raise SpreadValidationError("Net credit must be greater than zero and below the spread width.")
+    if request.action not in {"OPEN", "CLOSE"}:
+        raise SpreadValidationError("Spread action must be OPEN or CLOSE.")
+    if request.limit_price <= 0 or request.limit_price >= required_width:
+        raise SpreadValidationError("Net limit price must be greater than zero and below the spread width.")
     if request.duration != "DAY" or request.session != "NORMAL":
         raise SpreadValidationError("The initial NDXP terminal permits NORMAL-session DAY orders only.")
 
@@ -104,8 +108,8 @@ def validate_spread_request(request: NdxpSpreadRequest, *, required_width: Decim
         raise SpreadValidationError("A put credit spread must sell the higher strike and buy the lower strike.")
 
     gross_width_dollars = width * Decimal("100") * request.quantity
-    premium_dollars = request.net_credit * Decimal("100") * request.quantity
-    return {
+    order_value_dollars = request.limit_price * Decimal("100") * request.quantity
+    summary = {
         "root": short.root,
         "expiration": short.expiration,
         "option_type": short.option_type,
@@ -113,30 +117,39 @@ def validate_spread_request(request: NdxpSpreadRequest, *, required_width: Decim
         "long_strike": str(long.strike),
         "width_points": str(width),
         "quantity": request.quantity,
-        "net_credit": str(request.net_credit),
+        "action": request.action,
+        "price_effect": "CREDIT" if request.action == "OPEN" else "DEBIT",
+        "limit_price": str(request.limit_price),
         "gross_width_dollars": str(gross_width_dollars),
-        "premium_dollars": str(premium_dollars),
-        "maximum_loss_dollars": str(gross_width_dollars - premium_dollars),
     }
+    if request.action == "OPEN":
+        summary.update(
+            premium_dollars=str(order_value_dollars),
+            maximum_loss_dollars=str(gross_width_dollars - order_value_dollars),
+        )
+    else:
+        summary["closing_debit_dollars"] = str(order_value_dollars)
+    return summary
 
 
 def build_vertical_order_payload(request: NdxpSpreadRequest) -> dict[str, Any]:
     validate_spread_request(request)
+    opening = request.action == "OPEN"
     return {
         "session": "NORMAL",
         "duration": "DAY",
-        "orderType": "NET_CREDIT",
+        "orderType": "NET_CREDIT" if opening else "NET_DEBIT",
         "complexOrderStrategyType": "VERTICAL",
-        "price": _format_price(request.net_credit),
+        "price": _format_price(request.limit_price),
         "orderStrategyType": "SINGLE",
         "orderLegCollection": [
             {
-                "instruction": "SELL_TO_OPEN",
+                "instruction": "SELL_TO_OPEN" if opening else "BUY_TO_CLOSE",
                 "quantity": request.quantity,
                 "instrument": {"symbol": request.short_symbol, "assetType": "OPTION"},
             },
             {
-                "instruction": "BUY_TO_OPEN",
+                "instruction": "BUY_TO_OPEN" if opening else "SELL_TO_CLOSE",
                 "quantity": request.quantity,
                 "instrument": {"symbol": request.long_symbol, "assetType": "OPTION"},
             },

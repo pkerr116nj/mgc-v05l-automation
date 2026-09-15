@@ -3,14 +3,16 @@
 const ui = Object.fromEntries(Array.from(document.querySelectorAll("[id]")).map((el) => [el.id, el]));
 const columnDefinitions = [
   ["last", "Last", 2], ["percent_change", "% Chng", 2], ["mark", "Mark", 2], ["bid", "Bid", 2], ["ask", "Ask", 2], ["net_change", "Net Chng", 2],
-  ["delta", "Delta", 4], ["theta", "Theta", 4], ["gamma", "Gamma", 4], ["iv", "IV", 2],
+  ["spread_delta", "Derived Δ", 4], ["theta", "Derived Θ", 4], ["gamma", "Derived Γ", 4], ["iv", "Short IV", 2],
   ["volume", "Volume", 0], ["open_interest", "Open Int", 0],
 ];
-const defaultColumns = ["last", "percent_change", "mark", "bid", "ask", "net_change", "delta", "theta", "gamma", "iv"];
+const defaultColumns = ["last", "percent_change", "mark", "bid", "ask", "net_change", "spread_delta", "theta", "gamma", "iv"];
 let visibleColumns = loadColumns();
 let state = null;
 let selectedShort = null;
 let selectedLong = null;
+let selectedAction = "OPEN";
+let selectedMetrics = null;
 let lastHeartbeat = performance.now();
 let lastStateReceived = performance.now();
 
@@ -21,7 +23,8 @@ const age = (ms) => ms == null ? "—" : ms < 1000 ? `${Math.round(ms)} ms` : `$
 function loadColumns() {
   try {
     const saved = JSON.parse(localStorage.getItem("ndxp-chain-columns") || "null");
-    const valid = Array.isArray(saved) ? saved.filter((key) => columnDefinitions.some(([candidate]) => candidate === key)) : [];
+    const migrated = Array.isArray(saved) ? saved.map((key) => key === "delta" ? "spread_delta" : key) : [];
+    const valid = migrated.filter((key) => columnDefinitions.some(([candidate]) => candidate === key));
     return valid.includes("bid") ? valid : defaultColumns;
   } catch (_) { return defaultColumns; }
 }
@@ -112,10 +115,12 @@ function difference(short, long, key) {
 function spreadMetrics(short, long) {
   const bid = Number.isFinite(Number(short.bid)) && Number.isFinite(Number(long.ask)) ? Number(short.bid) - Number(long.ask) : null;
   const ask = Number.isFinite(Number(short.ask)) && Number.isFinite(Number(long.bid)) ? Number(short.ask) - Number(long.bid) : null;
+  const legMark = difference(short, long, "mark");
+  const mark = Number.isFinite(bid) && Number.isFinite(ask) ? (bid + ask) / 2 : legMark;
   return {
     last: difference(short, long, "last"), percent_change: difference(short, long, "percent_change"),
-    mark: difference(short, long, "mark"), bid, ask, net_change: difference(short, long, "net_change"),
-    delta: difference(short, long, "delta"), theta: difference(short, long, "theta"), gamma: difference(short, long, "gamma"),
+    mark, bid, ask, net_change: difference(short, long, "net_change"),
+    spread_delta: difference(long, short, "delta"), theta: difference(long, short, "theta"), gamma: difference(long, short, "gamma"),
     iv: short.iv, volume: short.volume, open_interest: short.open_interest,
   };
 }
@@ -158,30 +163,36 @@ function metricCell(spread, key, near, side) {
   const definition = columnDefinitions.find(([candidate]) => candidate === key);
   const value = spread?.metrics?.[key];
   const formatted = key === "iv" && value != null ? `${number(value, definition[2])}%` : number(value, definition[2]);
-  if (key === "bid" && spread) {
+  if ((key === "bid" || key === "ask") && spread) {
     const button = document.createElement("button");
-    button.className = `metric bid-action${near ? " near" : ""}`;
+    const opening = key === "bid";
+    button.className = `metric ${opening ? "bid-action" : "ask-action"}${near ? " near" : ""}`;
     button.textContent = formatted;
-    button.title = `Sell ${side.toLowerCase()} credit spread at displayed bid`;
+    button.title = opening ? `Sell to open ${side.toLowerCase()} credit spread` : `Buy to close ${side.toLowerCase()} credit spread`;
     button.disabled = value == null || Number(value) <= 0;
-    button.addEventListener("click", () => openTicket(side, spread));
+    button.addEventListener("click", () => openTicket(opening ? "OPEN" : "CLOSE", side, spread));
     button.setAttribute("role", "cell");
     return button;
   }
   return cell(formatted, `metric${near ? " near" : ""}`);
 }
 
-function openTicket(side, spread) {
+function openTicket(action, side, spread) {
+  selectedAction = action;
+  selectedMetrics = spread.metrics;
   selectedShort = spread.short; selectedLong = spread.long;
-  ui["ticket-side"].textContent = `${side} CREDIT`;
-  ui["ticket-title"].textContent = `Sell ${side.toLowerCase()} vertical`;
-  ui["ticket-market"].textContent = `Bid ${number(spread.metrics.bid)}`;
+  const opening = action === "OPEN";
+  ui["ticket-side"].textContent = `${side} · ${opening ? "SELL TO OPEN" : "BUY TO CLOSE"}`;
+  ui["ticket-title"].textContent = `${opening ? "Sell" : "Buy"} ${side.toLowerCase()} vertical`;
+  ui["ticket-market"].textContent = `Bid ${number(spread.metrics.bid)} · Mid ${number(spread.metrics.mark)} · Ask ${number(spread.metrics.ask)}`;
+  ui["short-instruction"].textContent = opening ? "SELL TO OPEN" : "BUY TO CLOSE";
+  ui["long-instruction"].textContent = opening ? "BUY TO OPEN" : "SELL TO CLOSE";
   ui["short-leg"].textContent = `${selectedShort.symbol} · ${number(selectedShort.strike, 0)}`;
   ui["long-leg"].textContent = `${selectedLong.symbol} · ${number(selectedLong.strike, 0)}`;
   ui.quantity.value = "20";
-  ui.credit.value = Math.max(0.05, Number(spread.metrics.bid || 0)).toFixed(2);
+  ui.credit.value = Math.max(0.05, Number(spread.metrics.mark || 0)).toFixed(2);
   ui.reviewed.checked = false;
-  ui["preview-result"].textContent = "Spread constructed from the displayed bid. Review before building the Schwab payload.";
+  ui["preview-result"].textContent = `${opening ? "Opening credit" : "Closing debit"} ticket constructed at the displayed mid. Review before building the Schwab payload.`;
   calculateRisk();
   ui["ticket-dialog"].showModal();
 }
@@ -190,12 +201,17 @@ function calculateRisk() {
   const quantity = Number(ui.quantity.value || 0), credit = Number(ui.credit.value || 0), gross = quantity * 10 * 100;
   ui.premium.textContent = money(quantity * credit * 100);
   ui["gross-risk"].textContent = money(gross);
-  ui["max-loss"].textContent = money(gross - quantity * credit * 100);
+  ui["premium-label"].textContent = selectedAction === "OPEN" ? "Premium" : "Closing debit";
+  ui["max-loss-label"].textContent = selectedAction === "OPEN" ? "Maximum loss" : "Position effect";
+  ui["max-loss"].textContent = selectedAction === "OPEN" ? money(gross - quantity * credit * 100) : "Reduces risk";
   ui.distance.textContent = selectedShort && state?.market?.spot != null ? `${number(Math.abs(selectedShort.strike - state.market.spot))} pts` : "—";
+  const perSpreadDelta = selectedMetrics?.spread_delta;
+  ui["spread-delta"].textContent = number(perSpreadDelta, 4);
+  ui["position-delta"].textContent = perSpreadDelta == null ? "—" : number(Number(perSpreadDelta) * quantity, 2);
 }
 
 function orderPayload() {
-  return { account_hash: ui.account.value, short_symbol: selectedShort?.symbol || "", long_symbol: selectedLong?.symbol || "", quantity: Number(ui.quantity.value), net_credit: ui.credit.value, duration: "DAY", session: "NORMAL" };
+  return { account_hash: ui.account.value, short_symbol: selectedShort?.symbol || "", long_symbol: selectedLong?.symbol || "", quantity: Number(ui.quantity.value), limit_price: ui.credit.value, action: selectedAction, duration: "DAY", session: "NORMAL" };
 }
 
 async function preview() {
@@ -248,7 +264,7 @@ async function lockedAction(action, payload) {
 }
 
 async function selectExpiration() {
-  selectedShort = null; selectedLong = null;
+  selectedShort = null; selectedLong = null; selectedAction = "OPEN"; selectedMetrics = null;
   await api("/api/selection", { method: "POST", body: JSON.stringify({ expiration: ui.expiration.value, option_type: "CALL" }) });
   await refresh();
 }

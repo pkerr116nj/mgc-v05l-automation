@@ -24,13 +24,14 @@ def symbol(strike: int, option_type: str = "C", root: str = "NDXP") -> str:
     return f"{root:<6}260914{option_type}{strike * 1000:08d}"
 
 
-def request(*, option_type: str = "C", short: int = 29330, long: int = 29340) -> NdxpSpreadRequest:
+def request(*, option_type: str = "C", short: int = 29330, long: int = 29340, action: str = "OPEN") -> NdxpSpreadRequest:
     return NdxpSpreadRequest(
         account_hash="hash-1",
         short_symbol=symbol(short, option_type),
         long_symbol=symbol(long, option_type),
         quantity=20,
-        net_credit=Decimal("3.75"),
+        limit_price=Decimal("3.75"),
+        action=action,
     )
 
 
@@ -46,6 +47,18 @@ def test_call_credit_vertical_payload_and_risk_are_exact() -> None:
     assert payload["complexOrderStrategyType"] == "VERTICAL"
     assert payload["price"] == "3.75"
     assert [leg["instruction"] for leg in payload["orderLegCollection"]] == ["SELL_TO_OPEN", "BUY_TO_OPEN"]
+
+
+def test_close_vertical_is_net_debit_with_opposite_leg_actions() -> None:
+    proposed = request(action="CLOSE")
+    summary = validate_spread_request(proposed)
+    payload = build_vertical_order_payload(proposed)
+
+    assert summary["price_effect"] == "DEBIT"
+    assert summary["closing_debit_dollars"] == "7500.00"
+    assert "maximum_loss_dollars" not in summary
+    assert payload["orderType"] == "NET_DEBIT"
+    assert [leg["instruction"] for leg in payload["orderLegCollection"]] == ["BUY_TO_CLOSE", "SELL_TO_CLOSE"]
 
 
 def test_put_credit_vertical_requires_short_higher_than_long() -> None:
@@ -131,18 +144,48 @@ def test_demo_service_builds_preview_but_never_transmits(tmp_path: Path) -> None
                 "short_symbol": short["symbol"],
                 "long_symbol": long["symbol"],
                 "quantity": 20,
-                "net_credit": "1.25",
+                "limit_price": "1.25",
+                "action": "OPEN",
             }
         )
         assert preview["preview_only"] is True
         assert preview["summary"]["gross_width_dollars"] == "20000"
+        positioned_short = next(row for row in calls if row["strike"] == 29330)
+        positioned_long = next(row for row in calls if row["strike"] == 29340)
+        close_preview = service.preview(
+            {
+                "account_hash": "demo-account-hash",
+                "short_symbol": positioned_short["symbol"],
+                "long_symbol": positioned_long["symbol"],
+                "quantity": 20,
+                "limit_price": "1.25",
+                "action": "CLOSE",
+            }
+        )
+        assert close_preview["order_payload"]["orderType"] == "NET_DEBIT"
+        assert [leg["instruction"] for leg in close_preview["order_payload"]["orderLegCollection"]] == [
+            "BUY_TO_CLOSE",
+            "SELL_TO_CLOSE",
+        ]
+        with pytest.raises(SpreadValidationError, match="exact short leg"):
+            service.preview(
+                {
+                    "account_hash": "demo-account-hash",
+                    "short_symbol": short["symbol"],
+                    "long_symbol": long["symbol"],
+                    "quantity": 20,
+                    "limit_price": "1.25",
+                    "action": "CLOSE",
+                }
+            )
         with pytest.raises(TransmissionDisabledError):
             service.mutate("submit", {
                 "account_hash": "demo-account-hash",
                 "short_symbol": short["symbol"],
                 "long_symbol": long["symbol"],
                 "quantity": 20,
-                "net_credit": "1.25",
+                "limit_price": "1.25",
+                "action": "OPEN",
             })
     finally:
         service.stop()

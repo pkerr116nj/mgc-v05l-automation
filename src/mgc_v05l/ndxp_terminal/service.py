@@ -163,6 +163,17 @@ class NdxpTerminalService:
         account_hashes = {row["hash"] for row in broker["accounts"]}
         if request.account_hash not in account_hashes:
             raise SpreadValidationError("The selected account hash is not present in current Schwab account truth.")
+        if request.action == "CLOSE":
+            positions = {
+                (row.get("account_hash"), row.get("symbol")): row
+                for row in broker["positions"]
+            }
+            short_position = positions.get((request.account_hash, request.short_symbol), {})
+            long_position = positions.get((request.account_hash, request.long_symbol), {})
+            if float(short_position.get("short_quantity") or 0) < request.quantity:
+                raise SpreadValidationError("The selected account does not hold enough of the exact short leg to close.")
+            if float(long_position.get("long_quantity") or 0) < request.quantity:
+                raise SpreadValidationError("The selected account does not hold enough of the exact protective long leg to close.")
         risk = validate_spread_request(request)
         return {
             "ok": True,
@@ -174,7 +185,7 @@ class NdxpTerminalService:
                 "Both legs were found in the current Schwab chain.",
                 "The account was found in current Schwab account truth.",
                 "The spread is an exact 10-point defined-risk NDX/NDXP vertical.",
-                "The order is NORMAL session, DAY duration, and NET_CREDIT priced.",
+                f"The order is NORMAL session, DAY duration, and {'NET_CREDIT' if request.action == 'OPEN' else 'NET_DEBIT'} priced.",
                 "Broker transmission remains source-locked.",
             ],
         }

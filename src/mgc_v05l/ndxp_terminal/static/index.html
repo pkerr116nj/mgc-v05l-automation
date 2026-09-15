@@ -41,7 +41,7 @@
           <label>Spread<select id="spread-view" aria-label="Spread presentation"><option value="VERTICAL">Vertical</option></select></label>
           <label>Width<select id="spread-width" aria-label="Spread width"><option value="10">10 points</option></select></label>
           <button id="columns-button" class="icon-button" aria-label="Choose chain columns">Columns ⚙</button>
-          <span class="touch-hint">Tap a bid to sell · swipe vertically for strikes · swipe horizontally for fields</span>
+          <span class="touch-hint">Tap bid to sell/open · tap ask to buy/close · tickets default to mid</span>
         </div>
         <div id="chain-scroll" class="chain-scroll">
           <div id="chain-table" class="spread-grid mono" role="table" aria-label="Calls and puts vertical spread quotes"></div>
@@ -83,17 +83,19 @@
       <div class="ticket-content">
         <div class="ticket-banner"><span id="ticket-side">CALL CREDIT</span><strong id="ticket-market">Bid —</strong></div>
         <label class="field">Account<select id="account"></select></label>
-        <div class="leg-card short"><span>SELL TO OPEN</span><strong id="short-leg">—</strong></div>
-        <div class="leg-card long"><span>BUY TO OPEN</span><strong id="long-leg">—</strong></div>
+        <div class="leg-card short"><span id="short-instruction">SELL TO OPEN</span><strong id="short-leg">—</strong></div>
+        <div class="leg-card long"><span id="long-instruction">BUY TO OPEN</span><strong id="long-leg">—</strong></div>
         <div class="field-row">
           <label class="field">Quantity<input id="quantity" type="number" inputmode="numeric" min="1" max="100" value="20" /></label>
           <label class="field">Net credit<input id="credit" type="number" inputmode="decimal" min="0.01" max="9.99" step="0.05" placeholder="0.00" /></label>
         </div>
         <div class="risk-grid">
-          <div><label>Premium</label><strong id="premium">—</strong></div>
+          <div><label id="premium-label">Premium</label><strong id="premium">—</strong></div>
           <div><label>Gross width</label><strong id="gross-risk">—</strong></div>
-          <div class="risk"><label>Maximum loss</label><strong id="max-loss">—</strong></div>
+          <div class="risk"><label id="max-loss-label">Maximum loss</label><strong id="max-loss">—</strong></div>
           <div><label>Short distance</label><strong id="distance">—</strong></div>
+          <div><label>Derived spread Δ</label><strong id="spread-delta">—</strong></div>
+          <div><label>Position Δ</label><strong id="position-delta">—</strong></div>
         </div>
         <label class="confirm"><input id="reviewed" type="checkbox" /> I reviewed expiration, strikes, quantity, and credit.</label>
         <button id="preview" class="primary">Review Schwab order payload</button>
