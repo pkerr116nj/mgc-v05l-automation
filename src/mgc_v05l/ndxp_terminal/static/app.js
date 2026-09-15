@@ -1,16 +1,30 @@
 "use strict";
 
 const ui = Object.fromEntries(Array.from(document.querySelectorAll("[id]")).map((el) => [el.id, el]));
+const columnDefinitions = [
+  ["last", "Last", 2], ["percent_change", "% Chng", 2], ["mark", "Mark", 2], ["bid", "Bid", 2], ["ask", "Ask", 2], ["net_change", "Net Chng", 2],
+  ["delta", "Delta", 4], ["theta", "Theta", 4], ["gamma", "Gamma", 4], ["iv", "IV", 2],
+  ["volume", "Volume", 0], ["open_interest", "Open Int", 0],
+];
+const defaultColumns = ["last", "percent_change", "mark", "bid", "ask", "net_change", "delta", "theta", "gamma", "iv"];
+let visibleColumns = loadColumns();
 let state = null;
-let optionType = "CALL";
 let selectedShort = null;
 let selectedLong = null;
 let lastHeartbeat = performance.now();
 let lastStateReceived = performance.now();
 
-const money = (value) => value == null ? "—" : new Intl.NumberFormat("en-US", { style: "currency", currency: "USD", maximumFractionDigits: 0 }).format(Number(value));
-const number = (value, digits = 2) => value == null ? "—" : Number(value).toLocaleString("en-US", { minimumFractionDigits: digits, maximumFractionDigits: digits });
+const money = (value) => value == null || !Number.isFinite(Number(value)) ? "—" : new Intl.NumberFormat("en-US", { style: "currency", currency: "USD", maximumFractionDigits: 0 }).format(Number(value));
+const number = (value, digits = 2) => value == null || !Number.isFinite(Number(value)) ? "—" : Number(value).toLocaleString("en-US", { minimumFractionDigits: digits, maximumFractionDigits: digits });
 const age = (ms) => ms == null ? "—" : ms < 1000 ? `${Math.round(ms)} ms` : `${(ms / 1000).toFixed(1)} s`;
+
+function loadColumns() {
+  try {
+    const saved = JSON.parse(localStorage.getItem("ndxp-chain-columns") || "null");
+    const valid = Array.isArray(saved) ? saved.filter((key) => columnDefinitions.some(([candidate]) => candidate === key)) : [];
+    return valid.includes("bid") ? valid : defaultColumns;
+  } catch (_) { return defaultColumns; }
+}
 
 async function api(path, options = {}) {
   const response = await fetch(path, { cache: "no-store", headers: { "Content-Type": "application/json" }, ...options });
@@ -35,18 +49,17 @@ async function heartbeat() {
   const now = performance.now();
   const gap = now - lastHeartbeat;
   lastHeartbeat = now;
-  try {
-    await api("/api/client-heartbeat", { method: "POST", body: JSON.stringify({ interval_ms: gap, state_response_age_ms: now - lastStateReceived }) });
-  } catch (_) {}
+  try { await api("/api/client-heartbeat", { method: "POST", body: JSON.stringify({ interval_ms: gap, state_response_age_ms: now - lastStateReceived }) }); }
+  catch (_) {}
 }
 
 function render() {
   const market = state.market || {};
   const broker = state.broker || {};
   const diagnostics = state.diagnostics || {};
-  ui.clock.textContent = new Date(state.generated_at).toLocaleTimeString();
+  ui.clock.textContent = new Date(state.generated_at).toLocaleTimeString([], { hour: "numeric", minute: "2-digit", second: "2-digit" });
   ui.transmission.textContent = state.transmission.label;
-  ui.spot.textContent = number(market.spot);
+  ui.spot.textContent = number(market.spot, 2);
   ui["quote-age"].textContent = age(diagnostics.quote_source_age_ms);
   ui["market-latency"].textContent = age(diagnostics.market_latency_ms);
   ui["broker-latency"].textContent = age(diagnostics.broker_latency_ms);
@@ -54,7 +67,7 @@ function render() {
   ui.diagnostic.className = diagnostics.classification === "HEALTHY" ? "status-good" : diagnostics.classification?.includes("ERROR") || diagnostics.classification?.includes("STALL") ? "status-bad" : "status-warn";
   renderExpirations(market.expirations || [], market.selected_expiration);
   renderAccounts(broker.accounts || [], broker.selected_account_hash);
-  renderChain((market.selected_chain || {})[optionType] || [], market.spot);
+  renderChain(market.selected_chain || {}, market.spot);
   renderPositions(broker.positions || []);
   renderOrders(broker.working_orders || []);
   renderDiagnostics(diagnostics);
@@ -75,37 +88,106 @@ function renderAccounts(accounts, selected) {
   ui.account.value = accounts.some((row) => row.hash === current) ? current : selected || accounts[0]?.hash || "";
 }
 
-function renderChain(rows, spot) {
-  const near = [...rows].sort((a, b) => Math.abs(a.strike - spot) - Math.abs(b.strike - spot)).slice(0, 26).sort((a, b) => a.strike - b.strike);
-  ui.chain.replaceChildren(...near.map((row) => {
-    const node = document.createElement("div");
-    node.className = `chain-row mono${Math.abs(row.strike - spot) <= 10 ? " near" : ""}`;
-    [number(row.strike, 0), number(row.bid), number(row.ask), number(row.mid), number(row.delta, 3), number(row.gamma, 3), number(row.theta, 2)].forEach((value) => {
-      const span = document.createElement("span"); span.textContent = value; node.appendChild(span);
-    });
-    const button = document.createElement("button"); button.textContent = "Sell"; button.addEventListener("click", () => chooseShort(row, rows)); node.appendChild(button);
-    return node;
-  }));
+function verticalRows(chain) {
+  const calls = new Map((chain.CALL || []).map((row) => [Number(row.strike), row]));
+  const puts = new Map((chain.PUT || []).map((row) => [Number(row.strike), row]));
+  return [...new Set([...calls.keys(), ...puts.keys()])].sort((a, b) => a - b).flatMap((low) => {
+    const high = low + 10;
+    const callShort = calls.get(low), callLong = calls.get(high);
+    const putLong = puts.get(low), putShort = puts.get(high);
+    if (!callShort && !putShort) return [];
+    return [{
+      low, high,
+      call: callShort && callLong ? { short: callShort, long: callLong, metrics: spreadMetrics(callShort, callLong) } : null,
+      put: putShort && putLong ? { short: putShort, long: putLong, metrics: spreadMetrics(putShort, putLong) } : null,
+    }];
+  });
 }
 
-function chooseShort(row, rows) {
-  const longStrike = row.strike + (optionType === "CALL" ? 10 : -10);
-  const pair = rows.find((candidate) => Number(candidate.strike) === Number(longStrike));
-  if (!pair) return showNotice("The protective 10-point leg is not present in the current chain.", true);
-  selectedShort = row; selectedLong = pair;
-  ui["short-leg"].textContent = `${row.symbol} @ ${number(row.strike, 0)}`;
-  ui["long-leg"].textContent = `${pair.symbol} @ ${number(pair.strike, 0)}`;
-  const natural = Math.max(0.05, Number(row.bid || 0) - Number(pair.ask || 0));
-  ui.credit.value = natural.toFixed(2);
+function difference(short, long, key) {
+  const a = Number(short?.[key]), b = Number(long?.[key]);
+  return Number.isFinite(a) && Number.isFinite(b) ? a - b : null;
+}
+
+function spreadMetrics(short, long) {
+  const bid = Number.isFinite(Number(short.bid)) && Number.isFinite(Number(long.ask)) ? Number(short.bid) - Number(long.ask) : null;
+  const ask = Number.isFinite(Number(short.ask)) && Number.isFinite(Number(long.bid)) ? Number(short.ask) - Number(long.bid) : null;
+  return {
+    last: difference(short, long, "last"), percent_change: difference(short, long, "percent_change"),
+    mark: difference(short, long, "mark"), bid, ask, net_change: difference(short, long, "net_change"),
+    delta: difference(short, long, "delta"), theta: difference(short, long, "theta"), gamma: difference(short, long, "gamma"),
+    iv: short.iv, volume: short.volume, open_interest: short.open_interest,
+  };
+}
+
+function gridTemplate() {
+  const side = visibleColumns.map((key) => key === "open_interest" ? "94px" : "78px").join(" ");
+  return `${side} 96px ${side}`;
+}
+
+function renderChain(chain, spot) {
+  const rows = verticalRows(chain);
+  ui["chain-table"].style.gridTemplateColumns = gridTemplate();
+  const fragments = [];
+  const callGroup = cell("CALLS", "group-head calls-head"); callGroup.style.gridColumn = `span ${visibleColumns.length}`;
+  const strikeGroup = cell("10-POINT", "group-head strike-head");
+  const putGroup = cell("PUTS", "group-head puts-head"); putGroup.style.gridColumn = `span ${visibleColumns.length}`;
+  fragments.push(callGroup, strikeGroup, putGroup);
+  for (const side of ["call", "strike", "put"]) {
+    const columns = side === "strike" ? [["strike", "Strikes"]] : visibleColumns.map((key) => columnDefinitions.find(([candidate]) => candidate === key));
+    for (const [, label] of columns) fragments.push(cell(label, `column-head ${side === "strike" ? "strike-cell" : ""}`));
+  }
+  for (const row of rows) {
+    const near = Number.isFinite(Number(spot)) && row.low <= spot && row.high >= spot;
+    for (const key of visibleColumns) fragments.push(metricCell(row.call, key, near, "CALL"));
+    fragments.push(cell(`${number(row.low, 0)} / ${number(row.high, 0)}`, `strike-cell spread-strikes${near ? " near" : ""}`));
+    for (const key of visibleColumns) fragments.push(metricCell(row.put, key, near, "PUT"));
+  }
+  if (!rows.length) {
+    const empty = cell("Waiting for the selected Schwab option chain…", "chain-empty");
+    empty.style.gridColumn = "1 / -1"; fragments.push(empty);
+  }
+  ui["chain-table"].replaceChildren(...fragments);
+}
+
+function cell(text, className = "") {
+  const node = document.createElement("div"); node.className = className; node.textContent = text; node.setAttribute("role", "cell"); return node;
+}
+
+function metricCell(spread, key, near, side) {
+  const definition = columnDefinitions.find(([candidate]) => candidate === key);
+  const value = spread?.metrics?.[key];
+  const formatted = key === "iv" && value != null ? `${number(value, definition[2])}%` : number(value, definition[2]);
+  if (key === "bid" && spread) {
+    const button = document.createElement("button");
+    button.className = `metric bid-action${near ? " near" : ""}`;
+    button.textContent = formatted;
+    button.title = `Sell ${side.toLowerCase()} credit spread at displayed bid`;
+    button.disabled = value == null || Number(value) <= 0;
+    button.addEventListener("click", () => openTicket(side, spread));
+    button.setAttribute("role", "cell");
+    return button;
+  }
+  return cell(formatted, `metric${near ? " near" : ""}`);
+}
+
+function openTicket(side, spread) {
+  selectedShort = spread.short; selectedLong = spread.long;
+  ui["ticket-side"].textContent = `${side} CREDIT`;
+  ui["ticket-title"].textContent = `Sell ${side.toLowerCase()} vertical`;
+  ui["ticket-market"].textContent = `Bid ${number(spread.metrics.bid)}`;
+  ui["short-leg"].textContent = `${selectedShort.symbol} · ${number(selectedShort.strike, 0)}`;
+  ui["long-leg"].textContent = `${selectedLong.symbol} · ${number(selectedLong.strike, 0)}`;
+  ui.quantity.value = "20";
+  ui.credit.value = Math.max(0.05, Number(spread.metrics.bid || 0)).toFixed(2);
   ui.reviewed.checked = false;
-  ui["preview-result"].textContent = "Spread constructed. Review the risk and build the Schwab order preview.";
+  ui["preview-result"].textContent = "Spread constructed from the displayed bid. Review before building the Schwab payload.";
   calculateRisk();
+  ui["ticket-dialog"].showModal();
 }
 
 function calculateRisk() {
-  const quantity = Number(ui.quantity.value || 0);
-  const credit = Number(ui.credit.value || 0);
-  const gross = quantity * 10 * 100;
+  const quantity = Number(ui.quantity.value || 0), credit = Number(ui.credit.value || 0), gross = quantity * 10 * 100;
   ui.premium.textContent = money(quantity * credit * 100);
   ui["gross-risk"].textContent = money(gross);
   ui["max-loss"].textContent = money(gross - quantity * credit * 100);
@@ -113,18 +195,11 @@ function calculateRisk() {
 }
 
 function orderPayload() {
-  return {
-    account_hash: ui.account.value,
-    short_symbol: selectedShort?.symbol || "",
-    long_symbol: selectedLong?.symbol || "",
-    quantity: Number(ui.quantity.value),
-    net_credit: ui.credit.value,
-    duration: "DAY",
-    session: "NORMAL"
-  };
+  return { account_hash: ui.account.value, short_symbol: selectedShort?.symbol || "", long_symbol: selectedLong?.symbol || "", quantity: Number(ui.quantity.value), net_credit: ui.credit.value, duration: "DAY", session: "NORMAL" };
 }
 
 async function preview() {
+  if (!selectedShort || !selectedLong) return showNotice("Tap a call or put bid first.", true);
   if (!ui.reviewed.checked) return showNotice("Review the order details and tick the confirmation box before building the preview.", true);
   try {
     const result = await api("/api/preview", { method: "POST", body: JSON.stringify(orderPayload()) });
@@ -159,14 +234,7 @@ function dataRow(title, detail) {
 }
 
 function renderDiagnostics(d) {
-  const rows = [
-    ["UI heartbeat gap", age(d.client_gap_ms)],
-    ["Worker scheduling gap", age(d.worker_gap_ms)],
-    ["Schwab market response", age(d.market_latency_ms)],
-    ["Schwab broker response", age(d.broker_latency_ms)],
-    ["Successful poll age", age(d.market_poll_age_ms)],
-    ["Quote source age", age(d.quote_source_age_ms)],
-  ];
+  const rows = [["UI heartbeat gap", age(d.client_gap_ms)], ["Worker scheduling gap", age(d.worker_gap_ms)], ["Schwab market response", age(d.market_latency_ms)], ["Schwab broker response", age(d.broker_latency_ms)], ["Successful poll age", age(d.market_poll_age_ms)], ["Quote source age", age(d.quote_source_age_ms)]];
   ui["diagnostic-detail"].replaceChildren(...rows.flatMap(([label, value]) => {
     const dt = document.createElement("dt"); dt.textContent = label;
     const dd = document.createElement("dd"); dd.textContent = value;
@@ -179,25 +247,38 @@ async function lockedAction(action, payload) {
   catch (error) { showNotice(error.message, true); }
 }
 
-async function select() {
+async function selectExpiration() {
   selectedShort = null; selectedLong = null;
-  ui["short-leg"].textContent = "Choose a strike"; ui["long-leg"].textContent = "Paired automatically";
-  await api("/api/selection", { method: "POST", body: JSON.stringify({ expiration: ui.expiration.value, option_type: optionType }) });
+  await api("/api/selection", { method: "POST", body: JSON.stringify({ expiration: ui.expiration.value, option_type: "CALL" }) });
   await refresh();
+}
+
+function renderColumnOptions() {
+  ui["column-options"].replaceChildren(...columnDefinitions.map(([key, label]) => {
+    const wrapper = document.createElement("label"); wrapper.className = "column-choice";
+    const input = document.createElement("input"); input.type = "checkbox"; input.checked = visibleColumns.includes(key); input.disabled = key === "bid";
+    input.addEventListener("change", () => {
+      visibleColumns = input.checked ? [...visibleColumns, key] : visibleColumns.filter((candidate) => candidate !== key);
+      visibleColumns.sort((a, b) => columnDefinitions.findIndex(([candidate]) => candidate === a) - columnDefinitions.findIndex(([candidate]) => candidate === b));
+      localStorage.setItem("ndxp-chain-columns", JSON.stringify(visibleColumns));
+      renderChain(state?.market?.selected_chain || {}, state?.market?.spot);
+    });
+    wrapper.append(input, document.createTextNode(label)); return wrapper;
+  }));
 }
 
 function showNotice(message, error = false) { ui.notice.textContent = message; ui.notice.className = `notice${error ? " error" : ""}`; }
 function hideNotice() { ui.notice.className = "notice hidden"; }
 
-ui.calls.addEventListener("click", () => { optionType = "CALL"; ui.calls.className = "active"; ui.puts.className = ""; select(); });
-ui.puts.addEventListener("click", () => { optionType = "PUT"; ui.puts.className = "active"; ui.calls.className = ""; select(); });
-ui.expiration.addEventListener("change", select);
+ui.expiration.addEventListener("change", selectExpiration);
 ui.quantity.addEventListener("input", calculateRisk); ui.credit.addEventListener("input", calculateRisk);
-ui.preview.addEventListener("click", preview);
-ui.submit.addEventListener("click", () => lockedAction("submit", orderPayload()));
+ui.preview.addEventListener("click", preview); ui.submit.addEventListener("click", () => lockedAction("submit", orderPayload()));
+ui["columns-button"].addEventListener("click", () => ui["columns-dialog"].showModal());
+document.querySelectorAll("[data-jump]").forEach((button) => button.addEventListener("click", () => document.getElementById(button.dataset.jump).scrollIntoView({ behavior: "smooth" })));
 ui["access-check"].addEventListener("click", async () => {
   try { showNotice("Running read-only Schwab account and NDX chain checks…"); const result = await api("/api/access-check"); showNotice(`Access verified: ${JSON.stringify(result)}`); }
   catch (error) { showNotice(`Access check failed: ${error.message}`, true); }
 });
 
+renderColumnOptions();
 refresh(); heartbeat(); setInterval(refresh, 1000); setInterval(heartbeat, 1000);

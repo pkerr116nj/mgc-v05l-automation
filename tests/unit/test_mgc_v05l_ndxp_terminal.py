@@ -121,6 +121,8 @@ def test_demo_service_builds_preview_but_never_transmits(tmp_path: Path) -> None
             time.sleep(0.02)
             snapshot = service.snapshot()
         calls = snapshot["market"]["selected_chain"]["CALL"]
+        assert calls[0]["net_change"] == 0.0
+        assert calls[0]["percent_change"] == 0.0
         short = next(row for row in calls if any(other["strike"] == row["strike"] + 10 for other in calls))
         long = next(row for row in calls if row["strike"] == short["strike"] + 10)
         preview = service.preview(

@@ -2,87 +2,106 @@
 <html lang="en">
   <head>
     <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+    <meta name="theme-color" content="#050708" />
     <title>NDXP Credit Terminal</title>
     <link rel="stylesheet" href="/styles.css" />
   </head>
   <body>
-    <header>
-      <div>
-        <div class="eyebrow">SCHWAB EXECUTION CONSOLE</div>
-        <h1>NDXP Credit Terminal</h1>
-      </div>
-      <div class="header-status">
+    <header class="topbar">
+      <div class="instrument"><strong>NDX</strong><span>NASDAQ 100 INDEX</span></div>
+      <div class="spot-block mono"><strong id="spot">—</strong><span>Quote age <b id="quote-age">—</b></span></div>
+      <div class="top-status">
+        <span id="diagnostic" class="status-good">STARTING</span>
         <span id="transmission" class="pill locked">TRANSMISSION LOCKED</span>
         <span id="clock" class="mono">—</span>
       </div>
     </header>
 
     <main>
-      <section class="market-strip panel">
-        <div><label>NDX</label><strong id="spot">—</strong></div>
-        <div><label>Quote age</label><strong id="quote-age">—</strong></div>
+      <nav class="section-tabs" aria-label="Terminal sections">
+        <button class="active">Options</button>
+        <button data-jump="positions-panel">Positions</button>
+        <button data-jump="orders-panel">Orders</button>
+        <button data-jump="diagnostics-panel">Diagnostics</button>
+      </nav>
+
+      <section class="market-strip">
         <div><label>Schwab market</label><strong id="market-latency">—</strong></div>
         <div><label>Broker truth</label><strong id="broker-latency">—</strong></div>
-        <div><label>Diagnostic</label><strong id="diagnostic" class="status-good">STARTING</strong></div>
+        <div><label>Presentation</label><strong class="accent">Vertical · 10 points</strong></div>
         <button id="access-check" class="secondary">Verify API access</button>
       </section>
 
       <div id="notice" class="notice hidden"></div>
 
-      <div class="workspace">
-        <section class="panel chain-panel">
-          <div class="panel-title">
-            <div><span class="kicker">LIVE CHAIN</span><h2>Select the short leg</h2></div>
-            <div class="selectors">
-              <select id="expiration" aria-label="Expiration"></select>
-              <div class="segmented" role="group" aria-label="Option type">
-                <button id="calls" class="active">Calls</button>
-                <button id="puts">Puts</button>
-              </div>
-            </div>
-          </div>
-          <div class="chain-head mono"><span>Strike</span><span>Bid</span><span>Ask</span><span>Mid</span><span>Delta</span><span>Gamma</span><span>Theta</span><span></span></div>
-          <div id="chain" class="chain"></div>
-        </section>
-
-        <aside class="panel ticket-panel">
-          <div class="panel-title"><div><span class="kicker">ORDER PREVIEW</span><h2>10-point credit vertical</h2></div></div>
-          <label class="field">Account<select id="account"></select></label>
-          <div class="leg-card short"><span>SELL TO OPEN</span><strong id="short-leg">Choose a strike</strong></div>
-          <div class="leg-card long"><span>BUY TO OPEN</span><strong id="long-leg">Paired automatically</strong></div>
-          <div class="field-row">
-            <label class="field">Contracts<input id="quantity" type="number" min="1" max="100" value="20" /></label>
-            <label class="field">Net credit<input id="credit" type="number" min="0.01" max="9.99" step="0.05" placeholder="0.00" /></label>
-          </div>
-          <div class="risk-grid">
-            <div><label>Premium</label><strong id="premium">—</strong></div>
-            <div><label>Gross width</label><strong id="gross-risk">—</strong></div>
-            <div class="risk"><label>Maximum loss</label><strong id="max-loss">—</strong></div>
-            <div><label>Distance</label><strong id="distance">—</strong></div>
-          </div>
-          <label class="confirm"><input id="reviewed" type="checkbox" /> I reviewed the expiration, strikes, size, and credit.</label>
-          <button id="preview" class="primary">Build Schwab order preview</button>
-          <button id="submit" class="danger" disabled>Transmit to Schwab — locked</button>
-          <div id="preview-result" class="preview-result"><span>Select a short strike to construct a spread.</span></div>
-        </aside>
-      </div>
+      <section class="chain-shell" aria-label="NDXP option spread chain">
+        <div class="chain-controls">
+          <label>Expiration<select id="expiration" aria-label="Expiration"></select></label>
+          <label>Spread<select id="spread-view" aria-label="Spread presentation"><option value="VERTICAL">Vertical</option></select></label>
+          <label>Width<select id="spread-width" aria-label="Spread width"><option value="10">10 points</option></select></label>
+          <button id="columns-button" class="icon-button" aria-label="Choose chain columns">Columns ⚙</button>
+          <span class="touch-hint">Tap a bid to sell · swipe vertically for strikes · swipe horizontally for fields</span>
+        </div>
+        <div id="chain-scroll" class="chain-scroll">
+          <div id="chain-table" class="spread-grid mono" role="table" aria-label="Calls and puts vertical spread quotes"></div>
+        </div>
+      </section>
 
       <div class="lower-grid">
-        <section class="panel">
+        <section id="positions-panel" class="panel">
           <div class="panel-title"><div><span class="kicker">BROKER TRUTH</span><h2>NDX positions</h2></div></div>
           <div id="positions" class="empty">Waiting for Schwab…</div>
         </section>
-        <section class="panel">
+        <section id="orders-panel" class="panel">
           <div class="panel-title"><div><span class="kicker">ORDER CONTROL</span><h2>Working NDX orders</h2></div></div>
           <div id="orders" class="empty">Waiting for Schwab…</div>
         </section>
-        <section class="panel diagnostics-panel">
+        <section id="diagnostics-panel" class="panel diagnostics-panel">
           <div class="panel-title"><div><span class="kicker">FAULT ISOLATION</span><h2>Feed diagnostics</h2></div></div>
           <dl id="diagnostic-detail"></dl>
         </section>
       </div>
     </main>
+
+    <dialog id="columns-dialog" class="modal compact-modal">
+      <form method="dialog">
+        <div class="modal-head"><div><span class="kicker">CHAIN LAYOUT</span><h2>Displayed fields</h2></div><button class="close-button" value="close" aria-label="Close">×</button></div>
+        <p class="muted">Bid remains visible because it launches the sell ticket. Your other selections are saved on this device.</p>
+        <div id="column-options" class="column-options"></div>
+        <button class="primary" value="close">Done</button>
+      </form>
+    </dialog>
+
+    <dialog id="ticket-dialog" class="modal ticket-modal">
+      <form method="dialog">
+        <div class="modal-head">
+          <div><span class="kicker">ORDER ENTRY · PREVIEW ONLY</span><h2 id="ticket-title">Sell NDXP vertical</h2></div>
+          <button class="close-button" value="close" aria-label="Close">×</button>
+        </div>
+      </form>
+      <div class="ticket-content">
+        <div class="ticket-banner"><span id="ticket-side">CALL CREDIT</span><strong id="ticket-market">Bid —</strong></div>
+        <label class="field">Account<select id="account"></select></label>
+        <div class="leg-card short"><span>SELL TO OPEN</span><strong id="short-leg">—</strong></div>
+        <div class="leg-card long"><span>BUY TO OPEN</span><strong id="long-leg">—</strong></div>
+        <div class="field-row">
+          <label class="field">Quantity<input id="quantity" type="number" inputmode="numeric" min="1" max="100" value="20" /></label>
+          <label class="field">Net credit<input id="credit" type="number" inputmode="decimal" min="0.01" max="9.99" step="0.05" placeholder="0.00" /></label>
+        </div>
+        <div class="risk-grid">
+          <div><label>Premium</label><strong id="premium">—</strong></div>
+          <div><label>Gross width</label><strong id="gross-risk">—</strong></div>
+          <div class="risk"><label>Maximum loss</label><strong id="max-loss">—</strong></div>
+          <div><label>Short distance</label><strong id="distance">—</strong></div>
+        </div>
+        <label class="confirm"><input id="reviewed" type="checkbox" /> I reviewed expiration, strikes, quantity, and credit.</label>
+        <button id="preview" class="primary">Review Schwab order payload</button>
+        <button id="submit" class="danger" disabled>Transmit to Schwab — locked</button>
+        <pre id="preview-result" class="preview-result">Tap a displayed bid to construct a spread.</pre>
+      </div>
+    </dialog>
+
     <script src="/app.js"></script>
   </body>
 </html>

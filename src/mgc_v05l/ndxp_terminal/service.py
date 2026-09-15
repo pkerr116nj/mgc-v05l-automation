@@ -281,6 +281,8 @@ def _normalize_market(payload: dict[str, Any] | None, *, selected_expiration: st
                             "mid": round((bid + ask) / 2, 2) if bid is not None and ask is not None else None,
                             "mark": _float_or_none(contract.get("mark")),
                             "last": _float_or_none(contract.get("last")),
+                            "net_change": _float_or_none(contract.get("netChange")),
+                            "percent_change": _float_or_none(contract.get("percentChange")),
                             "delta": _float_or_none(contract.get("delta")),
                             "gamma": _float_or_none(contract.get("gamma")),
                             "theta": _float_or_none(contract.get("theta")),

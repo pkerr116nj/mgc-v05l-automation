@@ -230,6 +230,8 @@ def _demo_contract(day: date, option_code: str, strike: int, mid: float, now: da
         "ask": round(ask, 2),
         "mark": round(mid, 2),
         "last": round(mid, 2),
+        "netChange": 0.0,
+        "percentChange": 0.0,
         "delta": round(max(0.03, 0.5 - distance / 300), 3) * (1 if option_code == "C" else -1),
         "gamma": 0.006,
         "theta": -1.25,

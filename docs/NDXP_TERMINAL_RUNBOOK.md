@@ -10,6 +10,18 @@ The client will be a responsive progressive web application for Mac, iPad, and p
 
 Before mobile use is enabled, the localhost-only preview server will be replaced with an authenticated service boundary, TLS, explicit device/session authorization, and operator confirmation suitable for broker mutations.
 
+### Screenshot-derived interaction contract
+
+The September 14 Thinkorswim iPad references establish these initial chain requirements:
+
+- calls and puts appear side by side around a central strike-pair column;
+- each row represents a selectable 10-point vertical rather than an unpaired contract;
+- the page scrolls vertically through strikes and the chain scrolls horizontally through fields;
+- quote fields, net and percentage change, Greeks, IV, volume, and open interest are selectable display columns;
+- tapping a positive bid launches a sell-credit ticket populated with the correct short and protective long legs;
+- ticket quantity defaults to 20 contracts; and
+- until a Thinkorswim order-entry screenshot is available, the ticket uses the terminal's explicit risk and preview layout rather than guessing at Thinkorswim's precise order-entry presentation.
+
 ## Safety state
 
 This build can read live Schwab market and account data and construct exact order payloads. It cannot transmit, cancel, or replace a Schwab order.
