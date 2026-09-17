@@ -12,6 +12,7 @@ from decimal import Decimal
 from pathlib import Path
 from typing import Any, Protocol
 
+from .analytics import derive_expiration_analytics
 from .diagnostics import classify_diagnostics
 from .orders import (
     LIVE_TRANSMISSION_COMPILED,
@@ -94,6 +95,13 @@ class NdxpTerminalService:
                 normalized_market = _normalize_market(market, selected_expiration=self._selected_expiration)
             normalized_broker = _normalize_broker(broker)
             now_wall = time.time()
+            normalized_market["analytics"] = derive_expiration_analytics(
+                spot=normalized_market.get("spot"),
+                expiration=normalized_market.get("selected_expiration"),
+                chain=normalized_market.get("selected_chain", {}),
+                spot_quote_time_ms=normalized_market.get("spot_quote_time_ms"),
+                now=datetime.fromtimestamp(now_wall, tz=timezone.utc),
+            )
             source_age_ms = _source_age_ms(normalized_market.get("latest_source_time_ms"), now_wall)
             market_poll_age_ms = (
                 (now_wall - self._last_market_success_wall) * 1000 if self._last_market_success_wall is not None else None
@@ -314,6 +322,7 @@ def _normalize_market(payload: dict[str, Any] | None, *, selected_expiration: st
             latest_source_time_ms = quote_time_ms if latest_source_time_ms is None else max(latest_source_time_ms, quote_time_ms)
     else:
         underlying_quote = {}
+        quote_time_ms = None
     spot = (
         _float_or_none(chain.get("underlyingPrice"))
         or _float_or_none(underlying_quote.get("lastPrice"))
@@ -327,6 +336,7 @@ def _normalize_market(payload: dict[str, Any] | None, *, selected_expiration: st
         "received_at": payload.get("received_at"),
         "latency_ms": payload.get("latency_ms"),
         "latest_source_time_ms": latest_source_time_ms,
+        "spot_quote_time_ms": quote_time_ms,
         "expirations": expirations,
         "selected_expiration": selected,
         "selected_chain": chains.get(selected, {"CALL": [], "PUT": []}),

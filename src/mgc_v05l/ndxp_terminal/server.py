@@ -13,6 +13,7 @@ from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
+from zoneinfo import ZoneInfo
 
 from .orders import SpreadValidationError, TransmissionDisabledError
 from .service import NdxpTerminalService
@@ -21,6 +22,7 @@ from .service import NdxpTerminalService
 STATIC_ROOT = Path(__file__).with_name("static")
 DEMO_STRIKE_INTERVAL = 10
 DEMO_STRIKES_EACH_SIDE = 30
+EASTERN = ZoneInfo("America/New_York")
 
 
 class NdxpTerminalHandler(BaseHTTPRequestHandler):
@@ -158,7 +160,7 @@ class DemoSchwabAdapter:
     def fetch_market(self, *, chain_symbol: str, quote_symbol: str) -> dict[str, Any]:
         now = datetime.now(timezone.utc)
         spot = 29318 + math.sin(time.monotonic() / 5) * 8
-        expirations = [_next_weekday(date.today(), offset) for offset in range(3)]
+        expirations = [_next_weekday(_demo_start_day(now), offset) for offset in range(3)]
         call_map: dict[str, Any] = {}
         put_map: dict[str, Any] = {}
         for day in expirations:
@@ -169,9 +171,10 @@ class DemoSchwabAdapter:
             first_strike = center_strike - DEMO_STRIKES_EACH_SIDE * DEMO_STRIKE_INTERVAL
             last_strike = center_strike + DEMO_STRIKES_EACH_SIDE * DEMO_STRIKE_INTERVAL
             for strike in range(first_strike, last_strike + DEMO_STRIKE_INTERVAL, DEMO_STRIKE_INTERVAL):
-                distance = strike - spot
-                call_mid = max(0.15, 15 - distance * 0.16)
-                put_mid = max(0.15, 15 + distance * 0.16)
+                expiry_at = datetime.combine(day, datetime.min.time().replace(hour=16), tzinfo=EASTERN).astimezone(timezone.utc)
+                time_years = max((expiry_at - now).total_seconds(), 60) / (365.25 * 24 * 60 * 60)
+                call_mid = _demo_black_price("CALL", spot, strike, time_years, 0.142)
+                put_mid = _demo_black_price("PUT", spot, strike, time_years, 0.142)
                 calls[f"{strike:.1f}"] = [_demo_contract(day, "C", strike, call_mid, now, spot)]
                 puts[f"{strike:.1f}"] = [_demo_contract(day, "P", strike, put_mid, now, spot)]
             call_map[f"{day.isoformat()}:{days}"] = calls
@@ -191,7 +194,7 @@ class DemoSchwabAdapter:
 
     def fetch_broker_truth(self) -> dict[str, Any]:
         now = datetime.now(timezone.utc).isoformat()
-        expiration = date.today().strftime("%y%m%d")
+        expiration = _next_weekday(_demo_start_day(datetime.now(timezone.utc)), 0).strftime("%y%m%d")
         short_call = f"NDXP  {expiration}C29330000"
         long_call = f"NDXP  {expiration}C29340000"
         return {
@@ -243,8 +246,8 @@ class DemoSchwabAdapter:
 def _demo_contract(day: date, option_code: str, strike: int, mid: float, now: datetime, spot: float) -> dict[str, Any]:
     root = "NDXP  "
     symbol = f"{root}{day.strftime('%y%m%d')}{option_code}{strike * 1000:08d}"
-    bid = max(0.05, mid - 0.15)
-    ask = mid + 0.15
+    bid = max(0.01, mid - 0.10)
+    ask = max(0.02, mid + 0.10)
     distance = abs(strike - spot)
     return {
         "symbol": symbol,
@@ -265,6 +268,16 @@ def _demo_contract(day: date, option_code: str, strike: int, mid: float, now: da
     }
 
 
+def _demo_black_price(option_type: str, forward: float, strike: float, time_years: float, volatility: float) -> float:
+    root_time = math.sqrt(time_years)
+    d1 = (math.log(forward / strike) + 0.5 * volatility * volatility * time_years) / (volatility * root_time)
+    d2 = d1 - volatility * root_time
+    cdf = lambda value: 0.5 * (1.0 + math.erf(value / math.sqrt(2.0)))
+    if option_type == "CALL":
+        return max(0.01, forward * cdf(d1) - strike * cdf(d2))
+    return max(0.01, strike * cdf(-d2) - forward * cdf(-d1))
+
+
 def _next_weekday(start: date, offset: int) -> date:
     day = start
     found = -1
@@ -275,6 +288,13 @@ def _next_weekday(start: date, offset: int) -> date:
                 return day
         day += timedelta(days=1)
     return day
+
+
+def _demo_start_day(now: datetime) -> date:
+    eastern_now = now.astimezone(EASTERN)
+    if eastern_now.time() >= datetime.min.time().replace(hour=16):
+        return eastern_now.date() + timedelta(days=1)
+    return eastern_now.date()
 
 
 def build_parser() -> argparse.ArgumentParser:

@@ -33,6 +33,19 @@
         <button id="access-check" class="secondary">Verify API access</button>
       </section>
 
+      <section class="range-strip" aria-label="Independent implied range analytics">
+        <div class="range-primary">
+          <span class="kicker">MARKET-IMPLIED RANGE · SELECTED EXPIRATION</span>
+          <strong id="expected-range" class="mono">Calculating…</strong>
+          <span id="expected-move" class="range-caption">Independent option-mid model</span>
+        </div>
+        <div class="range-stat"><label>Derived ATM IV</label><strong id="derived-atm-iv">—</strong></div>
+        <div class="range-stat"><label>Time remaining</label><strong id="time-remaining">—</strong></div>
+        <div class="range-stat secondary-ranges"><label>Secondary bands</label><strong id="secondary-ranges">—</strong></div>
+        <div class="range-stat"><label>Qualified / preferred</label><strong id="candidate-count">—</strong></div>
+        <button id="filters-button" class="secondary">Opportunity filters</button>
+      </section>
+
       <div id="notice" class="notice hidden"></div>
 
       <section class="chain-shell" aria-label="NDXP option spread chain">
@@ -74,6 +87,21 @@
       </form>
     </dialog>
 
+    <dialog id="filters-dialog" class="modal compact-modal">
+      <form method="dialog">
+        <div class="modal-head"><div><span class="kicker">TRANSPARENT FILTERS</span><h2>Opportunity criteria</h2></div><button class="close-button" value="close" aria-label="Close">×</button></div>
+        <p class="muted">Highlighting only. These settings never construct or transmit an order.</p>
+        <div class="filter-grid">
+          <label class="field">Minimum breakeven EM multiple<input id="filter-em" type="number" min="0" step="0.1" value="1.0" /></label>
+          <label class="field">Minimum opening credit<input id="filter-credit" type="number" min="0" step="0.05" value="1.00" /></label>
+          <label class="field">Minimum credit / risk<input id="filter-credit-risk" type="number" min="0" step="0.01" value="0.10" /></label>
+          <label class="field">Maximum market width<input id="filter-width" type="number" min="0.05" step="0.05" value="0.75" /></label>
+        </div>
+        <p class="preferred-note">Preferred opening credit: <strong>$2.00–$2.50</strong></p>
+        <button id="save-filters" class="primary" value="close">Apply filters</button>
+      </form>
+    </dialog>
+
     <dialog id="ticket-dialog" class="modal ticket-modal">
       <form method="dialog">
         <div class="modal-head">
@@ -97,6 +125,12 @@
           <div><label>Short distance</label><strong id="distance">—</strong></div>
           <div><label>Derived spread Δ</label><strong id="spread-delta">—</strong></div>
           <div><label>Position Δ</label><strong id="position-delta">—</strong></div>
+          <div><label>Breakeven</label><strong id="ticket-breakeven">—</strong></div>
+          <div><label>Breakeven / EM</label><strong id="ticket-em-multiple">—</strong></div>
+          <div><label>Beyond breakeven</label><strong id="ticket-tail-probability">—</strong></div>
+          <div><label>Credit / risk</label><strong id="ticket-credit-risk">—</strong></div>
+          <div><label>Target closing debit</label><strong>$1.00–$1.40</strong></div>
+          <div><label>Target gross profit</label><strong id="target-profit">—</strong></div>
         </div>
         <label class="confirm"><input id="reviewed" type="checkbox" /> I reviewed expiration, strikes, quantity, and credit.</label>
         <button id="preview" class="primary">Review Schwab order payload</button>

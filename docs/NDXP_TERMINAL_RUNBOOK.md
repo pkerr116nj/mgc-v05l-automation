@@ -1,4 +1,4 @@
-# Schwab NDXP Credit Terminal — Initial Locked Build
+# Schwab NDXP Credit Terminal — Locked Review Build
 
 ## Product direction
 
@@ -27,6 +27,29 @@ The September 14 Thinkorswim iPad references establish these initial chain requi
 The displayed spread delta is position delta per one short credit spread: `long-leg delta - short-leg delta`. Total position delta multiplies that result by ticket quantity. Derived theta and gamma use the same signed position convention. These are transparent leg-derived values, not Schwab-provided complex-spread Greeks; they still inherit any error in Schwab's individual-leg inputs. IV is therefore labeled as short-leg IV rather than represented as a net spread IV. A separately derived observed delta based on synchronized changes in spread mid versus NDX remains a future diagnostic enhancement.
 
 The live Schwab chain request asks for 120 strike levels, providing a buffer beyond the 25-per-side display requirement. The demo supplies 30 levels on each side. On first load and after an expiration change, the terminal centers the page on the spread row containing spot; all returned rows remain vertically scrollable.
+
+### Independent IV and range analytics
+
+The selected-expiration range is calculated independently from current option bid/ask midpoints. The model does not consume Schwab's supplied IV or Greeks:
+
+1. synchronized call and put mids infer the forward through call/put parity;
+2. out-of-the-money contract mids are inverted to implied volatilities with Black-76;
+3. a piecewise-linear smile supplies ATM, short-strike, and breakeven volatility;
+4. ATM IV and exact time remaining to the 4:00 p.m. ET NDXP expiration produce the expected move; and
+5. the fitted distribution produces the model-implied probability of finishing beyond the short strike and beyond the spread's midpoint breakeven.
+
+The prominent range is ±1 standard deviation. ±0.5 and ±1.5 standard-deviation ranges remain visible as secondary context. The chain defaults to breakeven distance, breakeven/expected-move multiple, probability beyond breakeven, and credit/risk columns. Schwab short-leg IV remains selectable as a comparison diagnostic.
+
+Analytics fail closed when spot or expiration is missing, fewer than six usable option mids are available, call/put parity is internally inconsistent, the inferred forward or ATM IV is implausible, or any near-ATM model input is more than 15 seconds old. An invalid model displays its reason and publishes no per-spread probabilities.
+
+Opportunity highlighting is informational and transparent. The initial device-local filters are:
+
+- breakeven distance of at least 1.0 expected move;
+- opening midpoint credit of at least $1.00;
+- credit-to-maximum-risk of at least 10%; and
+- combined spread market width no greater than $0.75.
+
+Patrick's preferred opening-credit band is $2.00–$2.50. Spreads passing all filters in that band receive the strongest highlight; qualifying spreads outside it remain distinguishable, and credits above $2.50 are labeled elevated rather than automatically preferred. The ticket shows the $1.00–$1.40 target closing-debit band and projected gross profit for the selected quantity. Filters and highlights never construct or transmit an order.
 
 ## Safety state
 

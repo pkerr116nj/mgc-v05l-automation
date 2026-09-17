@@ -7,6 +7,7 @@ from pathlib import Path
 
 import pytest
 
+from mgc_v05l.ndxp_terminal.analytics import derive_expiration_analytics
 from mgc_v05l.ndxp_terminal.diagnostics import classify_diagnostics
 from mgc_v05l.ndxp_terminal.orders import (
     LockedSchwabMutationGateway,
@@ -141,6 +142,17 @@ def test_demo_service_builds_preview_but_never_transmits(tmp_path: Path) -> None
         assert len([strike for strike in shared_strikes if strike > spot]) >= 25
         assert calls[0]["net_change"] == 0.0
         assert calls[0]["percent_change"] == 0.0
+        analytics = snapshot["market"]["analytics"]
+        assert analytics["status"] == "VALID"
+        assert analytics["independent_of_schwab_greeks"] is True
+        assert analytics["atm_iv_percent"] == pytest.approx(14.2, abs=0.05)
+        assert analytics["expected_move"] > 0
+        assert analytics["ranges"]["1.0"]["lower"] < spot < analytics["ranges"]["1.0"]["upper"]
+        assert len(analytics["spreads"]) >= 50
+        model_spread = next(iter(analytics["spreads"].values()))
+        assert 0 <= model_spread["probability_beyond_breakeven"] <= 1
+        assert model_spread["market_width"] >= 0
+        assert model_spread["credit_band"] in {"BELOW_PREFERRED", "PREFERRED", "ELEVATED"}
         short = next(row for row in calls if any(other["strike"] == row["strike"] + 10 for other in calls))
         long = next(row for row in calls if row["strike"] == short["strike"] + 10)
         preview = service.preview(
@@ -194,6 +206,29 @@ def test_demo_service_builds_preview_but_never_transmits(tmp_path: Path) -> None
             })
     finally:
         service.stop()
+
+
+def test_expected_range_fails_closed_when_model_quotes_are_stale() -> None:
+    adapter = DemoSchwabAdapter()
+    raw = adapter.fetch_market(chain_symbol="NDX", quote_symbol="$NDX")
+    from mgc_v05l.ndxp_terminal.service import _normalize_market
+
+    normalized = _normalize_market(raw, selected_expiration=None)
+    stale_ms = int((datetime.now(timezone.utc).timestamp() - 60) * 1000)
+    for side in normalized["selected_chain"].values():
+        for contract in side:
+            contract["quote_time_ms"] = stale_ms
+    analytics = derive_expiration_analytics(
+        spot=normalized["spot"],
+        expiration=normalized["selected_expiration"],
+        chain=normalized["selected_chain"],
+        spot_quote_time_ms=stale_ms,
+        now=datetime.now(timezone.utc),
+    )
+
+    assert analytics["status"] == "UNAVAILABLE"
+    assert "stale" in analytics["reason"].lower()
+    assert analytics["spreads"] == {}
 
 
 def test_non_loopback_server_refuses_live_or_unapproved_demo(tmp_path: Path) -> None:
