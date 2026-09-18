@@ -490,7 +490,9 @@ def test_mobile_chain_keeps_strikes_fixed_and_allows_positive_midpoint_sell() ->
     assert 'id="put-header-table"' in html
     assert "grid-template-columns:minmax(0,1fr) 110px minmax(0,1fr)" in css
     assert "position:sticky; top:var(--topbar-height)" in css
-    assert ".metric.itm" in css
+    assert ".metric.itm { background:var(--call); }" in css
+    assert ".bid-action.itm { background:#512029; }" in css
+    assert ".ask-action.itm { background:#174d35; }" in css
     assert 'ui["call-scroll"].scrollLeft' in javascript
     assert 'ui["put-scroll"].scrollLeft' in javascript
     assert 'header.offsetLeft + header.offsetWidth - pane.clientWidth' in javascript
