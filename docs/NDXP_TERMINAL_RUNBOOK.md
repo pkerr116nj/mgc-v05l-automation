@@ -1,4 +1,4 @@
-# NDXP Credit Terminal — Locked Review Build
+# NDXP Credit Terminal — One-Contract Live Pilot
 
 ## Product direction
 
@@ -19,7 +19,7 @@ One long-lived Databento session serves the terminal. It subscribes only the sel
 
 Schwab option bid and ask values are not used as an invisible fallback in Databento mode. Until a contract has a current Databento quote, its price is blank and analytics fail closed. The interface labels the mixed boundary as `Databento OPRA NBBO · Schwab NDX spot` and reports subscription, mapping, quote, timestamp, and stream-error evidence.
 
-Before mobile use is enabled, the localhost-only preview server will be replaced with an authenticated service boundary, TLS, explicit device/session authorization, and operator confirmation suitable for broker mutations.
+The iPad/LAN surface remains read-only. Broker mutations are accepted only from a browser connected to Mars loopback until an authenticated HTTPS boundary with explicit device/session authorization is implemented.
 
 ### Screenshot-derived interaction contract
 
@@ -33,7 +33,7 @@ The September 14 Thinkorswim iPad references establish these initial chain requi
 - quote fields, net and percentage change, Greeks, IV, volume, and open interest are selectable display columns;
 - tapping a bid launches a sell-to-open credit ticket whenever the spread midpoint is positive, including when an after-hours natural bid is non-positive; tapping a positive ask launches the inverse buy-to-close debit ticket;
 - both opening and closing tickets default their limit price to the displayed spread mid, not the touched bid or ask;
-- ticket quantity defaults to 20 contracts; and
+- ticket quantity defaults to 20 contracts in preview-only mode and is forced to one contract in live-pilot mode; and
 - until a Thinkorswim order-entry screenshot is available, the ticket uses the terminal's explicit risk and preview layout rather than guessing at Thinkorswim's precise order-entry presentation.
 
 The displayed spread delta is position delta per one short credit spread: `long-leg delta - short-leg delta`. Total position delta multiplies that result by ticket quantity. Derived theta and gamma use the same signed position convention. These are transparent leg-derived values, not Schwab-provided complex-spread Greeks; they still inherit any error in Schwab's individual-leg inputs. IV is therefore labeled as short-leg IV rather than represented as a net spread IV. A separately derived observed delta based on synchronized changes in spread mid versus NDX remains a future diagnostic enhancement.
@@ -65,14 +65,20 @@ Patrick's preferred opening-credit band is $2.00–$2.50. Spreads passing all fi
 
 ## Safety state
 
-This build can read live Schwab market and account data and construct exact order payloads. It cannot transmit, cancel, or replace a Schwab order.
+This build can transmit and cancel only within a deliberately narrow first-pilot envelope. Replacement remains disabled.
 
-Two independent gates protect the broker mutation methods:
+The following independent gates protect broker mutations:
 
-1. `LIVE_TRANSMISSION_COMPILED = False` in `src/mgc_v05l/ndxp_terminal/orders.py`.
-2. `MGC_NDXP_LIVE_TRANSMISSION_ENABLED` must equal `1`.
+1. reviewed pilot support is compiled in;
+2. `MGC_NDXP_LIVE_TRANSMISSION_ENABLED` must equal `1`;
+3. the process must be launched with `--live-pilot`;
+4. the HTTP client must originate from `127.0.0.1` or `::1` on Mars;
+5. a single-use, 60-second preview token must match the exact order payload; and
+6. the selected account must match current Schwab broker truth.
 
-The source gate remains false until Patrick separately authorizes a controlled live pilot. Setting an environment variable alone cannot unlock this build.
+Opening submissions are hard-limited to exactly one 10-point NDX/NDXP vertical in the currently selected expiration. The limit defaults to the displayed midpoint and remains editable anywhere inside the normal validated range (greater than zero and less than the ten-point width); the application does not impose a premium band or distance-from-spot rule. A consumed preview token cannot be retried, including after an ambiguous transport result. Every submission and cancellation attempt and acknowledgement is appended to `outputs/ndxp_terminal/mutations.jsonl`; account hashes are fingerprinted rather than written literally.
+
+Cancellation is permitted for the selected account from Mars loopback. Replacement is disabled. The iPad continues to display positions and working orders but cannot mutate them.
 
 ## Credential setup on Mars
 
@@ -123,6 +129,15 @@ To inspect the interface without Schwab credentials:
 ```bash
 bash scripts/run_ndxp_terminal.sh --demo
 ```
+
+The controlled pilot requires both runtime gates and must be opened locally on Mars:
+
+```bash
+export MGC_NDXP_LIVE_TRANSMISSION_ENABLED=1
+bash scripts/run_ndxp_terminal.sh --live-pilot --no-browser
+```
+
+Open `http://127.0.0.1:8810/` on Mars. Do not use the LAN address for order entry; LAN clients remain read-only even if the server is also launched with `--lan-live`.
 
 Demo mode displays a persistent `SYNTHETIC DEMO DATA` banner. Its repeated prices, IV, changes, and Greeks exist only to exercise layout and ticket behavior and must never be interpreted as a market snapshot.
 

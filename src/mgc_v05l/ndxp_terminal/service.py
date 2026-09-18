@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
+import secrets
 import threading
 import time
 from copy import deepcopy
@@ -21,7 +23,9 @@ from .orders import (
     SpreadValidationError,
     TransmissionDisabledError,
     build_vertical_order_payload,
+    parse_option_symbol,
     validate_spread_request,
+    validate_live_pilot_request,
 )
 from .schwab import NdxpSchwabAdapter
 
@@ -48,6 +52,7 @@ class NdxpTerminalService:
         adapter: TerminalAdapter | None = None,
         market_interval_seconds: float = 1.0,
         broker_interval_seconds: float = 5.0,
+        live_pilot_requested: bool = False,
     ) -> None:
         self.repo_root = repo_root
         self.adapter = adapter or NdxpSchwabAdapter(repo_root)
@@ -72,8 +77,14 @@ class NdxpTerminalService:
         self._request_sequence = 0
         self._selected_expiration: str | None = None
         self._selected_option_type = "CALL"
+        self._live_pilot_requested = live_pilot_requested
+        self._preview_tokens: dict[str, tuple[float, str]] = {}
+        self._consumed_preview_tokens: set[str] = set()
         self._diagnostic_path = repo_root / "outputs" / "ndxp_terminal" / "diagnostics.jsonl"
-        self._mutation_gateway = LockedSchwabMutationGateway(self.adapter.broker)
+        self._mutation_gateway = LockedSchwabMutationGateway(
+            self.adapter.broker,
+            pilot_requested=live_pilot_requested,
+        )
 
     def start(self) -> None:
         with self._lock:
@@ -131,6 +142,7 @@ class NdxpTerminalService:
                 "mode": str(getattr(self.adapter, "mode", "SCHWAB_LIVE_READ_ONLY")),
                 "transmission": {
                     "compiled": LIVE_TRANSMISSION_COMPILED,
+                    "launch_requested": self._live_pilot_requested,
                     "runtime_enabled": os.environ.get("MGC_NDXP_LIVE_TRANSMISSION_ENABLED") == "1",
                     "effective_enabled": self._mutation_gateway.enabled,
                     "label": "TRANSMISSION LOCKED" if not self._mutation_gateway.enabled else "LIVE PILOT ENABLED",
@@ -175,7 +187,7 @@ class NdxpTerminalService:
             self._last_client_heartbeat = now
         return {"ok": True, "server_time": datetime.now(timezone.utc).isoformat()}
 
-    def preview(self, payload: dict[str, Any]) -> dict[str, Any]:
+    def preview(self, payload: dict[str, Any], *, allow_live_token: bool = False) -> dict[str, Any]:
         request = NdxpSpreadRequest.from_json(payload)
         with self._lock:
             market = _normalize_market(self._market, selected_expiration=None)
@@ -198,7 +210,7 @@ class NdxpTerminalService:
             if float(long_position.get("long_quantity") or 0) < request.quantity:
                 raise SpreadValidationError("The selected account does not hold enough of the exact protective long leg to close.")
         risk = validate_spread_request(request)
-        return {
+        result = {
             "ok": True,
             "preview_only": True,
             "transmission_enabled": False,
@@ -209,27 +221,134 @@ class NdxpTerminalService:
                 "The account was found in current Schwab account truth.",
                 "The spread is an exact 10-point defined-risk NDX/NDXP vertical.",
                 f"The order is NORMAL session, DAY duration, and {'NET_CREDIT' if request.action == 'OPEN' else 'NET_DEBIT'} priced.",
-                "Broker transmission remains source-locked.",
+                "Broker transmission requires the loopback-only, single-use live-pilot gate.",
             ],
         }
+        if allow_live_token and self._mutation_gateway.enabled:
+            validate_live_pilot_request(request)
+            if request.account_hash != str(broker.get("selected_account_hash") or ""):
+                raise SpreadValidationError("Live pilot preview is restricted to the currently selected Schwab account.")
+            self._validate_live_pilot_contracts(request, market)
+            token = secrets.token_urlsafe(32)
+            with self._lock:
+                self._purge_preview_tokens()
+                self._preview_tokens[token] = (time.monotonic() + 60.0, _request_digest(request))
+            result.update(
+                transmission_enabled=True,
+                preview_token=token,
+                preview_token_expires_seconds=60,
+            )
+            result["checks"].append("Single-use live-pilot token issued for this exact payload.")
+        return result
 
     def access_check(self) -> dict[str, Any]:
         return self.adapter.access_check()
 
     def mutate(self, action: str, payload: dict[str, Any]) -> dict[str, Any]:
+        with self._lock:
+            broker = _normalize_broker(self._broker)
+        selected_account_hash = str(broker.get("selected_account_hash") or "")
+        requested_account_hash = str(payload.get("account_hash") or "").strip()
+        if not selected_account_hash or requested_account_hash != selected_account_hash:
+            raise SpreadValidationError("Live mutation is restricted to the currently selected Schwab account.")
         if action == "submit":
-            return self._mutation_gateway.submit(NdxpSpreadRequest.from_json(payload))
+            request = NdxpSpreadRequest.from_json(payload)
+            if not self._mutation_gateway.enabled:
+                raise TransmissionDisabledError("Schwab submission is not enabled by every live-pilot gate.")
+            self._consume_preview_token(str(payload.get("preview_token") or ""), request)
+            self._journal_mutation("SUBMIT_ATTEMPT", request=request)
+            try:
+                result = self._mutation_gateway.submit(request)
+            except Exception as exc:
+                self._journal_mutation("SUBMIT_UNKNOWN", request=request, error=f"{type(exc).__name__}: {exc}")
+                raise
+            self._journal_mutation("SUBMIT_ACK", request=request, result=result)
+            return result
         if action == "cancel":
-            return self._mutation_gateway.cancel(
-                account_hash=str(payload.get("account_hash") or ""),
-                broker_order_id=str(payload.get("broker_order_id") or ""),
-            )
+            broker_order_id = str(payload.get("broker_order_id") or "")
+            self._journal_mutation("CANCEL_ATTEMPT", broker_order_id=broker_order_id)
+            try:
+                result = self._mutation_gateway.cancel(
+                    account_hash=requested_account_hash,
+                    broker_order_id=broker_order_id,
+                )
+            except Exception as exc:
+                self._journal_mutation("CANCEL_UNKNOWN", broker_order_id=broker_order_id, error=f"{type(exc).__name__}: {exc}")
+                raise
+            self._journal_mutation("CANCEL_ACK", broker_order_id=broker_order_id, result=result)
+            return result
         if action == "replace":
-            return self._mutation_gateway.replace(
-                broker_order_id=str(payload.get("broker_order_id") or ""),
-                request=NdxpSpreadRequest.from_json(payload),
-            )
+            raise TransmissionDisabledError("Order replacement is disabled during the one-contract live pilot.")
         raise SpreadValidationError(f"Unknown mutation action: {action}.")
+
+    def _consume_preview_token(self, token: str, request: NdxpSpreadRequest) -> None:
+        if not token:
+            raise SpreadValidationError("A current single-use preview token is required for submission.")
+        with self._lock:
+            self._purge_preview_tokens()
+            if token in self._consumed_preview_tokens:
+                raise SpreadValidationError("This preview token was already consumed; the order was not resubmitted.")
+            record = self._preview_tokens.pop(token, None)
+            if record is None or record[0] < time.monotonic():
+                raise SpreadValidationError("The preview token is missing or expired; build a fresh preview.")
+            if record[1] != _request_digest(request):
+                raise SpreadValidationError("The order changed after preview; build a fresh preview.")
+            self._consumed_preview_tokens.add(token)
+
+    def _purge_preview_tokens(self) -> None:
+        now = time.monotonic()
+        self._preview_tokens = {token: record for token, record in self._preview_tokens.items() if record[0] >= now}
+
+    def _validate_live_pilot_contracts(self, request: NdxpSpreadRequest, market: dict[str, Any]) -> None:
+        selected_expiration = str(market.get("selected_expiration") or "")
+        expected_expiration = selected_expiration.replace("-", "")[2:]
+        short = parse_option_symbol(request.short_symbol)
+        if not expected_expiration or short.expiration != expected_expiration:
+            raise SpreadValidationError("The live pilot spread must use the currently selected expiration.")
+        selected_symbols = {
+            row["symbol"]
+            for side in market.get("selected_chain", {}).values()
+            for row in side
+        }
+        if request.short_symbol not in selected_symbols or request.long_symbol not in selected_symbols:
+            raise SpreadValidationError("Both live-pilot legs must be in the currently selected option chain.")
+
+    def _journal_mutation(
+        self,
+        event: str,
+        *,
+        request: NdxpSpreadRequest | None = None,
+        broker_order_id: str | None = None,
+        result: dict[str, Any] | None = None,
+        error: str | None = None,
+    ) -> None:
+        record: dict[str, Any] = {
+            "recorded_at": datetime.now(timezone.utc).isoformat(),
+            "event": event,
+        }
+        if request is not None:
+            record["account_fingerprint"] = hashlib.sha256(request.account_hash.encode("utf-8")).hexdigest()[:12]
+            record["request"] = {
+                "short_symbol": request.short_symbol,
+                "long_symbol": request.long_symbol,
+                "quantity": request.quantity,
+                "limit_price": str(request.limit_price),
+                "action": request.action,
+            }
+        if broker_order_id:
+            record["broker_order_id"] = broker_order_id
+        if result is not None:
+            record["result"] = {
+                key: result.get(key)
+                for key in ("status_code", "broker_order_id", "location")
+                if result.get(key) is not None
+            }
+        if error:
+            record["error"] = error
+        path = self.repo_root / "outputs" / "ndxp_terminal" / "mutations.jsonl"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(record, separators=(",", ":"), default=str) + "\n")
 
     def _poll_loop(self) -> None:
         while not self._stop.is_set():
@@ -430,6 +549,24 @@ def _normalize_broker(payload: dict[str, Any] | None) -> dict[str, Any]:
         "positions": positions,
         "working_orders": orders,
     }
+
+
+def _request_digest(request: NdxpSpreadRequest) -> str:
+    canonical = json.dumps(
+        {
+            "account_hash": request.account_hash,
+            "short_symbol": request.short_symbol,
+            "long_symbol": request.long_symbol,
+            "quantity": request.quantity,
+            "limit_price": str(request.limit_price),
+            "action": request.action,
+            "duration": request.duration,
+            "session": request.session,
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
 def _max_timestamp_ms(value: Any) -> int | None:

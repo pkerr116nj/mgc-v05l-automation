@@ -22,7 +22,7 @@ from mgc_v05l.ndxp_terminal.orders import (
     build_vertical_order_payload,
     validate_spread_request,
 )
-from mgc_v05l.ndxp_terminal.server import DemoSchwabAdapter, main, run_server
+from mgc_v05l.ndxp_terminal.server import DemoSchwabAdapter, is_loopback_address, main, run_server
 from mgc_v05l.ndxp_terminal.service import NdxpTerminalService
 from mgc_v05l.ndxp_terminal.schwab import NdxpSchwabAdapter
 
@@ -73,13 +73,16 @@ def symbol(strike: int, option_type: str = "C", root: str = "NDXP") -> str:
     return f"{root:<6}260914{option_type}{strike * 1000:08d}"
 
 
-def request(*, option_type: str = "C", short: int = 29330, long: int = 29340, action: str = "OPEN") -> NdxpSpreadRequest:
+def request(
+    *, option_type: str = "C", short: int = 29330, long: int = 29340,
+    action: str = "OPEN", quantity: int = 20, limit_price: str = "3.75",
+) -> NdxpSpreadRequest:
     return NdxpSpreadRequest(
         account_hash="hash-1",
         short_symbol=symbol(short, option_type),
         long_symbol=symbol(long, option_type),
-        quantity=20,
-        limit_price=Decimal("3.75"),
+        quantity=quantity,
+        limit_price=Decimal(limit_price),
         action=action,
     )
 
@@ -137,6 +140,7 @@ class CountingBroker:
 
     def submit_order(self, *_args, **_kwargs):
         self.calls += 1
+        return {"status_code": 201, "broker_order_id": "pilot-123"}
 
     cancel_order = submit_order
     replace_order = submit_order
@@ -231,17 +235,48 @@ def test_access_check_uses_aapl_for_quote_connectivity() -> None:
     assert result["quote_access"] is True
 
 
-def test_all_broker_mutations_are_source_locked(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_live_pilot_requires_both_runtime_and_launch_gates(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("MGC_NDXP_LIVE_TRANSMISSION_ENABLED", "1")
     broker = CountingBroker()
     gateway = LockedSchwabMutationGateway(broker)
-    with pytest.raises(TransmissionDisabledError, match="source-locked"):
+    with pytest.raises(TransmissionDisabledError, match="launch-locked"):
         gateway.submit(request())
-    with pytest.raises(TransmissionDisabledError, match="source-locked"):
+    with pytest.raises(TransmissionDisabledError, match="launch-locked"):
         gateway.cancel(account_hash="hash-1", broker_order_id="123")
-    with pytest.raises(TransmissionDisabledError, match="source-locked"):
+    with pytest.raises(TransmissionDisabledError, match="launch-locked"):
         gateway.replace(broker_order_id="123", request=request())
     assert broker.calls == 0
+
+    monkeypatch.delenv("MGC_NDXP_LIVE_TRANSMISSION_ENABLED")
+    requested = LockedSchwabMutationGateway(broker, pilot_requested=True)
+    with pytest.raises(TransmissionDisabledError, match="runtime-locked"):
+        requested.submit(request(quantity=1, limit_price="3.75"))
+    assert broker.calls == 0
+
+
+def test_live_pilot_hard_limits_submission_and_disables_replace(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("MGC_NDXP_LIVE_TRANSMISSION_ENABLED", "1")
+    broker = CountingBroker()
+    gateway = LockedSchwabMutationGateway(broker, pilot_requested=True)
+
+    with pytest.raises(SpreadValidationError, match="exactly one"):
+        gateway.submit(request(quantity=20, limit_price="9.95"))
+    with pytest.raises(SpreadValidationError, match="opening orders only"):
+        gateway.submit(request(quantity=1, limit_price="9.95", action="CLOSE"))
+    with pytest.raises(TransmissionDisabledError, match="replacement is disabled"):
+        gateway.replace(broker_order_id="123", request=request(quantity=1, limit_price="9.95"))
+    assert broker.calls == 0
+
+    result = gateway.submit(request(quantity=1, limit_price="3.75"))
+    assert result["broker_order_id"] == "pilot-123"
+    assert broker.calls == 1
+
+
+def test_live_pilot_origin_is_loopback_only() -> None:
+    assert is_loopback_address("127.0.0.1") is True
+    assert is_loopback_address("::1") is True
+    assert is_loopback_address("192.168.1.254") is False
+    assert is_loopback_address("192.168.1.42") is False
 
 
 def test_databento_feed_uses_one_session_and_maps_opra_quotes() -> None:
@@ -436,6 +471,69 @@ def test_demo_service_builds_preview_but_never_transmits(tmp_path: Path) -> None
                 "limit_price": "1.25",
                 "action": "OPEN",
             })
+    finally:
+        service.stop()
+
+
+def test_live_pilot_uses_exact_single_use_preview_and_selected_account(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("MGC_NDXP_LIVE_TRANSMISSION_ENABLED", "1")
+    broker = CountingBroker()
+    adapter = DemoSchwabAdapter()
+    adapter.broker = broker
+    service = NdxpTerminalService(
+        tmp_path,
+        adapter=adapter,
+        market_interval_seconds=0.05,
+        broker_interval_seconds=0.05,
+        live_pilot_requested=True,
+    )
+    service.start()
+    try:
+        deadline = time.monotonic() + 2
+        snapshot = service.snapshot()
+        while (not snapshot["market"]["selected_chain"]["CALL"] or not snapshot["broker"]["accounts"]) and time.monotonic() < deadline:
+            time.sleep(0.02)
+            snapshot = service.snapshot()
+        calls = snapshot["market"]["selected_chain"]["CALL"]
+        short = next(row for row in calls if any(other["strike"] == row["strike"] + 10 for other in calls))
+        long = next(row for row in calls if row["strike"] == short["strike"] + 10)
+        payload = {
+            "account_hash": "demo-account-hash",
+            "short_symbol": short["symbol"],
+            "long_symbol": long["symbol"],
+            "quantity": 1,
+            "limit_price": "3.75",
+            "action": "OPEN",
+        }
+
+        preview = service.preview(payload, allow_live_token=True)
+        assert preview["transmission_enabled"] is True
+        assert preview["preview_token_expires_seconds"] == 60
+        submitted = service.mutate("submit", {**payload, "preview_token": preview["preview_token"]})
+        assert submitted["broker_order_id"] == "pilot-123"
+        assert broker.calls == 1
+
+        with pytest.raises(SpreadValidationError, match="already consumed"):
+            service.mutate("submit", {**payload, "preview_token": preview["preview_token"]})
+        assert broker.calls == 1
+
+        with pytest.raises(SpreadValidationError, match="currently selected"):
+            service.mutate("cancel", {"account_hash": "another-account", "broker_order_id": "pilot-123"})
+        assert broker.calls == 1
+
+        cancelled = service.mutate(
+            "cancel", {"account_hash": "demo-account-hash", "broker_order_id": "pilot-123"}
+        )
+        assert cancelled["status_code"] == 201
+        assert broker.calls == 2
+        journal = (tmp_path / "outputs" / "ndxp_terminal" / "mutations.jsonl").read_text(encoding="utf-8")
+        assert "SUBMIT_ATTEMPT" in journal
+        assert "SUBMIT_ACK" in journal
+        assert "CANCEL_ACK" in journal
+        assert "demo-account-hash" not in journal
+
     finally:
         service.stop()
 

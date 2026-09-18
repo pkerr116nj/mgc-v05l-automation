@@ -17,6 +17,8 @@ let selectedShort = null;
 let selectedLong = null;
 let selectedAction = "OPEN";
 let selectedMetrics = null;
+let livePreviewToken = null;
+let submissionPending = false;
 let lastHeartbeat = performance.now();
 let lastStateReceived = performance.now();
 let centeredExpiration = null;
@@ -83,6 +85,7 @@ function render() {
   const diagnostics = state.diagnostics || {};
   ui.clock.textContent = new Date(state.generated_at).toLocaleTimeString([], { hour: "numeric", minute: "2-digit", second: "2-digit" });
   ui.transmission.textContent = state.transmission.label;
+  renderTransmissionControl();
   if (state.mode === "DEMO") {
     ui["mode-banner"].textContent = "SYNTHETIC DEMO DATA · NOT CONNECTED TO DATABENTO OR SCHWAB MARKET DATA";
     ui["mode-banner"].className = "mode-banner";
@@ -127,7 +130,16 @@ function renderExpirations(expirations, selected) {
 function renderAccounts(accounts, selected) {
   const current = ui.account.value;
   ui.account.replaceChildren(...accounts.map((row) => new Option(`${row.number_masked} · ${row.type || "Account"}`, row.hash)));
-  ui.account.value = accounts.some((row) => row.hash === current) ? current : selected || accounts[0]?.hash || "";
+  const livePilot = Boolean(state?.transmission?.effective_enabled);
+  ui.account.value = livePilot ? selected : accounts.some((row) => row.hash === current) ? current : selected || accounts[0]?.hash || "";
+  ui.account.disabled = livePilot;
+}
+
+function renderTransmissionControl() {
+  const enabled = Boolean(state?.transmission?.effective_enabled);
+  ui["ticket-mode"].textContent = enabled ? "ORDER ENTRY · ONE-CONTRACT LIVE PILOT" : "ORDER ENTRY · PREVIEW ONLY";
+  ui.submit.disabled = !enabled || !livePreviewToken || submissionPending;
+  ui.submit.textContent = enabled ? "Transmit one-spread pilot to Schwab" : "Transmit to Schwab — locked";
 }
 
 function renderAnalytics(analytics) {
@@ -405,6 +417,7 @@ function opportunityState(metrics) {
 }
 
 function openTicket(action, side, spread) {
+  livePreviewToken = null;
   selectedAction = action;
   selectedMetrics = spread.metrics;
   selectedShort = spread.short; selectedLong = spread.long;
@@ -416,11 +429,13 @@ function openTicket(action, side, spread) {
   ui["long-instruction"].textContent = opening ? "BUY TO OPEN" : "SELL TO CLOSE";
   ui["short-leg"].textContent = `${selectedShort.symbol} · ${number(selectedShort.strike, 0)}`;
   ui["long-leg"].textContent = `${selectedLong.symbol} · ${number(selectedLong.strike, 0)}`;
-  ui.quantity.value = "20";
+  const livePilot = Boolean(state?.transmission?.effective_enabled);
+  ui.quantity.value = livePilot ? "1" : "20";
   ui.credit.value = Math.max(0.05, Number(spread.metrics.mark || 0)).toFixed(2);
   ui.reviewed.checked = false;
   ui["preview-result"].textContent = `${opening ? "Opening credit" : "Closing debit"} ticket constructed at the displayed mid. Review before building the Schwab payload.`;
   calculateRisk();
+  renderTransmissionControl();
   ui["ticket-dialog"].showModal();
 }
 
@@ -453,14 +468,42 @@ function orderPayload() {
   return { account_hash: ui.account.value, short_symbol: selectedShort?.symbol || "", long_symbol: selectedLong?.symbol || "", quantity: Number(ui.quantity.value), limit_price: ui.credit.value, action: selectedAction, duration: "DAY", session: "NORMAL" };
 }
 
+function invalidateLivePreview() {
+  livePreviewToken = null;
+  renderTransmissionControl();
+}
+
 async function preview() {
   if (!selectedShort || !selectedLong) return showNotice("Tap a call or put bid first.", true);
   if (!ui.reviewed.checked) return showNotice("Review the order details and tick the confirmation box before building the preview.", true);
   try {
     const result = await api("/api/preview", { method: "POST", body: JSON.stringify(orderPayload()) });
+    livePreviewToken = result.preview_token || null;
     ui["preview-result"].textContent = JSON.stringify(result, null, 2);
-    showNotice("Order preview built. No broker mutation was attempted.");
+    renderTransmissionControl();
+    showNotice(livePreviewToken ? "Live-pilot preview built. The token is single-use for 60 seconds." : "Order preview built. No broker mutation was attempted.");
   } catch (error) { showNotice(error.message, true); }
+}
+
+async function submitLivePilot() {
+  if (!livePreviewToken || submissionPending) return showNotice("Build a fresh live-pilot preview first.", true);
+  const payload = { ...orderPayload(), preview_token: livePreviewToken };
+  const summary = `${payload.action} 1 ${selectedShort?.symbol} / ${selectedLong?.symbol} at ${payload.limit_price} credit`;
+  if (!window.confirm(`Transmit this Schwab pilot?\n\n${summary}\n\nThe preview token can be used only once.`)) return;
+  submissionPending = true;
+  renderTransmissionControl();
+  const token = livePreviewToken;
+  livePreviewToken = null;
+  try {
+    const result = await api("/api/submit", { method: "POST", body: JSON.stringify({ ...payload, preview_token: token }) });
+    ui["preview-result"].textContent = JSON.stringify(result, null, 2);
+    showNotice(`Schwab accepted the pilot request${result.broker_order_id ? ` as order ${result.broker_order_id}` : ""}.`);
+  } catch (error) {
+    showNotice(`${error.message} Do not resubmit until Schwab working orders are reconciled.`, true);
+  } finally {
+    submissionPending = false;
+    renderTransmissionControl();
+  }
 }
 
 function renderPositions(rows) {
@@ -475,7 +518,13 @@ function renderOrders(rows) {
   ui.orders.replaceChildren(...rows.map((row) => {
     const node = dataRow(`#${row.order_id} · ${row.order_type} ${row.price ?? ""}`, row.legs.map((leg) => `${leg.instruction} ${leg.quantity} ${leg.symbol}`).join(" · "));
     const actions = document.createElement("div"); actions.className = "actions";
-    const cancel = document.createElement("button"); cancel.textContent = "Cancel (locked)"; cancel.addEventListener("click", () => lockedAction("cancel", { account_hash: ui.account.value, broker_order_id: row.order_id }));
+    const cancel = document.createElement("button");
+    const liveLocal = Boolean(state?.transmission?.effective_enabled);
+    cancel.textContent = liveLocal ? "Cancel order" : "Cancel (locked)";
+    cancel.disabled = !liveLocal;
+    cancel.addEventListener("click", () => {
+      if (window.confirm(`Cancel Schwab order ${row.order_id}?`)) lockedAction("cancel", { account_hash: ui.account.value, broker_order_id: row.order_id });
+    });
     const replace = document.createElement("button"); replace.textContent = "Replace (locked)"; replace.addEventListener("click", () => lockedAction("replace", { ...orderPayload(), broker_order_id: row.order_id }));
     actions.append(cancel, replace); node.appendChild(actions); return node;
   }));
@@ -502,11 +551,15 @@ function renderDiagnostics(d) {
 }
 
 async function lockedAction(action, payload) {
-  try { await api(`/api/${action}`, { method: "POST", body: JSON.stringify(payload) }); }
+  try {
+    const result = await api(`/api/${action}`, { method: "POST", body: JSON.stringify(payload) });
+    showNotice(`${action === "cancel" ? "Cancellation" : action} accepted by Schwab${result.broker_order_id ? ` for order ${result.broker_order_id}` : ""}.`);
+  }
   catch (error) { showNotice(error.message, true); }
 }
 
 async function selectExpiration() {
+  invalidateLivePreview();
   selectedShort = null; selectedLong = null; selectedAction = "OPEN"; selectedMetrics = null;
   await api("/api/selection", { method: "POST", body: JSON.stringify({ expiration: ui.expiration.value, option_type: "CALL" }) });
   await refresh();
@@ -552,8 +605,10 @@ function showNotice(message, error = false) { ui.notice.textContent = message; u
 function hideNotice() { ui.notice.className = "notice hidden"; }
 
 ui.expiration.addEventListener("change", selectExpiration);
-ui.quantity.addEventListener("input", calculateRisk); ui.credit.addEventListener("input", calculateRisk);
-ui.preview.addEventListener("click", preview); ui.submit.addEventListener("click", () => lockedAction("submit", orderPayload()));
+ui.quantity.addEventListener("input", () => { invalidateLivePreview(); calculateRisk(); });
+ui.credit.addEventListener("input", () => { invalidateLivePreview(); calculateRisk(); });
+ui.reviewed.addEventListener("change", () => { if (!ui.reviewed.checked) invalidateLivePreview(); });
+ui.preview.addEventListener("click", preview); ui.submit.addEventListener("click", submitLivePilot);
 ui["columns-button"].addEventListener("click", () => ui["columns-dialog"].showModal());
 ui["filters-button"].addEventListener("click", () => { populateFilters(); ui["filters-dialog"].showModal(); });
 ui["save-filters"].addEventListener("click", (event) => {

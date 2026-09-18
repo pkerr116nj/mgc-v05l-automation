@@ -11,8 +11,10 @@ from typing import Any
 from ..production_link.client import SchwabBrokerHttpClient
 
 
-# This requires a reviewed source change before any Schwab mutation can leave the app.
-LIVE_TRANSMISSION_COMPILED = False
+# Live transmission is compiled only for the deliberately constrained pilot below.
+# Runtime and origin gates remain mandatory.
+LIVE_TRANSMISSION_COMPILED = True
+LIVE_PILOT_QUANTITY = 1
 _OPTION_RE = re.compile(r"^([A-Z0-9.$]{1,6})\s*(\d{6})([CP])(\d{8})$")
 _ALLOWED_ROOTS = {"NDX", "NDXP"}
 
@@ -160,15 +162,21 @@ def build_vertical_order_payload(request: NdxpSpreadRequest) -> dict[str, Any]:
 class LockedSchwabMutationGateway:
     """Implemented broker mutation methods that fail closed until a reviewed pilot unlock."""
 
-    def __init__(self, client: SchwabBrokerHttpClient) -> None:
+    def __init__(self, client: SchwabBrokerHttpClient, *, pilot_requested: bool = False) -> None:
         self._client = client
+        self._pilot_requested = pilot_requested
 
     @property
     def enabled(self) -> bool:
-        return LIVE_TRANSMISSION_COMPILED and os.environ.get("MGC_NDXP_LIVE_TRANSMISSION_ENABLED") == "1"
+        return (
+            LIVE_TRANSMISSION_COMPILED
+            and self._pilot_requested
+            and os.environ.get("MGC_NDXP_LIVE_TRANSMISSION_ENABLED") == "1"
+        )
 
     def submit(self, request: NdxpSpreadRequest) -> dict[str, Any]:
         self._assert_enabled("submission")
+        validate_live_pilot_request(request)
         return self._client.submit_order(request.account_hash, build_vertical_order_payload(request))
 
     def cancel(self, *, account_hash: str, broker_order_id: str) -> dict[str, Any]:
@@ -179,13 +187,7 @@ class LockedSchwabMutationGateway:
 
     def replace(self, *, broker_order_id: str, request: NdxpSpreadRequest) -> dict[str, Any]:
         self._assert_enabled("replacement")
-        if not broker_order_id.strip():
-            raise SpreadValidationError("Replacement requires broker_order_id.")
-        return self._client.replace_order(
-            request.account_hash,
-            broker_order_id.strip(),
-            build_vertical_order_payload(request),
-        )
+        raise TransmissionDisabledError("Order replacement is disabled during the one-contract live pilot.")
 
     def _assert_enabled(self, operation: str) -> None:
         if not LIVE_TRANSMISSION_COMPILED:
@@ -196,6 +198,20 @@ class LockedSchwabMutationGateway:
             raise TransmissionDisabledError(
                 f"Schwab {operation} is runtime-locked. MGC_NDXP_LIVE_TRANSMISSION_ENABLED is not 1."
             )
+        if not self._pilot_requested:
+            raise TransmissionDisabledError(
+                f"Schwab {operation} is launch-locked. Start the terminal with --live-pilot."
+            )
+
+
+def validate_live_pilot_request(request: NdxpSpreadRequest) -> None:
+    """Enforce the one-contract opening envelope for the first live pilot."""
+
+    validate_spread_request(request)
+    if request.action != "OPEN":
+        raise SpreadValidationError("The first live pilot permits opening orders only.")
+    if request.quantity != LIVE_PILOT_QUANTITY:
+        raise SpreadValidationError("The first live pilot is hard-limited to exactly one spread.")
 
 
 def _format_price(value: Decimal) -> str:

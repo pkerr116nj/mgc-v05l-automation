@@ -31,7 +31,15 @@ class NdxpTerminalHandler(BaseHTTPRequestHandler):
 
     def do_GET(self) -> None:  # noqa: N802
         if self.path == "/api/state":
-            self._json(HTTPStatus.OK, self.service.snapshot())
+            snapshot = self.service.snapshot()
+            origin_allowed = self._loopback_client()
+            snapshot["transmission"]["origin_allowed"] = origin_allowed
+            snapshot["transmission"]["effective_enabled"] = bool(
+                snapshot["transmission"]["effective_enabled"] and origin_allowed
+            )
+            if snapshot["transmission"]["launch_requested"] and not origin_allowed:
+                snapshot["transmission"]["label"] = "LIVE PILOT · MARS ONLY"
+            self._json(HTTPStatus.OK, snapshot)
             return
         if self.path == "/api/access-check":
             try:
@@ -67,8 +75,14 @@ class NdxpTerminalHandler(BaseHTTPRequestHandler):
             elif self.path == "/api/selection":
                 result = self.service.update_selection(payload)
             elif self.path == "/api/preview":
-                result = self.service.preview(payload)
+                result = self.service.preview(payload, allow_live_token=self._loopback_client())
             elif self.path in {"/api/submit", "/api/cancel", "/api/replace"}:
+                if not self._loopback_client():
+                    self._json(
+                        HTTPStatus.FORBIDDEN,
+                        {"ok": False, "error": "Broker mutations are permitted only from Mars loopback during the live pilot."},
+                    )
+                    return
                 result = self.service.mutate(self.path.rsplit("/", 1)[-1], payload)
             else:
                 self._json(HTTPStatus.NOT_FOUND, {"ok": False, "error": "Unknown endpoint."})
@@ -83,6 +97,9 @@ class NdxpTerminalHandler(BaseHTTPRequestHandler):
 
     def log_message(self, format: str, *args: Any) -> None:
         return
+
+    def _loopback_client(self) -> bool:
+        return is_loopback_address(self.client_address[0])
 
     def _read_json(self) -> dict[str, Any]:
         length = int(self.headers.get("Content-Length") or 0)
@@ -104,6 +121,10 @@ class NdxpTerminalHandler(BaseHTTPRequestHandler):
         self.wfile.write(data)
 
 
+def is_loopback_address(address: str) -> bool:
+    return address in {"127.0.0.1", "::1"}
+
+
 def run_server(
     *,
     repo_root: Path,
@@ -114,6 +135,7 @@ def run_server(
     databento: bool = False,
     allow_remote_demo: bool = False,
     allow_lan_live: bool = False,
+    live_pilot: bool = False,
 ) -> None:
     loopback = host in {"127.0.0.1", "localhost", "::1"}
     remote_demo = demo and allow_remote_demo
@@ -124,13 +146,17 @@ def run_server(
             "the explicitly read-only --lan-live mode."
         )
     adapter = DemoSchwabAdapter() if demo else (NdxpDatabentoAdapter(repo_root) if databento else None)
-    service = NdxpTerminalService(repo_root, adapter=adapter)
+    if live_pilot and demo:
+        raise ValueError("The live pilot cannot run with demo data.")
+    service = NdxpTerminalService(repo_root, adapter=adapter, live_pilot_requested=live_pilot)
     service.start()
     handler = type("BoundNdxpTerminalHandler", (NdxpTerminalHandler,), {"service": service})
     server = ThreadingHTTPServer((host, port), handler)
     url = f"http://{host}:{server.server_port}/"
     display_url = f"http://<MARS_LAN_IP>:{server.server_port}/" if not loopback else url
-    if remote_demo:
+    if live_pilot:
+        mode = "LAN_SCHWAB_LIVE_PILOT" if lan_live else "SCHWAB_LIVE_PILOT"
+    elif remote_demo:
         mode = "TELEPORT_DEMO"
     elif lan_live:
         mode = "LAN_DATABENTO_SCHWAB_READ_ONLY" if databento else "LAN_SCHWAB_READ_ONLY"
@@ -145,7 +171,7 @@ def run_server(
                 "listen": url,
                 "mode": mode,
                 "schwab_credentials_loaded": not demo,
-                "transmission": "LOCKED",
+                "transmission": "LIVE PILOT · LOOPBACK ONLY" if live_pilot else "LOCKED",
             }
         )
     )
@@ -331,6 +357,11 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Expose the source-locked Schwab or Databento/Schwab read-only terminal on the trusted private LAN.",
     )
+    parser.add_argument(
+        "--live-pilot",
+        action="store_true",
+        help="Request the one-contract live pilot; mutations remain restricted to Mars loopback.",
+    )
     return parser
 
 
@@ -343,6 +374,8 @@ def main(argv: list[str] | None = None) -> int:
         parser.error("--teleport-demo requires --demo; remote live-Schwab access is disabled.")
     if args.lan_live and (args.demo or args.teleport_demo):
         parser.error("--lan-live cannot be combined with a demo mode.")
+    if args.live_pilot and args.demo:
+        parser.error("--live-pilot cannot be combined with --demo.")
     host = "0.0.0.0" if (args.teleport_demo or args.lan_live) and args.host == "127.0.0.1" else args.host
     repo_root = Path(__file__).resolve().parents[3]
     run_server(
@@ -354,5 +387,6 @@ def main(argv: list[str] | None = None) -> int:
         databento=args.databento,
         allow_remote_demo=args.teleport_demo,
         allow_lan_live=args.lan_live,
+        live_pilot=args.live_pilot,
     )
     return 0
