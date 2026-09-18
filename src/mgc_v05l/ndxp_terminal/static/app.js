@@ -215,6 +215,7 @@ function sideGridTemplate() {
 
 function renderChain(chain, spot, analytics = {}) {
   const rows = verticalRows(chain, analytics);
+  const positions = activePositionIndex();
   renderChainCoverage(chain, spot);
   const sideTemplate = sideGridTemplate();
   ui["call-header-table"].style.gridTemplateColumns = sideTemplate;
@@ -252,7 +253,7 @@ function renderChain(chain, spot, analytics = {}) {
     const callItm = row.call && Number(row.call.short.strike) < Number(spot);
     const putItm = row.put && Number(row.put.short.strike) > Number(spot);
     for (const key of visibleColumns) callFragments.push(metricCell(row.call, key, near, "CALL", callOtm, callItm));
-    strikeFragments.push(cell(`${number(row.low, 0)} / ${number(row.high, 0)}`, `strike-cell spread-strikes${near ? " near" : ""}`));
+    strikeFragments.push(positionStrikeCell(row, near, positions));
     for (const key of visibleColumns) putFragments.push(metricCell(row.put, key, near, "PUT", putOtm, putItm));
   }
   if (!rows.length) {
@@ -281,6 +282,35 @@ function renderChain(chain, spot, analytics = {}) {
   if (!chainHorizontalInitialized) {
     requestAnimationFrame(() => { anchorChainPanes(); chainHorizontalInitialized = true; });
   }
+}
+
+function activePositionIndex() {
+  const broker = state?.broker || {};
+  const selectedAccount = broker.selected_account_hash;
+  return new Map((broker.positions || [])
+    .filter((row) => !selectedAccount || row.account_hash === selectedAccount)
+    .map((row) => [String(row.symbol || "").trim().toUpperCase(), row]));
+}
+
+function positionStrikeCell(row, near, positions) {
+  const node = cell(`${number(row.low, 0)} / ${number(row.high, 0)}`, `strike-cell spread-strikes${near ? " near" : ""}`);
+  appendPositionFlag(node, row.call?.short, "short", "call", "low", positions);
+  appendPositionFlag(node, row.call?.long, "long", "call", "high", positions);
+  appendPositionFlag(node, row.put?.long, "long", "put", "low", positions);
+  appendPositionFlag(node, row.put?.short, "short", "put", "high", positions);
+  return node;
+}
+
+function appendPositionFlag(node, contract, direction, side, level, positions) {
+  const position = positions.get(String(contract?.symbol || "").trim().toUpperCase());
+  const quantity = Number(position?.[`${direction}_quantity`] || 0);
+  if (!(quantity > 0)) return;
+  const marker = document.createElement("span");
+  marker.className = `position-flag ${direction} ${side} ${level}`;
+  marker.textContent = "⚑";
+  marker.title = `${direction === "long" ? "Long" : "Short"} ${number(quantity, 0)} · ${contract.symbol}`;
+  marker.setAttribute("aria-label", marker.title);
+  node.append(marker);
 }
 
 function synchronizeChainHeader(side) {

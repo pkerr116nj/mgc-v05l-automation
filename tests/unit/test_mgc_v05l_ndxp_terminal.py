@@ -684,6 +684,8 @@ def test_mobile_chain_keeps_strikes_fixed_and_allows_positive_midpoint_sell() ->
     assert ".metric.itm { background:var(--call); }" in css
     assert ".bid-action.itm { background:#512029; }" in css
     assert ".ask-action.itm { background:#174d35; }" in css
+    assert ".position-flag.long { color:#54e990; }" in css
+    assert ".position-flag.short { color:#ff656d; }" in css
     assert 'ui["call-scroll"].scrollLeft' in javascript
     assert 'ui["put-scroll"].scrollLeft' in javascript
     assert "const tableLeft = headerTable.getBoundingClientRect().left" in javascript
@@ -703,6 +705,9 @@ def test_mobile_chain_keeps_strikes_fixed_and_allows_positive_midpoint_sell() ->
     assert 'document.documentElement.style.setProperty("--topbar-height"' in javascript
     assert 'const callItm = row.call && Number(row.call.short.strike) < Number(spot)' in javascript
     assert 'const putItm = row.put && Number(row.put.short.strike) > Number(spot)' in javascript
+    assert 'appendPositionFlag(node, row.call?.short, "short", "call", "low", positions)' in javascript
+    assert 'appendPositionFlag(node, row.put?.long, "long", "put", "low", positions)' in javascript
+    assert 'marker.textContent = "⚑"' in javascript
     assert "button.disabled = opening ? !positiveMidpoint" in javascript
     assert 'value="20"' in html
     assert "`${payload.action} ${payload.quantity}" in javascript
