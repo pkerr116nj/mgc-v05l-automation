@@ -488,7 +488,13 @@ def test_mobile_chain_keeps_strikes_fixed_and_allows_positive_midpoint_sell() ->
     assert 'id="chain-header-frame"' in html
     assert 'id="call-header-table"' in html
     assert 'id="put-header-table"' in html
-    assert "grid-template-columns:minmax(0,1fr) 110px minmax(0,1fr)" in css
+    assert "--strike-gutter-width:146px" in css
+    assert "grid-template-columns:minmax(0,1fr) var(--strike-gutter-width) minmax(0,1fr)" in css
+    assert ".side-grid { width:max-content; }" in css
+    assert ".call-side-scroll .side-grid,#call-header-table { margin-left:auto; }" in css
+    assert ".spread-grid.strike-grid" in css
+    assert "width:100%; min-width:0; max-width:100%; overflow:hidden" in css
+    assert "position:-webkit-sticky; position:sticky" in css
     assert "position:sticky; top:var(--topbar-height)" in css
     assert ".metric.itm { background:var(--call); }" in css
     assert ".bid-action.itm { background:#512029; }" in css
