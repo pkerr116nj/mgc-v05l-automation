@@ -501,7 +501,9 @@ def test_mobile_chain_keeps_strikes_fixed_and_allows_positive_midpoint_sell() ->
     assert ".ask-action.itm { background:#174d35; }" in css
     assert 'ui["call-scroll"].scrollLeft' in javascript
     assert 'ui["put-scroll"].scrollLeft' in javascript
-    assert 'header.offsetLeft + header.offsetWidth - pane.clientWidth' in javascript
+    assert "const tableLeft = headerTable.getBoundingClientRect().left" in javascript
+    assert "const contentLeft = headerRect.left - tableLeft" in javascript
+    assert "contentLeft + headerRect.width - pane.clientWidth" in javascript
     assert 'document.documentElement.style.setProperty("--topbar-height"' in javascript
     assert 'const callItm = row.call && Number(row.call.short.strike) < Number(spot)' in javascript
     assert 'const putItm = row.put && Number(row.put.short.strike) > Number(spot)' in javascript

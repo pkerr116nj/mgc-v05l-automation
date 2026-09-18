@@ -268,12 +268,16 @@ function synchronizeChainHeader(side) {
 
 function snapChainPane(side) {
   const pane = ui[`${side}-scroll`];
-  const headerCells = [...ui[`${side}-header-table`].querySelectorAll(".column-head")];
+  const headerTable = ui[`${side}-header-table`];
+  const headerCells = [...headerTable.querySelectorAll(".column-head")];
+  const tableLeft = headerTable.getBoundingClientRect().left;
   const maximum = Math.max(0, pane.scrollWidth - pane.clientWidth);
   const targets = headerCells.map((header) => {
+    const headerRect = header.getBoundingClientRect();
+    const contentLeft = headerRect.left - tableLeft;
     const raw = side === "call"
-      ? header.offsetLeft + header.offsetWidth - pane.clientWidth
-      : header.offsetLeft;
+      ? contentLeft + headerRect.width - pane.clientWidth
+      : contentLeft;
     return Math.max(0, Math.min(maximum, raw));
   });
   if (!targets.length) return;
