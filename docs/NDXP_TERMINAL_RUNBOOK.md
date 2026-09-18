@@ -29,9 +29,9 @@ The September 14 Thinkorswim iPad references establish these initial chain requi
 - each row represents a selectable 10-point vertical rather than an unpaired contract;
 - valid OTM call-credit spreads above spot and OTM put-credit spreads below spot receive a subtle side-specific tint while the spread straddling spot retains the stronger full-row highlight;
 - the chain provides at least 25 shared call-and-put strike levels below spot and 25 above spot, with an on-screen coverage warning if Schwab returns less;
-- the page scrolls vertically through strikes and the chain scrolls horizontally through fields;
+- the page scrolls vertically through strikes; call and put fields scroll horizontally in separate touch panes while the center strike column remains fixed;
 - quote fields, net and percentage change, Greeks, IV, volume, and open interest are selectable display columns;
-- tapping a positive bid launches a sell-to-open credit ticket and tapping a positive ask launches the inverse buy-to-close debit ticket;
+- tapping a bid launches a sell-to-open credit ticket whenever the spread midpoint is positive, including when an after-hours natural bid is non-positive; tapping a positive ask launches the inverse buy-to-close debit ticket;
 - both opening and closing tickets default their limit price to the displayed spread mid, not the touched bid or ask;
 - ticket quantity defaults to 20 contracts; and
 - until a Thinkorswim order-entry screenshot is available, the ticket uses the terminal's explicit risk and preview layout rather than guessing at Thinkorswim's precise order-entry presentation.

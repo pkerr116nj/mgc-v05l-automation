@@ -474,3 +474,18 @@ def test_lan_live_allows_schwab_only_and_rejects_demo(monkeypatch: pytest.Monkey
     with pytest.raises(SystemExit) as demo_conflict:
         main(["--demo", "--lan-live"])
     assert demo_conflict.value.code == 2
+
+
+def test_mobile_chain_keeps_strikes_fixed_and_allows_positive_midpoint_sell() -> None:
+    static_root = Path(__file__).parents[2] / "src" / "mgc_v05l" / "ndxp_terminal" / "static"
+    html = (static_root / "index.html").read_text(encoding="utf-8")
+    css = (static_root / "styles.css").read_text(encoding="utf-8")
+    javascript = (static_root / "app.js").read_text(encoding="utf-8")
+
+    assert 'id="call-scroll"' in html
+    assert 'id="strike-table"' in html
+    assert 'id="put-scroll"' in html
+    assert "grid-template-columns:minmax(0,1fr) 110px minmax(0,1fr)" in css
+    assert 'ui["call-scroll"].scrollLeft' in javascript
+    assert 'ui["put-scroll"].scrollLeft' in javascript
+    assert "button.disabled = opening ? !positiveMidpoint" in javascript

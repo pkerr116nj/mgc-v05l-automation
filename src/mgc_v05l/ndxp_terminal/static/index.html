@@ -59,8 +59,14 @@
           <span id="chain-coverage" class="chain-coverage status-warn">Checking chain depth…</span>
           <span class="touch-hint">Tap bid to sell/open · tap ask to buy/close · tickets default to mid</span>
         </div>
-        <div id="chain-scroll" class="chain-scroll">
-          <div id="chain-table" class="spread-grid mono" role="table" aria-label="Calls and puts vertical spread quotes"></div>
+        <div id="chain-frame" class="chain-frame mono" role="group" aria-label="Calls and puts vertical spread quotes">
+          <div id="call-scroll" class="chain-side-scroll call-side-scroll">
+            <div id="call-table" class="spread-grid side-grid" role="table" aria-label="Call vertical spread quotes"></div>
+          </div>
+          <div id="strike-table" class="spread-grid strike-grid" role="table" aria-label="Vertical spread strikes"></div>
+          <div id="put-scroll" class="chain-side-scroll put-side-scroll">
+            <div id="put-table" class="spread-grid side-grid" role="table" aria-label="Put vertical spread quotes"></div>
+          </div>
         </div>
       </section>
 

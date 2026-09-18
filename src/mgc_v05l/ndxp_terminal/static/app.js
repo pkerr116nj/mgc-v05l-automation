@@ -20,6 +20,7 @@ let selectedMetrics = null;
 let lastHeartbeat = performance.now();
 let lastStateReceived = performance.now();
 let centeredExpiration = null;
+let chainHorizontalInitialized = false;
 
 const money = (value) => value == null || !Number.isFinite(Number(value)) ? "—" : new Intl.NumberFormat("en-US", { style: "currency", currency: "USD", maximumFractionDigits: 0 }).format(Number(value));
 const number = (value, digits = 2) => value == null || !Number.isFinite(Number(value)) ? "—" : Number(value).toLocaleString("en-US", { minimumFractionDigits: digits, maximumFractionDigits: digits });
@@ -188,42 +189,64 @@ function spreadMetrics(short, long, model = null) {
   };
 }
 
-function gridTemplate() {
-  const side = visibleColumns.map((key) => key === "open_interest" ? "94px" : "78px").join(" ");
-  return `${side} 96px ${side}`;
+function sideGridTemplate() {
+  return visibleColumns.map((key) => key === "open_interest" ? "94px" : "78px").join(" ");
 }
 
 function renderChain(chain, spot, analytics = {}) {
   const rows = verticalRows(chain, analytics);
   renderChainCoverage(chain, spot);
-  ui["chain-table"].style.gridTemplateColumns = gridTemplate();
-  const fragments = [];
+  const sideTemplate = sideGridTemplate();
+  ui["call-table"].style.gridTemplateColumns = sideTemplate;
+  ui["put-table"].style.gridTemplateColumns = sideTemplate;
+  ui["strike-table"].style.gridTemplateColumns = "100%";
+  const callFragments = [];
+  const strikeFragments = [];
+  const putFragments = [];
   const callGroup = cell("CALLS", "group-head calls-head"); callGroup.style.gridColumn = `span ${visibleColumns.length}`;
   const strikeGroup = cell("10-POINT", "group-head strike-head");
   const putGroup = cell("PUTS", "group-head puts-head"); putGroup.style.gridColumn = `span ${visibleColumns.length}`;
-  fragments.push(callGroup, strikeGroup, putGroup);
-  for (const side of ["call", "strike", "put"]) {
-    const columns = side === "strike" ? [["strike", "Strikes"]] : visibleColumns.map((key) => columnDefinitions.find(([candidate]) => candidate === key));
-    for (const [, label] of columns) fragments.push(cell(label, `column-head ${side === "strike" ? "strike-cell" : ""}`));
+  callFragments.push(callGroup);
+  strikeFragments.push(strikeGroup);
+  putFragments.push(putGroup);
+  for (const key of visibleColumns) {
+    const [, label] = columnDefinitions.find(([candidate]) => candidate === key);
+    callFragments.push(cell(label, "column-head"));
+    putFragments.push(cell(label, "column-head"));
   }
+  strikeFragments.push(cell("Strikes", "column-head strike-cell"));
   for (const row of rows) {
     const near = Number.isFinite(Number(spot)) && row.low <= spot && row.high >= spot;
     const callOtm = row.call && Number(row.call.short.strike) > Number(spot);
     const putOtm = row.put && Number(row.put.short.strike) < Number(spot);
-    for (const key of visibleColumns) fragments.push(metricCell(row.call, key, near, "CALL", callOtm));
-    fragments.push(cell(`${number(row.low, 0)} / ${number(row.high, 0)}`, `strike-cell spread-strikes${near ? " near" : ""}`));
-    for (const key of visibleColumns) fragments.push(metricCell(row.put, key, near, "PUT", putOtm));
+    for (const key of visibleColumns) callFragments.push(metricCell(row.call, key, near, "CALL", callOtm));
+    strikeFragments.push(cell(`${number(row.low, 0)} / ${number(row.high, 0)}`, `strike-cell spread-strikes${near ? " near" : ""}`));
+    for (const key of visibleColumns) putFragments.push(metricCell(row.put, key, near, "PUT", putOtm));
   }
   if (!rows.length) {
-    const empty = cell("Waiting for the selected option market…", "chain-empty");
-    empty.style.gridColumn = "1 / -1"; fragments.push(empty);
+    const callEmpty = cell("Waiting for calls…", "chain-empty");
+    const putEmpty = cell("Waiting for puts…", "chain-empty");
+    callEmpty.style.gridColumn = "1 / -1";
+    putEmpty.style.gridColumn = "1 / -1";
+    callFragments.push(callEmpty);
+    strikeFragments.push(cell("—", "chain-empty strike-cell"));
+    putFragments.push(putEmpty);
   }
-  ui["chain-table"].replaceChildren(...fragments);
+  ui["call-table"].replaceChildren(...callFragments);
+  ui["strike-table"].replaceChildren(...strikeFragments);
+  ui["put-table"].replaceChildren(...putFragments);
   renderCandidateCount(rows, analytics);
   const expiration = state?.market?.selected_expiration || "";
   if (rows.length && expiration !== centeredExpiration) {
     centeredExpiration = expiration;
-    requestAnimationFrame(() => ui["chain-table"].querySelector(".spread-strikes.near")?.scrollIntoView({ block: "center", inline: "nearest" }));
+    requestAnimationFrame(() => ui["strike-table"].querySelector(".spread-strikes.near")?.scrollIntoView({ block: "center", inline: "nearest" }));
+  }
+  if (!chainHorizontalInitialized) {
+    requestAnimationFrame(() => {
+      ui["call-scroll"].scrollLeft = ui["call-scroll"].scrollWidth - ui["call-scroll"].clientWidth;
+      ui["put-scroll"].scrollLeft = 0;
+      chainHorizontalInitialized = true;
+    });
   }
 }
 
@@ -265,8 +288,15 @@ function metricCell(spread, key, near, side, otm = false) {
     button.className = `metric ${opening ? "bid-action" : "ask-action"}${near ? " near" : ""}${otm ? " otm" : ""}${opening && opportunity.qualified ? " qualified" : ""}${opening && opportunity.preferred ? " preferred" : ""}${opening && spread.metrics?.credit_band === "ELEVATED" ? " elevated" : ""}`;
     button.textContent = formatted;
     const moneyness = otm ? " · OTM" : "";
-    button.title = opening ? `Sell to open ${side.toLowerCase()} credit spread${moneyness} · ${opportunity.label}` : `Buy to close ${side.toLowerCase()} credit spread${moneyness}`;
-    button.disabled = value == null || Number(value) <= 0;
+    const midpoint = Number(spread.metrics?.mark);
+    const positiveMidpoint = Number.isFinite(midpoint) && midpoint > 0;
+    const naturalBidWarning = opening && Number(value) <= 0
+      ? ` · natural bid ${number(value)} is non-positive; midpoint ticket ${number(midpoint)}`
+      : "";
+    button.title = opening
+      ? `Sell to open ${side.toLowerCase()} credit spread${moneyness} · ${opportunity.label}${naturalBidWarning}`
+      : `Buy to close ${side.toLowerCase()} credit spread${moneyness}`;
+    button.disabled = opening ? !positiveMidpoint : value == null || Number(value) <= 0;
     button.addEventListener("click", () => openTicket(opening ? "OPEN" : "CLOSE", side, spread));
     button.setAttribute("role", "cell");
     return button;
