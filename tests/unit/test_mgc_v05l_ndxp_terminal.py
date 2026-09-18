@@ -9,6 +9,8 @@ from zoneinfo import ZoneInfo
 
 import pytest
 
+import mgc_v05l.ndxp_terminal.server as server_module
+
 from mgc_v05l.ndxp_terminal.analytics import derive_expiration_analytics
 from mgc_v05l.ndxp_terminal.databento import DatabentoOpraFeed, NdxpDatabentoAdapter
 from mgc_v05l.ndxp_terminal.diagnostics import classify_diagnostics
@@ -460,10 +462,15 @@ def test_teleport_demo_requires_demo_flag() -> None:
     assert exc_info.value.code == 2
 
 
-def test_lan_live_requires_databento_and_rejects_demo() -> None:
-    with pytest.raises(SystemExit) as missing_databento:
-        main(["--lan-live"])
-    assert missing_databento.value.code == 2
+def test_lan_live_allows_schwab_only_and_rejects_demo(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured: dict[str, object] = {}
+    monkeypatch.setattr(server_module, "run_server", lambda **kwargs: captured.update(kwargs))
+
+    main(["--lan-live", "--no-browser"])
+    assert captured["databento"] is False
+    assert captured["allow_lan_live"] is True
+    assert captured["host"] == "0.0.0.0"
+
     with pytest.raises(SystemExit) as demo_conflict:
-        main(["--demo", "--databento", "--lan-live"])
+        main(["--demo", "--lan-live"])
     assert demo_conflict.value.code == 2

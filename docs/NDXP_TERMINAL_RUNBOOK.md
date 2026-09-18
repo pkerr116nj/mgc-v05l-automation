@@ -138,10 +138,10 @@ bash scripts/run_ndxp_terminal.sh --databento --no-browser
 By default it listens only on `127.0.0.1:8810`. At home, the explicit source-locked LAN review mode can instead be opened normally from a Mac or iPad on the trusted private network:
 
 ```bash
-bash scripts/run_ndxp_terminal.sh --databento --lan-live --no-browser
+bash scripts/run_ndxp_terminal.sh --lan-live --no-browser
 ```
 
-Open `http://<MARS_LAN_IP>:8810/`. No SSH tunnel or router port-forward is required. This mode exposes read-only Schwab account truth to devices already on the private LAN, while all broker mutations remain source-locked. It is not suitable for public exposure; authenticated HTTPS remains required before enabling live trading or internet-facing access.
+Open `http://<MARS_LAN_IP>:8810/`. No SSH tunnel or router port-forward is required. This mode uses Schwab for NDX spot, NDXP option-chain quotes, positions, and working orders. It exposes read-only Schwab account truth to devices already on the private LAN, while all broker mutations remain source-locked. Add `--databento` only when an OPRA entitlement is available and Databento quotes are desired. It is not suitable for public exposure; authenticated HTTPS remains required before enabling live trading or internet-facing access.
 
 ## Roaming preview over UniFi Teleport
 
@@ -153,7 +153,7 @@ On Mars, start the preview with:
 bash scripts/run_ndxp_terminal.sh --demo --teleport-demo --no-browser
 ```
 
-This explicit combination listens on all Mars interfaces. The server refuses a remote bind for live Schwab mode or when either demo safety flag is missing.
+This explicit combination listens on all Mars interfaces. Live Schwab mode likewise refuses a non-loopback bind unless the operator explicitly supplies `--lan-live`.
 
 Find Mars's LAN address in the UniFi console, or on Mars with:
 
