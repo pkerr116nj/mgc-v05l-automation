@@ -24,6 +24,7 @@ let lastStateReceived = performance.now();
 let centeredExpiration = null;
 let chainHorizontalInitialized = false;
 const chainSnapTimers = new WeakMap();
+const workingOrderDrafts = new Map();
 let chainResizeTimer = null;
 let chainViewportWidth = window.innerWidth;
 
@@ -114,7 +115,7 @@ function render() {
   renderAnalytics(market.analytics || {});
   renderChain(market.selected_chain || {}, market.spot, market.analytics || {});
   renderPositions(broker.positions || []);
-  renderOrders(broker.working_orders || []);
+  renderOrders(broker.working_orders || [], broker.recent_orders || []);
   renderDiagnostics(diagnostics);
   calculateRisk();
   const errors = Object.values(state.errors || {}).filter(Boolean);
@@ -446,7 +447,7 @@ function opportunityState(metrics) {
   };
 }
 
-function openTicket(action, side, spread) {
+function openTicket(action, side, spread, requestedQuantity = null) {
   livePreviewToken = null;
   selectedAction = action;
   selectedMetrics = spread.metrics;
@@ -459,13 +460,29 @@ function openTicket(action, side, spread) {
   ui["long-instruction"].textContent = opening ? "BUY TO OPEN" : "SELL TO CLOSE";
   ui["short-leg"].textContent = `${selectedShort.symbol} · ${number(selectedShort.strike, 0)}`;
   ui["long-leg"].textContent = `${selectedLong.symbol} · ${number(selectedLong.strike, 0)}`;
-  ui.quantity.value = "20";
+  const heldQuantity = action === "CLOSE" ? heldSpreadQuantity(spread) : 0;
+  ui.quantity.value = String(requestedQuantity || heldQuantity || 20);
   ui.credit.value = Math.max(0.05, Number(spread.metrics.mark || 0)).toFixed(2);
-  ui.reviewed.checked = false;
   ui["preview-result"].textContent = `${opening ? "Opening credit" : "Closing debit"} ticket constructed at the displayed mid. Review before building the Schwab payload.`;
   calculateRisk();
   renderTransmissionControl();
   ui["ticket-dialog"].showModal();
+}
+
+function heldSpreadQuantity(spread) {
+  const positions = activePositionIndex();
+  const shortPosition = positions.get(String(spread?.short?.symbol || "").trim().toUpperCase());
+  const longPosition = positions.get(String(spread?.long?.symbol || "").trim().toUpperCase());
+  return Math.min(
+    Number(shortPosition?.short_quantity || 0),
+    Number(longPosition?.long_quantity || 0),
+  );
+}
+
+function adjustPriceInput(input, increment) {
+  const current = Number(input.value || 0);
+  input.value = Math.min(9.99, Math.max(0.01, current + Number(increment))).toFixed(2);
+  input.dispatchEvent(new Event("input", { bubbles: true }));
 }
 
 function calculateRisk() {
@@ -504,7 +521,6 @@ function invalidateLivePreview() {
 
 async function preview() {
   if (!selectedShort || !selectedLong) return showNotice("Tap a call or put bid first.", true);
-  if (!ui.reviewed.checked) return showNotice("Review the order details and tick the confirmation box before building the preview.", true);
   try {
     const result = await api("/api/preview", { method: "POST", body: JSON.stringify(orderPayload()) });
     livePreviewToken = result.preview_token || null;
@@ -539,25 +555,140 @@ async function submitLiveOrder() {
 function renderPositions(rows) {
   if (!rows.length) { ui.positions.className = "empty"; ui.positions.textContent = "No NDX/NDXP positions in current Schwab account truth."; return; }
   ui.positions.className = "";
-  ui.positions.replaceChildren(...rows.map((row) => dataRow(row.symbol, `${row.long_quantity || 0} long · ${row.short_quantity || 0} short · avg ${row.average_price ?? "—"}`)));
+  const positions = activePositionIndex();
+  const matchedSymbols = new Set();
+  const cards = [];
+  for (const row of verticalRows(state?.market?.selected_chain || {}, state?.market?.analytics || {})) {
+    for (const [side, spread] of [["CALL", row.call], ["PUT", row.put]]) {
+      if (!spread) continue;
+      const quantity = heldSpreadQuantity(spread);
+      if (!(quantity > 0)) continue;
+      const shortSymbol = String(spread.short.symbol || "").trim().toUpperCase();
+      const longSymbol = String(spread.long.symbol || "").trim().toUpperCase();
+      const shortPosition = positions.get(shortSymbol);
+      const longPosition = positions.get(longSymbol);
+      matchedSymbols.add(shortSymbol); matchedSymbols.add(longSymbol);
+      const averageCredit = Number(shortPosition?.average_price) - Number(longPosition?.average_price);
+      const node = document.createElement("div"); node.className = "position-card";
+      const head = document.createElement("div"); head.className = "order-card-head";
+      const title = document.createElement("strong");
+      title.textContent = `${side} ${number(spread.short.strike, 0)} / ${number(spread.long.strike, 0)} · ${number(quantity, 0)} spreads`;
+      const mark = document.createElement("span"); mark.className = "order-status"; mark.textContent = `MARK ${number(spread.metrics.mark)}`;
+      head.append(title, mark);
+      const detail = document.createElement("small"); detail.className = "order-detail";
+      detail.textContent = `Average opening credit ${Number.isFinite(averageCredit) ? number(averageCredit) : "—"} · ${spread.short.symbol} / ${spread.long.symbol}`;
+      const actions = document.createElement("div"); actions.className = "actions";
+      const close = document.createElement("button"); close.textContent = "Close at current mid";
+      close.addEventListener("click", () => openTicket("CLOSE", side, spread, quantity));
+      actions.append(close); node.append(head, detail, actions); cards.push(node);
+    }
+  }
+  for (const row of rows) {
+    if (!matchedSymbols.has(String(row.symbol || "").trim().toUpperCase())) {
+      cards.push(dataRow(row.symbol, `${row.long_quantity || 0} long · ${row.short_quantity || 0} short · avg ${row.average_price ?? "—"}`));
+    }
+  }
+  ui.positions.replaceChildren(...cards);
 }
 
-function renderOrders(rows) {
-  if (!rows.length) { ui.orders.className = "empty"; ui.orders.textContent = "No working NDX/NDXP orders."; return; }
+function renderOrders(rows, recentRows = []) {
+  if (document.activeElement?.matches("#orders input")) return;
+  if (!rows.length && !recentRows.length) { workingOrderDrafts.clear(); ui.orders.className = "empty"; ui.orders.textContent = "No recent NDX/NDXP orders."; return; }
   ui.orders.className = "";
-  ui.orders.replaceChildren(...rows.map((row) => {
-    const node = dataRow(`#${row.order_id} · ${row.order_type} ${row.price ?? ""}`, row.legs.map((leg) => `${leg.instruction} ${leg.quantity} ${leg.symbol}`).join(" · "));
-    const actions = document.createElement("div"); actions.className = "actions";
-    const cancel = document.createElement("button");
-    const liveLocal = Boolean(state?.transmission?.effective_enabled);
-    cancel.textContent = liveLocal ? "Cancel order" : "Cancel (locked)";
-    cancel.disabled = !liveLocal;
-    cancel.addEventListener("click", () => {
-      if (window.confirm(`Cancel Schwab order ${row.order_id}?`)) lockedAction("cancel", { account_hash: ui.account.value, broker_order_id: row.order_id });
-    });
-    const replace = document.createElement("button"); replace.textContent = "Replace (disabled)"; replace.disabled = true;
-    actions.append(cancel, replace); node.appendChild(actions); return node;
-  }));
+  const activeIds = new Set(rows.map((row) => row.order_id));
+  for (const orderId of workingOrderDrafts.keys()) if (!activeIds.has(orderId)) workingOrderDrafts.delete(orderId);
+  const activity = recentRows.filter((row) => !activeIds.has(row.order_id));
+  ui.orders.replaceChildren(...rows.map(workingOrderCard), ...activity.map(recentOrderCard));
+}
+
+function recentOrderCard(row) {
+  const node = document.createElement("div"); node.className = "working-order-card recent-order-card";
+  const head = document.createElement("div"); head.className = "order-card-head";
+  const title = document.createElement("strong"); title.textContent = `#${row.order_id} · ${row.action || row.order_type || "ORDER"}`;
+  const status = document.createElement("span");
+  const statusText = String(row.status || "UNKNOWN").toUpperCase();
+  status.className = `order-status order-status-${statusText.toLowerCase().replaceAll("_", "-")}`;
+  status.textContent = statusText;
+  head.append(title, status);
+  const detail = document.createElement("small"); detail.className = "order-detail";
+  detail.textContent = row.legs.map((leg) => `${leg.instruction} ${leg.quantity} ${leg.symbol}`).join(" · ");
+  const timing = document.createElement("small"); timing.className = "order-detail";
+  const timestamp = row.close_time || row.entered_time;
+  const fill = row.filled_quantity != null ? ` · filled ${number(row.filled_quantity, 0)}` : "";
+  timing.textContent = `${timestamp ? new Date(timestamp).toLocaleString() : "Time unavailable"}${fill}`;
+  node.append(head, detail, timing);
+  return node;
+}
+
+function workingOrderCard(row) {
+  const draft = workingOrderDrafts.get(row.order_id) || {};
+  const node = document.createElement("div"); node.className = "working-order-card";
+  const head = document.createElement("div"); head.className = "order-card-head";
+  const title = document.createElement("strong"); title.textContent = `#${row.order_id} · ${row.action || row.order_type || "ORDER"}`;
+  const status = document.createElement("span"); status.className = "order-status"; status.textContent = row.status || "WORKING";
+  head.append(title, status);
+  const detail = document.createElement("small"); detail.className = "order-detail";
+  detail.textContent = row.legs.map((leg) => `${leg.instruction} ${leg.quantity} ${leg.symbol}`).join(" · ");
+  const entered = document.createElement("small"); entered.className = "order-detail";
+  entered.textContent = row.entered_time ? `Entered ${new Date(row.entered_time).toLocaleString()}` : "";
+  const fields = document.createElement("div"); fields.className = "inline-order-fields";
+  const quantityLabel = document.createElement("label"); quantityLabel.textContent = "Quantity";
+  const quantity = document.createElement("input"); quantity.type = "number"; quantity.min = "1"; quantity.max = "100"; quantity.value = draft.quantity ?? row.quantity ?? "";
+  quantityLabel.append(quantity);
+  const priceLabel = document.createElement("label"); priceLabel.textContent = row.action === "CLOSE" ? "Net debit" : "Net credit";
+  const price = document.createElement("input"); price.type = "number"; price.min = "0.01"; price.max = "9.99"; price.step = "0.05"; price.value = draft.price ?? Number(row.price || 0).toFixed(2);
+  priceLabel.append(price);
+  const preserveDraft = () => workingOrderDrafts.set(row.order_id, { quantity: quantity.value, price: price.value });
+  quantity.addEventListener("input", preserveDraft); price.addEventListener("input", preserveDraft);
+  const actions = document.createElement("div"); actions.className = "actions";
+  const live = Boolean(state?.transmission?.effective_enabled);
+  const update = document.createElement("button"); update.textContent = live ? "Update order" : "Update (locked)";
+  update.disabled = !live || !row.editable;
+  update.addEventListener("click", async () => {
+    update.disabled = true;
+    const result = await replaceWorkingOrder(row, quantity, price);
+    if (!result) update.disabled = !live || !row.editable;
+  });
+  const cancel = document.createElement("button"); cancel.textContent = live ? "Cancel" : "Cancel (locked)";
+  cancel.disabled = !live;
+  cancel.addEventListener("click", async () => {
+    cancel.disabled = true;
+    workingOrderDrafts.delete(row.order_id);
+    const result = await lockedAction("cancel", { account_hash: ui.account.value, broker_order_id: row.order_id });
+    if (!result) cancel.disabled = !live;
+  });
+  actions.append(update, cancel); fields.append(quantityLabel, priceLabel, actions);
+  const priceSteps = document.createElement("div"); priceSteps.className = "inline-price-steps";
+  for (const step of [-0.25, -0.10, -0.05, 0.05, 0.10, 0.25]) {
+    const button = document.createElement("button"); button.type = "button";
+    button.textContent = `${step > 0 ? "+" : "−"}${Math.abs(step).toFixed(2)}`;
+    button.addEventListener("click", () => { adjustPriceInput(price, step); preserveDraft(); });
+    priceSteps.append(button);
+  }
+  node.append(head, detail, entered, fields, priceSteps);
+  return node;
+}
+
+async function replaceWorkingOrder(row, quantityInput, priceInput) {
+  const quantity = Number(quantityInput.value);
+  const price = Number(priceInput.value);
+  if (!row.editable || !Number.isInteger(quantity) || quantity < 1 || quantity > 100 || !(price > 0 && price < 10)) {
+    showNotice("Enter a whole-number quantity from 1–100 and a valid net price below 10.00.", true);
+    return null;
+  }
+  const result = await lockedAction("replace", {
+    account_hash: ui.account.value,
+    broker_order_id: row.order_id,
+    short_symbol: row.short_symbol,
+    long_symbol: row.long_symbol,
+    quantity,
+    limit_price: price.toFixed(2),
+    action: row.action,
+    duration: "DAY",
+    session: "NORMAL",
+  });
+  if (result) workingOrderDrafts.delete(row.order_id);
+  return result;
 }
 
 function dataRow(title, detail) {
@@ -583,9 +714,12 @@ function renderDiagnostics(d) {
 async function lockedAction(action, payload) {
   try {
     const result = await api(`/api/${action}`, { method: "POST", body: JSON.stringify(payload) });
-    showNotice(`${action === "cancel" ? "Cancellation" : action} accepted by Schwab${result.broker_order_id ? ` for order ${result.broker_order_id}` : ""}.`);
+    const label = action === "cancel" ? "Cancellation" : action === "replace" ? "Order update" : action;
+    showNotice(`${label} accepted by Schwab${result.broker_order_id ? ` for order ${result.broker_order_id}` : ""}.`);
+    await refresh();
+    return result;
   }
-  catch (error) { showNotice(error.message, true); }
+  catch (error) { showNotice(`${error.message} Reconcile the Schwab order list before trying again.`, true); return null; }
 }
 
 async function selectExpiration() {
@@ -637,7 +771,9 @@ function hideNotice() { ui.notice.className = "notice hidden"; }
 ui.expiration.addEventListener("change", selectExpiration);
 ui.quantity.addEventListener("input", () => { invalidateLivePreview(); calculateRisk(); });
 ui.credit.addEventListener("input", () => { invalidateLivePreview(); calculateRisk(); });
-ui.reviewed.addEventListener("change", () => { if (!ui.reviewed.checked) invalidateLivePreview(); });
+document.querySelectorAll("[data-ticket-price-step]").forEach((button) => button.addEventListener("click", () => {
+  adjustPriceInput(ui.credit, Number(button.dataset.ticketPriceStep));
+}));
 ui.preview.addEventListener("click", preview); ui.submit.addEventListener("click", submitLiveOrder);
 ui["columns-button"].addEventListener("click", () => ui["columns-dialog"].showModal());
 ui["filters-button"].addEventListener("click", () => { populateFilters(); ui["filters-dialog"].showModal(); });

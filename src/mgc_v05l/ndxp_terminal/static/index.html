@@ -85,7 +85,7 @@
           <div id="positions" class="empty">Waiting for Schwab…</div>
         </section>
         <section id="orders-panel" class="panel">
-          <div class="panel-title"><div><span class="kicker">ORDER CONTROL</span><h2>Working NDX orders</h2></div></div>
+          <div class="panel-title"><div><span class="kicker">ORDER CONTROL</span><h2>NDX order activity</h2></div></div>
           <div id="orders" class="empty">Waiting for Schwab…</div>
         </section>
         <section id="diagnostics-panel" class="panel diagnostics-panel">
@@ -135,6 +135,14 @@
           <label class="field">Quantity<input id="quantity" type="number" inputmode="numeric" min="1" max="100" value="20" /></label>
           <label class="field">Net credit<input id="credit" type="number" inputmode="decimal" min="0.01" max="9.99" step="0.05" placeholder="0.00" /></label>
         </div>
+        <div class="price-step-row" aria-label="Adjust limit price">
+          <button type="button" data-ticket-price-step="-0.25">−0.25</button>
+          <button type="button" data-ticket-price-step="-0.10">−0.10</button>
+          <button type="button" data-ticket-price-step="-0.05">−0.05</button>
+          <button type="button" data-ticket-price-step="0.05">+0.05</button>
+          <button type="button" data-ticket-price-step="0.10">+0.10</button>
+          <button type="button" data-ticket-price-step="0.25">+0.25</button>
+        </div>
         <div class="risk-grid">
           <div><label id="premium-label">Premium</label><strong id="premium">—</strong></div>
           <div><label>Gross width</label><strong id="gross-risk">—</strong></div>
@@ -149,7 +157,6 @@
           <div><label>Target closing debit</label><strong>$1.00–$1.40</strong></div>
           <div><label>Target gross profit</label><strong id="target-profit">—</strong></div>
         </div>
-        <label class="confirm"><input id="reviewed" type="checkbox" /> I reviewed expiration, strikes, quantity, and credit.</label>
         <button id="preview" class="primary">Review Schwab order payload</button>
         <button id="submit" class="danger" disabled>Transmit to Schwab — locked</button>
         <pre id="preview-result" class="preview-result">Tap a displayed bid to construct a spread.</pre>

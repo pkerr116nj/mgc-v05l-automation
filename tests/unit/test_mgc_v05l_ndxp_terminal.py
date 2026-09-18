@@ -156,7 +156,7 @@ class CountingBroker:
 
 class CapturingTruthBroker:
     def __init__(self) -> None:
-        self.order_kwargs: dict = {}
+        self.order_calls: list[dict] = []
 
     def list_account_numbers(self) -> list[dict]:
         return [{"accountNumber": "masked", "hashValue": "hash-1"}]
@@ -167,7 +167,7 @@ class CapturingTruthBroker:
 
     def get_orders(self, account_hash: str, **kwargs) -> list[dict]:
         assert account_hash == "hash-1"
-        self.order_kwargs = kwargs
+        self.order_calls.append(kwargs)
         return []
 
 
@@ -179,10 +179,12 @@ def test_broker_truth_supplies_required_schwab_order_time_window(tmp_path: Path)
     snapshot = adapter.fetch_broker_truth()
 
     assert snapshot["selected_account_hash"] == "hash-1"
-    assert adapter.broker.order_kwargs["status"] == "WORKING"
-    assert adapter.broker.order_kwargs["max_results"] == 100
-    from_value = adapter.broker.order_kwargs["from_entered_time"]
-    to_value = adapter.broker.order_kwargs["to_entered_time"]
+    assert len(adapter.broker.order_calls) == 2
+    working_call, recent_call = adapter.broker.order_calls
+    assert working_call["status"] == "WORKING"
+    assert working_call["max_results"] == 100
+    from_value = working_call["from_entered_time"]
+    to_value = working_call["to_entered_time"]
     assert from_value.endswith(".000Z")
     assert to_value.endswith(".000Z")
     from_time = datetime.fromisoformat(from_value.replace("Z", "+00:00"))
@@ -190,6 +192,11 @@ def test_broker_truth_supplies_required_schwab_order_time_window(tmp_path: Path)
     assert from_time.tzinfo == timezone.utc
     assert to_time.tzinfo == timezone.utc
     assert to_time - from_time == timedelta(days=60)
+    assert "status" not in recent_call
+    assert recent_call["max_results"] == 100
+    recent_from = datetime.fromisoformat(recent_call["from_entered_time"].replace("Z", "+00:00"))
+    recent_to = datetime.fromisoformat(recent_call["to_entered_time"].replace("Z", "+00:00"))
+    assert recent_to - recent_from == timedelta(days=1)
 
 
 def test_terminal_defaults_to_confirmed_schwab_ndx_symbol(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -262,20 +269,20 @@ def test_live_trading_requires_both_runtime_and_launch_gates(monkeypatch: pytest
     assert broker.calls == 0
 
 
-def test_live_trading_accepts_valid_quantity_and_close_but_disables_replace(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_live_trading_accepts_valid_quantity_close_and_replace(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("MGC_NDXP_LIVE_TRANSMISSION_ENABLED", "1")
     broker = CountingBroker()
     gateway = LockedSchwabMutationGateway(broker, live_trading_requested=True)
 
-    with pytest.raises(TransmissionDisabledError, match="replacement is disabled"):
-        gateway.replace(broker_order_id="123", request=request(quantity=1, limit_price="9.95"))
-    assert broker.calls == 0
+    replaced = gateway.replace(broker_order_id="123", request=request(quantity=1, limit_price="9.95"))
+    assert replaced["status_code"] == 201
+    assert broker.calls == 1
 
     opened = gateway.submit(request(quantity=20, limit_price="3.75"))
     closed = gateway.submit(request(quantity=20, limit_price="1.25", action="CLOSE"))
     assert opened["broker_order_id"] == "test-order-123"
     assert closed["broker_order_id"] == "test-order-123"
-    assert broker.calls == 2
+    assert broker.calls == 3
 
 
 def test_live_trading_client_and_same_origin_guards() -> None:
@@ -512,6 +519,49 @@ def test_live_trading_uses_exact_single_use_preview_and_selected_account(
     broker = CountingBroker()
     adapter = DemoSchwabAdapter()
     adapter.broker = broker
+    fetch_demo_broker_truth = adapter.fetch_broker_truth
+
+    def fetch_broker_truth_with_working_order() -> dict:
+        truth = fetch_demo_broker_truth()
+        demo_positions = truth["accounts"][0]["securitiesAccount"]["positions"]
+        short_symbol = demo_positions[0]["instrument"]["symbol"]
+        long_symbol = demo_positions[1]["instrument"]["symbol"]
+        truth["working_orders"] = [
+            {
+                "orderId": "working-order-456",
+                "status": "WORKING",
+                "orderType": "NET_CREDIT",
+                "price": 2.0,
+                "enteredTime": datetime.now(timezone.utc).isoformat(),
+                "orderLegCollection": [
+                    {
+                        "instruction": "SELL_TO_OPEN",
+                        "quantity": 20,
+                        "instrument": {"symbol": short_symbol},
+                    },
+                    {
+                        "instruction": "BUY_TO_OPEN",
+                        "quantity": 20,
+                        "instrument": {"symbol": long_symbol},
+                    },
+                ],
+            }
+        ]
+        truth["recent_orders"] = [
+            {
+                "orderId": "filled-order-789",
+                "status": "FILLED",
+                "orderType": "NET_CREDIT",
+                "price": 2.1,
+                "enteredTime": datetime.now(timezone.utc).isoformat(),
+                "closeTime": datetime.now(timezone.utc).isoformat(),
+                "filledQuantity": 20,
+                "orderLegCollection": truth["working_orders"][0]["orderLegCollection"],
+            }
+        ]
+        return truth
+
+    adapter.fetch_broker_truth = fetch_broker_truth_with_working_order
     service = NdxpTerminalService(
         tmp_path,
         adapter=adapter,
@@ -537,6 +587,15 @@ def test_live_trading_uses_exact_single_use_preview_and_selected_account(
             "limit_price": "3.75",
             "action": "OPEN",
         }
+
+        working = snapshot["broker"]["working_orders"][0]
+        assert working["editable"] is True
+        assert working["action"] == "OPEN"
+        assert working["quantity"] == 20
+        recent = snapshot["broker"]["recent_orders"][0]
+        assert recent["status"] == "FILLED"
+        assert recent["filled_quantity"] == 20
+        assert recent["editable"] is False
 
         preview = service.preview(payload, allow_live_token=True)
         assert preview["transmission_enabled"] is True
@@ -569,15 +628,29 @@ def test_live_trading_uses_exact_single_use_preview_and_selected_account(
         assert closed["broker_order_id"] == "test-order-123"
         assert broker.calls == 2
 
+        replace_payload = {
+            "account_hash": "demo-account-hash",
+            "broker_order_id": "working-order-456",
+            "short_symbol": positioned_short["symbol"],
+            "long_symbol": positioned_long["symbol"],
+            "quantity": 20,
+            "limit_price": "2.25",
+            "action": "OPEN",
+        }
+        replaced = service.mutate("replace", replace_payload)
+        assert replaced["broker_order_id"] == "test-order-123"
+        assert broker.calls == 3
+
         cancelled = service.mutate(
             "cancel", {"account_hash": "demo-account-hash", "broker_order_id": "test-order-123"}
         )
         assert cancelled["status_code"] == 201
-        assert broker.calls == 3
+        assert broker.calls == 4
         journal = (tmp_path / "outputs" / "ndxp_terminal" / "mutations.jsonl").read_text(encoding="utf-8")
         assert "SUBMIT_ATTEMPT" in journal
         assert "SUBMIT_ACK" in journal
         assert "CANCEL_ACK" in journal
+        assert "REPLACE_ACK" in journal
         assert "demo-account-hash" not in journal
 
         service.stop()
@@ -710,5 +783,13 @@ def test_mobile_chain_keeps_strikes_fixed_and_allows_positive_midpoint_sell() ->
     assert 'marker.textContent = "⚑"' in javascript
     assert "button.disabled = opening ? !positiveMidpoint" in javascript
     assert 'value="20"' in html
+    assert 'id="reviewed"' not in html
+    assert 'data-ticket-price-step="-0.25"' in html
+    assert 'data-ticket-price-step="0.25"' in html
     assert "`${payload.action} ${payload.quantity}" in javascript
     assert "ORDER ENTRY · LIVE TRADING" in javascript
+    assert "function workingOrderCard(row)" in javascript
+    assert "function recentOrderCard(row)" in javascript
+    assert 'await lockedAction("replace"' in javascript
+    assert 'close.addEventListener("click", () => openTicket("CLOSE"' in javascript
+    assert "window.confirm(`Cancel Schwab order" not in javascript

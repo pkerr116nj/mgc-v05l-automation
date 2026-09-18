@@ -23,6 +23,7 @@ from ..production_link.client import SchwabBrokerHttpClient
 
 NDXP_CHAIN_STRIKE_COUNT = 120
 WORKING_ORDERS_LOOKBACK_DAYS = 60
+RECENT_ORDERS_LOOKBACK_DAYS = 1
 ACCESS_CHECK_QUOTE_SYMBOL = "AAPL"
 EASTERN = ZoneInfo("America/New_York")
 
@@ -113,11 +114,24 @@ class NdxpSchwabAdapter:
             if selected_hash
             else []
         )
+        recent_orders = (
+            self.broker.get_orders(
+                selected_hash,
+                from_entered_time=_schwab_zoned_datetime(
+                    now - timedelta(days=RECENT_ORDERS_LOOKBACK_DAYS)
+                ),
+                to_entered_time=_schwab_zoned_datetime(now),
+                max_results=100,
+            )
+            if selected_hash
+            else []
+        )
         return {
             "account_numbers": account_numbers,
             "accounts": accounts,
             "selected_account_hash": selected_hash,
             "working_orders": working_orders,
+            "recent_orders": recent_orders,
             "latency_ms": round((time.monotonic() - started) * 1000, 1),
             "received_at": datetime.now(timezone.utc).isoformat(),
         }

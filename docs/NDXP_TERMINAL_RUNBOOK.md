@@ -65,7 +65,7 @@ Patrick's preferred opening-credit band is $2.00–$2.50. Spreads passing all fi
 
 ## Safety state
 
-This build can submit opening and verified closing verticals and cancel working orders. Replacement remains disabled; cancel and submit a newly reviewed order instead.
+This build can submit opening and verified closing verticals, cancel working orders, and replace a recognized working vertical's quantity or net limit price directly from its displayed order card. Replacement preserves the exact account, action, and two contract identities reported by current Schwab working-order truth.
 
 The following independent gates protect broker mutations:
 
@@ -78,9 +78,9 @@ The following independent gates protect broker mutations:
 
 Trusted-LAN mutation requests must also carry a same-origin browser `Origin` matching the terminal's `Host`. This blocks a page on another origin from driving the terminal through the browser. The trusted-LAN mode deliberately does not add a PIN or a second login; it relies on the explicitly configured private subnet and must never be exposed through router port-forwarding or a public bind.
 
-Submissions remain limited to exact 10-point NDX/NDXP verticals in the currently selected expiration, with quantities from 1 through 100. The limit defaults to the displayed midpoint and remains editable anywhere inside the normal validated range (greater than zero and less than the ten-point width); the application does not impose a premium band or distance-from-spot rule. Closing orders additionally require sufficient quantities of both exact legs in current Schwab position truth. During regular NDXP hours, successful polling and option quote timestamps must be no more than five seconds old. A consumed preview token cannot be retried, including after an ambiguous transport result. Every submission and cancellation attempt and acknowledgement is appended to `outputs/ndxp_terminal/mutations.jsonl`; account hashes are fingerprinted rather than written literally.
+Submissions remain limited to exact 10-point NDX/NDXP verticals in the currently selected expiration, with quantities from 1 through 100. The limit defaults to the displayed midpoint and remains editable anywhere inside the normal validated range (greater than zero and less than the ten-point width); the application does not impose a premium band or distance-from-spot rule. Closing orders additionally require sufficient quantities of both exact legs in current Schwab position truth. During regular NDXP hours, successful polling and option quote timestamps must be no more than five seconds old. A consumed preview token cannot be retried, including after an ambiguous transport result. Every submission, cancellation, and replacement attempt and acknowledgement is appended to `outputs/ndxp_terminal/mutations.jsonl`; account hashes are fingerprinted rather than written literally.
 
-Cancellation is permitted for the selected account from any client authorized by the active mutation boundary. Replacement is disabled.
+Cancellation and working-order replacement are permitted for the selected account from any client authorized by the active mutation boundary. The order-activity panel exposes quantity and price fields, price-step buttons, Update, and Cancel without opening another ticket, followed by bounded recent filled, canceled, rejected, and expired activity. Filled verticals are paired from exact Schwab leg positions and expose a prefilled closing ticket. The order-entry ticket uses Review Payload followed by Transmit; it no longer requires a separate checkbox.
 
 ## Credential setup on Mars
 

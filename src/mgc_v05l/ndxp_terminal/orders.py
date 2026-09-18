@@ -185,7 +185,13 @@ class LockedSchwabMutationGateway:
 
     def replace(self, *, broker_order_id: str, request: NdxpSpreadRequest) -> dict[str, Any]:
         self._assert_enabled("replacement")
-        raise TransmissionDisabledError("Order replacement is disabled; cancel and submit a newly reviewed order.")
+        if not broker_order_id.strip():
+            raise SpreadValidationError("Replacement requires broker_order_id.")
+        return self._client.replace_order(
+            request.account_hash,
+            broker_order_id.strip(),
+            build_vertical_order_payload(request),
+        )
 
     def _assert_enabled(self, operation: str) -> None:
         if not LIVE_TRANSMISSION_COMPILED:

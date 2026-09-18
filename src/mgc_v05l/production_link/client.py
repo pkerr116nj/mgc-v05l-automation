@@ -102,8 +102,12 @@ class SchwabBrokerHttpClient:
 
     def replace_order(self, account_hash: str, broker_order_id: str, order_payload: dict[str, Any]) -> dict[str, Any]:
         response = self._request("PUT", f"/accounts/{account_hash}/orders/{broker_order_id}", json_body=order_payload, allow_empty=True)
+        location = response.headers.get("Location") or response.headers.get("location")
+        replacement_order_id = location.rstrip("/").split("/")[-1] if location else None
         return {
             "status_code": response.status_code,
+            "location": location,
+            "broker_order_id": replacement_order_id,
             "body": response.body if isinstance(response.body, dict) else {},
             "headers": response.headers,
         }

@@ -220,7 +220,7 @@ class NdxpTerminalService:
                 "The account was found in current Schwab account truth.",
                 "The spread is an exact 10-point defined-risk NDX/NDXP vertical.",
                 f"The order is NORMAL session, DAY duration, and {'NET_CREDIT' if request.action == 'OPEN' else 'NET_DEBIT'} priced.",
-                "Broker transmission requires the loopback-only, single-use live-trading gate.",
+                "Broker submission requires the authorized-client, single-use live-trading gate.",
             ],
         }
         if allow_live_token and self._mutation_gateway.enabled:
@@ -280,7 +280,48 @@ class NdxpTerminalService:
             self._journal_mutation("CANCEL_ACK", broker_order_id=broker_order_id, result=result)
             return result
         if action == "replace":
-            raise TransmissionDisabledError("Order replacement is disabled; cancel and submit a newly reviewed order.")
+            request = NdxpSpreadRequest.from_json(payload)
+            broker_order_id = str(payload.get("broker_order_id") or "").strip()
+            working_order = next(
+                (row for row in broker.get("working_orders", []) if row.get("order_id") == broker_order_id),
+                None,
+            )
+            if working_order is None:
+                raise SpreadValidationError("The order is not present in current Schwab working-order truth.")
+            if not working_order.get("editable"):
+                raise SpreadValidationError("The working order is not a recognized editable NDX vertical.")
+            identity = (
+                working_order.get("short_symbol"),
+                working_order.get("long_symbol"),
+                working_order.get("action"),
+            )
+            if identity != (request.short_symbol, request.long_symbol, request.action):
+                raise SpreadValidationError("Replacement may change only the working order's quantity and price.")
+            with self._lock:
+                market = _normalize_market(self._market, selected_expiration=None)
+            self._validate_live_contracts(request, market)
+            self._assert_live_data_ready(market, request=request)
+            self._journal_mutation("REPLACE_ATTEMPT", request=request, broker_order_id=broker_order_id)
+            try:
+                result = self._mutation_gateway.replace(
+                    broker_order_id=broker_order_id,
+                    request=request,
+                )
+            except Exception as exc:
+                self._journal_mutation(
+                    "REPLACE_UNKNOWN",
+                    request=request,
+                    broker_order_id=broker_order_id,
+                    error=f"{type(exc).__name__}: {exc}",
+                )
+                raise
+            self._journal_mutation(
+                "REPLACE_ACK",
+                request=request,
+                broker_order_id=broker_order_id,
+                result=result,
+            )
+            return {**result, "broker_order_id": result.get("broker_order_id") or broker_order_id}
         raise SpreadValidationError(f"Unknown mutation action: {action}.")
 
     def _consume_preview_token(self, token: str, request: NdxpSpreadRequest) -> None:
@@ -543,8 +584,22 @@ def _normalize_broker(payload: dict[str, Any] | None) -> dict[str, Any]:
                     "market_value": position.get("marketValue"),
                 }
             )
-    orders = []
-    for order in payload.get("working_orders", []):
+    working_orders = _normalize_orders(payload.get("working_orders"), editable=True)
+    recent_orders = _normalize_orders(payload.get("recent_orders"), editable=False)
+    return {
+        "received_at": payload.get("received_at"),
+        "latency_ms": payload.get("latency_ms"),
+        "selected_account_hash": payload.get("selected_account_hash"),
+        "accounts": accounts,
+        "positions": positions,
+        "working_orders": working_orders,
+        "recent_orders": recent_orders,
+    }
+
+
+def _normalize_orders(value: Any, *, editable: bool) -> list[dict[str, Any]]:
+    orders: list[dict[str, Any]] = []
+    for order in value if isinstance(value, list) else []:
         if not isinstance(order, dict):
             continue
         legs = []
@@ -559,6 +614,31 @@ def _normalize_broker(payload: dict[str, Any] | None) -> dict[str, Any]:
                     }
                 )
         if legs:
+            short_leg = next(
+                (leg for leg in legs if leg.get("instruction") in {"SELL_TO_OPEN", "BUY_TO_CLOSE"}),
+                None,
+            )
+            long_leg = next(
+                (leg for leg in legs if leg.get("instruction") in {"BUY_TO_OPEN", "SELL_TO_CLOSE"}),
+                None,
+            )
+            action = (
+                "OPEN"
+                if short_leg and long_leg and short_leg.get("instruction") == "SELL_TO_OPEN"
+                and long_leg.get("instruction") == "BUY_TO_OPEN"
+                else "CLOSE"
+                if short_leg and long_leg and short_leg.get("instruction") == "BUY_TO_CLOSE"
+                and long_leg.get("instruction") == "SELL_TO_CLOSE"
+                else None
+            )
+            leg_quantities: set[int] = set()
+            for leg in legs:
+                try:
+                    quantity_value = float(leg.get("quantity"))
+                except (TypeError, ValueError):
+                    continue
+                if quantity_value > 0 and quantity_value.is_integer():
+                    leg_quantities.add(int(quantity_value))
             orders.append(
                 {
                     "order_id": str(order.get("orderId") or ""),
@@ -566,17 +646,18 @@ def _normalize_broker(payload: dict[str, Any] | None) -> dict[str, Any]:
                     "order_type": order.get("orderType"),
                     "price": order.get("price"),
                     "entered_time": order.get("enteredTime"),
+                    "close_time": order.get("closeTime"),
+                    "filled_quantity": order.get("filledQuantity"),
+                    "remaining_quantity": order.get("remainingQuantity"),
+                    "action": action,
+                    "short_symbol": short_leg.get("symbol") if short_leg else None,
+                    "long_symbol": long_leg.get("symbol") if long_leg else None,
+                    "quantity": next(iter(leg_quantities)) if len(leg_quantities) == 1 else None,
+                    "editable": bool(editable and action and short_leg and long_leg and len(legs) == 2 and len(leg_quantities) == 1),
                     "legs": legs,
                 }
             )
-    return {
-        "received_at": payload.get("received_at"),
-        "latency_ms": payload.get("latency_ms"),
-        "selected_account_hash": payload.get("selected_account_hash"),
-        "accounts": accounts,
-        "positions": positions,
-        "working_orders": orders,
-    }
+    return orders
 
 
 def _request_digest(request: NdxpSpreadRequest) -> str:
