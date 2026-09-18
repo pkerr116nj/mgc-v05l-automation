@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import time
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
 
@@ -20,6 +20,7 @@ from mgc_v05l.ndxp_terminal.orders import (
 )
 from mgc_v05l.ndxp_terminal.server import DemoSchwabAdapter, main, run_server
 from mgc_v05l.ndxp_terminal.service import NdxpTerminalService
+from mgc_v05l.ndxp_terminal.schwab import NdxpSchwabAdapter
 
 
 class FakeDatabentoLive:
@@ -135,6 +136,40 @@ class CountingBroker:
 
     cancel_order = submit_order
     replace_order = submit_order
+
+
+class CapturingTruthBroker:
+    def __init__(self) -> None:
+        self.order_kwargs: dict = {}
+
+    def list_account_numbers(self) -> list[dict]:
+        return [{"accountNumber": "masked", "hashValue": "hash-1"}]
+
+    def list_accounts(self, *, fields: list[str] | None = None) -> list[dict]:
+        assert fields == ["positions"]
+        return [{"securitiesAccount": {"type": "MARGIN"}}]
+
+    def get_orders(self, account_hash: str, **kwargs) -> list[dict]:
+        assert account_hash == "hash-1"
+        self.order_kwargs = kwargs
+        return []
+
+
+def test_broker_truth_supplies_required_schwab_order_time_window(tmp_path: Path) -> None:
+    adapter = object.__new__(NdxpSchwabAdapter)
+    adapter._repo_root = tmp_path
+    adapter.broker = CapturingTruthBroker()
+
+    snapshot = adapter.fetch_broker_truth()
+
+    assert snapshot["selected_account_hash"] == "hash-1"
+    assert adapter.broker.order_kwargs["status"] == "WORKING"
+    assert adapter.broker.order_kwargs["max_results"] == 100
+    from_time = datetime.fromisoformat(adapter.broker.order_kwargs["from_entered_time"])
+    to_time = datetime.fromisoformat(adapter.broker.order_kwargs["to_entered_time"])
+    assert from_time.tzinfo == timezone.utc
+    assert to_time.tzinfo == timezone.utc
+    assert to_time - from_time == timedelta(days=60)
 
 
 def test_all_broker_mutations_are_source_locked(monkeypatch: pytest.MonkeyPatch) -> None:

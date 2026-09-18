@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import os
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -21,6 +21,7 @@ from ..production_link.client import SchwabBrokerHttpClient
 
 
 NDXP_CHAIN_STRIKE_COUNT = 120
+WORKING_ORDERS_LOOKBACK_DAYS = 60
 
 
 class NdxpSchwabAdapter:
@@ -91,7 +92,18 @@ class NdxpSchwabAdapter:
         account_numbers = self.broker.list_account_numbers()
         accounts = self.broker.list_accounts(fields=["positions"])
         selected_hash = self._selected_account_hash(account_numbers)
-        working_orders = self.broker.get_orders(selected_hash, status="WORKING", max_results=100) if selected_hash else []
+        now = datetime.now(timezone.utc)
+        working_orders = (
+            self.broker.get_orders(
+                selected_hash,
+                from_entered_time=(now - timedelta(days=WORKING_ORDERS_LOOKBACK_DAYS)).isoformat(),
+                to_entered_time=now.isoformat(),
+                status="WORKING",
+                max_results=100,
+            )
+            if selected_hash
+            else []
+        )
         return {
             "account_numbers": account_numbers,
             "accounts": accounts,
