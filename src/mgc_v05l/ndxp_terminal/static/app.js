@@ -5,7 +5,7 @@ const columnDefinitions = [
   ["last", "Last", 2], ["percent_change", "% Chng", 2], ["mark", "Mark", 2], ["bid", "Bid", 2], ["ask", "Ask", 2], ["net_change", "Net Chng", 2],
   ["breakeven_distance", "BE Dist", 1], ["em_multiple", "BE / EM", 2], ["probability_beyond_breakeven", "Beyond BE", 1],
   ["probability_beyond_short", "Beyond Short", 1], ["credit_to_risk", "Credit / Risk", 1], ["market_width", "Mkt Width", 2],
-  ["spread_delta", "Derived Δ", 4], ["theta", "Derived Θ", 4], ["gamma", "Derived Γ", 4], ["iv", "Short IV", 2],
+  ["spread_delta", "Model Δ", 4], ["theta", "Leg Θ", 4], ["gamma", "Leg Γ", 4], ["iv", "Short IV", 2],
   ["volume", "Volume", 0], ["open_interest", "Open Int", 0],
 ];
 const defaultColumns = ["last", "mark", "bid", "ask", "breakeven_distance", "em_multiple", "probability_beyond_breakeven", "credit_to_risk", "spread_delta", "iv"];
@@ -22,6 +22,8 @@ let lastStateReceived = performance.now();
 let centeredExpiration = null;
 let chainHorizontalInitialized = false;
 const chainSnapTimers = new WeakMap();
+let chainResizeTimer = null;
+let chainViewportWidth = window.innerWidth;
 
 const money = (value) => value == null || !Number.isFinite(Number(value)) ? "—" : new Intl.NumberFormat("en-US", { style: "currency", currency: "USD", maximumFractionDigits: 0 }).format(Number(value));
 const number = (value, digits = 2) => value == null || !Number.isFinite(Number(value)) ? "—" : Number(value).toLocaleString("en-US", { minimumFractionDigits: digits, maximumFractionDigits: digits });
@@ -89,6 +91,7 @@ function render() {
   }
   ui.spot.textContent = number(market.spot, 2);
   ui["quote-age"].textContent = age(diagnostics.quote_source_age_ms);
+  ui["quote-age-label"].firstChild.textContent = diagnostics.market_session === "OUTSIDE_REGULAR_HOURS" ? "Latest close age " : "Quote age ";
   ui["market-latency"].textContent = age(diagnostics.market_latency_ms);
   const databento = market.databento;
   ui["option-source-label"].textContent = databento ? "Databento OPRA NBBO" : "Option market · Schwab";
@@ -99,7 +102,9 @@ function render() {
     ? `${databento.subscribed_symbol_count || 0} contracts subscribed in one shared session${databento.last_error ? ` · ${databento.last_error}` : ""}`
     : "Option quotes are supplied by the Schwab chain response.";
   ui["broker-latency"].textContent = age(diagnostics.broker_latency_ms);
-  ui.diagnostic.textContent = diagnostics.classification || "STARTING";
+  ui.diagnostic.textContent = diagnostics.classification === "MARKET_CLOSED_LATEST_QUOTES"
+    ? "MARKET CLOSED · LATEST QUOTES"
+    : diagnostics.classification || "STARTING";
   ui.diagnostic.className = diagnostics.classification === "HEALTHY" ? "status-good" : diagnostics.classification?.includes("ERROR") || diagnostics.classification?.includes("STALL") ? "status-bad" : "status-warn";
   renderExpirations(market.expirations || [], market.selected_expiration);
   renderAccounts(broker.accounts || [], broker.selected_account_hash);
@@ -162,11 +167,12 @@ function verticalRows(chain, analytics) {
     const high = low + 10;
     const callShort = calls.get(low), callLong = calls.get(high);
     const putLong = puts.get(low), putShort = puts.get(high);
-    if (!callShort && !putShort) return [];
+    const call = callShort && callLong ? { short: callShort, long: callLong, metrics: spreadMetrics(callShort, callLong, analytics?.spreads?.[callShort.symbol]) } : null;
+    const put = putShort && putLong ? { short: putShort, long: putLong, metrics: spreadMetrics(putShort, putLong, analytics?.spreads?.[putShort.symbol]) } : null;
+    if (!call && !put) return [];
     return [{
       low, high,
-      call: callShort && callLong ? { short: callShort, long: callLong, metrics: spreadMetrics(callShort, callLong, analytics?.spreads?.[callShort.symbol]) } : null,
-      put: putShort && putLong ? { short: putShort, long: putLong, metrics: spreadMetrics(putShort, putLong, analytics?.spreads?.[putShort.symbol]) } : null,
+      call, put,
     }];
   });
 }
@@ -184,7 +190,8 @@ function spreadMetrics(short, long, model = null) {
   return {
     last: difference(short, long, "last"), percent_change: difference(short, long, "percent_change"),
     mark, bid, ask, net_change: difference(short, long, "net_change"),
-    spread_delta: difference(long, short, "delta"), theta: difference(long, short, "theta"), gamma: difference(long, short, "gamma"),
+    spread_delta: null, leg_derived_credit_delta: difference(long, short, "delta"),
+    theta: difference(long, short, "theta"), gamma: difference(long, short, "gamma"),
     iv: short.iv, volume: short.volume, open_interest: short.open_interest,
     ...(model || {}),
   };
@@ -216,8 +223,14 @@ function renderChain(chain, spot, analytics = {}) {
   putHeaderFragments.push(putGroup);
   for (const key of visibleColumns) {
     const [, label] = columnDefinitions.find(([candidate]) => candidate === key);
-    callHeaderFragments.push(cell(label, "column-head"));
-    putHeaderFragments.push(cell(label, "column-head"));
+    const callHeader = cell(label, "column-head");
+    const putHeader = cell(label, "column-head");
+    if (key === "spread_delta") {
+      callHeader.title = "Independent model delta for the displayed long call vertical; selling it reverses the sign.";
+      putHeader.title = "Independent model delta for the displayed long put vertical; selling it reverses the sign.";
+    }
+    callHeaderFragments.push(callHeader);
+    putHeaderFragments.push(putHeader);
   }
   strikeHeaderFragments.push(cell("Strikes", "column-head strike-cell"));
   for (const row of rows) {
@@ -254,11 +267,7 @@ function renderChain(chain, spot, analytics = {}) {
     requestAnimationFrame(() => ui["strike-table"].querySelector(".spread-strikes.near")?.scrollIntoView({ block: "center", inline: "nearest" }));
   }
   if (!chainHorizontalInitialized) {
-    requestAnimationFrame(() => {
-      ui["call-scroll"].scrollLeft = ui["call-scroll"].scrollWidth - ui["call-scroll"].clientWidth;
-      ui["put-scroll"].scrollLeft = 0;
-      chainHorizontalInitialized = true;
-    });
+    requestAnimationFrame(() => { anchorChainPanes(); chainHorizontalInitialized = true; });
   }
 }
 
@@ -293,6 +302,23 @@ function handleChainScroll(side) {
   synchronizeChainHeader(side);
   clearTimeout(chainSnapTimers.get(pane));
   chainSnapTimers.set(pane, setTimeout(() => snapChainPane(side), 110));
+}
+
+function anchorChainPanes() {
+  ui["call-scroll"].scrollLeft = Math.max(0, ui["call-scroll"].scrollWidth - ui["call-scroll"].clientWidth);
+  ui["put-scroll"].scrollLeft = 0;
+  synchronizeChainHeader("call");
+  synchronizeChainHeader("put");
+}
+
+function handleViewportGeometryChange(forceAnchor = false) {
+  updateStickyHeaderOffset();
+  const nextWidth = window.innerWidth;
+  const materiallyChanged = Math.abs(nextWidth - chainViewportWidth) > 80;
+  chainViewportWidth = nextWidth;
+  if (!forceAnchor && !materiallyChanged) return;
+  clearTimeout(chainResizeTimer);
+  chainResizeTimer = setTimeout(() => requestAnimationFrame(anchorChainPanes), 180);
 }
 
 function updateStickyHeaderOffset() {
@@ -406,9 +432,10 @@ function calculateRisk() {
   ui["max-loss-label"].textContent = selectedAction === "OPEN" ? "Maximum loss" : "Position effect";
   ui["max-loss"].textContent = selectedAction === "OPEN" ? money(gross - quantity * credit * 100) : "Reduces risk";
   ui.distance.textContent = selectedShort && state?.market?.spot != null ? `${number(Math.abs(selectedShort.strike - state.market.spot))} pts` : "—";
-  const perSpreadDelta = selectedMetrics?.spread_delta;
-  ui["spread-delta"].textContent = number(perSpreadDelta, 4);
-  ui["position-delta"].textContent = perSpreadDelta == null ? "—" : number(Number(perSpreadDelta) * quantity, 2);
+  const displayedVerticalDelta = selectedMetrics?.spread_delta;
+  const orderDelta = displayedVerticalDelta == null ? null : Number(displayedVerticalDelta) * (selectedAction === "OPEN" ? -1 : 1);
+  ui["spread-delta"].textContent = number(displayedVerticalDelta, 4);
+  ui["position-delta"].textContent = orderDelta == null ? "—" : number(orderDelta * quantity, 2);
   ui["ticket-breakeven"].textContent = number(selectedMetrics?.breakeven, 2);
   ui["ticket-em-multiple"].textContent = selectedMetrics?.em_multiple == null ? "—" : `${number(selectedMetrics.em_multiple, 2)}×`;
   ui["ticket-tail-probability"].textContent = percent(selectedMetrics?.probability_beyond_breakeven, 1);
@@ -536,7 +563,8 @@ document.querySelectorAll("[data-jump]").forEach((button) => button.addEventList
 ui["call-scroll"].addEventListener("scroll", () => handleChainScroll("call"), { passive: true });
 ui["put-scroll"].addEventListener("scroll", () => handleChainScroll("put"), { passive: true });
 new ResizeObserver(updateStickyHeaderOffset).observe(document.querySelector(".topbar"));
-window.addEventListener("orientationchange", updateStickyHeaderOffset);
+window.addEventListener("resize", () => handleViewportGeometryChange(false), { passive: true });
+window.addEventListener("orientationchange", () => handleViewportGeometryChange(true), { passive: true });
 ui["access-check"].addEventListener("click", async () => {
   try { showNotice("Running read-only Schwab account and NDX chain checks…"); const result = await api("/api/access-check"); showNotice(`Access verified: ${JSON.stringify(result)}`); }
   catch (error) { showNotice(`Access check failed: ${error.message}`, true); }

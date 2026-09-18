@@ -123,6 +123,7 @@ class NdxpTerminalService:
                 client_gap_ms=self._last_client_gap_ms,
                 source_age_ms=source_age_ms,
                 market_poll_age_ms=market_poll_age_ms,
+                now=datetime.fromtimestamp(now_wall, tz=timezone.utc),
             )
             return {
                 "generated_at": datetime.now(timezone.utc).isoformat(),

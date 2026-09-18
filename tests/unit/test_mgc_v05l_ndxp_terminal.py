@@ -304,21 +304,30 @@ def test_hybrid_adapter_replaces_schwab_option_quotes_with_databento() -> None:
 
 
 def test_diagnostics_distinguish_client_schwab_and_stale_data() -> None:
+    regular_hours = datetime(2026, 9, 18, 14, 0, tzinfo=timezone.utc)
     client = classify_diagnostics(
         market={"latency_ms": 50}, broker={"latency_ms": 70}, market_error=None, broker_error=None,
-        worker_gap_ms=100, client_gap_ms=4100, source_age_ms=100, market_poll_age_ms=100,
+        worker_gap_ms=100, client_gap_ms=4100, source_age_ms=100, market_poll_age_ms=100, now=regular_hours,
     )
     slow = classify_diagnostics(
         market={"latency_ms": 3100}, broker={"latency_ms": 70}, market_error=None, broker_error=None,
-        worker_gap_ms=100, client_gap_ms=100, source_age_ms=100, market_poll_age_ms=100,
+        worker_gap_ms=100, client_gap_ms=100, source_age_ms=100, market_poll_age_ms=100, now=regular_hours,
     )
     stale = classify_diagnostics(
         market={"latency_ms": 50}, broker={"latency_ms": 70}, market_error=None, broker_error=None,
-        worker_gap_ms=100, client_gap_ms=100, source_age_ms=6100, market_poll_age_ms=100,
+        worker_gap_ms=100, client_gap_ms=100, source_age_ms=6100, market_poll_age_ms=100, now=regular_hours,
     )
     assert client["classification"] == "CLIENT_OR_UI_STALL"
     assert slow["classification"] == "SCHWAB_RESPONSE_DELAY"
     assert stale["classification"] == "STALE_MARKET_DATA"
+
+    closed = classify_diagnostics(
+        market={"latency_ms": 50}, broker={"latency_ms": 70}, market_error=None, broker_error=None,
+        worker_gap_ms=100, client_gap_ms=100, source_age_ms=60_000, market_poll_age_ms=100,
+        now=datetime(2026, 9, 18, 11, 0, tzinfo=timezone.utc),
+    )
+    assert closed["classification"] == "MARKET_CLOSED_LATEST_QUOTES"
+    assert closed["market_session"] == "OUTSIDE_REGULAR_HOURS"
 
 
 def test_diagnostics_identify_databento_entitlement_and_partial_quotes() -> None:
@@ -371,6 +380,11 @@ def test_demo_service_builds_preview_but_never_transmits(tmp_path: Path) -> None
         assert 0 <= model_spread["probability_beyond_breakeven"] <= 1
         assert model_spread["market_width"] >= 0
         assert model_spread["credit_band"] in {"BELOW_PREFERRED", "PREFERRED", "ELEVATED"}
+        assert model_spread["spread_delta"] == pytest.approx(-model_spread["credit_position_delta"])
+        if model_spread["option_type"] == "CALL":
+            assert model_spread["spread_delta"] > 0
+        else:
+            assert model_spread["spread_delta"] < 0
         short = next(row for row in calls if any(other["strike"] == row["strike"] + 10 for other in calls))
         long = next(row for row in calls if row["strike"] == short["strike"] + 10)
         preview = service.preview(
@@ -504,6 +518,17 @@ def test_mobile_chain_keeps_strikes_fixed_and_allows_positive_midpoint_sell() ->
     assert "const tableLeft = headerTable.getBoundingClientRect().left" in javascript
     assert "const contentLeft = headerRect.left - tableLeft" in javascript
     assert "contentLeft + headerRect.width - pane.clientWidth" in javascript
+    assert "if (!call && !put) return []" in javascript
+    assert '["spread_delta", "Model Δ", 4]' in javascript
+    assert "credit_position_delta" in (static_root.parent / "analytics.py").read_text(encoding="utf-8")
+    assert 'id="quote-age-label"' in html
+    assert '"Latest close age "' in javascript
+    assert '"MARKET CLOSED · LATEST QUOTES"' in javascript
+    assert "selling it reverses the sign" in javascript
+    assert "function anchorChainPanes()" in javascript
+    assert "Math.abs(nextWidth - chainViewportWidth) > 80" in javascript
+    assert 'window.addEventListener("resize", () => handleViewportGeometryChange(false)' in javascript
+    assert 'window.addEventListener("orientationchange", () => handleViewportGeometryChange(true)' in javascript
     assert 'document.documentElement.style.setProperty("--topbar-height"' in javascript
     assert 'const callItm = row.call && Number(row.call.short.strike) < Number(spot)' in javascript
     assert 'const putItm = row.put && Number(row.put.short.strike) > Number(spot)' in javascript

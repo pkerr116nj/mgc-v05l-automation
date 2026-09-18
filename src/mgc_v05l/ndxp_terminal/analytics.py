@@ -187,12 +187,17 @@ def _spread_analytics(
     short_distance = short_strike - spot if option_type == "CALL" else spot - short_strike
     breakeven_iv = _smile_iv(surface, breakeven)
     short_iv = _smile_iv(surface, short_strike)
-    if breakeven_iv is None or short_iv is None:
+    long_strike = float(long["strike"])
+    long_iv = _smile_iv(surface, long_strike)
+    if breakeven_iv is None or short_iv is None or long_iv is None:
         return None
+    short_delta = _black_forward_delta(option_type, forward, short_strike, time_years, short_iv)
+    long_delta = _black_forward_delta(option_type, forward, long_strike, time_years, long_iv)
+    credit_position_delta = long_delta - short_delta
     return {
         "option_type": option_type,
         "short_strike": short_strike,
-        "long_strike": float(long["strike"]),
+        "long_strike": long_strike,
         "opening_bid": round(bid, 4),
         "opening_mid": round(mid, 4),
         "opening_ask": round(ask, 4),
@@ -209,6 +214,8 @@ def _spread_analytics(
         ),
         "credit_to_risk": round(mid / (width - mid), 8),
         "model_iv_at_breakeven": round(breakeven_iv, 8),
+        "spread_delta": round(-credit_position_delta, 8),
+        "credit_position_delta": round(credit_position_delta, 8),
         "credit_band": "PREFERRED" if 2.0 <= mid <= 2.5 else ("BELOW_PREFERRED" if mid < 2.0 else "ELEVATED"),
     }
 
@@ -261,6 +268,13 @@ def _black_price(option_type: str, forward: float, strike: float, time_years: fl
     if option_type == "CALL":
         return forward * _normal_cdf(d1) - strike * _normal_cdf(d2)
     return strike * _normal_cdf(-d2) - forward * _normal_cdf(-d1)
+
+
+def _black_forward_delta(option_type: str, forward: float, strike: float, time_years: float, volatility: float) -> float:
+    d1 = (math.log(forward / strike) + 0.5 * volatility * volatility * time_years) / (
+        volatility * math.sqrt(time_years)
+    )
+    return _normal_cdf(d1) if option_type == "CALL" else _normal_cdf(d1) - 1.0
 
 
 def _tail_probability(option_type: str, forward: float, strike: float, time_years: float, volatility: float) -> float:
