@@ -38,7 +38,7 @@ The September 14 Thinkorswim iPad references establish these initial chain requi
 
 The displayed spread delta is position delta per one short credit spread: `long-leg delta - short-leg delta`. Total position delta multiplies that result by ticket quantity. Derived theta and gamma use the same signed position convention. These are transparent leg-derived values, not Schwab-provided complex-spread Greeks; they still inherit any error in Schwab's individual-leg inputs. IV is therefore labeled as short-leg IV rather than represented as a net spread IV. A separately derived observed delta based on synchronized changes in spread mid versus NDX remains a future diagnostic enhancement.
 
-The live Schwab chain request asks for 120 strike levels, providing a buffer beyond the 25-per-side display requirement. The demo supplies 30 levels on each side. On first load and after an expiration change, the terminal centers the page on the spread row containing spot; all returned rows remain vertically scrollable.
+The live Schwab chain request is restricted to today's NDXP expiration and asks for 35 strike levels on each side of spot, providing a buffer beyond the 25-per-side display requirement without exceeding Schwab's response-body boundary. The demo supplies 30 levels on each side. On first load, the terminal centers the page on the spread row containing spot; all returned rows remain vertically scrollable.
 
 ### Independent IV and range analytics
 

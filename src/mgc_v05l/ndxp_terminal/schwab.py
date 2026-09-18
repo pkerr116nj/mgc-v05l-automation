@@ -8,6 +8,7 @@ import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
+from zoneinfo import ZoneInfo
 
 from ..market_data import (
     SchwabOAuthClient,
@@ -20,9 +21,10 @@ from ..market_data.schwab_models import HttpRequest
 from ..production_link.client import SchwabBrokerHttpClient
 
 
-NDXP_CHAIN_STRIKE_COUNT = 120
+NDXP_CHAIN_STRIKE_COUNT = 35
 WORKING_ORDERS_LOOKBACK_DAYS = 60
 ACCESS_CHECK_QUOTE_SYMBOL = "AAPL"
+EASTERN = ZoneInfo("America/New_York")
 
 
 class NdxpSchwabAdapter:
@@ -62,6 +64,7 @@ class NdxpSchwabAdapter:
         access_token = self.oauth.get_access_token()
         headers = {"Accept": "application/json", "Authorization": f"Bearer {access_token}"}
         resolved_chain_symbol = "$NDX" if chain_symbol.lstrip("$").upper() == "NDX" else chain_symbol
+        expiration = datetime.now(EASTERN).date().isoformat()
         return self.transport.request_json(
             HttpRequest(
                 method="GET",
@@ -71,6 +74,8 @@ class NdxpSchwabAdapter:
                     "symbol": resolved_chain_symbol,
                     "contractType": "ALL",
                     "strikeCount": NDXP_CHAIN_STRIKE_COUNT,
+                    "fromDate": expiration,
+                    "toDate": expiration,
                     "includeUnderlyingQuote": True,
                     "strategy": "SINGLE",
                 },
