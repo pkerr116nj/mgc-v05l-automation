@@ -485,13 +485,16 @@ def test_mobile_chain_keeps_strikes_fixed_and_allows_positive_midpoint_sell() ->
     assert 'id="call-scroll"' in html
     assert 'id="strike-table"' in html
     assert 'id="put-scroll"' in html
+    assert 'id="chain-header-frame"' in html
+    assert 'id="call-header-table"' in html
+    assert 'id="put-header-table"' in html
     assert "grid-template-columns:minmax(0,1fr) 110px minmax(0,1fr)" in css
-    assert "scroll-snap-type:x mandatory" in css
-    assert ".call-side-scroll .spread-grid>* { scroll-snap-align:end" in css
-    assert ".put-side-scroll .spread-grid>* { scroll-snap-align:start" in css
+    assert "position:sticky; top:var(--topbar-height)" in css
     assert ".metric.itm" in css
     assert 'ui["call-scroll"].scrollLeft' in javascript
     assert 'ui["put-scroll"].scrollLeft' in javascript
+    assert 'header.offsetLeft + header.offsetWidth - pane.clientWidth' in javascript
+    assert 'document.documentElement.style.setProperty("--topbar-height"' in javascript
     assert 'const callItm = row.call && Number(row.call.short.strike) < Number(spot)' in javascript
     assert 'const putItm = row.put && Number(row.put.short.strike) > Number(spot)' in javascript
     assert "button.disabled = opening ? !positiveMidpoint" in javascript

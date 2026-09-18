@@ -21,6 +21,7 @@ let lastHeartbeat = performance.now();
 let lastStateReceived = performance.now();
 let centeredExpiration = null;
 let chainHorizontalInitialized = false;
+const chainSnapTimers = new WeakMap();
 
 const money = (value) => value == null || !Number.isFinite(Number(value)) ? "—" : new Intl.NumberFormat("en-US", { style: "currency", currency: "USD", maximumFractionDigits: 0 }).format(Number(value));
 const number = (value, digits = 2) => value == null || !Number.isFinite(Number(value)) ? "—" : Number(value).toLocaleString("en-US", { minimumFractionDigits: digits, maximumFractionDigits: digits });
@@ -197,24 +198,28 @@ function renderChain(chain, spot, analytics = {}) {
   const rows = verticalRows(chain, analytics);
   renderChainCoverage(chain, spot);
   const sideTemplate = sideGridTemplate();
+  ui["call-header-table"].style.gridTemplateColumns = sideTemplate;
+  ui["put-header-table"].style.gridTemplateColumns = sideTemplate;
+  ui["strike-header-table"].style.gridTemplateColumns = "100%";
   ui["call-table"].style.gridTemplateColumns = sideTemplate;
   ui["put-table"].style.gridTemplateColumns = sideTemplate;
   ui["strike-table"].style.gridTemplateColumns = "100%";
-  const callFragments = [];
-  const strikeFragments = [];
-  const putFragments = [];
+  const callHeaderFragments = [];
+  const strikeHeaderFragments = [];
+  const putHeaderFragments = [];
+  const callFragments = [], strikeFragments = [], putFragments = [];
   const callGroup = cell("CALLS", "group-head calls-head"); callGroup.style.gridColumn = `span ${visibleColumns.length}`;
   const strikeGroup = cell("10-POINT", "group-head strike-head");
   const putGroup = cell("PUTS", "group-head puts-head"); putGroup.style.gridColumn = `span ${visibleColumns.length}`;
-  callFragments.push(callGroup);
-  strikeFragments.push(strikeGroup);
-  putFragments.push(putGroup);
+  callHeaderFragments.push(callGroup);
+  strikeHeaderFragments.push(strikeGroup);
+  putHeaderFragments.push(putGroup);
   for (const key of visibleColumns) {
     const [, label] = columnDefinitions.find(([candidate]) => candidate === key);
-    callFragments.push(cell(label, "column-head"));
-    putFragments.push(cell(label, "column-head"));
+    callHeaderFragments.push(cell(label, "column-head"));
+    putHeaderFragments.push(cell(label, "column-head"));
   }
-  strikeFragments.push(cell("Strikes", "column-head strike-cell"));
+  strikeHeaderFragments.push(cell("Strikes", "column-head strike-cell"));
   for (const row of rows) {
     const near = Number.isFinite(Number(spot)) && row.low <= spot && row.high >= spot;
     const callOtm = row.call && Number(row.call.short.strike) > Number(spot);
@@ -234,9 +239,14 @@ function renderChain(chain, spot, analytics = {}) {
     strikeFragments.push(cell("—", "chain-empty strike-cell"));
     putFragments.push(putEmpty);
   }
+  ui["call-header-table"].replaceChildren(...callHeaderFragments);
+  ui["strike-header-table"].replaceChildren(...strikeHeaderFragments);
+  ui["put-header-table"].replaceChildren(...putHeaderFragments);
   ui["call-table"].replaceChildren(...callFragments);
   ui["strike-table"].replaceChildren(...strikeFragments);
   ui["put-table"].replaceChildren(...putFragments);
+  synchronizeChainHeader("call");
+  synchronizeChainHeader("put");
   renderCandidateCount(rows, analytics);
   const expiration = state?.market?.selected_expiration || "";
   if (rows.length && expiration !== centeredExpiration) {
@@ -250,6 +260,40 @@ function renderChain(chain, spot, analytics = {}) {
       chainHorizontalInitialized = true;
     });
   }
+}
+
+function synchronizeChainHeader(side) {
+  ui[`${side}-header-scroll`].scrollLeft = ui[`${side}-scroll`].scrollLeft;
+}
+
+function snapChainPane(side) {
+  const pane = ui[`${side}-scroll`];
+  const headerCells = [...ui[`${side}-header-table`].querySelectorAll(".column-head")];
+  const maximum = Math.max(0, pane.scrollWidth - pane.clientWidth);
+  const targets = headerCells.map((header) => {
+    const raw = side === "call"
+      ? header.offsetLeft + header.offsetWidth - pane.clientWidth
+      : header.offsetLeft;
+    return Math.max(0, Math.min(maximum, raw));
+  });
+  if (!targets.length) return;
+  const nearest = targets.reduce((best, candidate) =>
+    Math.abs(candidate - pane.scrollLeft) < Math.abs(best - pane.scrollLeft) ? candidate : best
+  );
+  if (Math.abs(nearest - pane.scrollLeft) > 0.5) pane.scrollLeft = nearest;
+  synchronizeChainHeader(side);
+}
+
+function handleChainScroll(side) {
+  const pane = ui[`${side}-scroll`];
+  synchronizeChainHeader(side);
+  clearTimeout(chainSnapTimers.get(pane));
+  chainSnapTimers.set(pane, setTimeout(() => snapChainPane(side), 110));
+}
+
+function updateStickyHeaderOffset() {
+  const height = document.querySelector(".topbar")?.getBoundingClientRect().height || 92;
+  document.documentElement.style.setProperty("--topbar-height", `${Math.ceil(height)}px`);
 }
 
 function renderChainCoverage(chain, spot) {
@@ -485,10 +529,15 @@ ui["save-filters"].addEventListener("click", (event) => {
   if (!saveFilters()) event.preventDefault();
 });
 document.querySelectorAll("[data-jump]").forEach((button) => button.addEventListener("click", () => document.getElementById(button.dataset.jump).scrollIntoView({ behavior: "smooth" })));
+ui["call-scroll"].addEventListener("scroll", () => handleChainScroll("call"), { passive: true });
+ui["put-scroll"].addEventListener("scroll", () => handleChainScroll("put"), { passive: true });
+new ResizeObserver(updateStickyHeaderOffset).observe(document.querySelector(".topbar"));
+window.addEventListener("orientationchange", updateStickyHeaderOffset);
 ui["access-check"].addEventListener("click", async () => {
   try { showNotice("Running read-only Schwab account and NDX chain checks…"); const result = await api("/api/access-check"); showNotice(`Access verified: ${JSON.stringify(result)}`); }
   catch (error) { showNotice(`Access check failed: ${error.message}`, true); }
 });
 
 renderColumnOptions();
+updateStickyHeaderOffset();
 refresh(); heartbeat(); setInterval(refresh, 1000); setInterval(heartbeat, 1000);
