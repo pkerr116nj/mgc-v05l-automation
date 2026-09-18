@@ -205,7 +205,7 @@ def test_schwab_chain_canonicalizes_ndx_to_confirmed_index_symbol() -> None:
     adapter.fetch_chain(chain_symbol="NDX")
 
     assert adapter.transport.request.query["symbol"] == "$NDX"
-    assert adapter.transport.request.query["strikeCount"] == 35
+    assert adapter.transport.request.query["strikeCount"] == 120
     assert adapter.transport.request.query["fromDate"] == adapter.transport.request.query["toDate"]
     assert adapter.transport.request.query["fromDate"] == datetime.now(ZoneInfo("America/New_York")).date().isoformat()
 

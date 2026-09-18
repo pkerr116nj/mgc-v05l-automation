@@ -21,7 +21,7 @@ from ..market_data.schwab_models import HttpRequest
 from ..production_link.client import SchwabBrokerHttpClient
 
 
-NDXP_CHAIN_STRIKE_COUNT = 35
+NDXP_CHAIN_STRIKE_COUNT = 120
 WORKING_ORDERS_LOOKBACK_DAYS = 60
 ACCESS_CHECK_QUOTE_SYMBOL = "AAPL"
 EASTERN = ZoneInfo("America/New_York")
