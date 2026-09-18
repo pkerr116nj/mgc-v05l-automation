@@ -72,13 +72,15 @@ The following independent gates protect broker mutations:
 1. reviewed live-trading support is compiled in;
 2. `MGC_NDXP_LIVE_TRANSMISSION_ENABLED` must equal `1`;
 3. the process must be launched with `--live-trading`;
-4. the HTTP client must originate from `127.0.0.1` or `::1` on Mars;
+4. the HTTP client must originate from Mars loopback, or from a private subnet explicitly named with `--trusted-live-subnet` while both `--lan-live` and `--live-trading` are active;
 5. a single-use, 60-second preview token must match the exact order payload; and
 6. the selected account must match current Schwab broker truth.
 
+Trusted-LAN mutation requests must also carry a same-origin browser `Origin` matching the terminal's `Host`. This blocks a page on another origin from driving the terminal through the browser. The trusted-LAN mode deliberately does not add a PIN or a second login; it relies on the explicitly configured private subnet and must never be exposed through router port-forwarding or a public bind.
+
 Submissions remain limited to exact 10-point NDX/NDXP verticals in the currently selected expiration, with quantities from 1 through 100. The limit defaults to the displayed midpoint and remains editable anywhere inside the normal validated range (greater than zero and less than the ten-point width); the application does not impose a premium band or distance-from-spot rule. Closing orders additionally require sufficient quantities of both exact legs in current Schwab position truth. During regular NDXP hours, successful polling and option quote timestamps must be no more than five seconds old. A consumed preview token cannot be retried, including after an ambiguous transport result. Every submission and cancellation attempt and acknowledgement is appended to `outputs/ndxp_terminal/mutations.jsonl`; account hashes are fingerprinted rather than written literally.
 
-Cancellation is permitted for the selected account from Mars loopback. Replacement is disabled. The iPad continues to display positions and working orders but cannot mutate them.
+Cancellation is permitted for the selected account from any client authorized by the active mutation boundary. Replacement is disabled.
 
 ## Credential setup on Mars
 
@@ -130,14 +132,27 @@ To inspect the interface without Schwab credentials:
 bash scripts/run_ndxp_terminal.sh --demo
 ```
 
-Live trading requires both runtime gates and must be opened locally on Mars:
+Live trading requires both runtime gates. For Mars-only order entry:
 
 ```bash
 export MGC_NDXP_LIVE_TRANSMISSION_ENABLED=1
 bash scripts/run_ndxp_terminal.sh --live-trading --no-browser
 ```
 
-Open `http://127.0.0.1:8810/` on Mars. Do not use the LAN address for order entry; LAN clients remain read-only even if the server is also launched with `--lan-live`.
+Open `http://127.0.0.1:8810/` on Mars.
+
+To authorize both Mars and devices on Patrick's home subnet for live order entry:
+
+```bash
+export MGC_NDXP_LIVE_TRANSMISSION_ENABLED=1
+bash scripts/run_ndxp_terminal.sh \
+  --lan-live \
+  --live-trading \
+  --trusted-live-subnet 192.168.1.0/24 \
+  --no-browser
+```
+
+Open `http://192.168.1.254:8810/` from the Mac or iPad. The trusted subnet is an explicit runtime authorization boundary; live LAN mode refuses to start without it. Do not configure router port-forwarding for port 8810.
 
 Demo mode displays a persistent `SYNTHETIC DEMO DATA` banner. Its repeated prices, IV, changes, and Greeks exist only to exercise layout and ticket behavior and must never be interpreted as a market snapshot.
 
@@ -156,7 +171,7 @@ By default it listens only on `127.0.0.1:8810`. At home, the explicit source-loc
 bash scripts/run_ndxp_terminal.sh --lan-live --no-browser
 ```
 
-Open `http://<MARS_LAN_IP>:8810/`. No SSH tunnel or router port-forward is required. This mode uses Schwab for NDX spot, NDXP option-chain quotes, positions, and working orders. It exposes read-only Schwab account truth to devices already on the private LAN, while all broker mutations remain source-locked. Add `--databento` only when an OPRA entitlement is available and Databento quotes are desired. It is not suitable for public exposure; authenticated HTTPS remains required before enabling live trading or internet-facing access.
+Open `http://<MARS_LAN_IP>:8810/`. No SSH tunnel or router port-forward is required. Without `--live-trading` and an explicit `--trusted-live-subnet`, this mode uses Schwab for NDX spot, NDXP option-chain quotes, positions, and working orders but remains read-only. Add `--databento` only when an OPRA entitlement is available and Databento quotes are desired. It is not suitable for public exposure; authenticated HTTPS remains required before any internet-facing access.
 
 ## Roaming preview over UniFi Teleport
 

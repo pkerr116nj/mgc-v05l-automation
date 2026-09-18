@@ -22,7 +22,15 @@ from mgc_v05l.ndxp_terminal.orders import (
     build_vertical_order_payload,
     validate_spread_request,
 )
-from mgc_v05l.ndxp_terminal.server import DemoSchwabAdapter, is_loopback_address, main, run_server
+from mgc_v05l.ndxp_terminal.server import (
+    DemoSchwabAdapter,
+    client_in_trusted_networks,
+    is_loopback_address,
+    main,
+    parse_trusted_live_networks,
+    run_server,
+    same_origin_allowed,
+)
 from mgc_v05l.ndxp_terminal.service import NdxpTerminalService
 from mgc_v05l.ndxp_terminal.schwab import NdxpSchwabAdapter
 
@@ -270,11 +278,35 @@ def test_live_trading_accepts_valid_quantity_and_close_but_disables_replace(monk
     assert broker.calls == 2
 
 
-def test_live_trading_origin_is_loopback_only() -> None:
+def test_live_trading_client_and_same_origin_guards() -> None:
     assert is_loopback_address("127.0.0.1") is True
     assert is_loopback_address("::1") is True
     assert is_loopback_address("192.168.1.254") is False
     assert is_loopback_address("192.168.1.42") is False
+
+    networks = parse_trusted_live_networks(("192.168.1.0/24",))
+    assert client_in_trusted_networks("192.168.1.42", networks) is True
+    assert client_in_trusted_networks("192.168.2.42", networks) is False
+    assert same_origin_allowed(
+        origin="http://192.168.1.254:8810",
+        host="192.168.1.254:8810",
+        loopback=False,
+        trusted_networks=networks,
+    ) is True
+    assert same_origin_allowed(
+        origin="https://untrusted.example", host="192.168.1.254:8810", loopback=False
+    ) is False
+    assert same_origin_allowed(
+        origin="http://rebind.example:8810",
+        host="rebind.example:8810",
+        loopback=False,
+        trusted_networks=networks,
+    ) is False
+    assert same_origin_allowed(origin=None, host="192.168.1.254:8810", loopback=False) is False
+    assert same_origin_allowed(origin=None, host="127.0.0.1:8810", loopback=True) is True
+
+    with pytest.raises(ValueError, match="must be private"):
+        parse_trusted_live_networks(("8.8.8.0/24",))
 
 
 def test_databento_feed_uses_one_session_and_maps_opra_quotes() -> None:
@@ -602,8 +634,24 @@ def test_lan_live_allows_schwab_only_and_rejects_demo(monkeypatch: pytest.Monkey
     assert captured["allow_lan_live"] is True
     assert captured["host"] == "0.0.0.0"
 
-    main(["--lan-live", "--live-trading", "--no-browser"])
+    main(
+        [
+            "--lan-live",
+            "--live-trading",
+            "--trusted-live-subnet",
+            "192.168.1.0/24",
+            "--no-browser",
+        ]
+    )
     assert captured["live_trading"] is True
+    assert captured["trusted_live_subnets"] == ("192.168.1.0/24",)
+
+    with pytest.raises(SystemExit) as missing_subnet:
+        main(["--lan-live", "--live-trading", "--no-browser"])
+    assert missing_subnet.value.code == 2
+    with pytest.raises(SystemExit) as missing_live_flags:
+        main(["--trusted-live-subnet", "192.168.1.0/24", "--no-browser"])
+    assert missing_live_flags.value.code == 2
 
     with pytest.raises(SystemExit) as demo_conflict:
         main(["--demo", "--lan-live"])

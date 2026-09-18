@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import ipaddress
 import json
 import math
 import threading
@@ -13,6 +14,7 @@ from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 from zoneinfo import ZoneInfo
 
 from .databento import NdxpDatabentoAdapter
@@ -28,11 +30,12 @@ EASTERN = ZoneInfo("America/New_York")
 
 class NdxpTerminalHandler(BaseHTTPRequestHandler):
     service: NdxpTerminalService
+    trusted_live_networks: tuple[ipaddress.IPv4Network | ipaddress.IPv6Network, ...] = ()
 
     def do_GET(self) -> None:  # noqa: N802
         if self.path == "/api/state":
             snapshot = self.service.snapshot()
-            origin_allowed = self._loopback_client()
+            origin_allowed = self._mutation_client_allowed()
             snapshot["transmission"]["origin_allowed"] = origin_allowed
             snapshot["transmission"]["effective_enabled"] = bool(
                 snapshot["transmission"]["effective_enabled"] and origin_allowed
@@ -75,12 +78,18 @@ class NdxpTerminalHandler(BaseHTTPRequestHandler):
             elif self.path == "/api/selection":
                 result = self.service.update_selection(payload)
             elif self.path == "/api/preview":
-                result = self.service.preview(payload, allow_live_token=self._loopback_client())
+                result = self.service.preview(
+                    payload,
+                    allow_live_token=self._mutation_client_allowed() and self._same_origin_request(),
+                )
             elif self.path in {"/api/submit", "/api/cancel", "/api/replace"}:
-                if not self._loopback_client():
+                if not self._mutation_client_allowed() or not self._same_origin_request():
                     self._json(
                         HTTPStatus.FORBIDDEN,
-                        {"ok": False, "error": "Broker mutations are permitted only from Mars loopback."},
+                        {
+                            "ok": False,
+                            "error": "Broker mutations require an authorized client and same-origin request.",
+                        },
                     )
                     return
                 result = self.service.mutate(self.path.rsplit("/", 1)[-1], payload)
@@ -100,6 +109,19 @@ class NdxpTerminalHandler(BaseHTTPRequestHandler):
 
     def _loopback_client(self) -> bool:
         return is_loopback_address(self.client_address[0])
+
+    def _mutation_client_allowed(self) -> bool:
+        return self._loopback_client() or client_in_trusted_networks(
+            self.client_address[0], self.trusted_live_networks
+        )
+
+    def _same_origin_request(self) -> bool:
+        return same_origin_allowed(
+            origin=self.headers.get("Origin"),
+            host=self.headers.get("Host"),
+            loopback=self._loopback_client(),
+            trusted_networks=self.trusted_live_networks,
+        )
 
     def _read_json(self) -> dict[str, Any]:
         length = int(self.headers.get("Content-Length") or 0)
@@ -122,7 +144,53 @@ class NdxpTerminalHandler(BaseHTTPRequestHandler):
 
 
 def is_loopback_address(address: str) -> bool:
-    return address in {"127.0.0.1", "::1"}
+    try:
+        return ipaddress.ip_address(address).is_loopback
+    except ValueError:
+        return False
+
+
+def client_in_trusted_networks(
+    address: str,
+    networks: tuple[ipaddress.IPv4Network | ipaddress.IPv6Network, ...],
+) -> bool:
+    try:
+        client = ipaddress.ip_address(address)
+    except ValueError:
+        return False
+    return any(client.version == network.version and client in network for network in networks)
+
+
+def same_origin_allowed(
+    *,
+    origin: str | None,
+    host: str | None,
+    loopback: bool,
+    trusted_networks: tuple[ipaddress.IPv4Network | ipaddress.IPv6Network, ...] = (),
+) -> bool:
+    if origin is None:
+        return loopback
+    if not host or origin.rstrip("/") != f"http://{host}":
+        return False
+    if loopback:
+        return True
+    host_address = urlsplit(f"//{host}").hostname
+    return bool(host_address) and client_in_trusted_networks(host_address, trusted_networks)
+
+
+def parse_trusted_live_networks(
+    subnets: tuple[str, ...],
+) -> tuple[ipaddress.IPv4Network | ipaddress.IPv6Network, ...]:
+    networks: list[ipaddress.IPv4Network | ipaddress.IPv6Network] = []
+    for subnet in subnets:
+        try:
+            network = ipaddress.ip_network(subnet, strict=True)
+        except ValueError as exc:
+            raise ValueError(f"Invalid trusted live subnet {subnet!r}: {exc}") from exc
+        if not network.is_private:
+            raise ValueError(f"Trusted live subnet must be private: {subnet!r}")
+        networks.append(network)
+    return tuple(networks)
 
 
 def run_server(
@@ -136,6 +204,7 @@ def run_server(
     allow_remote_demo: bool = False,
     allow_lan_live: bool = False,
     live_trading: bool = False,
+    trusted_live_subnets: tuple[str, ...] = (),
 ) -> None:
     loopback = host in {"127.0.0.1", "localhost", "::1"}
     remote_demo = demo and allow_remote_demo
@@ -148,9 +217,18 @@ def run_server(
     adapter = DemoSchwabAdapter() if demo else (NdxpDatabentoAdapter(repo_root) if databento else None)
     if live_trading and demo:
         raise ValueError("Live trading cannot run with demo data.")
+    trusted_live_networks = parse_trusted_live_networks(trusted_live_subnets)
+    if trusted_live_networks and not (lan_live and live_trading):
+        raise ValueError("Trusted live subnets require both --lan-live and --live-trading.")
+    if lan_live and live_trading and not trusted_live_networks:
+        raise ValueError("Trusted-LAN live trading requires at least one --trusted-live-subnet.")
     service = NdxpTerminalService(repo_root, adapter=adapter, live_trading_requested=live_trading)
     service.start()
-    handler = type("BoundNdxpTerminalHandler", (NdxpTerminalHandler,), {"service": service})
+    handler = type(
+        "BoundNdxpTerminalHandler",
+        (NdxpTerminalHandler,),
+        {"service": service, "trusted_live_networks": trusted_live_networks},
+    )
     server = ThreadingHTTPServer((host, port), handler)
     url = f"http://{host}:{server.server_port}/"
     display_url = f"http://<MARS_LAN_IP>:{server.server_port}/" if not loopback else url
@@ -171,7 +249,13 @@ def run_server(
                 "listen": url,
                 "mode": mode,
                 "schwab_credentials_loaded": not demo,
-                "transmission": "LIVE TRADING · LOOPBACK ONLY" if live_trading else "LOCKED",
+                "transmission": (
+                    "LIVE TRADING · TRUSTED LAN"
+                    if live_trading and trusted_live_networks
+                    else "LIVE TRADING · LOOPBACK ONLY"
+                    if live_trading
+                    else "LOCKED"
+                ),
             }
         )
     )
@@ -360,7 +444,14 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--live-trading",
         action="store_true",
-        help="Enable reviewed live order entry; mutations remain restricted to Mars loopback.",
+        help="Enable reviewed live order entry; mutations default to Mars loopback only.",
+    )
+    parser.add_argument(
+        "--trusted-live-subnet",
+        action="append",
+        default=[],
+        metavar="CIDR",
+        help="Authorize live mutations from this private subnet; requires --lan-live and --live-trading.",
     )
     return parser
 
@@ -376,6 +467,14 @@ def main(argv: list[str] | None = None) -> int:
         parser.error("--lan-live cannot be combined with a demo mode.")
     if args.live_trading and args.demo:
         parser.error("--live-trading cannot be combined with --demo.")
+    if args.trusted_live_subnet and not (args.lan_live and args.live_trading):
+        parser.error("--trusted-live-subnet requires both --lan-live and --live-trading.")
+    if args.lan_live and args.live_trading and not args.trusted_live_subnet:
+        parser.error("Trusted-LAN live trading requires --trusted-live-subnet.")
+    try:
+        parse_trusted_live_networks(tuple(args.trusted_live_subnet))
+    except ValueError as exc:
+        parser.error(str(exc))
     host = "0.0.0.0" if (args.teleport_demo or args.lan_live) and args.host == "127.0.0.1" else args.host
     repo_root = Path(__file__).resolve().parents[3]
     run_server(
@@ -388,5 +487,6 @@ def main(argv: list[str] | None = None) -> int:
         allow_remote_demo=args.teleport_demo,
         allow_lan_live=args.lan_live,
         live_trading=args.live_trading,
+        trusted_live_subnets=tuple(args.trusted_live_subnet),
     )
     return 0
