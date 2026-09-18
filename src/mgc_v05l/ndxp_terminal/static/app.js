@@ -219,9 +219,11 @@ function renderChain(chain, spot, analytics = {}) {
     const near = Number.isFinite(Number(spot)) && row.low <= spot && row.high >= spot;
     const callOtm = row.call && Number(row.call.short.strike) > Number(spot);
     const putOtm = row.put && Number(row.put.short.strike) < Number(spot);
-    for (const key of visibleColumns) callFragments.push(metricCell(row.call, key, near, "CALL", callOtm));
+    const callItm = row.call && Number(row.call.short.strike) < Number(spot);
+    const putItm = row.put && Number(row.put.short.strike) > Number(spot);
+    for (const key of visibleColumns) callFragments.push(metricCell(row.call, key, near, "CALL", callOtm, callItm));
     strikeFragments.push(cell(`${number(row.low, 0)} / ${number(row.high, 0)}`, `strike-cell spread-strikes${near ? " near" : ""}`));
-    for (const key of visibleColumns) putFragments.push(metricCell(row.put, key, near, "PUT", putOtm));
+    for (const key of visibleColumns) putFragments.push(metricCell(row.put, key, near, "PUT", putOtm, putItm));
   }
   if (!rows.length) {
     const callEmpty = cell("Waiting for calls…", "chain-empty");
@@ -277,7 +279,7 @@ function cell(text, className = "") {
   const node = document.createElement("div"); node.className = className; node.textContent = text; node.setAttribute("role", "cell"); return node;
 }
 
-function metricCell(spread, key, near, side, otm = false) {
+function metricCell(spread, key, near, side, otm = false, itm = false) {
   const definition = columnDefinitions.find(([candidate]) => candidate === key);
   const value = spread?.metrics?.[key];
   const formatted = formatMetric(key, value, definition[2]);
@@ -285,7 +287,7 @@ function metricCell(spread, key, near, side, otm = false) {
   if ((key === "bid" || key === "ask") && spread) {
     const button = document.createElement("button");
     const opening = key === "bid";
-    button.className = `metric ${opening ? "bid-action" : "ask-action"}${near ? " near" : ""}${otm ? " otm" : ""}${opening && opportunity.qualified ? " qualified" : ""}${opening && opportunity.preferred ? " preferred" : ""}${opening && spread.metrics?.credit_band === "ELEVATED" ? " elevated" : ""}`;
+    button.className = `metric ${opening ? "bid-action" : "ask-action"}${near ? " near" : ""}${otm ? " otm" : ""}${itm ? " itm" : ""}${opening && opportunity.qualified ? " qualified" : ""}${opening && opportunity.preferred ? " preferred" : ""}${opening && spread.metrics?.credit_band === "ELEVATED" ? " elevated" : ""}`;
     button.textContent = formatted;
     const moneyness = otm ? " · OTM" : "";
     const midpoint = Number(spread.metrics?.mark);
@@ -301,7 +303,7 @@ function metricCell(spread, key, near, side, otm = false) {
     button.setAttribute("role", "cell");
     return button;
   }
-  return cell(formatted, `metric${near ? " near" : ""}${otm ? " otm" : ""}${opportunity.qualified ? " qualified" : ""}`);
+  return cell(formatted, `metric${near ? " near" : ""}${otm ? " otm" : ""}${itm ? " itm" : ""}${opportunity.qualified ? " qualified" : ""}`);
 }
 
 function formatMetric(key, value, digits) {
