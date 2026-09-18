@@ -177,7 +177,7 @@ Choose **Verify API access** in the terminal. It performs:
 - `GET /trader/v1/accounts/accountNumbers`
 - `GET /trader/v1/accounts?fields=positions`
 - `GET /trader/v1/accounts/{hash}/orders?status=WORKING`
-- `GET /marketdata/v1/chains?symbol=NDX`
+- `GET /marketdata/v1/chains?symbol=$NDX`
 - `GET /marketdata/v1/quotes?symbols=$NDX`
 
 It does not call a broker mutation endpoint. A successful result proves account enumeration, account truth, working-order access, and NDX option-chain access for the current OAuth token. Schwab does not provide a dry-run order-validation endpoint, so NDXP order acceptance still requires a separately authorized minimum-size live pilot.

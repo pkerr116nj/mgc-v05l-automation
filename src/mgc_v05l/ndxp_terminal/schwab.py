@@ -60,13 +60,14 @@ class NdxpSchwabAdapter:
     def fetch_chain(self, *, chain_symbol: str) -> dict[str, Any]:
         access_token = self.oauth.get_access_token()
         headers = {"Accept": "application/json", "Authorization": f"Bearer {access_token}"}
+        resolved_chain_symbol = "$NDX" if chain_symbol.lstrip("$").upper() == "NDX" else chain_symbol
         return self.transport.request_json(
             HttpRequest(
                 method="GET",
                 url=f"{self.market_config.market_data_base_url.rstrip('/')}/chains",
                 headers=headers,
                 query={
-                    "symbol": chain_symbol,
+                    "symbol": resolved_chain_symbol,
                     "contractType": "ALL",
                     "strikeCount": NDXP_CHAIN_STRIKE_COUNT,
                     "includeUnderlyingQuote": True,
@@ -96,8 +97,10 @@ class NdxpSchwabAdapter:
         working_orders = (
             self.broker.get_orders(
                 selected_hash,
-                from_entered_time=(now - timedelta(days=WORKING_ORDERS_LOOKBACK_DAYS)).isoformat(),
-                to_entered_time=now.isoformat(),
+                from_entered_time=_schwab_zoned_datetime(
+                    now - timedelta(days=WORKING_ORDERS_LOOKBACK_DAYS)
+                ),
+                to_entered_time=_schwab_zoned_datetime(now),
                 status="WORKING",
                 max_results=100,
             )
@@ -133,7 +136,7 @@ class NdxpSchwabAdapter:
 
     def access_check(self) -> dict[str, Any]:
         broker_truth = self.fetch_broker_truth()
-        market = self.fetch_market(chain_symbol="NDX", quote_symbol="$NDX")
+        market = self.fetch_market(chain_symbol="$NDX", quote_symbol="$NDX")
         chain = market.get("chain") if isinstance(market.get("chain"), dict) else {}
         return {
             "ok": True,
@@ -145,3 +148,8 @@ class NdxpSchwabAdapter:
             "broker_latency_ms": broker_truth.get("latency_ms"),
             "mutation_attempted": False,
         }
+
+
+def _schwab_zoned_datetime(value: datetime) -> str:
+    """Render the exact millisecond UTC form required by Schwab's orders API."""
+    return value.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000Z")

@@ -4,6 +4,7 @@ import time
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -165,11 +166,44 @@ def test_broker_truth_supplies_required_schwab_order_time_window(tmp_path: Path)
     assert snapshot["selected_account_hash"] == "hash-1"
     assert adapter.broker.order_kwargs["status"] == "WORKING"
     assert adapter.broker.order_kwargs["max_results"] == 100
-    from_time = datetime.fromisoformat(adapter.broker.order_kwargs["from_entered_time"])
-    to_time = datetime.fromisoformat(adapter.broker.order_kwargs["to_entered_time"])
+    from_value = adapter.broker.order_kwargs["from_entered_time"]
+    to_value = adapter.broker.order_kwargs["to_entered_time"]
+    assert from_value.endswith(".000Z")
+    assert to_value.endswith(".000Z")
+    from_time = datetime.fromisoformat(from_value.replace("Z", "+00:00"))
+    to_time = datetime.fromisoformat(to_value.replace("Z", "+00:00"))
     assert from_time.tzinfo == timezone.utc
     assert to_time.tzinfo == timezone.utc
     assert to_time - from_time == timedelta(days=60)
+
+
+def test_terminal_defaults_to_confirmed_schwab_ndx_symbol(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("MGC_NDXP_CHAIN_SYMBOL", raising=False)
+    service = NdxpTerminalService(tmp_path, adapter=DemoSchwabAdapter())
+    assert service.chain_symbol == "$NDX"
+
+
+def test_schwab_chain_canonicalizes_ndx_to_confirmed_index_symbol() -> None:
+    class OAuth:
+        @staticmethod
+        def get_access_token() -> str:
+            return "token"
+
+    class CapturingTransport:
+        request = None
+
+        def request_json(self, request):
+            self.request = request
+            return {}
+
+    adapter = object.__new__(NdxpSchwabAdapter)
+    adapter.oauth = OAuth()
+    adapter.market_config = SimpleNamespace(market_data_base_url="https://api.schwabapi.com/marketdata/v1")
+    adapter.transport = CapturingTransport()
+
+    adapter.fetch_chain(chain_symbol="NDX")
+
+    assert adapter.transport.request.query["symbol"] == "$NDX"
 
 
 def test_all_broker_mutations_are_source_locked(monkeypatch: pytest.MonkeyPatch) -> None:

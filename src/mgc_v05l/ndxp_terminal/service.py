@@ -53,7 +53,7 @@ class NdxpTerminalService:
         self.adapter = adapter or NdxpSchwabAdapter(repo_root)
         self.market_interval_seconds = market_interval_seconds
         self.broker_interval_seconds = broker_interval_seconds
-        self.chain_symbol = os.environ.get("MGC_NDXP_CHAIN_SYMBOL", "NDX")
+        self.chain_symbol = os.environ.get("MGC_NDXP_CHAIN_SYMBOL", "$NDX")
         self.quote_symbol = os.environ.get("MGC_NDXP_QUOTE_SYMBOL", "$NDX")
         self._lock = threading.RLock()
         self._stop = threading.Event()
