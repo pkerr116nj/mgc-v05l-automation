@@ -135,7 +135,13 @@ export MGC_DATABENTO_ENV_FILE=/Users/patrick/Dev/MGC-v05l-automation/.env.local
 bash scripts/run_ndxp_terminal.sh --databento --no-browser
 ```
 
-It listens only on `127.0.0.1:8810`. Open it in a browser on Mars, or use an SSH local-forward from another trusted home-network Mac. Do not change the live server to a LAN bind: it contains Schwab account truth and does not yet have the authenticated HTTPS boundary required for direct remote access.
+By default it listens only on `127.0.0.1:8810`. At home, the explicit source-locked LAN review mode can instead be opened normally from a Mac or iPad on the trusted private network:
+
+```bash
+bash scripts/run_ndxp_terminal.sh --databento --lan-live --no-browser
+```
+
+Open `http://<MARS_LAN_IP>:8810/`. No SSH tunnel or router port-forward is required. This mode exposes read-only Schwab account truth to devices already on the private LAN, while all broker mutations remain source-locked. It is not suitable for public exposure; authenticated HTTPS remains required before enabling live trading or internet-facing access.
 
 ## Roaming preview over UniFi Teleport
 

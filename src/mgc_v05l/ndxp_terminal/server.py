@@ -113,12 +113,15 @@ def run_server(
     demo: bool,
     databento: bool = False,
     allow_remote_demo: bool = False,
+    allow_lan_live: bool = False,
 ) -> None:
     loopback = host in {"127.0.0.1", "localhost", "::1"}
-    if not loopback and not (demo and allow_remote_demo):
+    remote_demo = demo and allow_remote_demo
+    lan_live = databento and allow_lan_live
+    if not loopback and not (remote_demo or lan_live):
         raise ValueError(
-            "A non-loopback bind is permitted only for the credential-free demo "
-            "with --demo --teleport-demo."
+            "A non-loopback bind requires either --demo --teleport-demo or "
+            "the explicitly read-only --databento --lan-live mode."
         )
     adapter = DemoSchwabAdapter() if demo else (NdxpDatabentoAdapter(repo_root) if databento else None)
     service = NdxpTerminalService(repo_root, adapter=adapter)
@@ -132,10 +135,12 @@ def run_server(
             {
                 "url": display_url,
                 "listen": url,
-                "mode": "TELEPORT_DEMO" if not loopback else (
-                    "DEMO" if demo else ("DATABENTO_OPRA_SCHWAB_READ_ONLY" if databento else "SCHWAB_LIVE_READ_ONLY")
+                "mode": "TELEPORT_DEMO" if remote_demo else (
+                    "LAN_DATABENTO_SCHWAB_READ_ONLY" if lan_live else (
+                        "DEMO" if demo else ("DATABENTO_OPRA_SCHWAB_READ_ONLY" if databento else "SCHWAB_LIVE_READ_ONLY")
+                    )
                 ),
-                "schwab_credentials_loaded": False if not loopback else None,
+                "schwab_credentials_loaded": not demo,
                 "transmission": "LOCKED",
             }
         )
@@ -317,6 +322,11 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Expose only demo mode to the trusted LAN/VPN; requires --demo and binds all interfaces by default.",
     )
+    parser.add_argument(
+        "--lan-live",
+        action="store_true",
+        help="Expose the source-locked Databento/Schwab read-only terminal on the trusted private LAN.",
+    )
     return parser
 
 
@@ -327,15 +337,20 @@ def main(argv: list[str] | None = None) -> int:
         parser.error("--demo and --databento are mutually exclusive.")
     if args.teleport_demo and not args.demo:
         parser.error("--teleport-demo requires --demo; remote live-Schwab access is disabled.")
-    host = "0.0.0.0" if args.teleport_demo and args.host == "127.0.0.1" else args.host
+    if args.lan_live and not args.databento:
+        parser.error("--lan-live requires --databento.")
+    if args.lan_live and (args.demo or args.teleport_demo):
+        parser.error("--lan-live cannot be combined with a demo mode.")
+    host = "0.0.0.0" if (args.teleport_demo or args.lan_live) and args.host == "127.0.0.1" else args.host
     repo_root = Path(__file__).resolve().parents[3]
     run_server(
         repo_root=repo_root,
         host=host,
         port=args.port,
-        open_browser=not args.no_browser and not args.teleport_demo,
+        open_browser=not args.no_browser and not args.teleport_demo and not args.lan_live,
         demo=args.demo,
         databento=args.databento,
         allow_remote_demo=args.teleport_demo,
+        allow_lan_live=args.lan_live,
     )
     return 0

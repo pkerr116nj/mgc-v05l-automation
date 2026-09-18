@@ -366,3 +366,12 @@ def test_teleport_demo_requires_demo_flag() -> None:
     with pytest.raises(SystemExit) as exc_info:
         main(["--teleport-demo"])
     assert exc_info.value.code == 2
+
+
+def test_lan_live_requires_databento_and_rejects_demo() -> None:
+    with pytest.raises(SystemExit) as missing_databento:
+        main(["--lan-live"])
+    assert missing_databento.value.code == 2
+    with pytest.raises(SystemExit) as demo_conflict:
+        main(["--demo", "--databento", "--lan-live"])
+    assert demo_conflict.value.code == 2

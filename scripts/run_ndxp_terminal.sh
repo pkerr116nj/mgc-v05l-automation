@@ -18,12 +18,16 @@ if [[ -n "${MGC_DATABENTO_ENV_FILE:-}" ]]; then
     echo "MGC_DATABENTO_ENV_FILE does not exist: ${MGC_DATABENTO_ENV_FILE}" >&2
     exit 1
   fi
+  set -a
   # shellcheck disable=SC1090
   source "${MGC_DATABENTO_ENV_FILE}"
+  set +a
 elif [[ -f "${REPO_ROOT}/.env.local" ]]; then
   # Local-only developer configuration; never print its contents.
+  set -a
   # shellcheck disable=SC1091
   source "${REPO_ROOT}/.env.local"
+  set +a
 fi
 export PYTHONPATH="${REPO_ROOT}/src${PYTHONPATH:+:${PYTHONPATH}}"
 
