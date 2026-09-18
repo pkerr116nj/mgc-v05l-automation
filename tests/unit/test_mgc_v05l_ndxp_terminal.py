@@ -140,7 +140,7 @@ class CountingBroker:
 
     def submit_order(self, *_args, **_kwargs):
         self.calls += 1
-        return {"status_code": 201, "broker_order_id": "pilot-123"}
+        return {"status_code": 201, "broker_order_id": "test-order-123"}
 
     cancel_order = submit_order
     replace_order = submit_order
@@ -235,7 +235,7 @@ def test_access_check_uses_aapl_for_quote_connectivity() -> None:
     assert result["quote_access"] is True
 
 
-def test_live_pilot_requires_both_runtime_and_launch_gates(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_live_trading_requires_both_runtime_and_launch_gates(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("MGC_NDXP_LIVE_TRANSMISSION_ENABLED", "1")
     broker = CountingBroker()
     gateway = LockedSchwabMutationGateway(broker)
@@ -248,31 +248,29 @@ def test_live_pilot_requires_both_runtime_and_launch_gates(monkeypatch: pytest.M
     assert broker.calls == 0
 
     monkeypatch.delenv("MGC_NDXP_LIVE_TRANSMISSION_ENABLED")
-    requested = LockedSchwabMutationGateway(broker, pilot_requested=True)
+    requested = LockedSchwabMutationGateway(broker, live_trading_requested=True)
     with pytest.raises(TransmissionDisabledError, match="runtime-locked"):
         requested.submit(request(quantity=1, limit_price="3.75"))
     assert broker.calls == 0
 
 
-def test_live_pilot_hard_limits_submission_and_disables_replace(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_live_trading_accepts_valid_quantity_and_close_but_disables_replace(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("MGC_NDXP_LIVE_TRANSMISSION_ENABLED", "1")
     broker = CountingBroker()
-    gateway = LockedSchwabMutationGateway(broker, pilot_requested=True)
+    gateway = LockedSchwabMutationGateway(broker, live_trading_requested=True)
 
-    with pytest.raises(SpreadValidationError, match="exactly one"):
-        gateway.submit(request(quantity=20, limit_price="9.95"))
-    with pytest.raises(SpreadValidationError, match="opening orders only"):
-        gateway.submit(request(quantity=1, limit_price="9.95", action="CLOSE"))
     with pytest.raises(TransmissionDisabledError, match="replacement is disabled"):
         gateway.replace(broker_order_id="123", request=request(quantity=1, limit_price="9.95"))
     assert broker.calls == 0
 
-    result = gateway.submit(request(quantity=1, limit_price="3.75"))
-    assert result["broker_order_id"] == "pilot-123"
-    assert broker.calls == 1
+    opened = gateway.submit(request(quantity=20, limit_price="3.75"))
+    closed = gateway.submit(request(quantity=20, limit_price="1.25", action="CLOSE"))
+    assert opened["broker_order_id"] == "test-order-123"
+    assert closed["broker_order_id"] == "test-order-123"
+    assert broker.calls == 2
 
 
-def test_live_pilot_origin_is_loopback_only() -> None:
+def test_live_trading_origin_is_loopback_only() -> None:
     assert is_loopback_address("127.0.0.1") is True
     assert is_loopback_address("::1") is True
     assert is_loopback_address("192.168.1.254") is False
@@ -475,7 +473,7 @@ def test_demo_service_builds_preview_but_never_transmits(tmp_path: Path) -> None
         service.stop()
 
 
-def test_live_pilot_uses_exact_single_use_preview_and_selected_account(
+def test_live_trading_uses_exact_single_use_preview_and_selected_account(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setenv("MGC_NDXP_LIVE_TRANSMISSION_ENABLED", "1")
@@ -487,7 +485,7 @@ def test_live_pilot_uses_exact_single_use_preview_and_selected_account(
         adapter=adapter,
         market_interval_seconds=0.05,
         broker_interval_seconds=0.05,
-        live_pilot_requested=True,
+        live_trading_requested=True,
     )
     service.start()
     try:
@@ -503,7 +501,7 @@ def test_live_pilot_uses_exact_single_use_preview_and_selected_account(
             "account_hash": "demo-account-hash",
             "short_symbol": short["symbol"],
             "long_symbol": long["symbol"],
-            "quantity": 1,
+            "quantity": 20,
             "limit_price": "3.75",
             "action": "OPEN",
         }
@@ -512,7 +510,7 @@ def test_live_pilot_uses_exact_single_use_preview_and_selected_account(
         assert preview["transmission_enabled"] is True
         assert preview["preview_token_expires_seconds"] == 60
         submitted = service.mutate("submit", {**payload, "preview_token": preview["preview_token"]})
-        assert submitted["broker_order_id"] == "pilot-123"
+        assert submitted["broker_order_id"] == "test-order-123"
         assert broker.calls == 1
 
         with pytest.raises(SpreadValidationError, match="already consumed"):
@@ -520,19 +518,40 @@ def test_live_pilot_uses_exact_single_use_preview_and_selected_account(
         assert broker.calls == 1
 
         with pytest.raises(SpreadValidationError, match="currently selected"):
-            service.mutate("cancel", {"account_hash": "another-account", "broker_order_id": "pilot-123"})
+            service.mutate("cancel", {"account_hash": "another-account", "broker_order_id": "test-order-123"})
         assert broker.calls == 1
 
+        positioned_short = next(row for row in calls if row["strike"] == 29330)
+        positioned_long = next(row for row in calls if row["strike"] == 29340)
+        close_payload = {
+            **payload,
+            "short_symbol": positioned_short["symbol"],
+            "long_symbol": positioned_long["symbol"],
+            "limit_price": "1.25",
+            "action": "CLOSE",
+        }
+        close_preview = service.preview(close_payload, allow_live_token=True)
+        closed = service.mutate(
+            "submit", {**close_payload, "preview_token": close_preview["preview_token"]}
+        )
+        assert closed["broker_order_id"] == "test-order-123"
+        assert broker.calls == 2
+
         cancelled = service.mutate(
-            "cancel", {"account_hash": "demo-account-hash", "broker_order_id": "pilot-123"}
+            "cancel", {"account_hash": "demo-account-hash", "broker_order_id": "test-order-123"}
         )
         assert cancelled["status_code"] == 201
-        assert broker.calls == 2
+        assert broker.calls == 3
         journal = (tmp_path / "outputs" / "ndxp_terminal" / "mutations.jsonl").read_text(encoding="utf-8")
         assert "SUBMIT_ATTEMPT" in journal
         assert "SUBMIT_ACK" in journal
         assert "CANCEL_ACK" in journal
         assert "demo-account-hash" not in journal
+
+        service.stop()
+        service._last_market_success_wall = time.time() - 6
+        with pytest.raises(SpreadValidationError, match="market poll is over five seconds old"):
+            service.preview(payload, allow_live_token=True)
 
     finally:
         service.stop()
@@ -583,9 +602,15 @@ def test_lan_live_allows_schwab_only_and_rejects_demo(monkeypatch: pytest.Monkey
     assert captured["allow_lan_live"] is True
     assert captured["host"] == "0.0.0.0"
 
+    main(["--lan-live", "--live-trading", "--no-browser"])
+    assert captured["live_trading"] is True
+
     with pytest.raises(SystemExit) as demo_conflict:
         main(["--demo", "--lan-live"])
     assert demo_conflict.value.code == 2
+    with pytest.raises(SystemExit) as live_demo_conflict:
+        main(["--demo", "--live-trading"])
+    assert live_demo_conflict.value.code == 2
 
 
 def test_mobile_chain_keeps_strikes_fixed_and_allows_positive_midpoint_sell() -> None:
@@ -631,3 +656,6 @@ def test_mobile_chain_keeps_strikes_fixed_and_allows_positive_midpoint_sell() ->
     assert 'const callItm = row.call && Number(row.call.short.strike) < Number(spot)' in javascript
     assert 'const putItm = row.put && Number(row.put.short.strike) > Number(spot)' in javascript
     assert "button.disabled = opening ? !positiveMidpoint" in javascript
+    assert 'value="20"' in html
+    assert "`${payload.action} ${payload.quantity}" in javascript
+    assert "ORDER ENTRY · LIVE TRADING" in javascript

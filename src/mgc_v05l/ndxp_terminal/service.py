@@ -15,7 +15,7 @@ from pathlib import Path
 from typing import Any, Protocol
 
 from .analytics import derive_expiration_analytics
-from .diagnostics import classify_diagnostics
+from .diagnostics import classify_diagnostics, ndxp_regular_session_open
 from .orders import (
     LIVE_TRANSMISSION_COMPILED,
     LockedSchwabMutationGateway,
@@ -25,7 +25,6 @@ from .orders import (
     build_vertical_order_payload,
     parse_option_symbol,
     validate_spread_request,
-    validate_live_pilot_request,
 )
 from .schwab import NdxpSchwabAdapter
 
@@ -52,7 +51,7 @@ class NdxpTerminalService:
         adapter: TerminalAdapter | None = None,
         market_interval_seconds: float = 1.0,
         broker_interval_seconds: float = 5.0,
-        live_pilot_requested: bool = False,
+        live_trading_requested: bool = False,
     ) -> None:
         self.repo_root = repo_root
         self.adapter = adapter or NdxpSchwabAdapter(repo_root)
@@ -77,13 +76,13 @@ class NdxpTerminalService:
         self._request_sequence = 0
         self._selected_expiration: str | None = None
         self._selected_option_type = "CALL"
-        self._live_pilot_requested = live_pilot_requested
+        self._live_trading_requested = live_trading_requested
         self._preview_tokens: dict[str, tuple[float, str]] = {}
         self._consumed_preview_tokens: set[str] = set()
         self._diagnostic_path = repo_root / "outputs" / "ndxp_terminal" / "diagnostics.jsonl"
         self._mutation_gateway = LockedSchwabMutationGateway(
             self.adapter.broker,
-            pilot_requested=live_pilot_requested,
+            live_trading_requested=live_trading_requested,
         )
 
     def start(self) -> None:
@@ -142,10 +141,10 @@ class NdxpTerminalService:
                 "mode": str(getattr(self.adapter, "mode", "SCHWAB_LIVE_READ_ONLY")),
                 "transmission": {
                     "compiled": LIVE_TRANSMISSION_COMPILED,
-                    "launch_requested": self._live_pilot_requested,
+                    "launch_requested": self._live_trading_requested,
                     "runtime_enabled": os.environ.get("MGC_NDXP_LIVE_TRANSMISSION_ENABLED") == "1",
                     "effective_enabled": self._mutation_gateway.enabled,
-                    "label": "TRANSMISSION LOCKED" if not self._mutation_gateway.enabled else "LIVE PILOT ENABLED",
+                    "label": "TRANSMISSION LOCKED" if not self._mutation_gateway.enabled else "LIVE TRADING ENABLED",
                 },
                 "selection": {
                     "expiration": self._selected_expiration,
@@ -221,14 +220,14 @@ class NdxpTerminalService:
                 "The account was found in current Schwab account truth.",
                 "The spread is an exact 10-point defined-risk NDX/NDXP vertical.",
                 f"The order is NORMAL session, DAY duration, and {'NET_CREDIT' if request.action == 'OPEN' else 'NET_DEBIT'} priced.",
-                "Broker transmission requires the loopback-only, single-use live-pilot gate.",
+                "Broker transmission requires the loopback-only, single-use live-trading gate.",
             ],
         }
         if allow_live_token and self._mutation_gateway.enabled:
-            validate_live_pilot_request(request)
             if request.account_hash != str(broker.get("selected_account_hash") or ""):
-                raise SpreadValidationError("Live pilot preview is restricted to the currently selected Schwab account.")
-            self._validate_live_pilot_contracts(request, market)
+                raise SpreadValidationError("Live order preview is restricted to the currently selected Schwab account.")
+            self._validate_live_contracts(request, market)
+            self._assert_live_data_ready(market, request=request)
             token = secrets.token_urlsafe(32)
             with self._lock:
                 self._purge_preview_tokens()
@@ -238,7 +237,7 @@ class NdxpTerminalService:
                 preview_token=token,
                 preview_token_expires_seconds=60,
             )
-            result["checks"].append("Single-use live-pilot token issued for this exact payload.")
+            result["checks"].append("Single-use live-trading token issued for this exact payload.")
         return result
 
     def access_check(self) -> dict[str, Any]:
@@ -254,7 +253,10 @@ class NdxpTerminalService:
         if action == "submit":
             request = NdxpSpreadRequest.from_json(payload)
             if not self._mutation_gateway.enabled:
-                raise TransmissionDisabledError("Schwab submission is not enabled by every live-pilot gate.")
+                raise TransmissionDisabledError("Schwab submission is not enabled by every live-trading gate.")
+            with self._lock:
+                market = _normalize_market(self._market, selected_expiration=None)
+            self._assert_live_data_ready(market, request=request)
             self._consume_preview_token(str(payload.get("preview_token") or ""), request)
             self._journal_mutation("SUBMIT_ATTEMPT", request=request)
             try:
@@ -278,7 +280,7 @@ class NdxpTerminalService:
             self._journal_mutation("CANCEL_ACK", broker_order_id=broker_order_id, result=result)
             return result
         if action == "replace":
-            raise TransmissionDisabledError("Order replacement is disabled during the one-contract live pilot.")
+            raise TransmissionDisabledError("Order replacement is disabled; cancel and submit a newly reviewed order.")
         raise SpreadValidationError(f"Unknown mutation action: {action}.")
 
     def _consume_preview_token(self, token: str, request: NdxpSpreadRequest) -> None:
@@ -299,19 +301,45 @@ class NdxpTerminalService:
         now = time.monotonic()
         self._preview_tokens = {token: record for token, record in self._preview_tokens.items() if record[0] >= now}
 
-    def _validate_live_pilot_contracts(self, request: NdxpSpreadRequest, market: dict[str, Any]) -> None:
+    def _validate_live_contracts(self, request: NdxpSpreadRequest, market: dict[str, Any]) -> None:
         selected_expiration = str(market.get("selected_expiration") or "")
         expected_expiration = selected_expiration.replace("-", "")[2:]
         short = parse_option_symbol(request.short_symbol)
         if not expected_expiration or short.expiration != expected_expiration:
-            raise SpreadValidationError("The live pilot spread must use the currently selected expiration.")
+            raise SpreadValidationError("The live spread must use the currently selected expiration.")
         selected_symbols = {
             row["symbol"]
             for side in market.get("selected_chain", {}).values()
             for row in side
         }
         if request.short_symbol not in selected_symbols or request.long_symbol not in selected_symbols:
-            raise SpreadValidationError("Both live-pilot legs must be in the currently selected option chain.")
+            raise SpreadValidationError("Both live-order legs must be in the currently selected option chain.")
+
+    def _assert_live_data_ready(self, market: dict[str, Any], *, request: NdxpSpreadRequest) -> None:
+        with self._lock:
+            market_error = self._market_error
+            broker_error = self._broker_error
+            last_market_success_wall = self._last_market_success_wall
+        if market_error or broker_error:
+            raise SpreadValidationError(f"Live order blocked by feed/broker error: {market_error or broker_error}")
+        now_wall = time.time()
+        poll_age_ms = None if last_market_success_wall is None else (now_wall - last_market_success_wall) * 1000
+        if poll_age_ms is None or poll_age_ms > 5000:
+            raise SpreadValidationError("Live order blocked because the most recent successful market poll is over five seconds old.")
+        if ndxp_regular_session_open(datetime.fromtimestamp(now_wall, tz=timezone.utc)):
+            source_age_ms = _source_age_ms(market.get("latest_source_time_ms"), now_wall)
+            if source_age_ms is None or source_age_ms > 5000:
+                raise SpreadValidationError("Live order blocked because option quotes are missing or over five seconds old.")
+            exact_legs = {
+                row.get("symbol"): row
+                for side in market.get("selected_chain", {}).values()
+                for row in side
+                if row.get("symbol") in {request.short_symbol, request.long_symbol}
+            }
+            for symbol in (request.short_symbol, request.long_symbol):
+                leg_age_ms = _source_age_ms(exact_legs.get(symbol, {}).get("quote_time_ms"), now_wall)
+                if leg_age_ms is None or leg_age_ms > 5000:
+                    raise SpreadValidationError(f"Live order blocked because quote data for {symbol} is missing or stale.")
 
     def _journal_mutation(
         self,

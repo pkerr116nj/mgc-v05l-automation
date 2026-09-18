@@ -38,7 +38,7 @@ class NdxpTerminalHandler(BaseHTTPRequestHandler):
                 snapshot["transmission"]["effective_enabled"] and origin_allowed
             )
             if snapshot["transmission"]["launch_requested"] and not origin_allowed:
-                snapshot["transmission"]["label"] = "LIVE PILOT · MARS ONLY"
+                snapshot["transmission"]["label"] = "LIVE TRADING · MARS ONLY"
             self._json(HTTPStatus.OK, snapshot)
             return
         if self.path == "/api/access-check":
@@ -80,7 +80,7 @@ class NdxpTerminalHandler(BaseHTTPRequestHandler):
                 if not self._loopback_client():
                     self._json(
                         HTTPStatus.FORBIDDEN,
-                        {"ok": False, "error": "Broker mutations are permitted only from Mars loopback during the live pilot."},
+                        {"ok": False, "error": "Broker mutations are permitted only from Mars loopback."},
                     )
                     return
                 result = self.service.mutate(self.path.rsplit("/", 1)[-1], payload)
@@ -135,7 +135,7 @@ def run_server(
     databento: bool = False,
     allow_remote_demo: bool = False,
     allow_lan_live: bool = False,
-    live_pilot: bool = False,
+    live_trading: bool = False,
 ) -> None:
     loopback = host in {"127.0.0.1", "localhost", "::1"}
     remote_demo = demo and allow_remote_demo
@@ -146,16 +146,16 @@ def run_server(
             "the explicitly read-only --lan-live mode."
         )
     adapter = DemoSchwabAdapter() if demo else (NdxpDatabentoAdapter(repo_root) if databento else None)
-    if live_pilot and demo:
-        raise ValueError("The live pilot cannot run with demo data.")
-    service = NdxpTerminalService(repo_root, adapter=adapter, live_pilot_requested=live_pilot)
+    if live_trading and demo:
+        raise ValueError("Live trading cannot run with demo data.")
+    service = NdxpTerminalService(repo_root, adapter=adapter, live_trading_requested=live_trading)
     service.start()
     handler = type("BoundNdxpTerminalHandler", (NdxpTerminalHandler,), {"service": service})
     server = ThreadingHTTPServer((host, port), handler)
     url = f"http://{host}:{server.server_port}/"
     display_url = f"http://<MARS_LAN_IP>:{server.server_port}/" if not loopback else url
-    if live_pilot:
-        mode = "LAN_SCHWAB_LIVE_PILOT" if lan_live else "SCHWAB_LIVE_PILOT"
+    if live_trading:
+        mode = "LAN_SCHWAB_LIVE_TRADING" if lan_live else "SCHWAB_LIVE_TRADING"
     elif remote_demo:
         mode = "TELEPORT_DEMO"
     elif lan_live:
@@ -171,7 +171,7 @@ def run_server(
                 "listen": url,
                 "mode": mode,
                 "schwab_credentials_loaded": not demo,
-                "transmission": "LIVE PILOT · LOOPBACK ONLY" if live_pilot else "LOCKED",
+                "transmission": "LIVE TRADING · LOOPBACK ONLY" if live_trading else "LOCKED",
             }
         )
     )
@@ -358,9 +358,9 @@ def build_parser() -> argparse.ArgumentParser:
         help="Expose the source-locked Schwab or Databento/Schwab read-only terminal on the trusted private LAN.",
     )
     parser.add_argument(
-        "--live-pilot",
+        "--live-trading",
         action="store_true",
-        help="Request the one-contract live pilot; mutations remain restricted to Mars loopback.",
+        help="Enable reviewed live order entry; mutations remain restricted to Mars loopback.",
     )
     return parser
 
@@ -374,8 +374,8 @@ def main(argv: list[str] | None = None) -> int:
         parser.error("--teleport-demo requires --demo; remote live-Schwab access is disabled.")
     if args.lan_live and (args.demo or args.teleport_demo):
         parser.error("--lan-live cannot be combined with a demo mode.")
-    if args.live_pilot and args.demo:
-        parser.error("--live-pilot cannot be combined with --demo.")
+    if args.live_trading and args.demo:
+        parser.error("--live-trading cannot be combined with --demo.")
     host = "0.0.0.0" if (args.teleport_demo or args.lan_live) and args.host == "127.0.0.1" else args.host
     repo_root = Path(__file__).resolve().parents[3]
     run_server(
@@ -387,6 +387,6 @@ def main(argv: list[str] | None = None) -> int:
         databento=args.databento,
         allow_remote_demo=args.teleport_demo,
         allow_lan_live=args.lan_live,
-        live_pilot=args.live_pilot,
+        live_trading=args.live_trading,
     )
     return 0

@@ -27,7 +27,7 @@ def classify_diagnostics(
     databento = (market or {}).get("databento") if isinstance((market or {}).get("databento"), dict) else None
     market_source = str((market or {}).get("market_source") or "Schwab market data")
     measured_at = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
-    market_session = "REGULAR_OPEN" if _ndxp_regular_session_open(measured_at) else "OUTSIDE_REGULAR_HOURS"
+    market_session = "REGULAR_OPEN" if ndxp_regular_session_open(measured_at) else "OUTSIDE_REGULAR_HOURS"
 
     if client_gap_ms is not None and client_gap_ms > 3500:
         classifications.append("CLIENT_OR_UI_STALL")
@@ -93,7 +93,7 @@ def classify_diagnostics(
     }
 
 
-def _ndxp_regular_session_open(at: datetime) -> bool:
+def ndxp_regular_session_open(at: datetime) -> bool:
     eastern = at.astimezone(EASTERN)
     return eastern.weekday() < 5 and time(9, 30) <= eastern.time().replace(tzinfo=None) < time(16, 0)
 
