@@ -79,6 +79,12 @@ function render() {
   const diagnostics = state.diagnostics || {};
   ui.clock.textContent = new Date(state.generated_at).toLocaleTimeString([], { hour: "numeric", minute: "2-digit", second: "2-digit" });
   ui.transmission.textContent = state.transmission.label;
+  if (state.mode === "DEMO") {
+    ui["mode-banner"].textContent = "SYNTHETIC DEMO DATA · NOT CONNECTED TO DATABENTO OR SCHWAB MARKET DATA";
+    ui["mode-banner"].className = "mode-banner";
+  } else {
+    ui["mode-banner"].className = "mode-banner hidden";
+  }
   ui.spot.textContent = number(market.spot, 2);
   ui["quote-age"].textContent = age(diagnostics.quote_source_age_ms);
   ui["market-latency"].textContent = age(diagnostics.market_latency_ms);
@@ -202,9 +208,11 @@ function renderChain(chain, spot, analytics = {}) {
   }
   for (const row of rows) {
     const near = Number.isFinite(Number(spot)) && row.low <= spot && row.high >= spot;
-    for (const key of visibleColumns) fragments.push(metricCell(row.call, key, near, "CALL"));
+    const callOtm = row.call && Number(row.call.short.strike) > Number(spot);
+    const putOtm = row.put && Number(row.put.short.strike) < Number(spot);
+    for (const key of visibleColumns) fragments.push(metricCell(row.call, key, near, "CALL", callOtm));
     fragments.push(cell(`${number(row.low, 0)} / ${number(row.high, 0)}`, `strike-cell spread-strikes${near ? " near" : ""}`));
-    for (const key of visibleColumns) fragments.push(metricCell(row.put, key, near, "PUT"));
+    for (const key of visibleColumns) fragments.push(metricCell(row.put, key, near, "PUT", putOtm));
   }
   if (!rows.length) {
     const empty = cell("Waiting for the selected option market…", "chain-empty");
@@ -246,7 +254,7 @@ function cell(text, className = "") {
   const node = document.createElement("div"); node.className = className; node.textContent = text; node.setAttribute("role", "cell"); return node;
 }
 
-function metricCell(spread, key, near, side) {
+function metricCell(spread, key, near, side, otm = false) {
   const definition = columnDefinitions.find(([candidate]) => candidate === key);
   const value = spread?.metrics?.[key];
   const formatted = formatMetric(key, value, definition[2]);
@@ -254,15 +262,16 @@ function metricCell(spread, key, near, side) {
   if ((key === "bid" || key === "ask") && spread) {
     const button = document.createElement("button");
     const opening = key === "bid";
-    button.className = `metric ${opening ? "bid-action" : "ask-action"}${near ? " near" : ""}${opening && opportunity.qualified ? " qualified" : ""}${opening && opportunity.preferred ? " preferred" : ""}${opening && spread.metrics?.credit_band === "ELEVATED" ? " elevated" : ""}`;
+    button.className = `metric ${opening ? "bid-action" : "ask-action"}${near ? " near" : ""}${otm ? " otm" : ""}${opening && opportunity.qualified ? " qualified" : ""}${opening && opportunity.preferred ? " preferred" : ""}${opening && spread.metrics?.credit_band === "ELEVATED" ? " elevated" : ""}`;
     button.textContent = formatted;
-    button.title = opening ? `Sell to open ${side.toLowerCase()} credit spread · ${opportunity.label}` : `Buy to close ${side.toLowerCase()} credit spread`;
+    const moneyness = otm ? " · OTM" : "";
+    button.title = opening ? `Sell to open ${side.toLowerCase()} credit spread${moneyness} · ${opportunity.label}` : `Buy to close ${side.toLowerCase()} credit spread${moneyness}`;
     button.disabled = value == null || Number(value) <= 0;
     button.addEventListener("click", () => openTicket(opening ? "OPEN" : "CLOSE", side, spread));
     button.setAttribute("role", "cell");
     return button;
   }
-  return cell(formatted, `metric${near ? " near" : ""}${opportunity.qualified ? " qualified" : ""}`);
+  return cell(formatted, `metric${near ? " near" : ""}${otm ? " otm" : ""}${opportunity.qualified ? " qualified" : ""}`);
 }
 
 function formatMetric(key, value, digits) {

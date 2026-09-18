@@ -27,6 +27,7 @@ The September 14 Thinkorswim iPad references establish these initial chain requi
 
 - calls and puts appear side by side around a central strike-pair column;
 - each row represents a selectable 10-point vertical rather than an unpaired contract;
+- valid OTM call-credit spreads above spot and OTM put-credit spreads below spot receive a subtle side-specific tint while the spread straddling spot retains the stronger full-row highlight;
 - the chain provides at least 25 shared call-and-put strike levels below spot and 25 above spot, with an on-screen coverage warning if Schwab returns less;
 - the page scrolls vertically through strikes and the chain scrolls horizontally through fields;
 - quote fields, net and percentage change, Greeks, IV, volume, and open interest are selectable display columns;
@@ -122,6 +123,8 @@ To inspect the interface without Schwab credentials:
 ```bash
 bash scripts/run_ndxp_terminal.sh --demo
 ```
+
+Demo mode displays a persistent `SYNTHETIC DEMO DATA` banner. Its repeated prices, IV, changes, and Greeks exist only to exercise layout and ticket behavior and must never be interpreted as a market snapshot.
 
 To install and run the hybrid live-data build on Mars:
 
