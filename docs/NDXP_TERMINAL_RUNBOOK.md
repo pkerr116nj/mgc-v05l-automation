@@ -1,4 +1,4 @@
-# Schwab NDXP Credit Terminal — Locked Review Build
+# NDXP Credit Terminal — Locked Review Build
 
 ## Product direction
 
@@ -7,6 +7,17 @@ The current interface is an engineering preview of the Schwab connection, spread
 The production interface will visually and operationally approximate the Thinkorswim Mobile workflow, using Patrick's screenshots as the reference for information density, navigation, option-chain interaction, order review, working-order management, and touch behavior. It will remain purpose-built for NDX/NDXP credit verticals rather than reproduce unrelated Thinkorswim functions.
 
 The client will be a responsive progressive web application for Mac, iPad, and potentially iPhone. Schwab OAuth credentials, tokens, broker polling, audit records, and order transmission stay on the trusted Mars backend. Mobile clients receive the application surface over an authenticated HTTPS connection, including when reached through the existing remote-access path. No Schwab app secret or refresh token is stored on iPad or iPhone.
+
+### Market-data boundary
+
+The preferred live mode deliberately separates two sources:
+
+- Databento `OPRA.PILLAR` consolidated `cmbp-1` supplies NDX/NDXP option NBBO bid and ask values.
+- Schwab supplies the contract roster, NDX cash-index spot, account positions, working orders, and eventual execution truth.
+
+One long-lived Databento session serves the terminal. It subscribes only the selected expiration's 35 strikes on either side of spot (calls and puts) and adds symbols when the operator changes expiration. The session never opens one connection per symbol and never subscribes the entire OPRA universe. Databento Live cannot remove subscriptions from an active session, so restarting the terminal clears accumulated expiration subscriptions.
+
+Schwab option bid and ask values are not used as an invisible fallback in Databento mode. Until a contract has a current Databento quote, its price is blank and analytics fail closed. The interface labels the mixed boundary as `Databento OPRA NBBO · Schwab NDX spot` and reports subscription, mapping, quote, timestamp, and stream-error evidence.
 
 Before mobile use is enabled, the localhost-only preview server will be replaced with an authenticated service boundary, TLS, explicit device/session authorization, and operator confirmation suitable for broker mutations.
 
@@ -82,6 +93,14 @@ export SCHWAB_TOKEN_FILE="/Users/patrick/Dev/MGC-v05l-automation/.local/schwab/t
 
 OAuth access and refresh tokens remain in the existing mode-600 local token file because the current OAuth client rotates them there. The directory and file are ignored by Git.
 
+Databento mode additionally requires `DATABENTO_API_KEY` and a live `OPRA.PILLAR` entitlement. Keep the key in the existing local Mars environment file. For a separate preview worktree, point the launcher at that file rather than copying the secret:
+
+```bash
+export MGC_DATABENTO_ENV_FILE=/Users/patrick/Dev/MGC-v05l-automation/.env.local
+```
+
+The launcher sources the file without displaying its contents. A missing key fails immediately; a missing OPRA live entitlement is reported by the Databento stream status in the interface.
+
 If the existing token is absent or expired beyond refresh, run the repository's established local OAuth bootstrap:
 
 ```bash
@@ -103,6 +122,17 @@ To inspect the interface without Schwab credentials:
 ```bash
 bash scripts/run_ndxp_terminal.sh --demo
 ```
+
+To install and run the hybrid live-data build on Mars:
+
+```bash
+.venv/bin/python -m pip install -e '.[databento]'
+
+export MGC_DATABENTO_ENV_FILE=/Users/patrick/Dev/MGC-v05l-automation/.env.local
+bash scripts/run_ndxp_terminal.sh --databento --no-browser
+```
+
+It listens only on `127.0.0.1:8810`. Open it in a browser on Mars, or use an SSH local-forward from another trusted home-network Mac. Do not change the live server to a LAN bind: it contains Schwab account truth and does not yet have the authenticated HTTPS boundary required for direct remote access.
 
 ## Roaming preview over UniFi Teleport
 
@@ -151,8 +181,11 @@ It does not call a broker mutation endpoint. A successful result proves account 
 | `APPLICATION_WORKER_STALL` | The local background poller missed its schedule by more than 2.5 seconds. |
 | `SCHWAB_RESPONSE_DELAY` | Schwab market data took more than 2.5 seconds or broker truth took more than 4 seconds. |
 | `SCHWAB_OR_NETWORK_ERROR` | A Schwab HTTP, OAuth, DNS, TLS, or local network request failed. |
+| `DATABENTO_STREAM_ERROR` | The Databento OPRA stream reported an entitlement, connection, protocol, or provider error. |
+| `DATABENTO_QUOTES_PENDING` | The OPRA subscription exists, but no selected-contract quotes have arrived yet. |
+| `DATABENTO_PARTIAL_QUOTES` | Fewer than 80% of selected OPRA contracts currently have a quote in the session cache. |
 | `MARKET_POLLER_STALE` | No successful market poll completed for more than 5 seconds. |
-| `STALE_MARKET_DATA` | Schwab responded, but the newest quote timestamp is more than 5 seconds old. |
+| `STALE_MARKET_DATA` | The newest selected option quote timestamp is more than 5 seconds old. |
 | `HEALTHY` | All measured layers remain within their thresholds. |
 
 Diagnostics are appended to `outputs/ndxp_terminal/diagnostics.jsonl` without credentials, tokens, account numbers, positions, or order payloads.

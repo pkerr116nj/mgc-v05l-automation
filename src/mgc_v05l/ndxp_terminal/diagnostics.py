@@ -1,4 +1,4 @@
-"""Classify terminal, worker, Schwab response, and quote-timestamp health."""
+"""Classify terminal, worker, broker, and market-feed health."""
 
 from __future__ import annotations
 
@@ -19,15 +19,33 @@ def classify_diagnostics(
 ) -> dict[str, Any]:
     classifications: list[str] = []
     evidence: list[str] = []
+    databento = (market or {}).get("databento") if isinstance((market or {}).get("databento"), dict) else None
+    market_source = str((market or {}).get("market_source") or "Schwab market data")
 
     if client_gap_ms is not None and client_gap_ms > 3500:
         classifications.append("CLIENT_OR_UI_STALL")
         evidence.append(f"Browser heartbeat gap reached {client_gap_ms:.0f} ms.")
     market_latency = _number((market or {}).get("latency_ms"))
     broker_latency = _number((broker or {}).get("latency_ms"))
-    if market_error or broker_error:
+    databento_error = bool(market_error and "databento" in market_error.lower())
+    if databento_error:
+        classifications.append("DATABENTO_STREAM_ERROR")
+        evidence.append(market_error or "Databento stream failed.")
+    elif databento and databento.get("last_error"):
+        classifications.append("DATABENTO_STREAM_ERROR")
+        evidence.append(str(databento["last_error"]))
+    elif databento and databento.get("target_symbol_count") and (
+        databento.get("selected_quote_count", 0) < databento.get("target_symbol_count", 0) * 0.8
+    ):
+        classification = "DATABENTO_QUOTES_PENDING" if not databento.get("selected_quote_count") else "DATABENTO_PARTIAL_QUOTES"
+        classifications.append(classification)
+        evidence.append(
+            f"Databento has {databento.get('selected_quote_count', 0)} quotes for "
+            f"{databento.get('target_symbol_count')} selected OPRA contracts."
+        )
+    if (market_error and not databento_error) or broker_error:
         classifications.append("SCHWAB_OR_NETWORK_ERROR")
-        evidence.append(market_error or broker_error or "Schwab request failed.")
+        evidence.append((market_error if not databento_error else None) or broker_error or "Schwab request failed.")
     elif (market_latency is not None and market_latency > 2500) or (broker_latency is not None and broker_latency > 4000):
         classifications.append("SCHWAB_RESPONSE_DELAY")
         evidence.append(f"Market/broker response latency is {market_latency or 0:.0f}/{broker_latency or 0:.0f} ms.")
@@ -39,11 +57,11 @@ def classify_diagnostics(
         evidence.append(f"No successful market poll for {market_poll_age_ms / 1000:.1f} seconds.")
     if source_age_ms is not None and source_age_ms > 5000:
         classifications.append("STALE_MARKET_DATA")
-        evidence.append(f"Latest Schwab quote timestamp is {source_age_ms / 1000:.1f} seconds old.")
+        evidence.append(f"Latest {market_source} option quote is {source_age_ms / 1000:.1f} seconds old.")
 
     if not classifications:
         classifications.append("HEALTHY")
-        evidence.append("UI heartbeat, local poller, Schwab responses, and quote timestamps are within thresholds.")
+        evidence.append("UI heartbeat, local poller, market feed, broker responses, and quote timestamps are within thresholds.")
     return {
         "classification": classifications[0],
         "all_classifications": classifications,
@@ -55,6 +73,8 @@ def classify_diagnostics(
         "broker_latency_ms": broker_latency,
         "market_poll_age_ms": market_poll_age_ms,
         "quote_source_age_ms": source_age_ms,
+        "market_source": market_source,
+        "databento": databento,
     }
 
 

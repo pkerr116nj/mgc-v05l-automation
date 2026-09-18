@@ -8,6 +8,7 @@ from pathlib import Path
 import pytest
 
 from mgc_v05l.ndxp_terminal.analytics import derive_expiration_analytics
+from mgc_v05l.ndxp_terminal.databento import DatabentoOpraFeed, NdxpDatabentoAdapter
 from mgc_v05l.ndxp_terminal.diagnostics import classify_diagnostics
 from mgc_v05l.ndxp_terminal.orders import (
     LockedSchwabMutationGateway,
@@ -19,6 +20,48 @@ from mgc_v05l.ndxp_terminal.orders import (
 )
 from mgc_v05l.ndxp_terminal.server import DemoSchwabAdapter, main, run_server
 from mgc_v05l.ndxp_terminal.service import NdxpTerminalService
+
+
+class FakeDatabentoLive:
+    def __init__(self) -> None:
+        self.callback = None
+        self.exception_callback = None
+        self.subscriptions: list[dict] = []
+        self.start_calls = 0
+        self.stop_calls = 0
+
+    def add_callback(self, callback, exception_callback) -> None:
+        self.callback = callback
+        self.exception_callback = exception_callback
+
+    def subscribe(self, **kwargs) -> None:
+        self.subscriptions.append(kwargs)
+
+    def start(self) -> None:
+        self.start_calls += 1
+
+    def stop(self) -> None:
+        self.stop_calls += 1
+
+
+class SymbolMappingMsg:
+    def __init__(self, instrument_id: int, symbol_value: str) -> None:
+        self.instrument_id = instrument_id
+        self.stype_in_symbol = symbol_value
+        self.stype_out_symbol = str(instrument_id)
+
+
+class _Level:
+    def __init__(self, bid: int, ask: int) -> None:
+        self.bid_px = bid
+        self.ask_px = ask
+
+
+class Cmbp1Msg:
+    def __init__(self, instrument_id: int, bid: float, ask: float, ts_event: int) -> None:
+        self.instrument_id = instrument_id
+        self.levels = [_Level(int(bid * 1_000_000_000), int(ask * 1_000_000_000))]
+        self.ts_event = ts_event
 
 
 def symbol(strike: int, option_type: str = "C", root: str = "NDXP") -> str:
@@ -107,6 +150,65 @@ def test_all_broker_mutations_are_source_locked(monkeypatch: pytest.MonkeyPatch)
     assert broker.calls == 0
 
 
+def test_databento_feed_uses_one_session_and_maps_opra_quotes() -> None:
+    live = FakeDatabentoLive()
+    feed = DatabentoOpraFeed("test-key", live_factory=lambda _key: live)
+    option_symbol = symbol(29330)
+
+    feed.ensure_subscribed([option_symbol])
+    feed.ensure_subscribed([option_symbol])
+    assert live.start_calls == 1
+    assert len(live.subscriptions) == 1
+    assert live.subscriptions[0]["dataset"] == "OPRA.PILLAR"
+    assert live.subscriptions[0]["schema"] == "cmbp-1"
+    assert live.subscriptions[0]["stype_in"] == "raw_symbol"
+    assert live.subscriptions[0]["snapshot"] is True
+
+    live.callback(SymbolMappingMsg(71, option_symbol))
+    event_ns = int(datetime.now(timezone.utc).timestamp() * 1_000_000_000)
+    live.callback(Cmbp1Msg(71, 2.10, 2.30, event_ns))
+    quote = feed.quotes([option_symbol])[option_symbol]
+    assert quote.bid == pytest.approx(2.10)
+    assert quote.ask == pytest.approx(2.30)
+    assert feed.status()["quote_count"] == 1
+
+    feed.stop()
+    assert live.stop_calls == 1
+
+
+def test_hybrid_adapter_replaces_schwab_option_quotes_with_databento() -> None:
+    live = FakeDatabentoLive()
+    feed = DatabentoOpraFeed("test-key", live_factory=lambda _key: live)
+    adapter = NdxpDatabentoAdapter(Path("."), schwab=DemoSchwabAdapter(), feed=feed)
+
+    first = adapter.fetch_market(chain_symbol="NDX", quote_symbol="$NDX")
+    subscribed = live.subscriptions[0]["symbols"]
+    assert 100 <= len(subscribed) <= 140
+    assert first["databento"]["selected_quote_count"] == 0
+    selected_expiration = first["databento"]["selected_expiration"]
+    first_selected_map = next(
+        value for key, value in first["chain"]["callExpDateMap"].items() if key.startswith(selected_expiration)
+    )
+    assert all(contract["bid"] is None for contracts in first_selected_map.values() for contract in contracts)
+
+    event_ns = int(datetime.now(timezone.utc).timestamp() * 1_000_000_000)
+    for instrument_id, option_symbol in enumerate(subscribed, start=1):
+        live.callback(SymbolMappingMsg(instrument_id, option_symbol))
+        live.callback(Cmbp1Msg(instrument_id, 2.10, 2.30, event_ns))
+
+    second = adapter.fetch_market(chain_symbol="NDX", quote_symbol="$NDX")
+    assert second["market_source"] == "Databento OPRA NBBO · Schwab NDX spot"
+    assert second["databento"]["selected_quote_count"] == len(subscribed)
+    second_selected_map = next(
+        value for key, value in second["chain"]["callExpDateMap"].items() if key.startswith(selected_expiration)
+    )
+    quoted = [contract for contracts in second_selected_map.values() for contract in contracts if contract["bid"] is not None]
+    assert quoted
+    assert quoted[0]["bid"] == pytest.approx(2.10)
+    assert quoted[0]["ask"] == pytest.approx(2.30)
+    assert quoted[0]["quoteSource"] == "DATABENTO_OPRA_NBBO"
+
+
 def test_diagnostics_distinguish_client_schwab_and_stale_data() -> None:
     client = classify_diagnostics(
         market={"latency_ms": 50}, broker={"latency_ms": 70}, market_error=None, broker_error=None,
@@ -123,6 +225,26 @@ def test_diagnostics_distinguish_client_schwab_and_stale_data() -> None:
     assert client["classification"] == "CLIENT_OR_UI_STALL"
     assert slow["classification"] == "SCHWAB_RESPONSE_DELAY"
     assert stale["classification"] == "STALE_MARKET_DATA"
+
+
+def test_diagnostics_identify_databento_entitlement_and_partial_quotes() -> None:
+    entitlement = classify_diagnostics(
+        market=None, broker={"latency_ms": 70},
+        market_error="DatabentoConfigurationError: OPRA entitlement denied", broker_error=None,
+        worker_gap_ms=100, client_gap_ms=100, source_age_ms=None, market_poll_age_ms=None,
+    )
+    partial = classify_diagnostics(
+        market={
+            "latency_ms": 50,
+            "market_source": "Databento OPRA NBBO · Schwab NDX spot",
+            "databento": {"target_symbol_count": 120, "selected_quote_count": 40, "last_error": None},
+        },
+        broker={"latency_ms": 70}, market_error=None, broker_error=None,
+        worker_gap_ms=100, client_gap_ms=100, source_age_ms=100, market_poll_age_ms=100,
+    )
+    assert entitlement["classification"] == "DATABENTO_STREAM_ERROR"
+    assert "SCHWAB_OR_NETWORK_ERROR" not in entitlement["all_classifications"]
+    assert partial["classification"] == "DATABENTO_PARTIAL_QUOTES"
 
 
 def test_demo_service_builds_preview_but_never_transmits(tmp_path: Path) -> None:

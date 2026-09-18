@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo
 
+from .databento import NdxpDatabentoAdapter
 from .orders import SpreadValidationError, TransmissionDisabledError
 from .service import NdxpTerminalService
 
@@ -110,6 +111,7 @@ def run_server(
     port: int,
     open_browser: bool,
     demo: bool,
+    databento: bool = False,
     allow_remote_demo: bool = False,
 ) -> None:
     loopback = host in {"127.0.0.1", "localhost", "::1"}
@@ -118,7 +120,7 @@ def run_server(
             "A non-loopback bind is permitted only for the credential-free demo "
             "with --demo --teleport-demo."
         )
-    adapter = DemoSchwabAdapter() if demo else None
+    adapter = DemoSchwabAdapter() if demo else (NdxpDatabentoAdapter(repo_root) if databento else None)
     service = NdxpTerminalService(repo_root, adapter=adapter)
     service.start()
     handler = type("BoundNdxpTerminalHandler", (NdxpTerminalHandler,), {"service": service})
@@ -130,7 +132,9 @@ def run_server(
             {
                 "url": display_url,
                 "listen": url,
-                "mode": "TELEPORT_DEMO" if not loopback else ("DEMO" if demo else "SCHWAB_LIVE_READ_ONLY"),
+                "mode": "TELEPORT_DEMO" if not loopback else (
+                    "DEMO" if demo else ("DATABENTO_OPRA_SCHWAB_READ_ONLY" if databento else "SCHWAB_LIVE_READ_ONLY")
+                ),
                 "schwab_credentials_loaded": False if not loopback else None,
                 "transmission": "LOCKED",
             }
@@ -304,6 +308,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--no-browser", action="store_true")
     parser.add_argument("--demo", action="store_true", help="Run with moving local sample data and no Schwab access.")
     parser.add_argument(
+        "--databento",
+        action="store_true",
+        help="Use Databento OPRA NBBOs for options while retaining Schwab spot and broker truth.",
+    )
+    parser.add_argument(
         "--teleport-demo",
         action="store_true",
         help="Expose only demo mode to the trusted LAN/VPN; requires --demo and binds all interfaces by default.",
@@ -314,6 +323,8 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
+    if args.demo and args.databento:
+        parser.error("--demo and --databento are mutually exclusive.")
     if args.teleport_demo and not args.demo:
         parser.error("--teleport-demo requires --demo; remote live-Schwab access is disabled.")
     host = "0.0.0.0" if args.teleport_demo and args.host == "127.0.0.1" else args.host
@@ -324,6 +335,7 @@ def main(argv: list[str] | None = None) -> int:
         port=args.port,
         open_browser=not args.no_browser and not args.teleport_demo,
         demo=args.demo,
+        databento=args.databento,
         allow_remote_demo=args.teleport_demo,
     )
     return 0

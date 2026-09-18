@@ -21,6 +21,9 @@ ndxp-terminal = "mgc_v05l.ndxp_terminal.server:main"
 dev = [
   "pytest>=8.4.0,<9.0.0",
 ]
+databento = [
+  "databento>=0.86.0,<0.87.0",
+]
 research = [
   "duckdb>=1.1.0,<2.0.0",
   "pyarrow>=15.0.0,<20.0.0",

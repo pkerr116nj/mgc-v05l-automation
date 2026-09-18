@@ -13,6 +13,18 @@ if [[ -f "${REPO_ROOT}/.local/schwab_env.sh" ]]; then
   # shellcheck disable=SC1091
   source "${REPO_ROOT}/.local/schwab_env.sh"
 fi
+if [[ -n "${MGC_DATABENTO_ENV_FILE:-}" ]]; then
+  if [[ ! -f "${MGC_DATABENTO_ENV_FILE}" ]]; then
+    echo "MGC_DATABENTO_ENV_FILE does not exist: ${MGC_DATABENTO_ENV_FILE}" >&2
+    exit 1
+  fi
+  # shellcheck disable=SC1090
+  source "${MGC_DATABENTO_ENV_FILE}"
+elif [[ -f "${REPO_ROOT}/.env.local" ]]; then
+  # Local-only developer configuration; never print its contents.
+  # shellcheck disable=SC1091
+  source "${REPO_ROOT}/.env.local"
+fi
 export PYTHONPATH="${REPO_ROOT}/src${PYTHONPATH:+:${PYTHONPATH}}"
 
 if [[ " ${*} " != *" --demo "* ]]; then
@@ -26,6 +38,11 @@ if [[ " ${*} " != *" --demo "* ]]; then
     echo "Schwab auth is incomplete: missing ${missing[*]}. Configure .local/schwab_env.sh; do not paste secrets into chat." >&2
     exit 1
   fi
+fi
+
+if [[ " ${*} " == *" --databento "* ]] && [[ -z "${DATABENTO_API_KEY:-}" ]]; then
+  echo "Databento mode requires DATABENTO_API_KEY. Set MGC_DATABENTO_ENV_FILE to the existing Mars env file; do not paste the key into chat." >&2
+  exit 1
 fi
 
 exec python -m mgc_v05l.ndxp_terminal "$@"

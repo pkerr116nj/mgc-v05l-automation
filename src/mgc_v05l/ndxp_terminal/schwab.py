@@ -47,9 +47,19 @@ class NdxpSchwabAdapter:
 
     def fetch_market(self, *, chain_symbol: str, quote_symbol: str) -> dict[str, Any]:
         started = time.monotonic()
+        chain = self.fetch_chain(chain_symbol=chain_symbol)
+        quote = self.fetch_quote(quote_symbol=quote_symbol)
+        return {
+            "chain": chain,
+            "quote": quote,
+            "latency_ms": round((time.monotonic() - started) * 1000, 1),
+            "received_at": datetime.now(timezone.utc).isoformat(),
+        }
+
+    def fetch_chain(self, *, chain_symbol: str) -> dict[str, Any]:
         access_token = self.oauth.get_access_token()
         headers = {"Accept": "application/json", "Authorization": f"Bearer {access_token}"}
-        chain = self.transport.request_json(
+        return self.transport.request_json(
             HttpRequest(
                 method="GET",
                 url=f"{self.market_config.market_data_base_url.rstrip('/')}/chains",
@@ -63,7 +73,11 @@ class NdxpSchwabAdapter:
                 },
             )
         )
-        quote = self.transport.request_json(
+
+    def fetch_quote(self, *, quote_symbol: str) -> dict[str, Any]:
+        access_token = self.oauth.get_access_token()
+        headers = {"Accept": "application/json", "Authorization": f"Bearer {access_token}"}
+        return self.transport.request_json(
             HttpRequest(
                 method="GET",
                 url=f"{self.market_config.market_data_base_url.rstrip('/')}/quotes",
@@ -71,12 +85,6 @@ class NdxpSchwabAdapter:
                 query={"symbols": quote_symbol, "indicative": False},
             )
         )
-        return {
-            "chain": chain,
-            "quote": quote,
-            "latency_ms": round((time.monotonic() - started) * 1000, 1),
-            "received_at": datetime.now(timezone.utc).isoformat(),
-        }
 
     def fetch_broker_truth(self) -> dict[str, Any]:
         started = time.monotonic()

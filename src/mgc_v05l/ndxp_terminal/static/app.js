@@ -82,6 +82,14 @@ function render() {
   ui.spot.textContent = number(market.spot, 2);
   ui["quote-age"].textContent = age(diagnostics.quote_source_age_ms);
   ui["market-latency"].textContent = age(diagnostics.market_latency_ms);
+  const databento = market.databento;
+  ui["option-source-label"].textContent = databento ? "Databento OPRA NBBO" : "Option market · Schwab";
+  ui["option-feed-status"].textContent = databento
+    ? `${databento.selected_quote_count || 0} / ${databento.target_symbol_count || 0} quoted`
+    : "Schwab chain quotes";
+  ui["option-feed-status"].title = databento
+    ? `${databento.subscribed_symbol_count || 0} contracts subscribed in one shared session${databento.last_error ? ` · ${databento.last_error}` : ""}`
+    : "Option quotes are supplied by the Schwab chain response.";
   ui["broker-latency"].textContent = age(diagnostics.broker_latency_ms);
   ui.diagnostic.textContent = diagnostics.classification || "STARTING";
   ui.diagnostic.className = diagnostics.classification === "HEALTHY" ? "status-good" : diagnostics.classification?.includes("ERROR") || diagnostics.classification?.includes("STALL") ? "status-bad" : "status-warn";
@@ -199,7 +207,7 @@ function renderChain(chain, spot, analytics = {}) {
     for (const key of visibleColumns) fragments.push(metricCell(row.put, key, near, "PUT"));
   }
   if (!rows.length) {
-    const empty = cell("Waiting for the selected Schwab option chain…", "chain-empty");
+    const empty = cell("Waiting for the selected option market…", "chain-empty");
     empty.style.gridColumn = "1 / -1"; fragments.push(empty);
   }
   ui["chain-table"].replaceChildren(...fragments);
@@ -221,7 +229,7 @@ function renderChainCoverage(chain, spot) {
   ui["chain-coverage"].className = `chain-coverage ${complete ? "status-good" : "status-warn"}`;
   ui["chain-coverage"].title = complete
     ? `At least ${minimumStrikesEachSide} call-and-put strike levels are available on each side of spot.`
-    : `Schwab returned fewer than ${minimumStrikesEachSide} shared call-and-put strike levels on one or both sides of spot.`;
+    : `The current contract roster contains fewer than ${minimumStrikesEachSide} shared call-and-put strike levels on one or both sides of spot.`;
 }
 
 function renderCandidateCount(rows, analytics) {
@@ -365,7 +373,11 @@ function dataRow(title, detail) {
 }
 
 function renderDiagnostics(d) {
-  const rows = [["UI heartbeat gap", age(d.client_gap_ms)], ["Worker scheduling gap", age(d.worker_gap_ms)], ["Schwab market response", age(d.market_latency_ms)], ["Schwab broker response", age(d.broker_latency_ms)], ["Successful poll age", age(d.market_poll_age_ms)], ["Quote source age", age(d.quote_source_age_ms)]];
+  const rows = [["UI heartbeat gap", age(d.client_gap_ms)], ["Worker scheduling gap", age(d.worker_gap_ms)], ["Schwab roster / spot response", age(d.market_latency_ms)], ["Schwab broker response", age(d.broker_latency_ms)], ["Successful poll age", age(d.market_poll_age_ms)], ["Option quote source age", age(d.quote_source_age_ms)]];
+  if (d.databento) {
+    rows.push(["Databento session", d.databento.started ? "Connected" : "Starting"]);
+    rows.push(["OPRA selected quotes", `${d.databento.selected_quote_count || 0} / ${d.databento.target_symbol_count || 0}`]);
+  }
   ui["diagnostic-detail"].replaceChildren(...rows.flatMap(([label, value]) => {
     const dt = document.createElement("dt"); dt.textContent = label;
     const dd = document.createElement("dd"); dd.textContent = value;

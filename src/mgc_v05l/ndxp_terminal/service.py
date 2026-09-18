@@ -35,6 +35,10 @@ class TerminalAdapter(Protocol):
 
     def access_check(self) -> dict[str, Any]: ...
 
+    def set_selected_expiration(self, expiration: str | None) -> None: ...
+
+    def stop(self) -> None: ...
+
 
 class NdxpTerminalService:
     def __init__(
@@ -83,6 +87,9 @@ class NdxpTerminalService:
         self._stop.set()
         if self._thread:
             self._thread.join(timeout=3)
+        stop_adapter = getattr(self.adapter, "stop", None)
+        if callable(stop_adapter):
+            stop_adapter()
 
     def snapshot(self) -> dict[str, Any]:
         with self._lock:
@@ -92,6 +99,7 @@ class NdxpTerminalService:
             normalized_market = _normalize_market(market, selected_expiration=self._selected_expiration)
             if self._selected_expiration is None and normalized_market["expirations"]:
                 self._selected_expiration = normalized_market["expirations"][0]
+                self._notify_selected_expiration()
                 normalized_market = _normalize_market(market, selected_expiration=self._selected_expiration)
             normalized_broker = _normalize_broker(broker)
             now_wall = time.time()
@@ -147,7 +155,13 @@ class NdxpTerminalService:
                 raise SpreadValidationError("option_type must be CALL or PUT.")
             self._selected_expiration = expiration or self._selected_expiration
             self._selected_option_type = option_type
+            self._notify_selected_expiration()
         return self.snapshot()
+
+    def _notify_selected_expiration(self) -> None:
+        setter = getattr(self.adapter, "set_selected_expiration", None)
+        if callable(setter):
+            setter(self._selected_expiration)
 
     def client_heartbeat(self, payload: dict[str, Any]) -> dict[str, Any]:
         now = time.monotonic()
@@ -275,6 +289,7 @@ def _normalize_market(payload: dict[str, Any] | None, *, selected_expiration: st
     quote_payload = payload.get("quote") if isinstance(payload.get("quote"), dict) else {}
     chains: dict[str, dict[str, list[dict[str, Any]]]] = {}
     latest_source_time_ms: int | None = None
+    latest_option_time_ms: int | None = None
     for side, source_key in (("CALL", "callExpDateMap"), ("PUT", "putExpDateMap")):
         expiration_map = chain.get(source_key) if isinstance(chain.get(source_key), dict) else {}
         for expiration_key, strike_map in expiration_map.items():
@@ -291,6 +306,7 @@ def _normalize_market(payload: dict[str, Any] | None, *, selected_expiration: st
                     source_ms = _max_timestamp_ms(contract)
                     if source_ms is not None:
                         latest_source_time_ms = source_ms if latest_source_time_ms is None else max(latest_source_time_ms, source_ms)
+                        latest_option_time_ms = source_ms if latest_option_time_ms is None else max(latest_option_time_ms, source_ms)
                     rows.append(
                         {
                             "symbol": str(contract["symbol"]).strip().upper(),
@@ -324,9 +340,9 @@ def _normalize_market(payload: dict[str, Any] | None, *, selected_expiration: st
         underlying_quote = {}
         quote_time_ms = None
     spot = (
-        _float_or_none(chain.get("underlyingPrice"))
-        or _float_or_none(underlying_quote.get("lastPrice"))
+        _float_or_none(underlying_quote.get("lastPrice"))
         or _float_or_none(underlying_quote.get("mark"))
+        or _float_or_none(chain.get("underlyingPrice"))
     )
     expirations = sorted(chains)
     selected = selected_expiration if selected_expiration in chains else (expirations[0] if expirations else None)
@@ -335,8 +351,10 @@ def _normalize_market(payload: dict[str, Any] | None, *, selected_expiration: st
         "spot": spot,
         "received_at": payload.get("received_at"),
         "latency_ms": payload.get("latency_ms"),
-        "latest_source_time_ms": latest_source_time_ms,
+        "latest_source_time_ms": payload.get("option_quote_time_ms") or latest_option_time_ms or latest_source_time_ms,
         "spot_quote_time_ms": quote_time_ms,
+        "market_source": payload.get("market_source") or "Schwab market data",
+        "databento": payload.get("databento") if isinstance(payload.get("databento"), dict) else None,
         "expirations": expirations,
         "selected_expiration": selected,
         "selected_chain": chains.get(selected, {"CALL": [], "PUT": []}),
