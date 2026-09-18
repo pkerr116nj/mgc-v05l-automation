@@ -206,6 +206,25 @@ def test_schwab_chain_canonicalizes_ndx_to_confirmed_index_symbol() -> None:
     assert adapter.transport.request.query["symbol"] == "$NDX"
 
 
+def test_access_check_uses_aapl_for_quote_connectivity() -> None:
+    adapter = object.__new__(NdxpSchwabAdapter)
+    calls: list[tuple[str, str]] = []
+    adapter.fetch_broker_truth = lambda: {"account_numbers": [{"hashValue": "hash-1"}], "latency_ms": 1.0}
+    adapter.fetch_chain = lambda *, chain_symbol: (
+        calls.append(("chain", chain_symbol)) or {"callExpDateMap": {"2026-09-18:0": {}}}
+    )
+    adapter.fetch_quote = lambda *, quote_symbol: (
+        calls.append(("quote", quote_symbol)) or {"AAPL": {"quote": {"lastPrice": 200.0}}}
+    )
+
+    result = adapter.access_check()
+
+    assert calls == [("chain", "$NDX"), ("quote", "AAPL")]
+    assert result["ndx_chain_access"] is True
+    assert result["quote_probe_symbol"] == "AAPL"
+    assert result["quote_access"] is True
+
+
 def test_all_broker_mutations_are_source_locked(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("MGC_NDXP_LIVE_TRANSMISSION_ENABLED", "1")
     broker = CountingBroker()

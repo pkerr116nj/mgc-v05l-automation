@@ -22,6 +22,7 @@ from ..production_link.client import SchwabBrokerHttpClient
 
 NDXP_CHAIN_STRIKE_COUNT = 120
 WORKING_ORDERS_LOOKBACK_DAYS = 60
+ACCESS_CHECK_QUOTE_SYMBOL = "AAPL"
 
 
 class NdxpSchwabAdapter:
@@ -136,15 +137,18 @@ class NdxpSchwabAdapter:
 
     def access_check(self) -> dict[str, Any]:
         broker_truth = self.fetch_broker_truth()
-        market = self.fetch_market(chain_symbol="$NDX", quote_symbol="$NDX")
-        chain = market.get("chain") if isinstance(market.get("chain"), dict) else {}
+        market_started = time.monotonic()
+        chain = self.fetch_chain(chain_symbol="$NDX")
+        quote = self.fetch_quote(quote_symbol=ACCESS_CHECK_QUOTE_SYMBOL)
         return {
             "ok": True,
             "checked_at": datetime.now(timezone.utc).isoformat(),
             "account_count": len(broker_truth.get("account_numbers") or []),
             "account_and_trading_access": bool(broker_truth.get("account_numbers")),
             "ndx_chain_access": bool(chain.get("callExpDateMap") or chain.get("putExpDateMap")),
-            "market_latency_ms": market.get("latency_ms"),
+            "quote_probe_symbol": ACCESS_CHECK_QUOTE_SYMBOL,
+            "quote_access": bool(quote),
+            "market_latency_ms": round((time.monotonic() - market_started) * 1000, 1),
             "broker_latency_ms": broker_truth.get("latency_ms"),
             "mutation_attempted": False,
         }
