@@ -18,6 +18,7 @@ from zoneinfo import ZoneInfo
 EASTERN = ZoneInfo("America/New_York")
 SECONDS_PER_YEAR = 365.25 * 24 * 60 * 60
 MAX_SURFACE_QUOTE_AGE_MS = 15_000
+MAX_CLOSED_SNAPSHOT_SKEW_MS = 2 * 60 * 60 * 1000
 MIN_SURFACE_POINTS = 6
 
 
@@ -27,11 +28,12 @@ def derive_expiration_analytics(
     expiration: str | None,
     chain: dict[str, list[dict[str, Any]]],
     spot_quote_time_ms: int | None,
+    allow_closed_snapshot: bool = False,
     now: datetime | None = None,
 ) -> dict[str, Any]:
     """Build selected-expiration analytics, or explain why they are unavailable."""
 
-    observed_at = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
+    requested_at = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
     base: dict[str, Any] = {
         "status": "UNAVAILABLE",
         "reason": None,
@@ -45,14 +47,31 @@ def derive_expiration_analytics(
         expiry_at = _expiration_at(expiration)
     except (TypeError, ValueError):
         return _unavailable(base, "The selected expiration is invalid.")
-    seconds_remaining = (expiry_at - observed_at).total_seconds()
-    if seconds_remaining <= 0:
-        return _unavailable(base, "The selected NDXP expiration has passed.")
-    time_years = seconds_remaining / SECONDS_PER_YEAR
 
     calls = _by_strike(chain.get("CALL", []))
     puts = _by_strike(chain.get("PUT", []))
     shared = sorted(set(calls) & set(puts), key=lambda strike: abs(strike - float(spot)))
+    reference_timestamps = [
+        timestamp
+        for strike in shared[:8]
+        for timestamp in (
+            _timestamp(calls[strike].get("quote_time_ms")),
+            _timestamp(puts[strike].get("quote_time_ms")),
+        )
+        if timestamp is not None
+    ]
+    if spot_quote_time_ms is not None:
+        reference_timestamps.append(spot_quote_time_ms)
+    model_observed_at = requested_at
+    if allow_closed_snapshot:
+        if not reference_timestamps:
+            return _unavailable(base, "Closed-snapshot timestamps are unavailable.")
+        model_observed_at = datetime.fromtimestamp(min(reference_timestamps) / 1000, tz=timezone.utc)
+    seconds_remaining = (expiry_at - model_observed_at).total_seconds()
+    if seconds_remaining <= 0:
+        return _unavailable(base, "The selected NDXP expiration has passed.")
+    time_years = seconds_remaining / SECONDS_PER_YEAR
+
     parity_rows: list[tuple[float, float, int]] = []
     for strike in shared[:40]:
         call_mid = _quote_mid(calls[strike])
@@ -101,8 +120,24 @@ def derive_expiration_analytics(
         return _unavailable(base, "The NDX spot quote timestamp is unavailable.")
     timestamps.append(spot_quote_time_ms)
     oldest_ms = min(timestamps)
-    quote_age_ms = max(0.0, observed_at.timestamp() * 1000 - oldest_ms)
-    if quote_age_ms > MAX_SURFACE_QUOTE_AGE_MS:
+    newest_ms = max(timestamps)
+    quote_age_ms = max(0.0, requested_at.timestamp() * 1000 - oldest_ms)
+    input_skew_ms = newest_ms - oldest_ms
+    quote_mode = "LIVE"
+    if allow_closed_snapshot:
+        eastern_dates = {
+            datetime.fromtimestamp(timestamp / 1000, tz=timezone.utc).astimezone(EASTERN).date()
+            for timestamp in timestamps
+        }
+        if len(eastern_dates) != 1:
+            return _unavailable(base, "Closed-snapshot model inputs do not share one Eastern market date.")
+        if input_skew_ms > MAX_CLOSED_SNAPSHOT_SKEW_MS:
+            return _unavailable(
+                base,
+                f"Closed-snapshot model inputs are {input_skew_ms / 1000:.1f}s apart.",
+            )
+        quote_mode = "CLOSED_SNAPSHOT"
+    elif quote_age_ms > MAX_SURFACE_QUOTE_AGE_MS:
         return _unavailable(base, f"Model inputs are stale ({quote_age_ms / 1000:.1f}s old).")
 
     atm_iv = _smile_iv(surface, forward)
@@ -144,6 +179,9 @@ def derive_expiration_analytics(
         "parity_rms_error": round(parity_error, 4),
         "surface_points": len(surface),
         "oldest_model_quote_age_ms": round(quote_age_ms, 1),
+        "model_input_time_ms": oldest_ms,
+        "model_input_skew_ms": input_skew_ms,
+        "quote_mode": quote_mode,
         "atm_iv": atm_iv,
         "atm_iv_percent": round(atm_iv * 100, 4),
         "expected_move": round(expected_move, 4),

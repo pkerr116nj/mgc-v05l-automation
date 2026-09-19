@@ -698,6 +698,59 @@ def test_expected_range_fails_closed_when_model_quotes_are_stale() -> None:
     assert analytics["spreads"] == {}
 
 
+def test_closed_session_uses_one_bounded_latest_close_snapshot() -> None:
+    adapter = DemoSchwabAdapter()
+    raw = adapter.fetch_market(chain_symbol="NDX", quote_symbol="$NDX")
+    from mgc_v05l.ndxp_terminal.service import _normalize_market
+
+    normalized = _normalize_market(raw, selected_expiration=None)
+    observed_at = datetime(2026, 9, 19, 10, 0, tzinfo=timezone.utc)
+    option_time_ms = int(datetime(2026, 9, 18, 20, 15, tzinfo=timezone.utc).timestamp() * 1000)
+    spot_time_ms = int(datetime(2026, 9, 18, 21, 15, tzinfo=timezone.utc).timestamp() * 1000)
+    for side in normalized["selected_chain"].values():
+        for contract in side:
+            contract["quote_time_ms"] = option_time_ms
+    analytics = derive_expiration_analytics(
+        spot=normalized["spot"],
+        expiration=normalized["selected_expiration"],
+        chain=normalized["selected_chain"],
+        spot_quote_time_ms=spot_time_ms,
+        allow_closed_snapshot=True,
+        now=observed_at,
+    )
+
+    assert analytics["status"] == "VALID"
+    assert analytics["quote_mode"] == "CLOSED_SNAPSHOT"
+    assert analytics["model_input_time_ms"] == option_time_ms
+    assert analytics["model_input_skew_ms"] == 60 * 60 * 1000
+    assert analytics["oldest_model_quote_age_ms"] > 15_000
+    assert analytics["spreads"]
+
+
+def test_closed_snapshot_rejects_inputs_from_different_market_dates() -> None:
+    adapter = DemoSchwabAdapter()
+    raw = adapter.fetch_market(chain_symbol="NDX", quote_symbol="$NDX")
+    from mgc_v05l.ndxp_terminal.service import _normalize_market
+
+    normalized = _normalize_market(raw, selected_expiration=None)
+    option_time_ms = int(datetime(2026, 9, 18, 20, 15, tzinfo=timezone.utc).timestamp() * 1000)
+    spot_time_ms = int(datetime(2026, 9, 19, 4, 15, tzinfo=timezone.utc).timestamp() * 1000)
+    for side in normalized["selected_chain"].values():
+        for contract in side:
+            contract["quote_time_ms"] = option_time_ms
+    analytics = derive_expiration_analytics(
+        spot=normalized["spot"],
+        expiration=normalized["selected_expiration"],
+        chain=normalized["selected_chain"],
+        spot_quote_time_ms=spot_time_ms,
+        allow_closed_snapshot=True,
+        now=datetime(2026, 9, 19, 10, 0, tzinfo=timezone.utc),
+    )
+
+    assert analytics["status"] == "UNAVAILABLE"
+    assert "Eastern market date" in analytics["reason"]
+
+
 def test_market_normalization_binds_index_value_to_schwab_quote_timestamp() -> None:
     from mgc_v05l.ndxp_terminal.service import _normalize_market
 
@@ -884,6 +937,13 @@ def test_mobile_chain_keeps_strikes_fixed_and_allows_positive_midpoint_sell() ->
     assert 'id="spread-gamma"' in html
     assert 'id="position-gamma"' in html
     assert 'id="gamma-flip"' in html
+    assert 'id="gamma-summary"' in html
+    assert "CLOSED SNAPSHOT" in javascript
+    assert 'localStorage.getItem("ndxp-chain-columns-v4")' in javascript
+    assert 'styles.css?v=closed-snapshot-gamma-1' in html
+    assert 'app.js?v=closed-snapshot-gamma-1' in html
+    assert ".range-strip.snapshot" in css
+    assert "white-space:normal" in css
     assert 'data-ticket-price-step="-0.25"' in html
     assert 'data-ticket-price-step="0.25"' in html
     assert "`${payload.action} ${payload.quantity}" in javascript

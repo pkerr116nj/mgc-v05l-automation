@@ -119,6 +119,9 @@ class NdxpTerminalService:
                 expiration=normalized_market.get("selected_expiration"),
                 chain=normalized_market.get("selected_chain", {}),
                 spot_quote_time_ms=normalized_market.get("spot_quote_time_ms"),
+                allow_closed_snapshot=not ndxp_regular_session_open(
+                    datetime.fromtimestamp(now_wall, tz=timezone.utc)
+                ),
                 now=datetime.fromtimestamp(now_wall, tz=timezone.utc),
             )
             source_age_ms = _source_age_ms(normalized_market.get("latest_source_time_ms"), now_wall)

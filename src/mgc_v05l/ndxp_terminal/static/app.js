@@ -39,7 +39,7 @@ const percent = (value, digits = 1) => value == null || !Number.isFinite(Number(
 
 function loadColumns() {
   try {
-    const saved = JSON.parse(localStorage.getItem("ndxp-chain-columns-v3") || "null");
+    const saved = JSON.parse(localStorage.getItem("ndxp-chain-columns-v4") || "null");
     const migrated = Array.isArray(saved) ? saved.map((key) => key === "delta" ? "spread_delta" : key === "gamma" ? "credit_position_gamma" : key) : [];
     const valid = migrated.filter((key) => columnDefinitions.some(([candidate]) => candidate === key));
     return valid.includes("bid") ? valid : defaultColumns;
@@ -149,7 +149,9 @@ function renderTransmissionControl() {
 
 function renderAnalytics(analytics) {
   const valid = analytics.status === "VALID";
-  document.querySelector(".range-strip").classList.toggle("invalid", !valid);
+  const rangeStrip = document.querySelector(".range-strip");
+  rangeStrip.classList.toggle("invalid", !valid);
+  rangeStrip.classList.toggle("snapshot", valid && analytics.quote_mode === "CLOSED_SNAPSHOT");
   if (!valid) {
     ui["expected-range"].textContent = "Analytics unavailable";
     ui["expected-move"].textContent = analytics.reason || "Waiting for independently valid option mids.";
@@ -157,16 +159,24 @@ function renderAnalytics(analytics) {
     ui["time-remaining"].textContent = "—";
     ui["secondary-ranges"].textContent = "—";
     ui["candidate-count"].textContent = "—";
+    ui["gamma-summary"].textContent = "—";
+    ui["gamma-summary"].title = analytics.reason || "Gamma analytics unavailable.";
     return;
   }
   const one = analytics.ranges?.["1.0"];
   const half = analytics.ranges?.["0.5"];
   const oneHalf = analytics.ranges?.["1.5"];
   ui["expected-range"].textContent = one ? `${number(one.lower, 0)} – ${number(one.upper, 0)}` : "—";
-  ui["expected-move"].textContent = `±${number(analytics.expected_move, 1)} points · independently derived from option mids`;
+  const snapshot = analytics.quote_mode === "CLOSED_SNAPSHOT";
+  ui["expected-move"].textContent = snapshot
+    ? `CLOSED SNAPSHOT · ${easternTimestamp(analytics.model_input_time_ms)} · ±${number(analytics.expected_move, 1)} points`
+    : `±${number(analytics.expected_move, 1)} points · independently derived from option mids`;
   ui["derived-atm-iv"].textContent = `${number(analytics.atm_iv_percent, 2)}%`;
   ui["time-remaining"].textContent = formatDuration(analytics.seconds_remaining);
   ui["secondary-ranges"].textContent = half && oneHalf ? `0.5σ ${number(half.lower, 0)}–${number(half.upper, 0)} · 1.5σ ${number(oneHalf.lower, 0)}–${number(oneHalf.upper, 0)}` : "—";
+  const modeledSpreads = Object.values(analytics.spreads || {});
+  ui["gamma-summary"].textContent = `${modeledSpreads.length} spreads ready`;
+  ui["gamma-summary"].title = `Independent credit-position gamma, nearest gamma flip, and −25/−10/+10/+25-point scenarios are available in each spread ticket${snapshot ? " from the labeled closed snapshot" : ""}.`;
   ui["expected-range"].title = `${analytics.method}; ${analytics.surface_points} fitted strikes; parity RMS ${number(analytics.parity_rms_error, 3)} points.`;
 }
 
@@ -215,7 +225,12 @@ function spreadMetrics(short, long, model = null) {
 }
 
 function sideGridTemplate() {
-  return visibleColumns.map((key) => key === "open_interest" ? "94px" : "78px").join(" ");
+  const widths = {
+    breakeven_distance: 86, em_multiple: 86, probability_beyond_breakeven: 98,
+    probability_beyond_short: 98, credit_to_risk: 92, market_width: 88,
+    spread_delta: 86, credit_position_gamma: 92, open_interest: 94,
+  };
+  return visibleColumns.map((key) => `${widths[key] || 78}px`).join(" ");
 }
 
 function renderChain(chain, spot, analytics = {}) {
@@ -508,7 +523,10 @@ function calculateRisk() {
   ui["position-delta"].textContent = creditPositionDelta == null ? "—" : number(Number(creditPositionDelta) * quantity * actionSign, 2);
   ui["spread-gamma"].textContent = number(creditPositionGamma, 5);
   ui["position-gamma"].textContent = creditPositionGamma == null ? "—" : number(Number(creditPositionGamma) * quantity * actionSign, 4);
-  ui["gamma-flip"].textContent = selectedMetrics?.gamma_flip_spot == null
+  const gammaAvailable = creditPositionGamma != null;
+  ui["gamma-flip"].textContent = !gammaAvailable
+    ? "Analytics unavailable"
+    : selectedMetrics?.gamma_flip_spot == null
     ? "None in modeled range"
     : `${number(selectedMetrics.gamma_flip_spot, 2)} (${Number(selectedMetrics.gamma_flip_distance) >= 0 ? "+" : ""}${number(selectedMetrics.gamma_flip_distance, 1)} pts)`;
   const downScenario = selectedMetrics?.gamma_scenarios?.find((row) => Number(row.spot_move) === -25);
@@ -758,7 +776,7 @@ function renderColumnOptions() {
     input.addEventListener("change", () => {
       visibleColumns = input.checked ? [...visibleColumns, key] : visibleColumns.filter((candidate) => candidate !== key);
       visibleColumns.sort((a, b) => columnDefinitions.findIndex(([candidate]) => candidate === a) - columnDefinitions.findIndex(([candidate]) => candidate === b));
-      localStorage.setItem("ndxp-chain-columns-v3", JSON.stringify(visibleColumns));
+      localStorage.setItem("ndxp-chain-columns-v4", JSON.stringify(visibleColumns));
       renderChain(state?.market?.selected_chain || {}, state?.market?.spot, state?.market?.analytics || {});
     });
     wrapper.append(input, document.createTextNode(label)); return wrapper;
