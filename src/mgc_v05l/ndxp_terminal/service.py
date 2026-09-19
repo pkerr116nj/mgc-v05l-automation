@@ -107,8 +107,9 @@ class NdxpTerminalService:
             market = deepcopy(self._market)
             broker = deepcopy(self._broker)
             normalized_market = _normalize_market(market, selected_expiration=self._selected_expiration)
-            if self._selected_expiration is None and normalized_market["expirations"]:
-                self._selected_expiration = normalized_market["expirations"][0]
+            resolved_expiration = normalized_market.get("selected_expiration")
+            if resolved_expiration and resolved_expiration != self._selected_expiration:
+                self._selected_expiration = resolved_expiration
                 self._notify_selected_expiration()
                 normalized_market = _normalize_market(market, selected_expiration=self._selected_expiration)
             normalized_broker = _normalize_broker(broker)
@@ -439,6 +440,17 @@ class NdxpTerminalService:
         try:
             payload = self.adapter.fetch_market(chain_symbol=self.chain_symbol, quote_symbol=self.quote_symbol)
             with self._lock:
+                if not _raw_market_has_contracts(payload):
+                    prior_chain = self._market.get("chain") if isinstance(self._market, dict) else None
+                    if _raw_chain_has_contracts(prior_chain):
+                        retained = deepcopy(payload) if isinstance(payload, dict) else {}
+                        retained["chain"] = deepcopy(prior_chain)
+                        self._market = retained
+                        self._market_error = "Schwab returned no available option contracts; retaining the last valid chain."
+                        return
+                    self._market = payload
+                    self._market_error = "Schwab returned no available NDX option expiration."
+                    return
                 self._market = payload
                 self._market_error = None
                 self._last_market_success_wall = time.time()
@@ -549,6 +561,26 @@ def _normalize_market(payload: dict[str, Any] | None, *, selected_expiration: st
         "selected_chain": chains.get(selected, {"CALL": [], "PUT": []}),
         "chains": chains,
     }
+
+
+def _raw_market_has_contracts(payload: Any) -> bool:
+    chain = payload.get("chain") if isinstance(payload, dict) else None
+    return _raw_chain_has_contracts(chain)
+
+
+def _raw_chain_has_contracts(chain: Any) -> bool:
+    if not isinstance(chain, dict):
+        return False
+    for key in ("callExpDateMap", "putExpDateMap"):
+        expiration_map = chain.get(key)
+        if not isinstance(expiration_map, dict):
+            continue
+        for strike_map in expiration_map.values():
+            if not isinstance(strike_map, dict):
+                continue
+            if any(isinstance(contracts, list) and bool(contracts) for contracts in strike_map.values()):
+                return True
+    return False
 
 
 def _normalize_broker(payload: dict[str, Any] | None) -> dict[str, Any]:

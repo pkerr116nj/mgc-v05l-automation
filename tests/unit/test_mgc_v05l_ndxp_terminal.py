@@ -212,11 +212,15 @@ def test_schwab_chain_canonicalizes_ndx_to_confirmed_index_symbol() -> None:
             return "token"
 
     class CapturingTransport:
-        request = None
+        def __init__(self) -> None:
+            self.requests: list = []
 
         def request_json(self, request):
-            self.request = request
-            return {}
+            self.requests.append(request)
+            if len(self.requests) < 3:
+                return {}
+            expiration = request.query["fromDate"]
+            return {"callExpDateMap": {f"{expiration}:0": {"29400.0": [{"symbol": symbol(29400)}]}}}
 
     adapter = object.__new__(NdxpSchwabAdapter)
     adapter.oauth = OAuth()
@@ -225,10 +229,18 @@ def test_schwab_chain_canonicalizes_ndx_to_confirmed_index_symbol() -> None:
 
     adapter.fetch_chain(chain_symbol="NDX")
 
-    assert adapter.transport.request.query["symbol"] == "$NDX"
-    assert adapter.transport.request.query["strikeCount"] == 120
-    assert adapter.transport.request.query["fromDate"] == adapter.transport.request.query["toDate"]
-    assert adapter.transport.request.query["fromDate"] == datetime.now(ZoneInfo("America/New_York")).date().isoformat()
+    assert len(adapter.transport.requests) == 3
+    request_dates = [date.fromisoformat(row.query["fromDate"]) for row in adapter.transport.requests]
+    assert request_dates[1] - request_dates[0] == timedelta(days=1)
+    assert request_dates[2] - request_dates[1] == timedelta(days=1)
+    assert request_dates[0] == datetime.now(ZoneInfo("America/New_York")).date()
+    assert all(row.query["symbol"] == "$NDX" for row in adapter.transport.requests)
+    assert all(row.query["strikeCount"] == 120 for row in adapter.transport.requests)
+    assert all(row.query["fromDate"] == row.query["toDate"] for row in adapter.transport.requests)
+
+    adapter.fetch_chain(chain_symbol="NDX")
+    assert len(adapter.transport.requests) == 4
+    assert date.fromisoformat(adapter.transport.requests[-1].query["fromDate"]) == request_dates[2]
 
 
 def test_access_check_uses_aapl_for_quote_connectivity() -> None:
@@ -236,7 +248,8 @@ def test_access_check_uses_aapl_for_quote_connectivity() -> None:
     calls: list[tuple[str, str]] = []
     adapter.fetch_broker_truth = lambda: {"account_numbers": [{"hashValue": "hash-1"}], "latency_ms": 1.0}
     adapter.fetch_chain = lambda *, chain_symbol: (
-        calls.append(("chain", chain_symbol)) or {"callExpDateMap": {"2026-09-18:0": {}}}
+        calls.append(("chain", chain_symbol))
+        or {"callExpDateMap": {"2026-09-18:0": {"29400.0": [{"symbol": symbol(29400)}]}}}
     )
     adapter.fetch_quote = lambda *, quote_symbol: (
         calls.append(("quote", quote_symbol)) or {"AAPL": {"quote": {"lastPrice": 200.0}}}
@@ -683,6 +696,34 @@ def test_expected_range_fails_closed_when_model_quotes_are_stale() -> None:
     assert analytics["status"] == "UNAVAILABLE"
     assert "stale" in analytics["reason"].lower()
     assert analytics["spreads"] == {}
+
+
+def test_empty_market_poll_retains_last_valid_chain_and_reports_error(tmp_path: Path) -> None:
+    adapter = DemoSchwabAdapter()
+    valid_market = adapter.fetch_market(chain_symbol="NDX", quote_symbol="$NDX")
+    empty_market = {
+        **valid_market,
+        "chain": {
+            "symbol": "$NDX",
+            "callExpDateMap": {},
+            "putExpDateMap": {},
+        },
+    }
+    service = NdxpTerminalService(tmp_path, adapter=adapter)
+    service._market = valid_market
+    service._selected_expiration = "1999-01-01"
+    service._last_market_success_wall = 123.0
+    adapter.fetch_market = lambda **_kwargs: empty_market
+
+    service._poll_market()
+
+    assert service._market is not None
+    assert service._market["chain"] == valid_market["chain"]
+    assert service._last_market_success_wall == 123.0
+    assert service._market_error == "Schwab returned no available option contracts; retaining the last valid chain."
+    snapshot = service.snapshot()
+    assert snapshot["market"]["expirations"]
+    assert service._selected_expiration == snapshot["market"]["selected_expiration"]
 
 
 def test_non_loopback_server_refuses_live_or_unapproved_demo(tmp_path: Path) -> None:

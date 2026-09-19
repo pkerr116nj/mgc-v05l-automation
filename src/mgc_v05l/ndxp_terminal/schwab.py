@@ -22,6 +22,7 @@ from ..production_link.client import SchwabBrokerHttpClient
 
 
 NDXP_CHAIN_STRIKE_COUNT = 120
+CHAIN_EXPIRATION_LOOKAHEAD_DAYS = 10
 WORKING_ORDERS_LOOKBACK_DAYS = 60
 RECENT_ORDERS_LOOKBACK_DAYS = 1
 ACCESS_CHECK_QUOTE_SYMBOL = "AAPL"
@@ -44,6 +45,7 @@ class NdxpSchwabAdapter:
         )
         self.market_config = market_config
         self.transport = transport
+        self._chain_expiration = None
         self.broker = SchwabBrokerHttpClient(
             oauth_client=self.oauth,
             base_url="https://api.schwabapi.com/trader/v1",
@@ -65,23 +67,35 @@ class NdxpSchwabAdapter:
         access_token = self.oauth.get_access_token()
         headers = {"Accept": "application/json", "Authorization": f"Bearer {access_token}"}
         resolved_chain_symbol = "$NDX" if chain_symbol.lstrip("$").upper() == "NDX" else chain_symbol
-        expiration = datetime.now(EASTERN).date().isoformat()
-        return self.transport.request_json(
-            HttpRequest(
-                method="GET",
-                url=f"{self.market_config.market_data_base_url.rstrip('/')}/chains",
-                headers=headers,
-                query={
-                    "symbol": resolved_chain_symbol,
-                    "contractType": "ALL",
-                    "strikeCount": NDXP_CHAIN_STRIKE_COUNT,
-                    "fromDate": expiration,
-                    "toDate": expiration,
-                    "includeUnderlyingQuote": True,
-                    "strategy": "SINGLE",
-                },
+        today = datetime.now(EASTERN).date()
+        cached_expiration = getattr(self, "_chain_expiration", None)
+        first_candidate = cached_expiration if cached_expiration and cached_expiration >= today else today
+        last_payload: dict[str, Any] = {}
+        for offset in range(CHAIN_EXPIRATION_LOOKAHEAD_DAYS + 1):
+            candidate = first_candidate + timedelta(days=offset)
+            expiration = candidate.isoformat()
+            payload = self.transport.request_json(
+                HttpRequest(
+                    method="GET",
+                    url=f"{self.market_config.market_data_base_url.rstrip('/')}/chains",
+                    headers=headers,
+                    query={
+                        "symbol": resolved_chain_symbol,
+                        "contractType": "ALL",
+                        "strikeCount": NDXP_CHAIN_STRIKE_COUNT,
+                        "fromDate": expiration,
+                        "toDate": expiration,
+                        "includeUnderlyingQuote": True,
+                        "strategy": "SINGLE",
+                    },
+                )
             )
-        )
+            last_payload = payload if isinstance(payload, dict) else {}
+            if _chain_has_contracts(last_payload):
+                self._chain_expiration = candidate
+                return last_payload
+        self._chain_expiration = None
+        return last_payload
 
     def fetch_quote(self, *, quote_symbol: str) -> dict[str, Any]:
         access_token = self.oauth.get_access_token()
@@ -176,3 +190,18 @@ class NdxpSchwabAdapter:
 def _schwab_zoned_datetime(value: datetime) -> str:
     """Render the exact millisecond UTC form required by Schwab's orders API."""
     return value.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000Z")
+
+
+def _chain_has_contracts(payload: Any) -> bool:
+    if not isinstance(payload, dict):
+        return False
+    for key in ("callExpDateMap", "putExpDateMap"):
+        expiration_map = payload.get(key)
+        if not isinstance(expiration_map, dict):
+            continue
+        for strike_map in expiration_map.values():
+            if not isinstance(strike_map, dict):
+                continue
+            if any(isinstance(contracts, list) and bool(contracts) for contracts in strike_map.values()):
+                return True
+    return False
