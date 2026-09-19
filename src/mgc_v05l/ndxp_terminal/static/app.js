@@ -5,10 +5,10 @@ const columnDefinitions = [
   ["last", "Last", 2], ["percent_change", "% Chng", 2], ["mark", "Mark", 2], ["bid", "Bid", 2], ["ask", "Ask", 2], ["net_change", "Net Chng", 2],
   ["breakeven_distance", "BE Dist", 1], ["em_multiple", "BE / EM", 2], ["probability_beyond_breakeven", "Beyond BE", 1],
   ["probability_beyond_short", "Beyond Short", 1], ["credit_to_risk", "Credit / Risk", 1], ["market_width", "Mkt Width", 2],
-  ["spread_delta", "Model Δ", 4], ["theta", "Leg Θ", 4], ["gamma", "Leg Γ", 4], ["iv", "Short IV", 2],
+  ["spread_delta", "Model Δ", 4], ["credit_position_gamma", "Credit Γ", 5], ["theta", "Leg Θ", 4], ["iv", "Short IV", 2],
   ["volume", "Volume", 0], ["open_interest", "Open Int", 0],
 ];
-const defaultColumns = ["last", "mark", "bid", "ask", "breakeven_distance", "em_multiple", "probability_beyond_breakeven", "credit_to_risk", "spread_delta", "iv"];
+const defaultColumns = ["last", "mark", "bid", "ask", "breakeven_distance", "em_multiple", "probability_beyond_breakeven", "credit_to_risk", "spread_delta", "credit_position_gamma", "iv"];
 const minimumStrikesEachSide = 25;
 let visibleColumns = loadColumns();
 let opportunityFilters = loadFilters();
@@ -39,8 +39,8 @@ const percent = (value, digits = 1) => value == null || !Number.isFinite(Number(
 
 function loadColumns() {
   try {
-    const saved = JSON.parse(localStorage.getItem("ndxp-chain-columns-v2") || "null");
-    const migrated = Array.isArray(saved) ? saved.map((key) => key === "delta" ? "spread_delta" : key) : [];
+    const saved = JSON.parse(localStorage.getItem("ndxp-chain-columns-v3") || "null");
+    const migrated = Array.isArray(saved) ? saved.map((key) => key === "delta" ? "spread_delta" : key === "gamma" ? "credit_position_gamma" : key) : [];
     const valid = migrated.filter((key) => columnDefinitions.some(([candidate]) => candidate === key));
     return valid.includes("bid") ? valid : defaultColumns;
   } catch (_) { return defaultColumns; }
@@ -98,8 +98,8 @@ function render() {
     ui["mode-banner"].className = "mode-banner hidden";
   }
   ui.spot.textContent = number(market.spot, 2);
-  ui["quote-age"].textContent = easternTimestamp(market.spot_quote_time_ms);
-  ui["quote-age-label"].firstChild.textContent = "Latest index quote ";
+  ui["quote-age"].textContent = market.spot_quote_time_ms == null ? "timestamp unavailable" : easternTimestamp(market.spot_quote_time_ms);
+  ui["quote-age-label"].firstChild.textContent = `${market.spot_source || "NDX value"} · `;
   ui["market-latency"].textContent = age(diagnostics.market_latency_ms);
   const databento = market.databento;
   ui["option-source-label"].textContent = databento ? "Databento OPRA NBBO" : "Option market · Schwab";
@@ -207,7 +207,7 @@ function spreadMetrics(short, long, model = null) {
   return {
     last: difference(short, long, "last"), percent_change: difference(short, long, "percent_change"),
     mark, bid, ask, net_change: difference(short, long, "net_change"),
-    spread_delta: null, leg_derived_credit_delta: difference(long, short, "delta"),
+    spread_delta: null, credit_position_delta: null, credit_position_gamma: null, leg_derived_credit_delta: difference(long, short, "delta"),
     theta: difference(long, short, "theta"), gamma: difference(long, short, "gamma"),
     iv: short.iv, volume: short.volume, open_interest: short.open_interest,
     ...(model || {}),
@@ -246,6 +246,10 @@ function renderChain(chain, spot, analytics = {}) {
     if (key === "spread_delta") {
       callHeader.title = "Independent model delta for the displayed long call vertical; selling it reverses the sign.";
       putHeader.title = "Independent model delta for the displayed long put vertical; selling it reverses the sign.";
+    }
+    if (key === "credit_position_gamma") {
+      callHeader.title = "Independent Black-76 gamma for the short-credit position: long leg gamma minus short leg gamma.";
+      putHeader.title = callHeader.title;
     }
     callHeaderFragments.push(callHeader);
     putHeaderFragments.push(putHeader);
@@ -497,10 +501,21 @@ function calculateRisk() {
   ui["max-loss-label"].textContent = selectedAction === "OPEN" ? "Maximum loss" : "Position effect";
   ui["max-loss"].textContent = selectedAction === "OPEN" ? money(gross - quantity * credit * 100) : "Reduces risk";
   ui.distance.textContent = selectedShort && state?.market?.spot != null ? `${number(Math.abs(selectedShort.strike - state.market.spot))} pts` : "—";
-  const displayedVerticalDelta = selectedMetrics?.spread_delta;
-  const orderDelta = displayedVerticalDelta == null ? null : Number(displayedVerticalDelta) * (selectedAction === "OPEN" ? -1 : 1);
-  ui["spread-delta"].textContent = number(displayedVerticalDelta, 4);
-  ui["position-delta"].textContent = orderDelta == null ? "—" : number(orderDelta * quantity, 2);
+  const creditPositionDelta = selectedMetrics?.credit_position_delta;
+  const creditPositionGamma = selectedMetrics?.credit_position_gamma;
+  const actionSign = selectedAction === "OPEN" ? 1 : -1;
+  ui["spread-delta"].textContent = number(creditPositionDelta, 4);
+  ui["position-delta"].textContent = creditPositionDelta == null ? "—" : number(Number(creditPositionDelta) * quantity * actionSign, 2);
+  ui["spread-gamma"].textContent = number(creditPositionGamma, 5);
+  ui["position-gamma"].textContent = creditPositionGamma == null ? "—" : number(Number(creditPositionGamma) * quantity * actionSign, 4);
+  ui["gamma-flip"].textContent = selectedMetrics?.gamma_flip_spot == null
+    ? "None in modeled range"
+    : `${number(selectedMetrics.gamma_flip_spot, 2)} (${Number(selectedMetrics.gamma_flip_distance) >= 0 ? "+" : ""}${number(selectedMetrics.gamma_flip_distance, 1)} pts)`;
+  const downScenario = selectedMetrics?.gamma_scenarios?.find((row) => Number(row.spot_move) === -25);
+  const upScenario = selectedMetrics?.gamma_scenarios?.find((row) => Number(row.spot_move) === 25);
+  ui["gamma-scenario"].textContent = downScenario && upScenario
+    ? `${number(downScenario.credit_position_gamma, 5)} / ${number(upScenario.credit_position_gamma, 5)}`
+    : "—";
   ui["ticket-breakeven"].textContent = number(selectedMetrics?.breakeven, 2);
   ui["ticket-em-multiple"].textContent = selectedMetrics?.em_multiple == null ? "—" : `${number(selectedMetrics.em_multiple, 2)}×`;
   ui["ticket-tail-probability"].textContent = percent(selectedMetrics?.probability_beyond_breakeven, 1);
@@ -580,7 +595,10 @@ function renderPositions(rows) {
       const mark = document.createElement("span"); mark.className = "order-status"; mark.textContent = `MARK ${number(spread.metrics.mark)}`;
       head.append(title, mark);
       const detail = document.createElement("small"); detail.className = "order-detail";
-      detail.textContent = `Average opening credit ${Number.isFinite(averageCredit) ? number(averageCredit) : "—"} · ${spread.short.symbol} / ${spread.long.symbol}`;
+      const positionDelta = spread.metrics.credit_position_delta == null ? null : Number(spread.metrics.credit_position_delta) * quantity;
+      const positionGamma = spread.metrics.credit_position_gamma == null ? null : Number(spread.metrics.credit_position_gamma) * quantity;
+      const gammaFlip = spread.metrics.gamma_flip_spot == null ? "Γ flip not found in modeled range" : `Γ flip ${number(spread.metrics.gamma_flip_spot, 2)}`;
+      detail.textContent = `Average opening credit ${Number.isFinite(averageCredit) ? number(averageCredit) : "—"} · Position Δ ${number(positionDelta, 2)} · Position Γ ${number(positionGamma, 4)} · ${gammaFlip} · ${spread.short.symbol} / ${spread.long.symbol}`;
       const actions = document.createElement("div"); actions.className = "actions";
       const close = document.createElement("button"); close.textContent = "Close at current mid";
       close.addEventListener("click", () => openTicket("CLOSE", side, spread, quantity));
@@ -740,7 +758,7 @@ function renderColumnOptions() {
     input.addEventListener("change", () => {
       visibleColumns = input.checked ? [...visibleColumns, key] : visibleColumns.filter((candidate) => candidate !== key);
       visibleColumns.sort((a, b) => columnDefinitions.findIndex(([candidate]) => candidate === a) - columnDefinitions.findIndex(([candidate]) => candidate === b));
-      localStorage.setItem("ndxp-chain-columns-v2", JSON.stringify(visibleColumns));
+      localStorage.setItem("ndxp-chain-columns-v3", JSON.stringify(visibleColumns));
       renderChain(state?.market?.selected_chain || {}, state?.market?.spot, state?.market?.analytics || {});
     });
     wrapper.append(input, document.createTextNode(label)); return wrapper;

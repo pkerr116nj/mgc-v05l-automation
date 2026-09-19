@@ -532,19 +532,9 @@ def _normalize_market(payload: dict[str, Any] | None, *, selected_expiration: st
         chains[expiration]["CALL"].sort(key=lambda row: row.get("strike") or 0)
         chains[expiration]["PUT"].sort(key=lambda row: row.get("strike") or 0)
     quote_row = next(iter(quote_payload.values()), {}) if quote_payload else {}
-    if isinstance(quote_row, dict):
-        underlying_quote = quote_row.get("quote") if isinstance(quote_row.get("quote"), dict) else quote_row
-        quote_time_ms = _max_timestamp_ms(underlying_quote)
-        if quote_time_ms is not None:
-            latest_source_time_ms = quote_time_ms if latest_source_time_ms is None else max(latest_source_time_ms, quote_time_ms)
-    else:
-        underlying_quote = {}
-        quote_time_ms = None
-    spot = (
-        _float_or_none(underlying_quote.get("lastPrice"))
-        or _float_or_none(underlying_quote.get("mark"))
-        or _float_or_none(chain.get("underlyingPrice"))
-    )
+    spot, quote_time_ms, spot_source = _spot_observation(chain=chain, quote_row=quote_row)
+    if quote_time_ms is not None:
+        latest_source_time_ms = quote_time_ms if latest_source_time_ms is None else max(latest_source_time_ms, quote_time_ms)
     expirations = sorted(chains)
     selected = selected_expiration if selected_expiration in chains else (expirations[0] if expirations else None)
     return {
@@ -554,6 +544,7 @@ def _normalize_market(payload: dict[str, Any] | None, *, selected_expiration: st
         "latency_ms": payload.get("latency_ms"),
         "latest_source_time_ms": payload.get("option_quote_time_ms") or latest_option_time_ms or latest_source_time_ms,
         "spot_quote_time_ms": quote_time_ms,
+        "spot_source": spot_source,
         "market_source": payload.get("market_source") or "Schwab market data",
         "databento": payload.get("databento") if isinstance(payload.get("databento"), dict) else None,
         "expirations": expirations,
@@ -711,18 +702,70 @@ def _request_digest(request: NdxpSpreadRequest) -> str:
 
 
 def _max_timestamp_ms(value: Any) -> int | None:
-    if not isinstance(value, dict):
-        return None
-    candidates = []
-    for key in ("quoteTimeInLong", "tradeTimeInLong", "regularMarketTradeTimeInLong"):
-        raw = value.get(key)
-        try:
-            numeric = int(raw)
-        except (TypeError, ValueError):
-            continue
-        if numeric > 0:
-            candidates.append(numeric)
+    candidates = [
+        timestamp
+        for key in (
+            "quoteTimeInLong", "tradeTimeInLong", "regularMarketTradeTimeInLong",
+            "quoteTime", "tradeTime", "regularMarketTradeTime",
+        )
+        if (timestamp := _timestamp_for_keys(value, (key,))) is not None
+    ]
     return max(candidates) if candidates else None
+
+
+def _timestamp_for_keys(value: Any, keys: tuple[str, ...]) -> int | None:
+    by_key: dict[str, list[int]] = {key: [] for key in keys}
+
+    def visit(candidate: Any) -> None:
+        if not isinstance(candidate, dict):
+            return
+        for key, raw in candidate.items():
+            if key in by_key:
+                normalized = _timestamp_ms(raw)
+                if normalized is not None:
+                    by_key[key].append(normalized)
+            elif isinstance(raw, dict):
+                visit(raw)
+
+    visit(value)
+    for key in keys:
+        if by_key[key]:
+            return max(by_key[key])
+    return None
+
+
+def _timestamp_ms(value: Any) -> int | None:
+    try:
+        numeric = int(value)
+    except (TypeError, ValueError):
+        return None
+    if numeric <= 0:
+        return None
+    if numeric < 100_000_000_000:
+        return numeric * 1_000
+    if numeric >= 100_000_000_000_000_000:
+        return numeric // 1_000_000
+    if numeric >= 100_000_000_000_000:
+        return numeric // 1_000
+    return numeric
+
+
+def _spot_observation(*, chain: dict[str, Any], quote_row: Any) -> tuple[float | None, int | None, str]:
+    if isinstance(quote_row, dict):
+        quote = quote_row.get("quote") if isinstance(quote_row.get("quote"), dict) else quote_row
+        fields = (
+            ("lastPrice", "last", ("tradeTimeInLong", "tradeTime", "regularMarketTradeTimeInLong", "regularMarketTradeTime", "quoteTimeInLong", "quoteTime")),
+            ("mark", "mark", ("quoteTimeInLong", "quoteTime", "tradeTimeInLong", "tradeTime")),
+            ("closePrice", "close", ("regularMarketTradeTimeInLong", "regularMarketTradeTime", "tradeTimeInLong", "tradeTime")),
+        )
+        for field, label, timestamp_keys in fields:
+            value = _float_or_none(quote.get(field))
+            if value is not None and value > 0:
+                return value, _timestamp_for_keys(quote_row, timestamp_keys), f"Schwab index {label}"
+    chain_spot = _float_or_none(chain.get("underlyingPrice"))
+    if chain_spot is not None and chain_spot > 0:
+        return chain_spot, _max_timestamp_ms(chain), "Schwab chain underlying"
+    return None, None, "NDX value unavailable"
 
 
 def _source_age_ms(source_ms: Any, now_wall: float) -> float | None:

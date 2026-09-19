@@ -698,6 +698,57 @@ def test_expected_range_fails_closed_when_model_quotes_are_stale() -> None:
     assert analytics["spreads"] == {}
 
 
+def test_market_normalization_binds_index_value_to_schwab_quote_timestamp() -> None:
+    from mgc_v05l.ndxp_terminal.service import _normalize_market
+
+    quote_time_ms = 1_789_776_000_000
+    normalized = _normalize_market(
+        {
+            "chain": {"symbol": "$NDX", "underlyingPrice": 29_640.0},
+            "quote": {
+                "$NDX": {
+                    "assetMainType": "INDEX",
+                    "quote": {
+                        "lastPrice": 29_644.17,
+                        "tradeTime": quote_time_ms // 1_000,
+                        "quoteTime": quote_time_ms // 1_000 + 3_600,
+                    },
+                }
+            },
+        },
+        selected_expiration=None,
+    )
+
+    assert normalized["spot"] == pytest.approx(29_644.17)
+    assert normalized["spot_quote_time_ms"] == quote_time_ms
+    assert normalized["spot_source"] == "Schwab index last"
+
+
+def test_independent_gamma_scenarios_use_credit_position_convention() -> None:
+    adapter = DemoSchwabAdapter()
+    raw = adapter.fetch_market(chain_symbol="NDX", quote_symbol="$NDX")
+    from mgc_v05l.ndxp_terminal.service import _normalize_market
+
+    normalized = _normalize_market(raw, selected_expiration=None)
+    analytics = derive_expiration_analytics(
+        spot=normalized["spot"],
+        expiration=normalized["selected_expiration"],
+        chain=normalized["selected_chain"],
+        spot_quote_time_ms=normalized["spot_quote_time_ms"],
+        now=datetime.now(timezone.utc),
+    )
+
+    assert analytics["status"] == "VALID"
+    spread = next(iter(analytics["spreads"].values()))
+    assert spread["credit_position_gamma"] == pytest.approx(-spread["spread_gamma"])
+    assert spread["credit_position_delta"] == pytest.approx(-spread["spread_delta"])
+    assert [row["spot_move"] for row in spread["gamma_scenarios"]] == [-25.0, -10.0, 0.0, 10.0, 25.0]
+    zero = next(row for row in spread["gamma_scenarios"] if row["spot_move"] == 0)
+    assert zero["credit_position_gamma"] == pytest.approx(spread["credit_position_gamma"])
+    assert zero["credit_position_delta"] == pytest.approx(spread["credit_position_delta"])
+    assert "fitted leg IVs held constant" in spread["gamma_method"]
+
+
 def test_empty_market_poll_retains_last_valid_chain_and_reports_error(tmp_path: Path) -> None:
     adapter = DemoSchwabAdapter()
     valid_market = adapter.fetch_market(chain_symbol="NDX", quote_symbol="$NDX")
@@ -807,9 +858,12 @@ def test_mobile_chain_keeps_strikes_fixed_and_allows_positive_midpoint_sell() ->
     assert "contentLeft + headerRect.width - pane.clientWidth" in javascript
     assert "if (!call && !put) return []" in javascript
     assert '["spread_delta", "Model Δ", 4]' in javascript
+    assert '["credit_position_gamma", "Credit Γ", 5]' in javascript
     assert "credit_position_delta" in (static_root.parent / "analytics.py").read_text(encoding="utf-8")
+    assert "credit_position_gamma" in (static_root.parent / "analytics.py").read_text(encoding="utf-8")
     assert 'id="quote-age-label"' in html
-    assert '"Latest index quote "' in javascript
+    assert 'market.spot_source || "NDX value"' in javascript
+    assert '"timestamp unavailable"' in javascript
     assert 'timeZone: "America/New_York"' in javascript
     assert "easternTimestamp(market.spot_quote_time_ms)" in javascript
     assert '"MARKET CLOSED · LATEST QUOTES"' in javascript
@@ -827,6 +881,9 @@ def test_mobile_chain_keeps_strikes_fixed_and_allows_positive_midpoint_sell() ->
     assert "button.disabled = opening ? !positiveMidpoint" in javascript
     assert 'value="20"' in html
     assert 'id="reviewed"' not in html
+    assert 'id="spread-gamma"' in html
+    assert 'id="position-gamma"' in html
+    assert 'id="gamma-flip"' in html
     assert 'data-ticket-price-step="-0.25"' in html
     assert 'data-ticket-price-step="0.25"' in html
     assert "`${payload.action} ${payload.quantity}" in javascript

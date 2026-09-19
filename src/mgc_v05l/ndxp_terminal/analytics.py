@@ -194,6 +194,29 @@ def _spread_analytics(
     short_delta = _black_forward_delta(option_type, forward, short_strike, time_years, short_iv)
     long_delta = _black_forward_delta(option_type, forward, long_strike, time_years, long_iv)
     credit_position_delta = long_delta - short_delta
+    short_gamma = _black_forward_gamma(forward, short_strike, time_years, short_iv)
+    long_gamma = _black_forward_gamma(forward, long_strike, time_years, long_iv)
+    credit_position_gamma = long_gamma - short_gamma
+    gamma_scenarios = _gamma_scenarios(
+        option_type=option_type,
+        spot=spot,
+        forward=forward,
+        short_strike=short_strike,
+        long_strike=long_strike,
+        time_years=time_years,
+        short_iv=short_iv,
+        long_iv=long_iv,
+    )
+    gamma_flip_spot = _nearest_gamma_flip_spot(
+        spot=spot,
+        forward=forward,
+        short_strike=short_strike,
+        long_strike=long_strike,
+        time_years=time_years,
+        short_iv=short_iv,
+        long_iv=long_iv,
+        expected_move=expected_move,
+    )
     return {
         "option_type": option_type,
         "short_strike": short_strike,
@@ -216,6 +239,12 @@ def _spread_analytics(
         "model_iv_at_breakeven": round(breakeven_iv, 8),
         "spread_delta": round(-credit_position_delta, 8),
         "credit_position_delta": round(credit_position_delta, 8),
+        "spread_gamma": round(-credit_position_gamma, 8),
+        "credit_position_gamma": round(credit_position_gamma, 8),
+        "gamma_scenarios": gamma_scenarios,
+        "gamma_flip_spot": round(gamma_flip_spot, 4) if gamma_flip_spot is not None else None,
+        "gamma_flip_distance": round(gamma_flip_spot - spot, 4) if gamma_flip_spot is not None else None,
+        "gamma_method": "Black-76 forward gamma · fitted leg IVs held constant across spot scenarios",
         "credit_band": "PREFERRED" if 2.0 <= mid <= 2.5 else ("BELOW_PREFERRED" if mid < 2.0 else "ELEVATED"),
     }
 
@@ -275,6 +304,109 @@ def _black_forward_delta(option_type: str, forward: float, strike: float, time_y
         volatility * math.sqrt(time_years)
     )
     return _normal_cdf(d1) if option_type == "CALL" else _normal_cdf(d1) - 1.0
+
+
+def _black_forward_gamma(forward: float, strike: float, time_years: float, volatility: float) -> float:
+    root_time = math.sqrt(time_years)
+    d1 = (math.log(forward / strike) + 0.5 * volatility * volatility * time_years) / (volatility * root_time)
+    return math.exp(-0.5 * d1 * d1) / (math.sqrt(2.0 * math.pi) * forward * volatility * root_time)
+
+
+def _credit_position_greeks(
+    *,
+    option_type: str,
+    forward: float,
+    short_strike: float,
+    long_strike: float,
+    time_years: float,
+    short_iv: float,
+    long_iv: float,
+) -> tuple[float, float]:
+    short_delta = _black_forward_delta(option_type, forward, short_strike, time_years, short_iv)
+    long_delta = _black_forward_delta(option_type, forward, long_strike, time_years, long_iv)
+    short_gamma = _black_forward_gamma(forward, short_strike, time_years, short_iv)
+    long_gamma = _black_forward_gamma(forward, long_strike, time_years, long_iv)
+    return long_delta - short_delta, long_gamma - short_gamma
+
+
+def _gamma_scenarios(
+    *,
+    option_type: str,
+    spot: float,
+    forward: float,
+    short_strike: float,
+    long_strike: float,
+    time_years: float,
+    short_iv: float,
+    long_iv: float,
+) -> list[dict[str, float]]:
+    scenarios: list[dict[str, float]] = []
+    for spot_move in (-25.0, -10.0, 0.0, 10.0, 25.0):
+        scenario_forward = forward + spot_move
+        if scenario_forward <= 0:
+            continue
+        delta, gamma = _credit_position_greeks(
+            option_type=option_type,
+            forward=scenario_forward,
+            short_strike=short_strike,
+            long_strike=long_strike,
+            time_years=time_years,
+            short_iv=short_iv,
+            long_iv=long_iv,
+        )
+        scenarios.append(
+            {
+                "spot_move": spot_move,
+                "spot": round(spot + spot_move, 4),
+                "credit_position_delta": round(delta, 8),
+                "credit_position_gamma": round(gamma, 8),
+            }
+        )
+    return scenarios
+
+
+def _nearest_gamma_flip_spot(
+    *,
+    spot: float,
+    forward: float,
+    short_strike: float,
+    long_strike: float,
+    time_years: float,
+    short_iv: float,
+    long_iv: float,
+    expected_move: float,
+) -> float | None:
+    radius = max(50.0, 2.0 * expected_move, abs(short_strike - long_strike) * 5.0)
+    lower_spot = max(0.01, spot - radius)
+    upper_spot = spot + radius
+
+    def gamma_at(candidate_spot: float) -> float:
+        candidate_forward = max(0.01, forward + candidate_spot - spot)
+        return _black_forward_gamma(candidate_forward, long_strike, time_years, long_iv) - _black_forward_gamma(
+            candidate_forward, short_strike, time_years, short_iv
+        )
+
+    samples = 80
+    points = [lower_spot + (upper_spot - lower_spot) * index / samples for index in range(samples + 1)]
+    roots: list[float] = []
+    left_spot = points[0]
+    left_gamma = gamma_at(left_spot)
+    for right_spot in points[1:]:
+        right_gamma = gamma_at(right_spot)
+        if left_gamma * right_gamma < 0:
+            low, high = left_spot, right_spot
+            low_gamma = left_gamma
+            for _ in range(50):
+                middle = (low + high) / 2
+                middle_gamma = gamma_at(middle)
+                if low_gamma * middle_gamma <= 0:
+                    high = middle
+                else:
+                    low = middle
+                    low_gamma = middle_gamma
+            roots.append((low + high) / 2)
+        left_spot, left_gamma = right_spot, right_gamma
+    return min(roots, key=lambda value: abs(value - spot)) if roots else None
 
 
 def _tail_probability(option_type: str, forward: float, strike: float, time_years: float, volatility: float) -> float:
