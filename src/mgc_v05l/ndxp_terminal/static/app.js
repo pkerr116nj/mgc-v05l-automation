@@ -42,6 +42,22 @@ const easternTimestamp = (timestampMs) => timestampMs == null || !Number.isFinit
   hour: "numeric", minute: "2-digit", second: "2-digit", timeZoneName: "short",
 }).format(new Date(Number(timestampMs)));
 const percent = (value, digits = 1) => value == null || !Number.isFinite(Number(value)) ? "—" : `${(Number(value) * 100).toFixed(digits)}%`;
+const compactMoney = (value) => value == null || !Number.isFinite(Number(value)) ? "—" : new Intl.NumberFormat("en-US", {
+  style: "currency", currency: "USD", notation: "compact", maximumFractionDigits: 1,
+}).format(Number(value));
+
+function selectedProduct() {
+  const key = state?.selection?.product || state?.market?.product?.key || "NDX";
+  return state?.market?.product || state?.products?.find((product) => product.key === key) || {
+    key: "NDX", display_symbol: "NDX", name: "NASDAQ 100 INDEX", spread_widths: [10], default_width: 10,
+    multiplier: 100, option_roots: ["NDX", "NDXP"], settlement: "CASH · AM/PM BY SERIES",
+  };
+}
+
+function selectedWidth() {
+  const value = Number(state?.selection?.spread_width || state?.market?.spread_width || selectedProduct().default_width || 10);
+  return Number.isFinite(value) && value > 0 ? value : 10;
+}
 
 function loadColumns() {
   try {
@@ -104,6 +120,13 @@ function render() {
     ui["mode-banner"].className = "mode-banner hidden";
   }
   ui.spot.textContent = number(market.spot, 2);
+  const product = selectedProduct();
+  ui["instrument-symbol"].textContent = product.display_symbol;
+  ui["instrument-name"].textContent = product.name;
+  ui["presentation-label"].textContent = `Vertical · ${number(selectedWidth(), 0)} points`;
+  ui["positions-title"].textContent = `${product.display_symbol} positions`;
+  ui["orders-title"].textContent = `${product.display_symbol} order activity`;
+  ui["distance-label"].textContent = `Short strike from ${product.display_symbol}`;
   ui["quote-age"].textContent = market.spot_quote_time_ms == null ? "timestamp unavailable" : easternTimestamp(market.spot_quote_time_ms);
   ui["quote-age-label"].firstChild.textContent = `${market.spot_source || "NDX value"} · `;
   ui["market-latency"].textContent = age(diagnostics.market_latency_ms);
@@ -120,10 +143,13 @@ function render() {
     ? "MARKET CLOSED · LATEST QUOTES"
     : diagnostics.classification || "STARTING";
   ui.diagnostic.className = diagnostics.classification === "HEALTHY" ? "status-good" : diagnostics.classification?.includes("ERROR") || diagnostics.classification?.includes("STALL") ? "status-bad" : "status-warn";
+  renderProducts(state.products || [], product.key);
+  renderWidths(product.spread_widths || [], selectedWidth());
   renderExpirations(market.expirations || [], market.selected_expiration);
   renderAccounts(broker.accounts || [], broker.selected_account_hash);
   renderAnalytics(market.analytics || {});
-  renderChain(market.selected_chain || {}, market.spot, market.analytics || {});
+  renderMarketGamma(market.market_gamma || {});
+  renderChain(market.selected_chain || {}, market.spot, market.analytics || {}, market.market_gamma || {});
   refreshOpenTicket(market.selected_chain || {}, market.analytics || {});
   renderPositions(broker.positions || []);
   renderOrders(broker.working_orders || [], broker.recent_orders || []);
@@ -131,6 +157,38 @@ function render() {
   calculateRisk();
   const errors = Object.values(state.errors || {}).filter(Boolean);
   if (errors.length) showNotice(errors.join(" | "), true); else hideNotice();
+}
+
+function renderProducts(products, selected) {
+  ui.product.replaceChildren(...products.map((product) => new Option(`${product.display_symbol} · ${product.name}`, product.key)));
+  ui.product.value = selected || products[0]?.key || "";
+}
+
+function renderWidths(widths, selected) {
+  const values = widths.map(Number).filter((value) => Number.isFinite(value));
+  ui["spread-width"].replaceChildren(...values.map((width) => new Option(`${number(width, 0)} points`, String(width))));
+  ui["spread-width"].value = String(values.includes(Number(selected)) ? Number(selected) : values[0] || "");
+  ui.credit.max = String(Number(selected) - 0.01);
+}
+
+function renderMarketGamma(gamma) {
+  const valid = gamma.status === "VALID";
+  const regime = String(gamma.regime || "").toLowerCase();
+  ui["market-gamma-regime"].className = valid ? `gamma-regime-${regime}` : "status-warn";
+  ui["market-gamma-regime"].textContent = valid ? `EST. ${gamma.regime} Γ` : "Gamma estimate unavailable";
+  ui["market-gamma-note"].textContent = valid
+    ? "Schwab SOD OI · conventional sign · not observed dealer inventory"
+    : gamma.reason || "Waiting for usable Schwab OI and IV.";
+  ui["market-gamma-signed"].textContent = valid ? compactMoney(gamma.signed_gex_1pct) : "—";
+  ui["market-gamma-flip"].textContent = valid && gamma.estimated_flip != null
+    ? `${number(gamma.estimated_flip, 1)} (${Number(gamma.estimated_flip_distance) >= 0 ? "+" : ""}${number(gamma.estimated_flip_distance, 1)})`
+    : valid ? "None in range" : "—";
+  ui["market-call-wall"].textContent = gamma.call_wall ? `${number(gamma.call_wall.strike, 0)} · ${compactMoney(gamma.call_wall.gex_1pct)}` : "—";
+  ui["market-put-wall"].textContent = gamma.put_wall ? `${number(gamma.put_wall.strike, 0)} · ${compactMoney(gamma.put_wall.gex_1pct)}` : "—";
+  ui["market-gamma-coverage"].textContent = valid
+    ? `${percent(gamma.coverage_ratio, 0)} · ${gamma.confidence} · ${gamma.expiration_count} exp`
+    : "—";
+  ui["market-gamma-signed"].title = gamma.interpretation || gamma.reason || "";
 }
 
 function renderExpirations(expirations, selected) {
@@ -198,7 +256,7 @@ function verticalRows(chain, analytics) {
   const calls = new Map((chain.CALL || []).map((row) => [Number(row.strike), row]));
   const puts = new Map((chain.PUT || []).map((row) => [Number(row.strike), row]));
   return [...new Set([...calls.keys(), ...puts.keys()])].sort((a, b) => a - b).flatMap((low) => {
-    const high = low + 10;
+    const high = low + selectedWidth();
     const callShort = calls.get(low), callLong = calls.get(high);
     const putLong = puts.get(low), putShort = puts.get(high);
     const call = callShort && callLong ? { short: callShort, long: callLong, metrics: spreadMetrics(callShort, callLong, analytics?.spreads?.[callShort.symbol]) } : null;
@@ -240,7 +298,7 @@ function sideGridTemplate() {
   return visibleColumns.map((key) => `${widths[key] || 78}px`).join(" ");
 }
 
-function renderChain(chain, spot, analytics = {}) {
+function renderChain(chain, spot, analytics = {}, marketGamma = {}) {
   const rows = verticalRows(chain, analytics);
   const positions = activePositionIndex();
   renderChainCoverage(chain, spot);
@@ -256,7 +314,7 @@ function renderChain(chain, spot, analytics = {}) {
   const putHeaderFragments = [];
   const callFragments = [], strikeFragments = [], putFragments = [];
   const callGroup = cell("CALLS", "group-head calls-head"); callGroup.style.gridColumn = `span ${visibleColumns.length}`;
-  const strikeGroup = cell("10-POINT", "group-head strike-head");
+  const strikeGroup = cell(`${number(selectedWidth(), 0)}-POINT`, "group-head strike-head");
   const putGroup = cell("PUTS", "group-head puts-head"); putGroup.style.gridColumn = `span ${visibleColumns.length}`;
   callHeaderFragments.push(callGroup);
   strikeHeaderFragments.push(strikeGroup);
@@ -284,7 +342,7 @@ function renderChain(chain, spot, analytics = {}) {
     const callItm = row.call && Number(row.call.short.strike) < Number(spot);
     const putItm = row.put && Number(row.put.short.strike) > Number(spot);
     for (const key of visibleColumns) callFragments.push(metricCell(row.call, key, near, "CALL", callOtm, callItm));
-    strikeFragments.push(positionStrikeCell(row, near, positions));
+    strikeFragments.push(positionStrikeCell(row, near, positions, marketGamma));
     for (const key of visibleColumns) putFragments.push(metricCell(row.put, key, near, "PUT", putOtm, putItm));
   }
   if (!rows.length) {
@@ -323,13 +381,26 @@ function activePositionIndex() {
     .map((row) => [String(row.symbol || "").trim().toUpperCase(), row]));
 }
 
-function positionStrikeCell(row, near, positions) {
-  const node = cell(`${number(row.low, 0)} / ${number(row.high, 0)}`, `strike-cell spread-strikes${near ? " near" : ""}`);
+function positionStrikeCell(row, near, positions, marketGamma = {}) {
+  const midpoint = (Number(row.low) + Number(row.high)) / 2;
+  const zone = nearestGammaScenario(midpoint, marketGamma?.scenario_profile || []);
+  const flipNear = marketGamma?.estimated_flip != null && Math.abs(Number(marketGamma.estimated_flip) - midpoint) <= selectedWidth();
+  const callWall = marketGamma?.call_wall?.strike != null && row.low <= Number(marketGamma.call_wall.strike) && row.high >= Number(marketGamma.call_wall.strike);
+  const putWall = marketGamma?.put_wall?.strike != null && row.low <= Number(marketGamma.put_wall.strike) && row.high >= Number(marketGamma.put_wall.strike);
+  const classes = ["strike-cell", "spread-strikes", near ? "near" : "", zone ? `gamma-zone-${String(zone.regime).toLowerCase()}` : "", flipNear ? "gamma-flip-near" : "", callWall ? "gamma-call-wall" : "", putWall ? "gamma-put-wall" : ""].filter(Boolean).join(" ");
+  const node = cell(`${number(row.low, 0)} / ${number(row.high, 0)}`, classes);
+  const zoneDetails = zone ? `Estimated ${String(zone.regime).toLowerCase()} market gamma near this level (${compactMoney(zone.signed_gex_1pct)} per 1% move).` : "Gamma zone unavailable.";
+  node.title = `${zoneDetails}${flipNear ? " Near estimated gamma flip." : ""}${callWall ? " Contains largest call-gamma concentration." : ""}${putWall ? " Contains largest put-gamma concentration." : ""}`;
   appendPositionFlag(node, row.call?.short, "short", "call", "low", positions);
   appendPositionFlag(node, row.call?.long, "long", "call", "high", positions);
   appendPositionFlag(node, row.put?.long, "long", "put", "low", positions);
   appendPositionFlag(node, row.put?.short, "short", "put", "high", positions);
   return node;
+}
+
+function nearestGammaScenario(spot, profile) {
+  if (!Number.isFinite(Number(spot)) || !Array.isArray(profile) || !profile.length) return null;
+  return profile.reduce((best, candidate) => Math.abs(Number(candidate.spot) - spot) < Math.abs(Number(best.spot) - spot) ? candidate : best);
 }
 
 function appendPositionFlag(node, contract, direction, side, level, positions) {
@@ -418,8 +489,11 @@ function renderCandidateCount(rows, analytics) {
   const states = spreads.map((spread) => opportunityState(spread.metrics));
   const qualified = states.filter((candidate) => candidate.qualified).length;
   const preferred = states.filter((candidate) => candidate.preferred).length;
-  ui["candidate-count"].textContent = `${qualified} / ${preferred}`;
-  ui["candidate-count"].title = `${qualified} spreads pass all transparent filters; ${preferred} of those have a $2.00–$2.50 opening mid.`;
+  const modeled = spreads.map((spread) => spread.metrics || {});
+  const harvest = modeled.filter((metrics) => metrics.value_class === "HARVEST").length;
+  const gammaRich = modeled.filter((metrics) => metrics.value_class === "RICH_GAMMA").length;
+  ui["candidate-count"].textContent = `${qualified} qualified · ${harvest} harvest`;
+  ui["candidate-count"].title = `${qualified} pass your filters; ${preferred} are in the preferred credit band; ${harvest} rank as elevated premium with controlled gamma; ${gammaRich} are rich but gamma-sensitive.`;
 }
 
 function cell(text, className = "") {
@@ -435,6 +509,11 @@ function metricCell(spread, key, near, side, otm = false, itm = false) {
     const button = document.createElement("button");
     const opening = key === "bid";
     button.className = `metric ${opening ? "bid-action" : "ask-action"}${near ? " near" : ""}${otm ? " otm" : ""}${itm ? " itm" : ""}${opening && opportunity.qualified ? " qualified" : ""}${opening && opportunity.preferred ? " preferred" : ""}${opening && spread.metrics?.credit_band === "ELEVATED" ? " elevated" : ""}`;
+    if (opening && spread.metrics?.value_class) {
+      const valueClass = String(spread.metrics.value_class).toLowerCase().replace("_", "-");
+      button.classList.add(`value-${valueClass}`);
+      if (spread.metrics.value_class !== "ORDINARY") button.dataset.valueBadge = spread.metrics.value_class === "RICH_GAMMA" ? "Γ RICH" : spread.metrics.value_class;
+    }
     button.textContent = formatted;
     const moneyness = otm ? " · OTM" : "";
     const midpoint = Number(spread.metrics?.mark);
@@ -443,7 +522,7 @@ function metricCell(spread, key, near, side, otm = false, itm = false) {
       ? ` · natural bid ${number(value)} is non-positive; midpoint ticket ${number(midpoint)}`
       : "";
     button.title = opening
-      ? `Sell to open ${side.toLowerCase()} credit spread${moneyness} · ${opportunity.label}${naturalBidWarning}`
+      ? `Sell to open ${side.toLowerCase()} credit spread${moneyness} · ${opportunity.label}${spread.metrics?.value_reason ? ` · ${spread.metrics.value_reason}` : ""}${naturalBidWarning}`
       : `Buy to close ${side.toLowerCase()} credit spread${moneyness}`;
     button.disabled = opening ? !positiveMidpoint : value == null || Number(value) <= 0;
     button.addEventListener("click", () => openTicket(opening ? "OPEN" : "CLOSE", side, spread));
@@ -604,23 +683,26 @@ function updateTicketPositionEffect(quantity) {
 
 function adjustPriceInput(input, increment) {
   const current = Number(input.value || 0);
-  input.value = Math.min(9.99, Math.max(0.01, current + Number(increment))).toFixed(2);
+  input.value = Math.min(selectedWidth() - 0.01, Math.max(0.01, current + Number(increment))).toFixed(2);
   input.dispatchEvent(new Event("input", { bubbles: true }));
 }
 
 function calculateRisk() {
-  const quantity = Number(ui.quantity.value || 0), limitPrice = Number(ui.credit.value || 0), gross = quantity * 10 * 100;
+  const product = selectedProduct();
+  const width = selectedWidth();
+  const multiplier = Number(product.multiplier || 100);
+  const quantity = Number(ui.quantity.value || 0), limitPrice = Number(ui.credit.value || 0), gross = quantity * width * multiplier;
   updateTicketPositionEffect(quantity);
   const opening = selectedAction === "OPEN";
   const legContracts = quantity * 2;
   const estimatedOrderCosts = legContracts * (OPTION_COMMISSION_PER_LEG_CONTRACT + ESTIMATED_OTHER_FEE_PER_LEG_CONTRACT);
-  const grossOrderCash = quantity * limitPrice * 100;
+  const grossOrderCash = quantity * limitPrice * multiplier;
   const orderNetCash = opening ? grossOrderCash - estimatedOrderCosts : grossOrderCash + estimatedOrderCosts;
   const openingCredit = opening ? limitPrice : selectedOpeningCredit;
-  const grossOpeningCash = openingCredit == null ? null : quantity * openingCredit * 100;
+  const grossOpeningCash = openingCredit == null ? null : quantity * openingCredit * multiplier;
   const estimatedOpeningCosts = openingCredit == null ? null : estimatedOrderCosts;
   const netOpeningCash = grossOpeningCash == null ? null : grossOpeningCash - estimatedOpeningCosts;
-  const netOpeningCreditPerSpread = openingCredit == null || !(quantity > 0) ? null : openingCredit - estimatedOpeningCosts / (quantity * 100);
+  const netOpeningCreditPerSpread = openingCredit == null || !(quantity > 0) ? null : openingCredit - estimatedOpeningCosts / (quantity * multiplier);
   const estimatedTradePnl = !opening && netOpeningCash != null ? netOpeningCash - orderNetCash : null;
   const hasOpeningCredit = !opening && selectedOpeningCredit != null;
   ui["opening-gross-row"].classList.toggle("hidden", !hasOpeningCredit);
@@ -638,7 +720,7 @@ function calculateRisk() {
   ui["order-net"].className = opening ? "cash-credit" : "cash-debit";
   ui["trade-pnl"].textContent = moneyExact(estimatedTradePnl);
   ui["trade-pnl"].className = estimatedTradePnl == null ? "cash-neutral" : estimatedTradePnl >= 0 ? "cash-credit" : "cash-debit";
-  ui["gross-risk"].textContent = `${number(10, 0)} pts × ${number(quantity, 0)} = ${money(gross)}`;
+  ui["gross-risk"].textContent = `${number(width, 0)} pts × ${number(quantity, 0)} = ${money(gross)}`;
   ui["max-loss-label"].textContent = selectedAction === "OPEN" ? "Est. maximum loss incl. costs" : "Position effect";
   ui["max-loss"].textContent = opening ? moneyExact(gross - grossOrderCash + estimatedOrderCosts) : "Releases defined risk";
   ui["max-loss"].className = opening ? "cash-debit" : "cash-credit";
@@ -658,7 +740,7 @@ function calculateRisk() {
   ui["breakeven-distance"].textContent = breakevenDistance == null ? "—" : `${number(breakevenDistance, 2)} pts ${direction}`;
   ui["short-iv-move"].textContent = Number.isFinite(shortIvMove) ? `±${number(shortIvMove, 1)} pts · ${number(selectedMetrics?.short_iv_percent, 2)}% IV` : "—";
   ui["ticket-em-multiple"].textContent = breakevenDistance == null || !(shortIvMove > 0) ? "—" : `${number(breakevenDistance / shortIvMove, 2)}×`;
-  ui["ticket-credit-risk"].textContent = netOpeningCreditPerSpread == null || !(netOpeningCreditPerSpread > 0 && netOpeningCreditPerSpread < 10) ? "—" : percent(netOpeningCreditPerSpread / (10 - netOpeningCreditPerSpread), 1);
+  ui["ticket-credit-risk"].textContent = netOpeningCreditPerSpread == null || !(netOpeningCreditPerSpread > 0 && netOpeningCreditPerSpread < width) ? "—" : percent(netOpeningCreditPerSpread / (width - netOpeningCreditPerSpread), 1);
   const creditPositionDelta = selectedMetrics?.credit_position_delta;
   const creditPositionGamma = selectedMetrics?.credit_position_gamma;
   const actionSign = selectedAction === "OPEN" ? 1 : -1;
@@ -674,8 +756,8 @@ function calculateRisk() {
     : `${number(selectedMetrics.gamma_flip_spot, 2)} (${Number(selectedMetrics.gamma_flip_distance) >= 0 ? "+" : ""}${number(selectedMetrics.gamma_flip_distance, 1)} pts)`;
   const adverseMove = optionType === "PUT" ? -25 : 25;
   const adverseScenario = selectedMetrics?.gamma_scenarios?.find((row) => Number(row.spot_move) === adverseMove);
-  ui["adverse-delta-label"].textContent = `Order Δ if NDX moves ${adverseMove > 0 ? "+" : ""}${adverseMove}`;
-  ui["adverse-gamma-label"].textContent = `Order Γ if NDX moves ${adverseMove > 0 ? "+" : ""}${adverseMove}`;
+  ui["adverse-delta-label"].textContent = `Order Δ if ${product.display_symbol} moves ${adverseMove > 0 ? "+" : ""}${adverseMove}`;
+  ui["adverse-gamma-label"].textContent = `Order Γ if ${product.display_symbol} moves ${adverseMove > 0 ? "+" : ""}${adverseMove}`;
   ui["adverse-delta"].textContent = adverseScenario ? number(Number(adverseScenario.credit_position_delta) * quantity * actionSign, 2) : "—";
   ui["gamma-scenario"].textContent = adverseScenario ? number(Number(adverseScenario.credit_position_gamma) * quantity * actionSign, 4) : "—";
   const openPositionGamma = creditPositionGamma == null ? null : Number(creditPositionGamma) * quantity;
@@ -736,7 +818,7 @@ async function submitLiveOrder() {
 }
 
 function renderPositions(rows) {
-  if (!rows.length) { ui.positions.className = "empty"; ui.positions.textContent = "No NDX/NDXP positions in current Schwab account truth."; return; }
+  if (!rows.length) { ui.positions.className = "empty"; ui.positions.textContent = `No ${selectedProduct().display_symbol} positions in current Schwab account truth.`; return; }
   ui.positions.className = "";
   const positions = activePositionIndex();
   const matchedSymbols = new Set();
@@ -779,7 +861,7 @@ function renderPositions(rows) {
 
 function renderOrders(rows, recentRows = []) {
   if (document.activeElement?.matches("#orders input")) return;
-  if (!rows.length && !recentRows.length) { workingOrderDrafts.clear(); ui.orders.className = "empty"; ui.orders.textContent = "No recent NDX/NDXP orders."; return; }
+  if (!rows.length && !recentRows.length) { workingOrderDrafts.clear(); ui.orders.className = "empty"; ui.orders.textContent = `No recent ${selectedProduct().display_symbol} orders.`; return; }
   ui.orders.className = "";
   const activeIds = new Set(rows.map((row) => row.order_id));
   for (const orderId of workingOrderDrafts.keys()) if (!activeIds.has(orderId)) workingOrderDrafts.delete(orderId);
@@ -822,7 +904,7 @@ function workingOrderCard(row) {
   const quantity = document.createElement("input"); quantity.type = "number"; quantity.min = "1"; quantity.max = "100"; quantity.value = draft.quantity ?? row.quantity ?? "";
   quantityLabel.append(quantity);
   const priceLabel = document.createElement("label"); priceLabel.textContent = row.action === "CLOSE" ? "Net debit" : "Net credit";
-  const price = document.createElement("input"); price.type = "number"; price.min = "0.01"; price.max = "9.99"; price.step = "0.05"; price.value = draft.price ?? Number(row.price || 0).toFixed(2);
+  const price = document.createElement("input"); price.type = "number"; price.min = "0.01"; price.max = String(selectedWidth() - 0.01); price.step = "0.05"; price.value = draft.price ?? Number(row.price || 0).toFixed(2);
   priceLabel.append(price);
   const preserveDraft = () => workingOrderDrafts.set(row.order_id, { quantity: quantity.value, price: price.value });
   quantity.addEventListener("input", preserveDraft); price.addEventListener("input", preserveDraft);
@@ -858,8 +940,8 @@ function workingOrderCard(row) {
 async function replaceWorkingOrder(row, quantityInput, priceInput) {
   const quantity = Number(quantityInput.value);
   const price = Number(priceInput.value);
-  if (!row.editable || !Number.isInteger(quantity) || quantity < 1 || quantity > 100 || !(price > 0 && price < 10)) {
-    showNotice("Enter a whole-number quantity from 1–100 and a valid net price below 10.00.", true);
+  if (!row.editable || !Number.isInteger(quantity) || quantity < 1 || quantity > 100 || !(price > 0 && price < selectedWidth())) {
+    showNotice(`Enter a whole-number quantity from 1–100 and a valid net price below ${number(selectedWidth(), 2)}.`, true);
     return null;
   }
   const result = await lockedAction("replace", {
@@ -911,7 +993,22 @@ async function lockedAction(action, payload) {
 async function selectExpiration() {
   invalidateLivePreview();
   selectedShort = null; selectedLong = null; selectedAction = "OPEN"; selectedMetrics = null;
-  await api("/api/selection", { method: "POST", body: JSON.stringify({ expiration: ui.expiration.value, option_type: "CALL" }) });
+  await api("/api/selection", { method: "POST", body: JSON.stringify({ product: ui.product.value, expiration: ui.expiration.value, spread_width: Number(ui["spread-width"].value), option_type: "CALL" }) });
+  await refresh();
+}
+
+async function selectProduct() {
+  invalidateLivePreview();
+  selectedShort = null; selectedLong = null; selectedAction = "OPEN"; selectedMetrics = null;
+  centeredExpiration = null;
+  await api("/api/selection", { method: "POST", body: JSON.stringify({ product: ui.product.value, expiration: "", option_type: "CALL" }) });
+  await refresh();
+}
+
+async function selectSpreadWidth() {
+  invalidateLivePreview();
+  selectedShort = null; selectedLong = null; selectedAction = "OPEN"; selectedMetrics = null;
+  await api("/api/selection", { method: "POST", body: JSON.stringify({ product: ui.product.value, expiration: ui.expiration.value, spread_width: Number(ui["spread-width"].value), option_type: "CALL" }) });
   await refresh();
 }
 
@@ -954,7 +1051,9 @@ function saveFilters() {
 function showNotice(message, error = false) { ui.notice.textContent = message; ui.notice.className = `notice${error ? " error" : ""}`; }
 function hideNotice() { ui.notice.className = "notice hidden"; }
 
+ui.product.addEventListener("change", selectProduct);
 ui.expiration.addEventListener("change", selectExpiration);
+ui["spread-width"].addEventListener("change", selectSpreadWidth);
 ui.quantity.addEventListener("input", () => { invalidateLivePreview(); calculateRisk(); });
 ui.credit.addEventListener("input", () => {
   ticketPriceFollowsMarket = false;
@@ -978,7 +1077,7 @@ new ResizeObserver(updateStickyHeaderOffset).observe(document.querySelector(".to
 window.addEventListener("resize", () => handleViewportGeometryChange(false), { passive: true });
 window.addEventListener("orientationchange", () => handleViewportGeometryChange(true), { passive: true });
 ui["access-check"].addEventListener("click", async () => {
-  try { showNotice("Running read-only Schwab account and NDX chain checks…"); const result = await api("/api/access-check"); showNotice(`Access verified: ${JSON.stringify(result)}`); }
+  try { showNotice(`Running read-only Schwab account and ${selectedProduct().display_symbol} chain checks…`); const result = await api("/api/access-check"); showNotice(`Access verified: ${JSON.stringify(result)}`); }
   catch (error) { showNotice(`Access check failed: ${error.message}`, true); }
 });
 

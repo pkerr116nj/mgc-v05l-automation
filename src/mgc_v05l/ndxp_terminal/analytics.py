@@ -1,8 +1,8 @@
-"""Independent, fail-closed IV and expected-range analytics for NDXP.
+"""Independent, fail-closed IV and expected-range analytics for index options.
 
 The calculations intentionally use option bid/ask midpoints and never consume
-Schwab's supplied volatility or Greeks.  NDXP is a European-style,
-cash-settled product, so call/put parity and Black-76 are suitable for the
+Schwab's supplied volatility or Greeks.  The supported European-style,
+cash-settled index products make call/put parity and Black-76 suitable for the
 short-dated review analytics exposed by the terminal.
 """
 
@@ -30,6 +30,8 @@ def derive_expiration_analytics(
     spot_quote_time_ms: int | None,
     allow_closed_snapshot: bool = False,
     now: datetime | None = None,
+    product_symbol: str = "NDX",
+    spread_width: int = 10,
 ) -> dict[str, Any]:
     """Build selected-expiration analytics, or explain why they are unavailable."""
 
@@ -42,7 +44,7 @@ def derive_expiration_analytics(
         "spreads": {},
     }
     if spot is None or not math.isfinite(float(spot)) or float(spot) <= 0:
-        return _unavailable(base, "NDX spot is unavailable.")
+        return _unavailable(base, f"{product_symbol} spot is unavailable.")
     try:
         expiry_at = _expiration_at(expiration)
     except (TypeError, ValueError):
@@ -69,7 +71,7 @@ def derive_expiration_analytics(
         model_observed_at = datetime.fromtimestamp(min(reference_timestamps) / 1000, tz=timezone.utc)
     seconds_remaining = (expiry_at - model_observed_at).total_seconds()
     if seconds_remaining <= 0:
-        return _unavailable(base, "The selected NDXP expiration has passed.")
+        return _unavailable(base, f"The selected {product_symbol} expiration has passed.")
     time_years = seconds_remaining / SECONDS_PER_YEAR
 
     parity_rows: list[tuple[float, float, int]] = []
@@ -117,7 +119,7 @@ def derive_expiration_analytics(
     used_near_atm = sorted(surface, key=lambda row: abs(row[0] - forward))[:8]
     timestamps = [row[2] for row in used_near_atm]
     if spot_quote_time_ms is None:
-        return _unavailable(base, "The NDX spot quote timestamp is unavailable.")
+        return _unavailable(base, f"The {product_symbol} spot quote timestamp is unavailable.")
     timestamps.append(spot_quote_time_ms)
     oldest_ms = min(timestamps)
     newest_ms = max(timestamps)
@@ -150,7 +152,7 @@ def derive_expiration_analytics(
     spreads: dict[str, dict[str, Any]] = {}
     for option_type, side in (("CALL", calls), ("PUT", puts)):
         for short_strike, short in side.items():
-            long_strike = short_strike + 10 if option_type == "CALL" else short_strike - 10
+            long_strike = short_strike + spread_width if option_type == "CALL" else short_strike - spread_width
             long = side.get(long_strike)
             if long is None:
                 continue
@@ -166,6 +168,8 @@ def derive_expiration_analytics(
             )
             if spread is not None:
                 spreads[str(short["symbol"])] = spread
+
+    _classify_spread_values(spreads)
 
     return {
         **base,
@@ -290,6 +294,51 @@ def _spread_analytics(
         "gamma_method": "Black-76 forward gamma · fitted leg IVs held constant across spot scenarios",
         "credit_band": "PREFERRED" if 2.0 <= mid <= 2.5 else ("BELOW_PREFERRED" if mid < 2.0 else "ELEVATED"),
     }
+
+
+def _classify_spread_values(spreads: dict[str, dict[str, Any]]) -> None:
+    """Attach a transparent, within-side richness classification."""
+    for spread in spreads.values():
+        spread["value_percentile"] = None
+        spread["adverse_gamma_multiple"] = None
+        spread["value_class"] = "ORDINARY"
+        spread["value_reason"] = "Value rank unavailable because opening credit or breakeven distance is non-positive."
+    for option_type in ("CALL", "PUT"):
+        candidates = [
+            spread for spread in spreads.values()
+            if spread.get("option_type") == option_type
+            and float(spread.get("breakeven_distance") or 0) > 0
+            and float(spread.get("opening_mid") or 0) > 0
+        ]
+        ranked = sorted(candidates, key=lambda spread: float(spread.get("credit_to_risk") or 0))
+        for index, spread in enumerate(ranked):
+            percentile = (index + 1) / len(ranked) if ranked else 0.0
+            spread["value_percentile"] = round(percentile, 4)
+            mid = float(spread.get("opening_mid") or 0)
+            market_width = float(spread.get("market_width") or 0)
+            width_ratio = market_width / mid if mid > 0 else math.inf
+            scenarios = spread.get("gamma_scenarios") or []
+            adverse_move = 25.0 if option_type == "CALL" else -25.0
+            current = next((row for row in scenarios if float(row.get("spot_move") or 0) == 0), None)
+            adverse = next((row for row in scenarios if float(row.get("spot_move") or 0) == adverse_move), None)
+            current_gamma = abs(float(current.get("credit_position_gamma") or 0)) if current else 0.0
+            adverse_gamma = abs(float(adverse.get("credit_position_gamma") or 0)) if adverse else 0.0
+            gamma_multiple = adverse_gamma / current_gamma if current_gamma > 1e-12 else None
+            spread["adverse_gamma_multiple"] = round(gamma_multiple, 4) if gamma_multiple is not None else None
+            if width_ratio > 0.60:
+                value_class = "THIN"
+            elif percentile >= 0.80 and gamma_multiple is not None and gamma_multiple >= 1.50:
+                value_class = "RICH_GAMMA"
+            elif percentile >= 0.80:
+                value_class = "HARVEST"
+            else:
+                value_class = "ORDINARY"
+            spread["value_class"] = value_class
+            spread["value_reason"] = (
+                f"credit/risk percentile {percentile:.0%} within {option_type.lower()} spreads · "
+                f"market width {width_ratio:.0%} of mid · "
+                + (f"adverse 25-point gamma {gamma_multiple:.2f}× current" if gamma_multiple is not None else "gamma ratio unavailable")
+            )
 
 
 def _expiration_at(expiration: str | None) -> datetime:

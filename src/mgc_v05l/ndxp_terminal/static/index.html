@@ -4,12 +4,12 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
     <meta name="theme-color" content="#050708" />
-    <title>NDXP Credit Terminal</title>
-    <link rel="stylesheet" href="/styles.css?v=broker-close-1" />
+    <title>Index Spread Terminal</title>
+    <link rel="stylesheet" href="/styles.css?v=multi-index-gamma-1" />
   </head>
   <body>
     <header class="topbar">
-      <div class="instrument"><strong>NDX</strong><span>NASDAQ 100 INDEX</span></div>
+      <div class="instrument"><strong id="instrument-symbol">NDX</strong><span id="instrument-name">NASDAQ 100 INDEX</span></div>
       <div class="spot-block mono"><strong id="spot">—</strong><span id="quote-age-label">Latest index quote <b id="quote-age">—</b></span></div>
       <div class="top-status">
         <span id="diagnostic" class="status-good">STARTING</span>
@@ -31,8 +31,17 @@
         <div><label>Schwab roster + spot</label><strong id="market-latency">—</strong></div>
         <div><label id="option-source-label">Option market</label><strong id="option-feed-status">—</strong></div>
         <div><label>Broker truth</label><strong id="broker-latency">—</strong></div>
-        <div><label>Presentation</label><strong class="accent">Vertical · 10 points</strong></div>
+        <div><label>Presentation</label><strong id="presentation-label" class="accent">Vertical · 10 points</strong></div>
         <button id="access-check" class="secondary">Verify API access</button>
+      </section>
+
+      <section class="market-gamma-strip" aria-label="Estimated market-wide gamma">
+        <div class="gamma-regime"><span class="kicker">OI GAMMA ESTIMATE · STRUCTURAL</span><strong id="market-gamma-regime">Calculating…</strong><span id="market-gamma-note">Schwab start-of-day open interest</span></div>
+        <div><label>Signed Γ / 1% move</label><strong id="market-gamma-signed">—</strong></div>
+        <div><label>Estimated Γ flip</label><strong id="market-gamma-flip">—</strong></div>
+        <div><label>Call concentration</label><strong id="market-call-wall">—</strong></div>
+        <div><label>Put concentration</label><strong id="market-put-wall">—</strong></div>
+        <div><label>OI coverage</label><strong id="market-gamma-coverage">—</strong></div>
       </section>
 
       <section class="range-strip" aria-label="Independent implied range analytics">
@@ -51,11 +60,12 @@
 
       <div id="notice" class="notice hidden"></div>
 
-      <section class="chain-shell" aria-label="NDXP option spread chain">
+      <section class="chain-shell" aria-label="Index option spread chain">
         <div class="chain-controls">
+          <label>Underlying<select id="product" aria-label="Index underlying"></select></label>
           <label>Expiration<select id="expiration" aria-label="Expiration"></select></label>
           <label>Spread<select id="spread-view" aria-label="Spread presentation"><option value="VERTICAL">Vertical</option></select></label>
-          <label>Width<select id="spread-width" aria-label="Spread width"><option value="10">10 points</option></select></label>
+          <label>Width<select id="spread-width" aria-label="Spread width"></select></label>
           <button id="columns-button" class="icon-button" aria-label="Choose chain columns">Columns ⚙</button>
           <span id="chain-coverage" class="chain-coverage status-warn">Checking chain depth…</span>
           <span class="touch-hint">Tap bid to sell/open · tap ask to buy/close · tickets default to mid</span>
@@ -82,11 +92,11 @@
 
       <div class="lower-grid">
         <section id="positions-panel" class="panel">
-          <div class="panel-title"><div><span class="kicker">BROKER TRUTH</span><h2>NDX positions</h2></div></div>
+          <div class="panel-title"><div><span class="kicker">BROKER TRUTH</span><h2 id="positions-title">NDX positions</h2></div></div>
           <div id="positions" class="empty">Waiting for Schwab…</div>
         </section>
         <section id="orders-panel" class="panel">
-          <div class="panel-title"><div><span class="kicker">ORDER CONTROL</span><h2>NDX order activity</h2></div></div>
+          <div class="panel-title"><div><span class="kicker">ORDER CONTROL</span><h2 id="orders-title">NDX order activity</h2></div></div>
           <div id="orders" class="empty">Waiting for Schwab…</div>
         </section>
         <section id="diagnostics-panel" class="panel diagnostics-panel">
@@ -161,7 +171,7 @@
         <section class="ticket-section">
           <h3>Distance and price</h3>
           <div class="risk-grid">
-            <div><label>Short strike from NDX</label><strong id="distance">—</strong></div>
+            <div><label id="distance-label">Short strike from NDX</label><strong id="distance">—</strong></div>
             <div><label>Est. net breakeven</label><strong id="ticket-breakeven">—</strong></div>
             <div><label>Distance to breakeven</label><strong id="breakeven-distance">—</strong></div>
             <div><label>Short-leg IV move to expiry</label><strong id="short-iv-move">—</strong></div>
@@ -193,6 +203,6 @@
       </div>
     </dialog>
 
-    <script src="/app.js?v=broker-close-1"></script>
+    <script src="/app.js?v=multi-index-gamma-1"></script>
   </body>
 </html>

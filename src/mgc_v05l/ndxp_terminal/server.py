@@ -280,9 +280,19 @@ class DemoSchwabAdapter:
     mode = "DEMO"
     broker = _DemoBroker()
 
+    def set_selected_expiration(self, _expiration: str | None) -> None:
+        return
+
     def fetch_market(self, *, chain_symbol: str, quote_symbol: str) -> dict[str, Any]:
         now = datetime.now(timezone.utc)
-        spot = 29318 + math.sin(time.monotonic() / 5) * 8
+        product_key = chain_symbol.strip().upper().lstrip("$")
+        settings = {
+            "NDX": (29318.0, 10, "NDXP"),
+            "SPX": (6450.0, 5, "SPXW"),
+            "RUT": (2875.0, 5, "RUTW"),
+        }
+        base_spot, strike_interval, option_root = settings.get(product_key, settings["NDX"])
+        spot = base_spot + math.sin(time.monotonic() / 5) * strike_interval * 0.8
         expirations = [_next_weekday(_demo_start_day(now), offset) for offset in range(3)]
         call_map: dict[str, Any] = {}
         put_map: dict[str, Any] = {}
@@ -290,16 +300,16 @@ class DemoSchwabAdapter:
             days = max(0, (day - date.today()).days)
             calls: dict[str, Any] = {}
             puts: dict[str, Any] = {}
-            center_strike = round(spot / DEMO_STRIKE_INTERVAL) * DEMO_STRIKE_INTERVAL
-            first_strike = center_strike - DEMO_STRIKES_EACH_SIDE * DEMO_STRIKE_INTERVAL
-            last_strike = center_strike + DEMO_STRIKES_EACH_SIDE * DEMO_STRIKE_INTERVAL
-            for strike in range(first_strike, last_strike + DEMO_STRIKE_INTERVAL, DEMO_STRIKE_INTERVAL):
+            center_strike = round(spot / strike_interval) * strike_interval
+            first_strike = center_strike - DEMO_STRIKES_EACH_SIDE * strike_interval
+            last_strike = center_strike + DEMO_STRIKES_EACH_SIDE * strike_interval
+            for strike in range(first_strike, last_strike + strike_interval, strike_interval):
                 expiry_at = datetime.combine(day, datetime.min.time().replace(hour=16), tzinfo=EASTERN).astimezone(timezone.utc)
                 time_years = max((expiry_at - now).total_seconds(), 60) / (365.25 * 24 * 60 * 60)
                 call_mid = _demo_black_price("CALL", spot, strike, time_years, 0.142)
                 put_mid = _demo_black_price("PUT", spot, strike, time_years, 0.142)
-                calls[f"{strike:.1f}"] = [_demo_contract(day, "C", strike, call_mid, now, spot)]
-                puts[f"{strike:.1f}"] = [_demo_contract(day, "P", strike, put_mid, now, spot)]
+                calls[f"{strike:.1f}"] = [_demo_contract(day, "C", strike, call_mid, now, spot, option_root)]
+                puts[f"{strike:.1f}"] = [_demo_contract(day, "P", strike, put_mid, now, spot, option_root)]
             call_map[f"{day.isoformat()}:{days}"] = calls
             put_map[f"{day.isoformat()}:{days}"] = puts
         epoch_ms = int(now.timestamp() * 1000)
@@ -352,13 +362,15 @@ class DemoSchwabAdapter:
             "received_at": now,
         }
 
-    def access_check(self) -> dict[str, Any]:
+    def access_check(self, *, chain_symbol: str = "$NDX") -> dict[str, Any]:
         return {
             "ok": True,
             "checked_at": datetime.now(timezone.utc).isoformat(),
             "account_count": 1,
             "account_and_trading_access": True,
             "ndx_chain_access": True,
+            "index_chain_symbol": chain_symbol,
+            "index_chain_access": True,
             "market_latency_ms": 42,
             "broker_latency_ms": 65,
             "mutation_attempted": False,
@@ -366,8 +378,16 @@ class DemoSchwabAdapter:
         }
 
 
-def _demo_contract(day: date, option_code: str, strike: int, mid: float, now: datetime, spot: float) -> dict[str, Any]:
-    root = "NDXP  "
+def _demo_contract(
+    day: date,
+    option_code: str,
+    strike: int,
+    mid: float,
+    now: datetime,
+    spot: float,
+    option_root: str = "NDXP",
+) -> dict[str, Any]:
+    root = f"{option_root:<6}"
     symbol = f"{root}{day.strftime('%y%m%d')}{option_code}{strike * 1000:08d}"
     bid = max(0.01, mid - 0.10)
     ask = max(0.02, mid + 0.10)

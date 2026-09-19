@@ -1,4 +1,4 @@
-"""Validated NDX/NDXP vertical order construction and locked mutation gateway."""
+"""Validated index-option vertical construction and locked mutation gateway."""
 
 from __future__ import annotations
 
@@ -9,17 +9,17 @@ from decimal import Decimal, InvalidOperation
 from typing import Any
 
 from ..production_link.client import SchwabBrokerHttpClient
+from .products import product_for_root, width_allowed
 
 
 # Live transmission is compiled only behind the runtime, launch, origin, and preview gates below.
 # Runtime and origin gates remain mandatory.
 LIVE_TRANSMISSION_COMPILED = True
 _OPTION_RE = re.compile(r"^([A-Z0-9.$]{1,6})\s*(\d{6})([CP])(\d{8})$")
-_ALLOWED_ROOTS = {"NDX", "NDXP"}
 
 
 class SpreadValidationError(ValueError):
-    """Raised when a proposed spread is not an exact, defined-risk NDX vertical."""
+    """Raised when a proposed spread is not a supported defined-risk vertical."""
 
 
 class TransmissionDisabledError(RuntimeError):
@@ -82,36 +82,42 @@ def parse_option_symbol(symbol: str) -> ParsedOptionSymbol:
     )
 
 
-def validate_spread_request(request: NdxpSpreadRequest, *, required_width: Decimal = Decimal("10")) -> dict[str, Any]:
+def validate_spread_request(request: NdxpSpreadRequest, *, required_width: Decimal | None = None) -> dict[str, Any]:
     if not request.account_hash:
         raise SpreadValidationError("A live-verified Schwab account hash is required.")
     if request.quantity <= 0 or request.quantity > 100:
         raise SpreadValidationError("Quantity must be between 1 and 100 contracts.")
     if request.action not in {"OPEN", "CLOSE"}:
         raise SpreadValidationError("Spread action must be OPEN or CLOSE.")
-    if request.limit_price <= 0 or request.limit_price >= required_width:
-        raise SpreadValidationError("Net limit price must be greater than zero and below the spread width.")
     if request.duration != "DAY" or request.session != "NORMAL":
-        raise SpreadValidationError("The initial NDXP terminal permits NORMAL-session DAY orders only.")
+        raise SpreadValidationError("The index-spread terminal permits NORMAL-session DAY orders only.")
 
     short = parse_option_symbol(request.short_symbol)
     long = parse_option_symbol(request.long_symbol)
-    if short.root not in _ALLOWED_ROOTS or long.root not in _ALLOWED_ROOTS:
-        raise SpreadValidationError("Both legs must be NDX or NDXP options supplied by Schwab.")
+    product = product_for_root(short.root)
+    if product is None or product_for_root(long.root) != product:
+        raise SpreadValidationError("Both legs must belong to the same supported NDX, SPX, or RUT option product.")
     if short.root != long.root or short.expiration != long.expiration or short.option_type != long.option_type:
         raise SpreadValidationError("Vertical legs must share the same root, expiration, and option type.")
     width = abs(short.strike - long.strike)
-    if width != required_width:
-        raise SpreadValidationError(f"The initial terminal requires an exact {required_width}-point spread.")
+    if required_width is not None and width != required_width:
+        raise SpreadValidationError(f"The selected product requires an exact {required_width}-point spread.")
+    if not width_allowed(product, width):
+        allowed = ", ".join(str(value) for value in product.spread_widths)
+        raise SpreadValidationError(f"{product.display_symbol} spread width must be one of: {allowed} points.")
+    if request.limit_price <= 0 or request.limit_price >= width:
+        raise SpreadValidationError("Net limit price must be greater than zero and below the spread width.")
     if short.option_type == "CALL" and short.strike >= long.strike:
         raise SpreadValidationError("A call credit spread must sell the lower strike and buy the higher strike.")
     if short.option_type == "PUT" and short.strike <= long.strike:
         raise SpreadValidationError("A put credit spread must sell the higher strike and buy the lower strike.")
 
-    gross_width_dollars = width * Decimal("100") * request.quantity
-    order_value_dollars = request.limit_price * Decimal("100") * request.quantity
+    multiplier = Decimal(product.multiplier)
+    gross_width_dollars = width * multiplier * request.quantity
+    order_value_dollars = request.limit_price * multiplier * request.quantity
     summary = {
         "root": short.root,
+        "product": product.key,
         "expiration": short.expiration,
         "option_type": short.option_type,
         "short_strike": str(short.strike),

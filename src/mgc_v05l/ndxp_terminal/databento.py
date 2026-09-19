@@ -193,6 +193,9 @@ class NdxpDatabentoAdapter:
 
     def set_selected_expiration(self, expiration: str | None) -> None:
         self._selected_expiration = expiration or None
+        setter = getattr(self.schwab, "set_selected_expiration", None)
+        if callable(setter):
+            setter(self._selected_expiration)
 
     def fetch_market(self, *, chain_symbol: str, quote_symbol: str) -> dict[str, Any]:
         started = time.monotonic()
@@ -243,11 +246,11 @@ class NdxpDatabentoAdapter:
     def fetch_broker_truth(self) -> dict[str, Any]:
         return self.schwab.fetch_broker_truth()
 
-    def access_check(self) -> dict[str, Any]:
-        result = self.schwab.access_check()
+    def access_check(self, *, chain_symbol: str = "$NDX") -> dict[str, Any]:
+        result = self.schwab.access_check(chain_symbol=chain_symbol)
         result["databento"] = self.feed.status()
         result["databento_opra_quote_received"] = bool(result["databento"].get("quote_count"))
-        result["market_source"] = "Databento OPRA NBBO · Schwab NDX spot"
+        result["market_source"] = f"Databento OPRA NBBO · Schwab {chain_symbol.lstrip('$')} spot"
         return result
 
     def stop(self) -> None:

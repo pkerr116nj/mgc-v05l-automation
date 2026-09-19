@@ -16,6 +16,7 @@ from typing import Any, Protocol
 
 from .analytics import derive_expiration_analytics
 from .diagnostics import classify_diagnostics, ndxp_regular_session_open
+from .market_gamma import derive_market_gamma
 from .orders import (
     LIVE_TRANSMISSION_COMPILED,
     LockedSchwabMutationGateway,
@@ -27,6 +28,7 @@ from .orders import (
     validate_spread_request,
 )
 from .schwab import NdxpSchwabAdapter
+from .products import PRODUCTS, IndexOptionProduct, get_product, product_for_root
 
 
 class TerminalAdapter(Protocol):
@@ -36,7 +38,7 @@ class TerminalAdapter(Protocol):
 
     def fetch_broker_truth(self) -> dict[str, Any]: ...
 
-    def access_check(self) -> dict[str, Any]: ...
+    def access_check(self, *, chain_symbol: str = "$NDX") -> dict[str, Any]: ...
 
     def set_selected_expiration(self, expiration: str | None) -> None: ...
 
@@ -57,8 +59,11 @@ class NdxpTerminalService:
         self.adapter = adapter or NdxpSchwabAdapter(repo_root)
         self.market_interval_seconds = market_interval_seconds
         self.broker_interval_seconds = broker_interval_seconds
-        self.chain_symbol = os.environ.get("MGC_NDXP_CHAIN_SYMBOL", "$NDX")
-        self.quote_symbol = os.environ.get("MGC_NDXP_QUOTE_SYMBOL", "$NDX")
+        default_product = os.environ.get("MGC_INDEX_PRODUCT", "NDX")
+        self._selected_product = get_product(default_product)
+        self._selected_width = self._selected_product.default_width
+        self.chain_symbol = os.environ.get("MGC_NDXP_CHAIN_SYMBOL", self._selected_product.chain_symbol)
+        self.quote_symbol = os.environ.get("MGC_NDXP_QUOTE_SYMBOL", self._selected_product.quote_symbol)
         self._lock = threading.RLock()
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
@@ -76,6 +81,10 @@ class NdxpTerminalService:
         self._request_sequence = 0
         self._selected_expiration: str | None = None
         self._selected_option_type = "CALL"
+        self._market_gamma_cache: dict[str, Any] | None = None
+        self._market_gamma_cache_at = 0.0
+        self._market_gamma_cache_spot: float | None = None
+        self._market_gamma_cache_product: str | None = None
         self._live_trading_requested = live_trading_requested
         self._preview_tokens: dict[str, tuple[float, str]] = {}
         self._consumed_preview_tokens: set[str] = set()
@@ -106,13 +115,14 @@ class NdxpTerminalService:
             self._request_sequence += 1
             market = deepcopy(self._market)
             broker = deepcopy(self._broker)
-            normalized_market = _normalize_market(market, selected_expiration=self._selected_expiration)
+            product = self._selected_product
+            normalized_market = _normalize_market(market, selected_expiration=self._selected_expiration, product=product)
             resolved_expiration = normalized_market.get("selected_expiration")
             if resolved_expiration and resolved_expiration != self._selected_expiration:
                 self._selected_expiration = resolved_expiration
                 self._notify_selected_expiration()
-                normalized_market = _normalize_market(market, selected_expiration=self._selected_expiration)
-            normalized_broker = _normalize_broker(broker)
+                normalized_market = _normalize_market(market, selected_expiration=self._selected_expiration, product=product)
+            normalized_broker = _normalize_broker(broker, product=product)
             now_wall = time.time()
             normalized_market["analytics"] = derive_expiration_analytics(
                 spot=normalized_market.get("spot"),
@@ -123,7 +133,35 @@ class NdxpTerminalService:
                     datetime.fromtimestamp(now_wall, tz=timezone.utc)
                 ),
                 now=datetime.fromtimestamp(now_wall, tz=timezone.utc),
+                product_symbol=product.display_symbol,
+                spread_width=self._selected_width,
             )
+            gamma_spot = _float_or_none(normalized_market.get("spot"))
+            gamma_cache_age = time.monotonic() - self._market_gamma_cache_at
+            gamma_spot_moved = (
+                gamma_spot is not None
+                and self._market_gamma_cache_spot is not None
+                and abs(gamma_spot - self._market_gamma_cache_spot) >= self._selected_width
+            )
+            if (
+                self._market_gamma_cache is None
+                or self._market_gamma_cache_product != product.key
+                or (gamma_spot is not None and self._market_gamma_cache.get("status") != "VALID")
+                or gamma_cache_age >= 30.0
+                or gamma_spot_moved
+            ):
+                self._market_gamma_cache = derive_market_gamma(
+                    spot=gamma_spot,
+                    chains=normalized_market.get("chains", {}),
+                    product=product,
+                    now=datetime.fromtimestamp(now_wall, tz=timezone.utc),
+                )
+                self._market_gamma_cache_at = time.monotonic()
+                self._market_gamma_cache_spot = gamma_spot
+                self._market_gamma_cache_product = product.key
+            normalized_market["market_gamma"] = deepcopy(self._market_gamma_cache)
+            normalized_market["product"] = product.public()
+            normalized_market["spread_width"] = self._selected_width
             source_age_ms = _source_age_ms(normalized_market.get("latest_source_time_ms"), now_wall)
             market_poll_age_ms = (
                 (now_wall - self._last_market_success_wall) * 1000 if self._last_market_success_wall is not None else None
@@ -151,9 +189,12 @@ class NdxpTerminalService:
                     "label": "TRANSMISSION LOCKED" if not self._mutation_gateway.enabled else "LIVE TRADING ENABLED",
                 },
                 "selection": {
+                    "product": product.key,
                     "expiration": self._selected_expiration,
                     "option_type": self._selected_option_type,
+                    "spread_width": self._selected_width,
                 },
+                "products": [row.public() for row in PRODUCTS.values()],
                 "market": normalized_market,
                 "broker": normalized_broker,
                 "diagnostics": diagnostics,
@@ -162,15 +203,35 @@ class NdxpTerminalService:
 
     def update_selection(self, payload: dict[str, Any]) -> dict[str, Any]:
         with self._lock:
+            requested_product = get_product(str(payload.get("product") or self._selected_product.key))
+            product_changed = requested_product != self._selected_product
+            if product_changed:
+                self._selected_product = requested_product
+                self._selected_width = requested_product.default_width
+                self.chain_symbol = requested_product.chain_symbol
+                self.quote_symbol = requested_product.quote_symbol
+                self._selected_expiration = None
+                self._market = None
+                self._last_market_attempt = 0.0
+                self._market_gamma_cache = None
             expiration = str(payload.get("expiration") or "").strip()
             option_type = str(payload.get("option_type") or self._selected_option_type).strip().upper()
-            expirations = _normalize_market(self._market, selected_expiration=None)["expirations"]
+            width = int(payload.get("spread_width") or self._selected_width)
+            if width not in self._selected_product.spread_widths:
+                raise SpreadValidationError(
+                    f"{self._selected_product.display_symbol} spread width must be one of "
+                    f"{', '.join(str(value) for value in self._selected_product.spread_widths)} points."
+                )
+            expirations = _normalize_market(
+                self._market, selected_expiration=None, product=self._selected_product
+            )["expirations"]
             if expiration and expiration not in expirations:
                 raise SpreadValidationError("Selected expiration is not present in the current Schwab chain.")
             if option_type not in {"CALL", "PUT"}:
                 raise SpreadValidationError("option_type must be CALL or PUT.")
             self._selected_expiration = expiration or self._selected_expiration
             self._selected_option_type = option_type
+            self._selected_width = width
             self._notify_selected_expiration()
         return self.snapshot()
 
@@ -193,8 +254,8 @@ class NdxpTerminalService:
     def preview(self, payload: dict[str, Any], *, allow_live_token: bool = False) -> dict[str, Any]:
         request = NdxpSpreadRequest.from_json(payload)
         with self._lock:
-            market = _normalize_market(self._market, selected_expiration=None)
-            broker = _normalize_broker(self._broker)
+            market = _normalize_market(self._market, selected_expiration=None, product=self._selected_product)
+            broker = _normalize_broker(self._broker, product=self._selected_product)
         chain_symbols = {row["symbol"] for expiry in market["chains"].values() for side in expiry.values() for row in side}
         if request.short_symbol not in chain_symbols or request.long_symbol not in chain_symbols:
             raise SpreadValidationError("Both option symbols must be present in the latest Schwab option chain.")
@@ -220,7 +281,7 @@ class NdxpTerminalService:
                 and row.get("long_symbol") == request.long_symbol
             )
             offsetting_quantity = held_quantity + pending_quantity
-        risk = validate_spread_request(request)
+        risk = validate_spread_request(request, required_width=Decimal(self._selected_width))
         result = {
             "ok": True,
             "preview_only": True,
@@ -230,7 +291,7 @@ class NdxpTerminalService:
             "checks": [
                 "Both legs were found in the current Schwab chain.",
                 "The account was found in current Schwab account truth.",
-                "The spread is an exact 10-point defined-risk NDX/NDXP vertical.",
+                f"The spread is a supported defined-risk {self._selected_product.display_symbol} vertical.",
                 f"The order is NORMAL session, DAY duration, and {'NET_CREDIT' if request.action == 'OPEN' else 'NET_DEBIT'} priced.",
                 "Broker submission requires the authorized-client, single-use live-trading gate.",
             ],
@@ -279,11 +340,11 @@ class NdxpTerminalService:
         return result
 
     def access_check(self) -> dict[str, Any]:
-        return self.adapter.access_check()
+        return self.adapter.access_check(chain_symbol=self.chain_symbol)
 
     def mutate(self, action: str, payload: dict[str, Any]) -> dict[str, Any]:
         with self._lock:
-            broker = _normalize_broker(self._broker)
+            broker = _normalize_broker(self._broker, product=self._selected_product)
         selected_account_hash = str(broker.get("selected_account_hash") or "")
         requested_account_hash = str(payload.get("account_hash") or "").strip()
         if not selected_account_hash or requested_account_hash != selected_account_hash:
@@ -293,7 +354,7 @@ class NdxpTerminalService:
             if not self._mutation_gateway.enabled:
                 raise TransmissionDisabledError("Schwab submission is not enabled by every live-trading gate.")
             with self._lock:
-                market = _normalize_market(self._market, selected_expiration=None)
+                market = _normalize_market(self._market, selected_expiration=None, product=self._selected_product)
             self._assert_live_data_ready(market, request=request)
             self._consume_preview_token(str(payload.get("preview_token") or ""), request)
             self._journal_mutation("SUBMIT_ATTEMPT", request=request)
@@ -327,7 +388,7 @@ class NdxpTerminalService:
             if working_order is None:
                 raise SpreadValidationError("The order is not present in current Schwab working-order truth.")
             if not working_order.get("editable"):
-                raise SpreadValidationError("The working order is not a recognized editable NDX vertical.")
+                raise SpreadValidationError("The working order is not a recognized editable index vertical.")
             identity = (
                 working_order.get("short_symbol"),
                 working_order.get("long_symbol"),
@@ -336,7 +397,7 @@ class NdxpTerminalService:
             if identity != (request.short_symbol, request.long_symbol, request.action):
                 raise SpreadValidationError("Replacement may change only the working order's quantity and price.")
             with self._lock:
-                market = _normalize_market(self._market, selected_expiration=None)
+                market = _normalize_market(self._market, selected_expiration=None, product=self._selected_product)
             self._validate_live_contracts(request, market)
             self._assert_live_data_ready(market, request=request)
             self._journal_mutation("REPLACE_ATTEMPT", request=request, broker_order_id=broker_order_id)
@@ -384,6 +445,12 @@ class NdxpTerminalService:
         selected_expiration = str(market.get("selected_expiration") or "")
         expected_expiration = selected_expiration.replace("-", "")[2:]
         short = parse_option_symbol(request.short_symbol)
+        product = product_for_root(short.root)
+        if product != self._selected_product:
+            raise SpreadValidationError("The live spread must belong to the currently selected index product.")
+        long = parse_option_symbol(request.long_symbol)
+        if abs(short.strike - long.strike) != Decimal(self._selected_width):
+            raise SpreadValidationError("The live spread must use the currently selected spread width.")
         if not expected_expiration or short.expiration != expected_expiration:
             raise SpreadValidationError("The live spread must use the currently selected expiration.")
         selected_symbols = {
@@ -475,8 +542,14 @@ class NdxpTerminalService:
 
     def _poll_market(self) -> None:
         try:
-            payload = self.adapter.fetch_market(chain_symbol=self.chain_symbol, quote_symbol=self.quote_symbol)
             with self._lock:
+                chain_symbol = self.chain_symbol
+                quote_symbol = self.quote_symbol
+                product_label = self._selected_product.display_symbol
+            payload = self.adapter.fetch_market(chain_symbol=chain_symbol, quote_symbol=quote_symbol)
+            with self._lock:
+                if chain_symbol != self.chain_symbol or quote_symbol != self.quote_symbol:
+                    return
                 if not _raw_market_has_contracts(payload):
                     prior_chain = self._market.get("chain") if isinstance(self._market, dict) else None
                     if _raw_chain_has_contracts(prior_chain):
@@ -486,7 +559,7 @@ class NdxpTerminalService:
                         self._market_error = "Schwab returned no available option contracts; retaining the last valid chain."
                         return
                     self._market = payload
-                    self._market_error = "Schwab returned no available NDX option expiration."
+                    self._market_error = f"Schwab returned no available {product_label} option expiration."
                     return
                 self._market = payload
                 self._market_error = None
@@ -521,7 +594,13 @@ class NdxpTerminalService:
             return
 
 
-def _normalize_market(payload: dict[str, Any] | None, *, selected_expiration: str | None) -> dict[str, Any]:
+def _normalize_market(
+    payload: dict[str, Any] | None,
+    *,
+    selected_expiration: str | None,
+    product: IndexOptionProduct | None = None,
+) -> dict[str, Any]:
+    product = product or get_product("NDX")
     payload = payload or {}
     chain = payload.get("chain") if isinstance(payload.get("chain"), dict) else {}
     quote_payload = payload.get("quote") if isinstance(payload.get("quote"), dict) else {}
@@ -575,7 +654,7 @@ def _normalize_market(payload: dict[str, Any] | None, *, selected_expiration: st
     expirations = sorted(chains)
     selected = selected_expiration if selected_expiration in chains else (expirations[0] if expirations else None)
     return {
-        "symbol": chain.get("symbol") or "NDX",
+        "symbol": chain.get("symbol") or product.chain_symbol,
         "spot": spot,
         "received_at": payload.get("received_at"),
         "latency_ms": payload.get("latency_ms"),
@@ -611,7 +690,12 @@ def _raw_chain_has_contracts(chain: Any) -> bool:
     return False
 
 
-def _normalize_broker(payload: dict[str, Any] | None) -> dict[str, Any]:
+def _normalize_broker(
+    payload: dict[str, Any] | None,
+    *,
+    product: IndexOptionProduct | None = None,
+) -> dict[str, Any]:
+    product = product or get_product("NDX")
     payload = payload or {}
     account_index = {
         str(row.get("hashValue") or ""): str(row.get("accountNumber") or "")
@@ -630,7 +714,7 @@ def _normalize_broker(payload: dict[str, Any] | None) -> dict[str, Any]:
         for position in account.get("positions", []) if isinstance(account.get("positions"), list) else []:
             instrument = position.get("instrument") if isinstance(position.get("instrument"), dict) else {}
             symbol = str(instrument.get("symbol") or "").strip().upper()
-            if not symbol.startswith("NDX"):
+            if not _symbol_matches_product(symbol, product):
                 continue
             positions.append(
                 {
@@ -644,8 +728,8 @@ def _normalize_broker(payload: dict[str, Any] | None) -> dict[str, Any]:
                     "market_value": position.get("marketValue"),
                 }
             )
-    working_orders = _normalize_orders(payload.get("working_orders"), editable=True)
-    recent_orders = _normalize_orders(payload.get("recent_orders"), editable=False)
+    working_orders = _normalize_orders(payload.get("working_orders"), editable=True, product=product)
+    recent_orders = _normalize_orders(payload.get("recent_orders"), editable=False, product=product)
     return {
         "received_at": payload.get("received_at"),
         "latency_ms": payload.get("latency_ms"),
@@ -657,7 +741,13 @@ def _normalize_broker(payload: dict[str, Any] | None) -> dict[str, Any]:
     }
 
 
-def _normalize_orders(value: Any, *, editable: bool) -> list[dict[str, Any]]:
+def _normalize_orders(
+    value: Any,
+    *,
+    editable: bool,
+    product: IndexOptionProduct | None = None,
+) -> list[dict[str, Any]]:
+    product = product or get_product("NDX")
     orders: list[dict[str, Any]] = []
     for order in value if isinstance(value, list) else []:
         if not isinstance(order, dict):
@@ -665,7 +755,7 @@ def _normalize_orders(value: Any, *, editable: bool) -> list[dict[str, Any]]:
         legs = []
         for leg in order.get("orderLegCollection", []) if isinstance(order.get("orderLegCollection"), list) else []:
             instrument = leg.get("instrument") if isinstance(leg.get("instrument"), dict) else {}
-            if str(instrument.get("symbol") or "").strip().upper().startswith("NDX"):
+            if _symbol_matches_product(str(instrument.get("symbol") or ""), product):
                 legs.append(
                     {
                         "instruction": leg.get("instruction"),
@@ -718,6 +808,11 @@ def _normalize_orders(value: Any, *, editable: bool) -> list[dict[str, Any]]:
                 }
             )
     return orders
+
+
+def _symbol_matches_product(symbol: str, product: IndexOptionProduct) -> bool:
+    normalized = str(symbol or "").strip().upper()
+    return any(normalized.startswith(root) for root in product.option_roots)
 
 
 def _remaining_order_quantity(row: dict[str, Any]) -> float:
@@ -817,7 +912,7 @@ def _spot_observation(*, chain: dict[str, Any], quote_row: Any) -> tuple[float |
     chain_spot = _float_or_none(chain.get("underlyingPrice"))
     if chain_spot is not None and chain_spot > 0:
         return chain_spot, _max_timestamp_ms(chain), "Schwab chain underlying"
-    return None, None, "NDX value unavailable"
+    return None, None, "Index value unavailable"
 
 
 def _source_age_ms(source_ms: Any, now_wall: float) -> float | None:

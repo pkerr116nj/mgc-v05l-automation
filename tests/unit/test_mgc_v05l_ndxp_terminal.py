@@ -14,6 +14,7 @@ import mgc_v05l.ndxp_terminal.server as server_module
 from mgc_v05l.ndxp_terminal.analytics import derive_expiration_analytics
 from mgc_v05l.ndxp_terminal.databento import DatabentoOpraFeed, NdxpDatabentoAdapter
 from mgc_v05l.ndxp_terminal.diagnostics import classify_diagnostics
+from mgc_v05l.ndxp_terminal.market_gamma import derive_market_gamma
 from mgc_v05l.ndxp_terminal.orders import (
     LockedSchwabMutationGateway,
     NdxpSpreadRequest,
@@ -33,6 +34,7 @@ from mgc_v05l.ndxp_terminal.server import (
 )
 from mgc_v05l.ndxp_terminal.service import NdxpTerminalService
 from mgc_v05l.ndxp_terminal.schwab import NdxpSchwabAdapter
+from mgc_v05l.ndxp_terminal.products import get_product
 
 
 class FakeDatabentoLive:
@@ -131,15 +133,25 @@ def test_put_credit_vertical_requires_short_higher_than_long() -> None:
 @pytest.mark.parametrize(
     "proposed, message",
     [
-        (request(short=29330, long=29350), "exact 10-point"),
+        (request(short=29330, long=29337), "must be one of"),
         (request(short=29340, long=29330), "sell the lower strike"),
-        (NdxpSpreadRequest("hash-1", symbol(29330, root="SPXW"), symbol(29340, root="SPXW"), 1, Decimal("1")), "NDX or NDXP"),
+        (NdxpSpreadRequest("hash-1", symbol(29330, root="SPXW"), symbol(29340, root="RUTW"), 1, Decimal("1")), "same supported NDX"),
         (NdxpSpreadRequest("hash-1", symbol(29330), symbol(29340), 101, Decimal("1")), "between 1 and 100"),
     ],
 )
 def test_invalid_spreads_fail_closed(proposed: NdxpSpreadRequest, message: str) -> None:
     with pytest.raises(SpreadValidationError, match=message):
         validate_spread_request(proposed)
+
+
+def test_supported_index_products_and_widths_build_valid_orders() -> None:
+    spx = NdxpSpreadRequest("hash-1", symbol(6450, root="SPXW"), symbol(6455, root="SPXW"), 2, Decimal("1.25"))
+    rut = NdxpSpreadRequest("hash-1", symbol(2875, option_type="P", root="RUTW"), symbol(2870, option_type="P", root="RUTW"), 3, Decimal("0.80"))
+
+    assert validate_spread_request(spx)["product"] == "SPX"
+    assert validate_spread_request(spx)["gross_width_dollars"] == "1000"
+    assert validate_spread_request(rut)["product"] == "RUT"
+    assert build_vertical_order_payload(rut)["orderLegCollection"][0]["instrument"]["symbol"].startswith("RUTW")
 
 
 class CountingBroker:
@@ -205,6 +217,45 @@ def test_terminal_defaults_to_confirmed_schwab_ndx_symbol(tmp_path: Path, monkey
     assert service.chain_symbol == "$NDX"
 
 
+def test_terminal_selection_switches_product_and_default_width(tmp_path: Path) -> None:
+    service = NdxpTerminalService(tmp_path, adapter=DemoSchwabAdapter())
+
+    snapshot = service.update_selection({"product": "SPX", "option_type": "CALL"})
+
+    assert snapshot["selection"]["product"] == "SPX"
+    assert snapshot["selection"]["spread_width"] == 5
+    assert snapshot["market"]["product"]["option_roots"] == ("SPX", "SPXW")
+    assert service.chain_symbol == "$SPX"
+    assert service.quote_symbol == "$SPX"
+
+
+def test_schwab_open_interest_gamma_is_labeled_estimated_and_finds_walls() -> None:
+    expiry = (datetime.now(timezone.utc).date() + timedelta(days=7)).isoformat()
+    chains = {
+        expiry: {
+            "CALL": [
+                {"strike": 6400, "iv": 20.0, "open_interest": 100},
+                {"strike": 6500, "iv": 20.0, "open_interest": 900},
+            ],
+            "PUT": [
+                {"strike": 6300, "iv": 22.0, "open_interest": 1200},
+                {"strike": 6400, "iv": 21.0, "open_interest": 200},
+            ],
+        }
+    }
+
+    result = derive_market_gamma(spot=6425, chains=chains, product=get_product("SPX"))
+
+    assert result["status"] == "VALID"
+    assert result["positioning_is_estimated"] is True
+    assert result["open_interest_basis"] == "START_OF_DAY"
+    assert result["coverage_ratio"] == 1.0
+    assert result["expiration_count"] == 1
+    assert result["call_wall"]["strike"] == 6500
+    assert result["put_wall"]["strike"] == 6300
+    assert result["scenario_profile"]
+
+
 def test_schwab_chain_canonicalizes_ndx_to_confirmed_index_symbol() -> None:
     class OAuth:
         @staticmethod
@@ -241,6 +292,37 @@ def test_schwab_chain_canonicalizes_ndx_to_confirmed_index_symbol() -> None:
     adapter.fetch_chain(chain_symbol="NDX")
     assert len(adapter.transport.requests) == 4
     assert date.fromisoformat(adapter.transport.requests[-1].query["fromDate"]) == request_dates[2]
+
+
+def test_schwab_gamma_chain_uses_cached_multi_expiration_request() -> None:
+    class OAuth:
+        @staticmethod
+        def get_access_token() -> str:
+            return "token"
+
+    class CapturingTransport:
+        def __init__(self) -> None:
+            self.requests: list = []
+
+        def request_json(self, request):
+            self.requests.append(request)
+            expiration = request.query["fromDate"]
+            return {"callExpDateMap": {f"{expiration}:0": {"6400.0": [{"symbol": symbol(6400, root="SPXW")}]}}}
+
+    adapter = object.__new__(NdxpSchwabAdapter)
+    adapter.oauth = OAuth()
+    adapter.market_config = SimpleNamespace(market_data_base_url="https://api.schwabapi.com/marketdata/v1")
+    adapter.transport = CapturingTransport()
+
+    first = adapter.fetch_gamma_chain(chain_symbol="SPX")
+    second = adapter.fetch_gamma_chain(chain_symbol="SPX")
+
+    assert first == second
+    assert len(adapter.transport.requests) == 1
+    query = adapter.transport.requests[0].query
+    assert query["symbol"] == "$SPX"
+    assert query["strikeCount"] == 160
+    assert date.fromisoformat(query["toDate"]) - date.fromisoformat(query["fromDate"]) == timedelta(days=45)
 
 
 def test_access_check_uses_aapl_for_quote_connectivity() -> None:
@@ -848,6 +930,9 @@ def test_independent_gamma_scenarios_use_credit_position_convention() -> None:
     assert zero["credit_position_gamma"] == pytest.approx(spread["credit_position_gamma"])
     assert zero["credit_position_delta"] == pytest.approx(spread["credit_position_delta"])
     assert "fitted leg IVs held constant" in spread["gamma_method"]
+    assert spread["value_class"] in {"THIN", "RICH_GAMMA", "HARVEST", "ORDINARY"}
+    ranked_spread = next(row for row in analytics["spreads"].values() if row["value_percentile"] is not None)
+    assert "credit/risk percentile" in ranked_spread["value_reason"]
 
 
 def test_empty_market_poll_retains_last_valid_chain_and_reports_error(tmp_path: Path) -> None:
@@ -988,8 +1073,15 @@ def test_mobile_chain_keeps_strikes_fixed_and_allows_positive_midpoint_sell() ->
     assert 'id="gamma-summary"' in html
     assert "CLOSED SNAPSHOT" in javascript
     assert 'localStorage.getItem("ndxp-chain-columns-v4")' in javascript
-    assert 'styles.css?v=broker-close-1' in html
-    assert 'app.js?v=broker-close-1' in html
+    assert 'styles.css?v=multi-index-gamma-1' in html
+    assert 'app.js?v=multi-index-gamma-1' in html
+    assert 'id="product"' in html
+    assert 'id="market-gamma-regime"' in html
+    assert 'id="market-gamma-flip"' in html
+    assert "function renderMarketGamma(gamma)" in javascript
+    assert "gamma-zone-positive" in css
+    assert "value-harvest" in css
+    assert "const high = low + selectedWidth()" in javascript
     assert 'classList.toggle("order-sell", opening)' in javascript
     assert 'classList.toggle("order-buy", !opening)' in javascript
     assert ".ticket-modal.order-buy .ticket-banner" in css
