@@ -504,7 +504,7 @@ def test_demo_service_builds_preview_but_never_transmits(tmp_path: Path) -> None
             "BUY_TO_CLOSE",
             "SELL_TO_CLOSE",
         ]
-        with pytest.raises(SpreadValidationError, match="exact short leg"):
+        with pytest.raises(SpreadValidationError, match="neither a filled nor pending matching spread"):
             service.preview(
                 {
                     "account_hash": "demo-account-hash",
@@ -542,6 +542,8 @@ def test_live_trading_uses_exact_single_use_preview_and_selected_account(
         demo_positions = truth["accounts"][0]["securitiesAccount"]["positions"]
         short_symbol = demo_positions[0]["instrument"]["symbol"]
         long_symbol = demo_positions[1]["instrument"]["symbol"]
+        pending_short_symbol = f"{short_symbol[:-8]}{int(short_symbol[-8:]) + 20_000:08d}"
+        pending_long_symbol = f"{long_symbol[:-8]}{int(long_symbol[-8:]) + 20_000:08d}"
         truth["working_orders"] = [
             {
                 "orderId": "working-order-456",
@@ -561,7 +563,28 @@ def test_live_trading_uses_exact_single_use_preview_and_selected_account(
                         "instrument": {"symbol": long_symbol},
                     },
                 ],
-            }
+            },
+            {
+                "orderId": "pending-only-order-457",
+                "status": "WORKING",
+                "orderType": "NET_CREDIT",
+                "price": 2.0,
+                "enteredTime": datetime.now(timezone.utc).isoformat(),
+                "filledQuantity": 0,
+                "remainingQuantity": 20,
+                "orderLegCollection": [
+                    {
+                        "instruction": "SELL_TO_OPEN",
+                        "quantity": 20,
+                        "instrument": {"symbol": pending_short_symbol},
+                    },
+                    {
+                        "instruction": "BUY_TO_OPEN",
+                        "quantity": 20,
+                        "instrument": {"symbol": pending_long_symbol},
+                    },
+                ],
+            },
         ]
         truth["recent_orders"] = [
             {
@@ -612,6 +635,27 @@ def test_live_trading_uses_exact_single_use_preview_and_selected_account(
         assert recent["status"] == "FILLED"
         assert recent["filled_quantity"] == 20
         assert recent["editable"] is False
+
+        pending = snapshot["broker"]["working_orders"][1]
+        pending_close_payload = {
+            **payload,
+            "short_symbol": pending["short_symbol"],
+            "long_symbol": pending["long_symbol"],
+            "limit_price": "1.25",
+            "action": "CLOSE",
+        }
+        pending_close = service.preview(pending_close_payload, allow_live_token=True)
+        assert pending_close["position_effect"] == {
+            "held_close_quantity": 0.0,
+            "pending_close_quantity": 20.0,
+            "reverse_open_quantity": 0.0,
+            "classification": "PENDING_CLOSE",
+        }
+        pending_reverse = service.preview(
+            {**pending_close_payload, "quantity": 25}, allow_live_token=True
+        )
+        assert pending_reverse["position_effect"]["classification"] == "CLOSE_AND_REVERSE"
+        assert pending_reverse["position_effect"]["reverse_open_quantity"] == 5.0
 
         preview = service.preview(payload, allow_live_token=True)
         assert preview["transmission_enabled"] is True
@@ -943,8 +987,8 @@ def test_mobile_chain_keeps_strikes_fixed_and_allows_positive_midpoint_sell() ->
     assert 'id="gamma-summary"' in html
     assert "CLOSED SNAPSHOT" in javascript
     assert 'localStorage.getItem("ndxp-chain-columns-v4")' in javascript
-    assert 'styles.css?v=live-ticket-1' in html
-    assert 'app.js?v=live-ticket-1' in html
+    assert 'styles.css?v=pending-close-1' in html
+    assert 'app.js?v=pending-close-1' in html
     assert 'classList.toggle("order-sell", opening)' in javascript
     assert 'classList.toggle("order-buy", !opening)' in javascript
     assert ".ticket-modal.order-buy .ticket-banner" in css
@@ -958,6 +1002,8 @@ def test_mobile_chain_keeps_strikes_fixed_and_allows_positive_midpoint_sell() ->
     assert "selectedMetrics?.short_iv_expected_move" in javascript
     assert "function refreshOpenTicket(chain, analytics)" in javascript
     assert "ticketPriceFollowsMarket" in javascript
+    assert "function pendingOpeningSpreadQuantity(spread)" in javascript
+    assert "CLOSE & REVERSE" in javascript
     assert ".risk-grid div.hidden { display:none; }" in css
     assert ".range-strip.snapshot" in css
     assert "white-space:normal" in css

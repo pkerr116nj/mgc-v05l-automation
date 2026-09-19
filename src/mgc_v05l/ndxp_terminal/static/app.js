@@ -15,6 +15,7 @@ let opportunityFilters = loadFilters();
 let state = null;
 let selectedShort = null;
 let selectedLong = null;
+let selectedSide = null;
 let selectedAction = "OPEN";
 let selectedMetrics = null;
 let selectedOpeningCredit = null;
@@ -479,6 +480,7 @@ function opportunityState(metrics) {
 function openTicket(action, side, spread, requestedQuantity = null) {
   livePreviewToken = null;
   selectedAction = action;
+  selectedSide = side;
   selectedMetrics = spread.metrics;
   selectedShort = spread.short; selectedLong = spread.long;
   ticketPriceFollowsMarket = true;
@@ -495,7 +497,8 @@ function openTicket(action, side, spread, requestedQuantity = null) {
   ui["long-leg"].textContent = `${selectedLong.symbol} · ${number(selectedLong.strike, 0)}`;
   updateLimitPriceLabel();
   const heldQuantity = action === "CLOSE" ? heldSpreadQuantity(spread) : 0;
-  ui.quantity.value = String(requestedQuantity || heldQuantity || 20);
+  const pendingQuantity = action === "CLOSE" ? pendingOpeningSpreadQuantity(spread) : 0;
+  ui.quantity.value = String(requestedQuantity || heldQuantity || pendingQuantity || 20);
   ui.credit.value = Math.max(0.05, Number(spread.metrics.mark || 0)).toFixed(2);
   ui["preview-result"].textContent = `${opening ? "Opening credit" : "Closing debit"} ticket constructed at the displayed mid. Review before building the Schwab payload.`;
   calculateRisk();
@@ -558,6 +561,47 @@ function heldSpreadOpeningCredit(spread) {
   return Number.isFinite(shortAverage) && Number.isFinite(longAverage) ? shortAverage - longAverage : null;
 }
 
+function pendingOpeningSpreadQuantity(spread) {
+  const shortSymbol = String(spread?.short?.symbol || "").trim().toUpperCase();
+  const longSymbol = String(spread?.long?.symbol || "").trim().toUpperCase();
+  return (state?.broker?.working_orders || [])
+    .filter((row) => row.action === "OPEN"
+      && String(row.short_symbol || "").trim().toUpperCase() === shortSymbol
+      && String(row.long_symbol || "").trim().toUpperCase() === longSymbol)
+    .reduce((total, row) => {
+      const remaining = Number(row.remaining_quantity);
+      const quantity = Number(row.quantity);
+      const filled = Number(row.filled_quantity || 0);
+      return total + (Number.isFinite(remaining) ? remaining : Math.max(0, quantity - filled));
+    }, 0);
+}
+
+function updateTicketPositionEffect(quantity) {
+  if (selectedAction !== "CLOSE") return;
+  const spread = { short: selectedShort, long: selectedLong };
+  const held = heldSpreadQuantity(spread);
+  const pending = pendingOpeningSpreadQuantity(spread);
+  const offsetting = held + pending;
+  const reversal = Math.max(0, Number(quantity) - offsetting);
+  const side = String(selectedSide || "spread").toLowerCase();
+  if (reversal > 0 && offsetting > 0) {
+    ui["ticket-title"].textContent = `Buy ${side} vertical · close & reverse`;
+    ui["ticket-side"].textContent = `${selectedSide} · BUY — CLOSE & REVERSE ${number(reversal, 0)}`;
+    ui["short-instruction"].textContent = "BUY TO CLOSE / OPEN";
+    ui["long-instruction"].textContent = "SELL TO CLOSE / OPEN";
+  } else if (pending > 0 && held <= 0) {
+    ui["ticket-title"].textContent = `Buy ${side} vertical · pending close`;
+    ui["ticket-side"].textContent = `${selectedSide} · BUY TO CLOSE · PENDING ENTRY`;
+    ui["short-instruction"].textContent = "BUY TO CLOSE";
+    ui["long-instruction"].textContent = "SELL TO CLOSE";
+  } else {
+    ui["ticket-title"].textContent = `Buy ${side} vertical`;
+    ui["ticket-side"].textContent = `${selectedSide} · BUY TO CLOSE`;
+    ui["short-instruction"].textContent = "BUY TO CLOSE";
+    ui["long-instruction"].textContent = "SELL TO CLOSE";
+  }
+}
+
 function adjustPriceInput(input, increment) {
   const current = Number(input.value || 0);
   input.value = Math.min(9.99, Math.max(0.01, current + Number(increment))).toFixed(2);
@@ -566,6 +610,7 @@ function adjustPriceInput(input, increment) {
 
 function calculateRisk() {
   const quantity = Number(ui.quantity.value || 0), limitPrice = Number(ui.credit.value || 0), gross = quantity * 10 * 100;
+  updateTicketPositionEffect(quantity);
   const opening = selectedAction === "OPEN";
   const legContracts = quantity * 2;
   const estimatedOrderCosts = legContracts * (OPTION_COMMISSION_PER_LEG_CONTRACT + ESTIMATED_OTHER_FEE_PER_LEG_CONTRACT);
@@ -577,9 +622,10 @@ function calculateRisk() {
   const netOpeningCash = grossOpeningCash == null ? null : grossOpeningCash - estimatedOpeningCosts;
   const netOpeningCreditPerSpread = openingCredit == null || !(quantity > 0) ? null : openingCredit - estimatedOpeningCosts / (quantity * 100);
   const estimatedTradePnl = !opening && netOpeningCash != null ? netOpeningCash - orderNetCash : null;
-  ui["opening-gross-row"].classList.toggle("hidden", opening);
-  ui["opening-net-row"].classList.toggle("hidden", opening);
-  ui["trade-pnl-row"].classList.toggle("hidden", opening);
+  const hasOpeningCredit = !opening && selectedOpeningCredit != null;
+  ui["opening-gross-row"].classList.toggle("hidden", !hasOpeningCredit);
+  ui["opening-net-row"].classList.toggle("hidden", !hasOpeningCredit);
+  ui["trade-pnl-row"].classList.toggle("hidden", !hasOpeningCredit);
   ui["opening-gross"].textContent = moneyExact(grossOpeningCash);
   ui["opening-net"].textContent = moneyExact(netOpeningCash);
   ui.premium.textContent = moneyExact(grossOrderCash);

@@ -208,10 +208,22 @@ class NdxpTerminalService:
             }
             short_position = positions.get((request.account_hash, request.short_symbol), {})
             long_position = positions.get((request.account_hash, request.long_symbol), {})
-            if float(short_position.get("short_quantity") or 0) < request.quantity:
-                raise SpreadValidationError("The selected account does not hold enough of the exact short leg to close.")
-            if float(long_position.get("long_quantity") or 0) < request.quantity:
-                raise SpreadValidationError("The selected account does not hold enough of the exact protective long leg to close.")
+            held_quantity = min(
+                float(short_position.get("short_quantity") or 0),
+                float(long_position.get("long_quantity") or 0),
+            )
+            pending_quantity = sum(
+                _remaining_order_quantity(row)
+                for row in broker["working_orders"]
+                if row.get("action") == "OPEN"
+                and row.get("short_symbol") == request.short_symbol
+                and row.get("long_symbol") == request.long_symbol
+            )
+            offsetting_quantity = held_quantity + pending_quantity
+            if offsetting_quantity <= 0:
+                raise SpreadValidationError(
+                    "The selected account has neither a filled nor pending matching spread to close."
+                )
         risk = validate_spread_request(request)
         result = {
             "ok": True,
@@ -227,6 +239,22 @@ class NdxpTerminalService:
                 "Broker submission requires the authorized-client, single-use live-trading gate.",
             ],
         }
+        if request.action == "CLOSE":
+            reverse_quantity = max(0.0, request.quantity - offsetting_quantity)
+            result["position_effect"] = {
+                "held_close_quantity": held_quantity,
+                "pending_close_quantity": pending_quantity,
+                "reverse_open_quantity": reverse_quantity,
+                "classification": "CLOSE_AND_REVERSE" if reverse_quantity > 0 else "PENDING_CLOSE" if pending_quantity > 0 and held_quantity <= 0 else "CLOSE",
+            }
+            if pending_quantity > 0:
+                result["checks"].append(
+                    f"A matching opening order has {pending_quantity:g} spreads pending; Schwab will adjudicate the offsetting close."
+                )
+            if reverse_quantity > 0:
+                result["checks"].append(
+                    f"The requested close crosses through the pending/filled position and reverses {reverse_quantity:g} spreads."
+                )
         if allow_live_token and self._mutation_gateway.enabled:
             if request.account_hash != str(broker.get("selected_account_hash") or ""):
                 raise SpreadValidationError("Live order preview is restricted to the currently selected Schwab account.")
@@ -684,6 +712,21 @@ def _normalize_orders(value: Any, *, editable: bool) -> list[dict[str, Any]]:
                 }
             )
     return orders
+
+
+def _remaining_order_quantity(row: dict[str, Any]) -> float:
+    try:
+        remaining = float(row.get("remaining_quantity"))
+    except (TypeError, ValueError):
+        remaining = -1.0
+    if remaining >= 0:
+        return remaining
+    try:
+        quantity = float(row.get("quantity") or 0)
+        filled = float(row.get("filled_quantity") or 0)
+    except (TypeError, ValueError):
+        return 0.0
+    return max(0.0, quantity - filled)
 
 
 def _request_digest(request: NdxpSpreadRequest) -> str:
