@@ -229,6 +229,7 @@ def _spread_analytics(
     long_iv = _smile_iv(surface, long_strike)
     if breakeven_iv is None or short_iv is None or long_iv is None:
         return None
+    short_iv_expected_move = spot * short_iv * math.sqrt(time_years)
     short_delta = _black_forward_delta(option_type, forward, short_strike, time_years, short_iv)
     long_delta = _black_forward_delta(option_type, forward, long_strike, time_years, long_iv)
     credit_position_delta = long_delta - short_delta
@@ -267,6 +268,10 @@ def _spread_analytics(
         "breakeven": round(breakeven, 4),
         "breakeven_distance": round(directional_distance, 4),
         "em_multiple": round(directional_distance / expected_move, 6),
+        "short_iv": round(short_iv, 8),
+        "short_iv_percent": round(short_iv * 100, 4),
+        "short_iv_expected_move": round(short_iv_expected_move, 4),
+        "short_iv_em_multiple": round(directional_distance / short_iv_expected_move, 6),
         "probability_beyond_breakeven": round(
             _tail_probability(option_type, forward, breakeven, time_years, breakeven_iv), 8
         ),

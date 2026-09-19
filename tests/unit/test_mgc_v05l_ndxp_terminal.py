@@ -464,6 +464,9 @@ def test_demo_service_builds_preview_but_never_transmits(tmp_path: Path) -> None
         model_spread = next(iter(analytics["spreads"].values()))
         assert 0 <= model_spread["probability_beyond_breakeven"] <= 1
         assert model_spread["market_width"] >= 0
+        assert model_spread["short_iv_percent"] > 0
+        assert model_spread["short_iv_expected_move"] > 0
+        assert model_spread["short_iv_em_multiple"] is not None
         assert model_spread["credit_band"] in {"BELOW_PREFERRED", "PREFERRED", "ELEVATED"}
         assert model_spread["spread_delta"] == pytest.approx(-model_spread["credit_position_delta"])
         if model_spread["option_type"] == "CALL":
@@ -940,11 +943,19 @@ def test_mobile_chain_keeps_strikes_fixed_and_allows_positive_midpoint_sell() ->
     assert 'id="gamma-summary"' in html
     assert "CLOSED SNAPSHOT" in javascript
     assert 'localStorage.getItem("ndxp-chain-columns-v4")' in javascript
-    assert 'styles.css?v=directional-ticket-1' in html
-    assert 'app.js?v=directional-ticket-1' in html
+    assert 'styles.css?v=ticket-economics-1' in html
+    assert 'app.js?v=ticket-economics-1' in html
     assert 'classList.toggle("order-sell", opening)' in javascript
     assert 'classList.toggle("order-buy", !opening)' in javascript
     assert ".ticket-modal.order-buy .ticket-banner" in css
+    assert 'id="breakeven-distance"' in html
+    assert 'id="short-iv-move"' in html
+    assert 'id="opening-net"' in html
+    assert 'id="trade-pnl"' in html
+    assert "Target closing debit" not in html
+    assert "Target gross profit" not in html
+    assert "OPTION_COMMISSION_PER_LEG_CONTRACT = 0.65" in javascript
+    assert "selectedMetrics?.short_iv_expected_move" in javascript
     assert ".range-strip.snapshot" in css
     assert "white-space:normal" in css
     assert 'data-ticket-price-step="-0.25"' in html

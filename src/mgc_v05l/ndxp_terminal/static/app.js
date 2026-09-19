@@ -17,6 +17,7 @@ let selectedShort = null;
 let selectedLong = null;
 let selectedAction = "OPEN";
 let selectedMetrics = null;
+let selectedOpeningCredit = null;
 let livePreviewToken = null;
 let submissionPending = false;
 let lastHeartbeat = performance.now();
@@ -27,8 +28,11 @@ const chainSnapTimers = new WeakMap();
 const workingOrderDrafts = new Map();
 let chainResizeTimer = null;
 let chainViewportWidth = window.innerWidth;
+const OPTION_COMMISSION_PER_LEG_CONTRACT = 0.65;
+const ESTIMATED_OTHER_FEE_PER_LEG_CONTRACT = 0.012;
 
 const money = (value) => value == null || !Number.isFinite(Number(value)) ? "—" : new Intl.NumberFormat("en-US", { style: "currency", currency: "USD", maximumFractionDigits: 0 }).format(Number(value));
+const moneyExact = (value) => value == null || !Number.isFinite(Number(value)) ? "—" : new Intl.NumberFormat("en-US", { style: "currency", currency: "USD", minimumFractionDigits: 2, maximumFractionDigits: 2 }).format(Number(value));
 const number = (value, digits = 2) => value == null || !Number.isFinite(Number(value)) ? "—" : Number(value).toLocaleString("en-US", { minimumFractionDigits: digits, maximumFractionDigits: digits });
 const age = (ms) => ms == null ? "—" : ms < 1000 ? `${Math.round(ms)} ms` : `${(ms / 1000).toFixed(1)} s`;
 const easternTimestamp = (timestampMs) => timestampMs == null || !Number.isFinite(Number(timestampMs)) ? "—" : new Intl.DateTimeFormat("en-US", {
@@ -476,6 +480,7 @@ function openTicket(action, side, spread, requestedQuantity = null) {
   selectedMetrics = spread.metrics;
   selectedShort = spread.short; selectedLong = spread.long;
   const opening = action === "OPEN";
+  selectedOpeningCredit = opening ? null : heldSpreadOpeningCredit(spread);
   ui["ticket-dialog"].classList.toggle("order-sell", opening);
   ui["ticket-dialog"].classList.toggle("order-buy", !opening);
   ui["ticket-side"].textContent = `${side} · ${opening ? "SELL TO OPEN" : "BUY TO CLOSE"}`;
@@ -485,6 +490,7 @@ function openTicket(action, side, spread, requestedQuantity = null) {
   ui["long-instruction"].textContent = opening ? "BUY TO OPEN" : "SELL TO CLOSE";
   ui["short-leg"].textContent = `${selectedShort.symbol} · ${number(selectedShort.strike, 0)}`;
   ui["long-leg"].textContent = `${selectedLong.symbol} · ${number(selectedLong.strike, 0)}`;
+  ui["limit-price-label"].textContent = opening ? "Limit credit" : "Limit debit";
   const heldQuantity = action === "CLOSE" ? heldSpreadQuantity(spread) : 0;
   ui.quantity.value = String(requestedQuantity || heldQuantity || 20);
   ui.credit.value = Math.max(0.05, Number(spread.metrics.mark || 0)).toFixed(2);
@@ -504,6 +510,15 @@ function heldSpreadQuantity(spread) {
   );
 }
 
+function heldSpreadOpeningCredit(spread) {
+  const positions = activePositionIndex();
+  const shortPosition = positions.get(String(spread?.short?.symbol || "").trim().toUpperCase());
+  const longPosition = positions.get(String(spread?.long?.symbol || "").trim().toUpperCase());
+  const shortAverage = Number(shortPosition?.average_price);
+  const longAverage = Number(longPosition?.average_price);
+  return Number.isFinite(shortAverage) && Number.isFinite(longAverage) ? shortAverage - longAverage : null;
+}
+
 function adjustPriceInput(input, increment) {
   const current = Number(input.value || 0);
   input.value = Math.min(9.99, Math.max(0.01, current + Number(increment))).toFixed(2);
@@ -511,13 +526,54 @@ function adjustPriceInput(input, increment) {
 }
 
 function calculateRisk() {
-  const quantity = Number(ui.quantity.value || 0), credit = Number(ui.credit.value || 0), gross = quantity * 10 * 100;
-  ui.premium.textContent = money(quantity * credit * 100);
-  ui["gross-risk"].textContent = money(gross);
-  ui["premium-label"].textContent = selectedAction === "OPEN" ? "Premium" : "Closing debit";
-  ui["max-loss-label"].textContent = selectedAction === "OPEN" ? "Maximum loss" : "Position effect";
-  ui["max-loss"].textContent = selectedAction === "OPEN" ? money(gross - quantity * credit * 100) : "Reduces risk";
-  ui.distance.textContent = selectedShort && state?.market?.spot != null ? `${number(Math.abs(selectedShort.strike - state.market.spot))} pts` : "—";
+  const quantity = Number(ui.quantity.value || 0), limitPrice = Number(ui.credit.value || 0), gross = quantity * 10 * 100;
+  const opening = selectedAction === "OPEN";
+  const legContracts = quantity * 2;
+  const estimatedOrderCosts = legContracts * (OPTION_COMMISSION_PER_LEG_CONTRACT + ESTIMATED_OTHER_FEE_PER_LEG_CONTRACT);
+  const grossOrderCash = quantity * limitPrice * 100;
+  const orderNetCash = opening ? grossOrderCash - estimatedOrderCosts : grossOrderCash + estimatedOrderCosts;
+  const openingCredit = opening ? limitPrice : selectedOpeningCredit;
+  const grossOpeningCash = openingCredit == null ? null : quantity * openingCredit * 100;
+  const estimatedOpeningCosts = openingCredit == null ? null : estimatedOrderCosts;
+  const netOpeningCash = grossOpeningCash == null ? null : grossOpeningCash - estimatedOpeningCosts;
+  const netOpeningCreditPerSpread = openingCredit == null || !(quantity > 0) ? null : openingCredit - estimatedOpeningCosts / (quantity * 100);
+  const estimatedTradePnl = !opening && netOpeningCash != null ? netOpeningCash - orderNetCash : null;
+  ui["opening-gross-row"].classList.toggle("hidden", opening);
+  ui["opening-net-row"].classList.toggle("hidden", opening);
+  ui["trade-pnl-row"].classList.toggle("hidden", opening);
+  ui["opening-gross"].textContent = moneyExact(grossOpeningCash);
+  ui["opening-net"].textContent = moneyExact(netOpeningCash);
+  ui.premium.textContent = moneyExact(grossOrderCash);
+  ui.premium.className = opening ? "cash-credit" : "cash-debit";
+  ui["order-cash-label"].textContent = opening ? "Gross opening credit" : "Proposed closing debit";
+  ui["order-cost-label"].textContent = opening ? "Est. opening costs" : "Est. closing costs";
+  ui["order-net-label"].textContent = opening ? "Est. net opening credit" : "Est. total closing debit";
+  ui["order-costs"].textContent = moneyExact(estimatedOrderCosts);
+  ui["order-net"].textContent = moneyExact(orderNetCash);
+  ui["order-net"].className = opening ? "cash-credit" : "cash-debit";
+  ui["trade-pnl"].textContent = moneyExact(estimatedTradePnl);
+  ui["trade-pnl"].className = estimatedTradePnl == null ? "cash-neutral" : estimatedTradePnl >= 0 ? "cash-credit" : "cash-debit";
+  ui["gross-risk"].textContent = `${number(10, 0)} pts × ${number(quantity, 0)} = ${money(gross)}`;
+  ui["max-loss-label"].textContent = selectedAction === "OPEN" ? "Est. maximum loss incl. costs" : "Position effect";
+  ui["max-loss"].textContent = opening ? moneyExact(gross - grossOrderCash + estimatedOrderCosts) : "Releases defined risk";
+  ui["max-loss"].className = opening ? "cash-debit" : "cash-credit";
+  const spot = Number(state?.market?.spot);
+  const optionType = selectedMetrics?.option_type;
+  const shortStrike = Number(selectedShort?.strike);
+  const direction = optionType === "PUT" ? "below" : "above";
+  ui.distance.textContent = Number.isFinite(shortStrike) && Number.isFinite(spot) ? `${number(Math.abs(shortStrike - spot))} pts ${direction}` : "—";
+  const breakeven = Number.isFinite(shortStrike) && Number.isFinite(Number(netOpeningCreditPerSpread))
+    ? optionType === "CALL" ? shortStrike + Number(netOpeningCreditPerSpread) : shortStrike - Number(netOpeningCreditPerSpread)
+    : null;
+  const breakevenDistance = breakeven == null || !Number.isFinite(spot)
+    ? null
+    : optionType === "CALL" ? breakeven - spot : spot - breakeven;
+  const shortIvMove = Number(selectedMetrics?.short_iv_expected_move);
+  ui["ticket-breakeven"].textContent = number(breakeven, 2);
+  ui["breakeven-distance"].textContent = breakevenDistance == null ? "—" : `${number(breakevenDistance, 2)} pts ${direction}`;
+  ui["short-iv-move"].textContent = Number.isFinite(shortIvMove) ? `±${number(shortIvMove, 1)} pts · ${number(selectedMetrics?.short_iv_percent, 2)}% IV` : "—";
+  ui["ticket-em-multiple"].textContent = breakevenDistance == null || !(shortIvMove > 0) ? "—" : `${number(breakevenDistance / shortIvMove, 2)}×`;
+  ui["ticket-credit-risk"].textContent = netOpeningCreditPerSpread == null || !(netOpeningCreditPerSpread > 0 && netOpeningCreditPerSpread < 10) ? "—" : percent(netOpeningCreditPerSpread / (10 - netOpeningCreditPerSpread), 1);
   const creditPositionDelta = selectedMetrics?.credit_position_delta;
   const creditPositionGamma = selectedMetrics?.credit_position_gamma;
   const actionSign = selectedAction === "OPEN" ? 1 : -1;
@@ -531,22 +587,22 @@ function calculateRisk() {
     : selectedMetrics?.gamma_flip_spot == null
     ? "None in modeled range"
     : `${number(selectedMetrics.gamma_flip_spot, 2)} (${Number(selectedMetrics.gamma_flip_distance) >= 0 ? "+" : ""}${number(selectedMetrics.gamma_flip_distance, 1)} pts)`;
-  const downScenario = selectedMetrics?.gamma_scenarios?.find((row) => Number(row.spot_move) === -25);
-  const upScenario = selectedMetrics?.gamma_scenarios?.find((row) => Number(row.spot_move) === 25);
-  ui["gamma-scenario"].textContent = downScenario && upScenario
-    ? `${number(downScenario.credit_position_gamma, 5)} / ${number(upScenario.credit_position_gamma, 5)}`
-    : "—";
-  ui["ticket-breakeven"].textContent = number(selectedMetrics?.breakeven, 2);
-  ui["ticket-em-multiple"].textContent = selectedMetrics?.em_multiple == null ? "—" : `${number(selectedMetrics.em_multiple, 2)}×`;
-  ui["ticket-tail-probability"].textContent = percent(selectedMetrics?.probability_beyond_breakeven, 1);
-  ui["ticket-credit-risk"].textContent = percent(selectedMetrics?.credit_to_risk, 1);
-  if (selectedAction === "OPEN" && quantity > 0 && credit > 0) {
-    const lowProfit = (credit - 1.40) * quantity * 100;
-    const highProfit = (credit - 1.00) * quantity * 100;
-    ui["target-profit"].textContent = `${money(lowProfit)} – ${money(highProfit)}`;
-  } else {
-    ui["target-profit"].textContent = "Opening credit required";
-  }
+  const adverseMove = optionType === "PUT" ? -25 : 25;
+  const adverseScenario = selectedMetrics?.gamma_scenarios?.find((row) => Number(row.spot_move) === adverseMove);
+  ui["adverse-delta-label"].textContent = `Order Δ if NDX moves ${adverseMove > 0 ? "+" : ""}${adverseMove}`;
+  ui["adverse-gamma-label"].textContent = `Order Γ if NDX moves ${adverseMove > 0 ? "+" : ""}${adverseMove}`;
+  ui["adverse-delta"].textContent = adverseScenario ? number(Number(adverseScenario.credit_position_delta) * quantity * actionSign, 2) : "—";
+  ui["gamma-scenario"].textContent = adverseScenario ? number(Number(adverseScenario.credit_position_gamma) * quantity * actionSign, 4) : "—";
+  const openPositionGamma = creditPositionGamma == null ? null : Number(creditPositionGamma) * quantity;
+  const adversePositionGamma = adverseScenario ? Number(adverseScenario.credit_position_gamma) * quantity : null;
+  const gammaMultiple = openPositionGamma && adversePositionGamma != null ? Math.abs(adversePositionGamma / openPositionGamma) : null;
+  const orderGammaChange = openPositionGamma == null ? null : openPositionGamma * actionSign;
+  ui["gamma-alert"].className = `gamma-alert ${orderGammaChange == null ? "" : orderGammaChange < 0 ? "negative" : "positive"}`.trim();
+  ui["gamma-alert"].textContent = openPositionGamma == null
+    ? "Gamma analytics unavailable"
+    : opening
+    ? `${openPositionGamma < 0 ? "ADDS NEGATIVE Γ" : "ADDS POSITIVE Γ"} · adverse ${Math.abs(adverseMove)}-pt move ${gammaMultiple == null ? "—" : `${number(gammaMultiple, 2)}× current magnitude`}`
+    : `${openPositionGamma < 0 ? "REMOVES NEGATIVE Γ" : "REMOVES POSITIVE Γ"} · held position ${number(openPositionGamma, 4)}`;
 }
 
 function orderPayload() {

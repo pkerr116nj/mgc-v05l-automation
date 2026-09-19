@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
     <meta name="theme-color" content="#050708" />
     <title>NDXP Credit Terminal</title>
-    <link rel="stylesheet" href="/styles.css?v=directional-ticket-1" />
+    <link rel="stylesheet" href="/styles.css?v=ticket-economics-1" />
   </head>
   <body>
     <header class="topbar">
@@ -134,7 +134,7 @@
         <div class="leg-card long"><span id="long-instruction">BUY TO OPEN</span><strong id="long-leg">—</strong></div>
         <div class="field-row">
           <label class="field">Quantity<input id="quantity" type="number" inputmode="numeric" min="1" max="100" value="20" /></label>
-          <label class="field">Net credit<input id="credit" type="number" inputmode="decimal" min="0.01" max="9.99" step="0.05" placeholder="0.00" /></label>
+          <label class="field"><span id="limit-price-label">Limit credit</span><input id="credit" type="number" inputmode="decimal" min="0.01" max="9.99" step="0.05" placeholder="0.00" /></label>
         </div>
         <div class="price-step-row" aria-label="Adjust limit price">
           <button type="button" data-ticket-price-step="-0.25">−0.25</button>
@@ -144,30 +144,55 @@
           <button type="button" data-ticket-price-step="0.10">+0.10</button>
           <button type="button" data-ticket-price-step="0.25">+0.25</button>
         </div>
-        <div class="risk-grid">
-          <div><label id="premium-label">Premium</label><strong id="premium">—</strong></div>
-          <div><label>Gross width</label><strong id="gross-risk">—</strong></div>
-          <div class="risk"><label id="max-loss-label">Maximum loss</label><strong id="max-loss">—</strong></div>
-          <div><label>Short distance</label><strong id="distance">—</strong></div>
-          <div><label>Credit position Δ / spread</label><strong id="spread-delta">—</strong></div>
-          <div><label>Ticket Δ change</label><strong id="position-delta">—</strong></div>
-          <div><label>Credit position Γ / spread</label><strong id="spread-gamma">—</strong></div>
-          <div><label>Ticket Γ change</label><strong id="position-gamma">—</strong></div>
-          <div><label>Nearest Γ flip</label><strong id="gamma-flip">—</strong></div>
-          <div><label>Γ at NDX −25 / +25</label><strong id="gamma-scenario">—</strong></div>
-          <div><label>Breakeven</label><strong id="ticket-breakeven">—</strong></div>
-          <div><label>Breakeven / EM</label><strong id="ticket-em-multiple">—</strong></div>
-          <div><label>Beyond breakeven</label><strong id="ticket-tail-probability">—</strong></div>
-          <div><label>Credit / risk</label><strong id="ticket-credit-risk">—</strong></div>
-          <div><label>Target closing debit</label><strong>$1.00–$1.40</strong></div>
-          <div><label>Target gross profit</label><strong id="target-profit">—</strong></div>
-        </div>
+        <section class="ticket-section">
+          <h3>Order economics</h3>
+          <div class="risk-grid">
+            <div id="opening-gross-row" class="hidden"><label>Gross opening credit</label><strong id="opening-gross" class="cash-credit">—</strong></div>
+            <div id="opening-net-row" class="hidden"><label>Est. net opening credit</label><strong id="opening-net" class="cash-credit">—</strong></div>
+            <div><label id="order-cash-label">Gross opening credit</label><strong id="premium">—</strong></div>
+            <div><label id="order-cost-label">Est. opening costs</label><strong id="order-costs" class="cash-debit">—</strong></div>
+            <div><label id="order-net-label">Est. net opening credit</label><strong id="order-net">—</strong></div>
+            <div><label>Total spread width</label><strong id="gross-risk">—</strong></div>
+            <div id="risk-effect-row" class="risk"><label id="max-loss-label">Maximum loss</label><strong id="max-loss">—</strong></div>
+            <div id="trade-pnl-row" class="hidden"><label>Est. net trade P/L</label><strong id="trade-pnl">—</strong></div>
+          </div>
+          <small class="section-note">Estimated costs use $0.65 commission plus $0.012 other fees per leg contract; actual Schwab charges may differ.</small>
+        </section>
+        <section class="ticket-section">
+          <h3>Distance and price</h3>
+          <div class="risk-grid">
+            <div><label>Short strike from NDX</label><strong id="distance">—</strong></div>
+            <div><label>Est. net breakeven</label><strong id="ticket-breakeven">—</strong></div>
+            <div><label>Distance to breakeven</label><strong id="breakeven-distance">—</strong></div>
+            <div><label>Short-leg IV move to expiry</label><strong id="short-iv-move">—</strong></div>
+            <div><label>Breakeven cushion / IV move</label><strong id="ticket-em-multiple">—</strong></div>
+            <div><label>Net credit / maximum loss</label><strong id="ticket-credit-risk">—</strong></div>
+          </div>
+        </section>
+        <section class="ticket-section">
+          <h3>Directional exposure</h3>
+          <div class="risk-grid">
+            <div><label>Open-position Δ / spread</label><strong id="spread-delta">—</strong></div>
+            <div><label>This order changes Δ by</label><strong id="position-delta">—</strong></div>
+          </div>
+        </section>
+        <section class="ticket-section gamma-section">
+          <h3>Gamma behavior</h3>
+          <div id="gamma-alert" class="gamma-alert">Gamma analytics unavailable</div>
+          <div class="risk-grid">
+            <div><label>Open-position Γ / spread</label><strong id="spread-gamma">—</strong></div>
+            <div><label>This order changes Γ by</label><strong id="position-gamma">—</strong></div>
+            <div><label id="adverse-delta-label">Order Δ at adverse 25 pts</label><strong id="adverse-delta">—</strong></div>
+            <div><label id="adverse-gamma-label">Order Γ at adverse 25 pts</label><strong id="gamma-scenario">—</strong></div>
+            <div><label>Spread Γ flip level</label><strong id="gamma-flip">—</strong></div>
+          </div>
+        </section>
         <button id="preview" class="primary">Review Schwab order payload</button>
         <button id="submit" class="danger" disabled>Transmit to Schwab — locked</button>
         <pre id="preview-result" class="preview-result">Tap a displayed bid to construct a spread.</pre>
       </div>
     </dialog>
 
-    <script src="/app.js?v=directional-ticket-1"></script>
+    <script src="/app.js?v=ticket-economics-1"></script>
   </body>
 </html>
