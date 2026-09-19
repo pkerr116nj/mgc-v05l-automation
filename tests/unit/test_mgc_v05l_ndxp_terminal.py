@@ -943,8 +943,8 @@ def test_mobile_chain_keeps_strikes_fixed_and_allows_positive_midpoint_sell() ->
     assert 'id="gamma-summary"' in html
     assert "CLOSED SNAPSHOT" in javascript
     assert 'localStorage.getItem("ndxp-chain-columns-v4")' in javascript
-    assert 'styles.css?v=ticket-economics-1' in html
-    assert 'app.js?v=ticket-economics-1' in html
+    assert 'styles.css?v=live-ticket-1' in html
+    assert 'app.js?v=live-ticket-1' in html
     assert 'classList.toggle("order-sell", opening)' in javascript
     assert 'classList.toggle("order-buy", !opening)' in javascript
     assert ".ticket-modal.order-buy .ticket-banner" in css
@@ -956,6 +956,9 @@ def test_mobile_chain_keeps_strikes_fixed_and_allows_positive_midpoint_sell() ->
     assert "Target gross profit" not in html
     assert "OPTION_COMMISSION_PER_LEG_CONTRACT = 0.65" in javascript
     assert "selectedMetrics?.short_iv_expected_move" in javascript
+    assert "function refreshOpenTicket(chain, analytics)" in javascript
+    assert "ticketPriceFollowsMarket" in javascript
+    assert ".risk-grid div.hidden { display:none; }" in css
     assert ".range-strip.snapshot" in css
     assert "white-space:normal" in css
     assert 'data-ticket-price-step="-0.25"' in html

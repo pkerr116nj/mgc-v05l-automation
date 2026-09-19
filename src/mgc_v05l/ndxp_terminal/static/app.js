@@ -18,6 +18,7 @@ let selectedLong = null;
 let selectedAction = "OPEN";
 let selectedMetrics = null;
 let selectedOpeningCredit = null;
+let ticketPriceFollowsMarket = true;
 let livePreviewToken = null;
 let submissionPending = false;
 let lastHeartbeat = performance.now();
@@ -122,6 +123,7 @@ function render() {
   renderAccounts(broker.accounts || [], broker.selected_account_hash);
   renderAnalytics(market.analytics || {});
   renderChain(market.selected_chain || {}, market.spot, market.analytics || {});
+  refreshOpenTicket(market.selected_chain || {}, market.analytics || {});
   renderPositions(broker.positions || []);
   renderOrders(broker.working_orders || [], broker.recent_orders || []);
   renderDiagnostics(diagnostics);
@@ -479,6 +481,7 @@ function openTicket(action, side, spread, requestedQuantity = null) {
   selectedAction = action;
   selectedMetrics = spread.metrics;
   selectedShort = spread.short; selectedLong = spread.long;
+  ticketPriceFollowsMarket = true;
   const opening = action === "OPEN";
   selectedOpeningCredit = opening ? null : heldSpreadOpeningCredit(spread);
   ui["ticket-dialog"].classList.toggle("order-sell", opening);
@@ -490,7 +493,7 @@ function openTicket(action, side, spread, requestedQuantity = null) {
   ui["long-instruction"].textContent = opening ? "BUY TO OPEN" : "SELL TO CLOSE";
   ui["short-leg"].textContent = `${selectedShort.symbol} · ${number(selectedShort.strike, 0)}`;
   ui["long-leg"].textContent = `${selectedLong.symbol} · ${number(selectedLong.strike, 0)}`;
-  ui["limit-price-label"].textContent = opening ? "Limit credit" : "Limit debit";
+  updateLimitPriceLabel();
   const heldQuantity = action === "CLOSE" ? heldSpreadQuantity(spread) : 0;
   ui.quantity.value = String(requestedQuantity || heldQuantity || 20);
   ui.credit.value = Math.max(0.05, Number(spread.metrics.mark || 0)).toFixed(2);
@@ -498,6 +501,42 @@ function openTicket(action, side, spread, requestedQuantity = null) {
   calculateRisk();
   renderTransmissionControl();
   ui["ticket-dialog"].showModal();
+}
+
+function updateLimitPriceLabel() {
+  const priceEffect = selectedAction === "OPEN" ? "credit" : "debit";
+  const stateLabel = ticketPriceFollowsMarket ? "LIVE MID" : livePreviewToken ? "REVIEWED" : "MANUAL";
+  ui["limit-price-label"].textContent = `Limit ${priceEffect} · ${stateLabel}`;
+}
+
+function refreshOpenTicket(chain, analytics) {
+  if (!ui["ticket-dialog"].open || !selectedShort || !selectedLong) return;
+  const shortSymbol = String(selectedShort.symbol || "").trim().toUpperCase();
+  const longSymbol = String(selectedLong.symbol || "").trim().toUpperCase();
+  const spread = verticalRows(chain, analytics)
+    .flatMap((row) => [row.call, row.put])
+    .find((candidate) => candidate
+      && String(candidate.short?.symbol || "").trim().toUpperCase() === shortSymbol
+      && String(candidate.long?.symbol || "").trim().toUpperCase() === longSymbol);
+  if (!spread) {
+    ui["ticket-market"].textContent = "Live quote unavailable · retaining last values";
+    return;
+  }
+  selectedMetrics = spread.metrics;
+  selectedShort = spread.short;
+  selectedLong = spread.long;
+  ui["ticket-market"].textContent = `Bid ${number(spread.metrics.bid)} · Mid ${number(spread.metrics.mark)} · Ask ${number(spread.metrics.ask)}`;
+  if (ticketPriceFollowsMarket) {
+    const midpoint = Number(spread.metrics.mark);
+    if (Number.isFinite(midpoint)) {
+      const nextPrice = Math.max(0.05, midpoint).toFixed(2);
+      if (ui.credit.value !== nextPrice) {
+        ui.credit.value = nextPrice;
+        invalidateLivePreview();
+      }
+    }
+  }
+  updateLimitPriceLabel();
 }
 
 function heldSpreadQuantity(spread) {
@@ -616,9 +655,12 @@ function invalidateLivePreview() {
 
 async function preview() {
   if (!selectedShort || !selectedLong) return showNotice("Tap a call or put bid first.", true);
+  ticketPriceFollowsMarket = false;
+  updateLimitPriceLabel();
   try {
     const result = await api("/api/preview", { method: "POST", body: JSON.stringify(orderPayload()) });
     livePreviewToken = result.preview_token || null;
+    updateLimitPriceLabel();
     ui["preview-result"].textContent = JSON.stringify(result, null, 2);
     renderTransmissionControl();
     showNotice(livePreviewToken ? "Live-order preview built. The token is single-use for 60 seconds." : "Order preview built. No broker mutation was attempted.");
@@ -868,7 +910,12 @@ function hideNotice() { ui.notice.className = "notice hidden"; }
 
 ui.expiration.addEventListener("change", selectExpiration);
 ui.quantity.addEventListener("input", () => { invalidateLivePreview(); calculateRisk(); });
-ui.credit.addEventListener("input", () => { invalidateLivePreview(); calculateRisk(); });
+ui.credit.addEventListener("input", () => {
+  ticketPriceFollowsMarket = false;
+  invalidateLivePreview();
+  updateLimitPriceLabel();
+  calculateRisk();
+});
 document.querySelectorAll("[data-ticket-price-step]").forEach((button) => button.addEventListener("click", () => {
   adjustPriceInput(ui.credit, Number(button.dataset.ticketPriceStep));
 }));
