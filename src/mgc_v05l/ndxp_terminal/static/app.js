@@ -476,6 +476,8 @@ function openTicket(action, side, spread, requestedQuantity = null) {
   selectedMetrics = spread.metrics;
   selectedShort = spread.short; selectedLong = spread.long;
   const opening = action === "OPEN";
+  ui["ticket-dialog"].classList.toggle("order-sell", opening);
+  ui["ticket-dialog"].classList.toggle("order-buy", !opening);
   ui["ticket-side"].textContent = `${side} · ${opening ? "SELL TO OPEN" : "BUY TO CLOSE"}`;
   ui["ticket-title"].textContent = `${opening ? "Sell" : "Buy"} ${side.toLowerCase()} vertical`;
   ui["ticket-market"].textContent = `Bid ${number(spread.metrics.bid)} · Mid ${number(spread.metrics.mark)} · Ask ${number(spread.metrics.ask)}`;

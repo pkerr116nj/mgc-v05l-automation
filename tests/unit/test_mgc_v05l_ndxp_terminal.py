@@ -940,8 +940,11 @@ def test_mobile_chain_keeps_strikes_fixed_and_allows_positive_midpoint_sell() ->
     assert 'id="gamma-summary"' in html
     assert "CLOSED SNAPSHOT" in javascript
     assert 'localStorage.getItem("ndxp-chain-columns-v4")' in javascript
-    assert 'styles.css?v=closed-snapshot-gamma-1' in html
-    assert 'app.js?v=closed-snapshot-gamma-1' in html
+    assert 'styles.css?v=directional-ticket-1' in html
+    assert 'app.js?v=directional-ticket-1' in html
+    assert 'classList.toggle("order-sell", opening)' in javascript
+    assert 'classList.toggle("order-buy", !opening)' in javascript
+    assert ".ticket-modal.order-buy .ticket-banner" in css
     assert ".range-strip.snapshot" in css
     assert "white-space:normal" in css
     assert 'data-ticket-price-step="-0.25"' in html
