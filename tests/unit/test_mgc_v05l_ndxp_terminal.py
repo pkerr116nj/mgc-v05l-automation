@@ -504,17 +504,18 @@ def test_demo_service_builds_preview_but_never_transmits(tmp_path: Path) -> None
             "BUY_TO_CLOSE",
             "SELL_TO_CLOSE",
         ]
-        with pytest.raises(SpreadValidationError, match="neither a filled nor pending matching spread"):
-            service.preview(
-                {
-                    "account_hash": "demo-account-hash",
-                    "short_symbol": short["symbol"],
-                    "long_symbol": long["symbol"],
-                    "quantity": 20,
-                    "limit_price": "1.25",
-                    "action": "CLOSE",
-                }
-            )
+        broker_adjudicated = service.preview(
+            {
+                "account_hash": "demo-account-hash",
+                "short_symbol": short["symbol"],
+                "long_symbol": long["symbol"],
+                "quantity": 20,
+                "limit_price": "1.25",
+                "action": "CLOSE",
+            }
+        )
+        assert broker_adjudicated["position_effect"]["classification"] == "BROKER_ADJUDICATED"
+        assert broker_adjudicated["position_effect"]["reverse_open_quantity"] is None
         with pytest.raises(TransmissionDisabledError):
             service.mutate("submit", {
                 "account_hash": "demo-account-hash",
@@ -987,8 +988,8 @@ def test_mobile_chain_keeps_strikes_fixed_and_allows_positive_midpoint_sell() ->
     assert 'id="gamma-summary"' in html
     assert "CLOSED SNAPSHOT" in javascript
     assert 'localStorage.getItem("ndxp-chain-columns-v4")' in javascript
-    assert 'styles.css?v=pending-close-1' in html
-    assert 'app.js?v=pending-close-1' in html
+    assert 'styles.css?v=broker-close-1' in html
+    assert 'app.js?v=broker-close-1' in html
     assert 'classList.toggle("order-sell", opening)' in javascript
     assert 'classList.toggle("order-buy", !opening)' in javascript
     assert ".ticket-modal.order-buy .ticket-banner" in css

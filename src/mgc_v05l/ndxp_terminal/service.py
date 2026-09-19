@@ -220,10 +220,6 @@ class NdxpTerminalService:
                 and row.get("long_symbol") == request.long_symbol
             )
             offsetting_quantity = held_quantity + pending_quantity
-            if offsetting_quantity <= 0:
-                raise SpreadValidationError(
-                    "The selected account has neither a filled nor pending matching spread to close."
-                )
         risk = validate_spread_request(request)
         result = {
             "ok": True,
@@ -240,18 +236,28 @@ class NdxpTerminalService:
             ],
         }
         if request.action == "CLOSE":
-            reverse_quantity = max(0.0, request.quantity - offsetting_quantity)
+            reverse_quantity = max(0.0, request.quantity - offsetting_quantity) if offsetting_quantity > 0 else None
             result["position_effect"] = {
                 "held_close_quantity": held_quantity,
                 "pending_close_quantity": pending_quantity,
                 "reverse_open_quantity": reverse_quantity,
-                "classification": "CLOSE_AND_REVERSE" if reverse_quantity > 0 else "PENDING_CLOSE" if pending_quantity > 0 and held_quantity <= 0 else "CLOSE",
+                "classification": "BROKER_ADJUDICATED"
+                if offsetting_quantity <= 0
+                else "CLOSE_AND_REVERSE"
+                if reverse_quantity and reverse_quantity > 0
+                else "PENDING_CLOSE"
+                if pending_quantity > 0 and held_quantity <= 0
+                else "CLOSE",
             }
+            if offsetting_quantity <= 0:
+                result["checks"].append(
+                    "No exact filled or pending match was reconstructed locally; Schwab will adjudicate the closing instruction."
+                )
             if pending_quantity > 0:
                 result["checks"].append(
                     f"A matching opening order has {pending_quantity:g} spreads pending; Schwab will adjudicate the offsetting close."
                 )
-            if reverse_quantity > 0:
+            if reverse_quantity and reverse_quantity > 0:
                 result["checks"].append(
                     f"The requested close crosses through the pending/filled position and reverses {reverse_quantity:g} spreads."
                 )
