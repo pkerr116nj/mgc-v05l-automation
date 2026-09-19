@@ -809,7 +809,9 @@ def test_mobile_chain_keeps_strikes_fixed_and_allows_positive_midpoint_sell() ->
     assert '["spread_delta", "Model Δ", 4]' in javascript
     assert "credit_position_delta" in (static_root.parent / "analytics.py").read_text(encoding="utf-8")
     assert 'id="quote-age-label"' in html
-    assert '"Latest close age "' in javascript
+    assert '"Latest index quote "' in javascript
+    assert 'timeZone: "America/New_York"' in javascript
+    assert "easternTimestamp(market.spot_quote_time_ms)" in javascript
     assert '"MARKET CLOSED · LATEST QUOTES"' in javascript
     assert "selling it reverses the sign" in javascript
     assert "function anchorChainPanes()" in javascript

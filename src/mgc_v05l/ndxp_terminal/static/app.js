@@ -31,6 +31,10 @@ let chainViewportWidth = window.innerWidth;
 const money = (value) => value == null || !Number.isFinite(Number(value)) ? "—" : new Intl.NumberFormat("en-US", { style: "currency", currency: "USD", maximumFractionDigits: 0 }).format(Number(value));
 const number = (value, digits = 2) => value == null || !Number.isFinite(Number(value)) ? "—" : Number(value).toLocaleString("en-US", { minimumFractionDigits: digits, maximumFractionDigits: digits });
 const age = (ms) => ms == null ? "—" : ms < 1000 ? `${Math.round(ms)} ms` : `${(ms / 1000).toFixed(1)} s`;
+const easternTimestamp = (timestampMs) => timestampMs == null || !Number.isFinite(Number(timestampMs)) ? "—" : new Intl.DateTimeFormat("en-US", {
+  timeZone: "America/New_York", weekday: "short", month: "short", day: "numeric",
+  hour: "numeric", minute: "2-digit", second: "2-digit", timeZoneName: "short",
+}).format(new Date(Number(timestampMs)));
 const percent = (value, digits = 1) => value == null || !Number.isFinite(Number(value)) ? "—" : `${(Number(value) * 100).toFixed(digits)}%`;
 
 function loadColumns() {
@@ -94,8 +98,8 @@ function render() {
     ui["mode-banner"].className = "mode-banner hidden";
   }
   ui.spot.textContent = number(market.spot, 2);
-  ui["quote-age"].textContent = age(diagnostics.quote_source_age_ms);
-  ui["quote-age-label"].firstChild.textContent = diagnostics.market_session === "OUTSIDE_REGULAR_HOURS" ? "Latest close age " : "Quote age ";
+  ui["quote-age"].textContent = easternTimestamp(market.spot_quote_time_ms);
+  ui["quote-age-label"].firstChild.textContent = "Latest index quote ";
   ui["market-latency"].textContent = age(diagnostics.market_latency_ms);
   const databento = market.databento;
   ui["option-source-label"].textContent = databento ? "Databento OPRA NBBO" : "Option market · Schwab";
