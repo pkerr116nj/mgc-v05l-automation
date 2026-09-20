@@ -16,6 +16,8 @@ dependencies = [
 [project.scripts]
 mgc-v05l = "mgc_v05l.app.main:main"
 ndxp-terminal = "mgc_v05l.ndxp_terminal.server:main"
+ndxp-naive-baseline = "mgc_v05l.research.ndxp_naive_baseline:main"
+ndxp-naive-data = "mgc_v05l.research.ndxp_naive_data:main"
 
 [project.optional-dependencies]
 dev = [
