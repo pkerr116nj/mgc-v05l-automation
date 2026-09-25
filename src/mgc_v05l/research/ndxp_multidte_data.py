@@ -293,23 +293,26 @@ def main(argv: Sequence[str] | None = None) -> int:
             start_date = date.fromisoformat(start_text.strip())
             if start_date > end_date:
                 raise SystemExit(f"start {start_date} is after end {end_date}")
-            span_days = (end_date - start_date).days + 1
-            sessions = weekdays_back(end_date, span_days)
-            sessions = [d for d in sessions if start_date <= d <= end_date]
-            cost, details = estimate_discovery(client, sessions)
-            unresolved = [row for row in details if row["status"] != "ok"]
+            start_ts = datetime.combine(start_date, time(9, 30), NEW_YORK)
+            end_ts = datetime.combine(end_date, time(9, 31), NEW_YORK)
+            cost = float(client.metadata.get_cost(
+                dataset=DATASET,
+                schema=DISCOVERY_SCHEMA,
+                stype_in="parent",
+                symbols=[PARENT],
+                start=start_ts,
+                end=end_ts,
+            ))
             results.append({
                 "start": start_date.isoformat(),
                 "end": end_date.isoformat(),
-                "weekdays_requested": len(sessions),
-                "sessions_priced": len(details) - len(unresolved),
-                "sessions_unresolved": len(unresolved),
                 "estimated_cost": cost,
             })
         print(json.dumps({
             "stage": "history_discovery",
             "parent": PARENT,
             "schema": DISCOVERY_SCHEMA,
+            "note": "Each range is priced with one Databento metadata request over the continuous interval.",
             "ranges": results,
         }, indent=2))
         return 0
