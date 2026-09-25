@@ -22,7 +22,7 @@ from zoneinfo import ZoneInfo
 
 NEW_YORK = ZoneInfo("America/New_York")
 DATASET = "OPRA.PILLAR"
-PARENT = "NDXP.OPT"
+PARENT = "NDX.OPT"
 DISCOVERY_SCHEMA = "cbbo-1s"
 PATH_SCHEMA = "cbbo-1m"
 
@@ -174,13 +174,20 @@ def discover_candidates(frame: Any, session: date, *, dtes: Sequence[int], targe
     return result
 
 
-def estimate_discovery(client: Any, sessions: Sequence[date]) -> float:
+def estimate_discovery(client: Any, sessions: Sequence[date]) -> tuple[float, list[dict[str, object]]]:
     total = 0.0
+    details: list[dict[str, object]] = []
     for session in sessions:
         start = datetime.combine(session, time(9, 30), NEW_YORK)
         end = start + timedelta(minutes=1)
-        total += float(client.metadata.get_cost(dataset=DATASET, schema=DISCOVERY_SCHEMA, stype_in="parent", symbols=[PARENT], start=start, end=end))
-    return total
+        try:
+            cost = float(client.metadata.get_cost(dataset=DATASET, schema=DISCOVERY_SCHEMA, stype_in="parent", symbols=[PARENT], start=start, end=end))
+        except Exception as exc:
+            details.append({"session": session.isoformat(), "status": "unresolved", "error": str(exc)})
+            continue
+        total += cost
+        details.append({"session": session.isoformat(), "status": "ok", "cost": cost})
+    return total, details
 
 
 def download_discovery(client: Any, sessions: Sequence[date], cache_dir: Path, out_csv: Path, *, dtes: Sequence[int], targets: Sequence[float]) -> list[Candidate]:
@@ -280,8 +287,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         sessions = weekdays_back(date.fromisoformat(a.end), a.sessions)
         dtes = [int(x) for x in a.dtes.split(",")]
         targets = [float(x) for x in a.targets.split(",")]
-        cost = estimate_discovery(client, sessions)
-        print(json.dumps({"stage":"discovery","sessions":len(sessions),"estimated_cost":cost}, indent=2))
+        cost, details = estimate_discovery(client, sessions)
+        unresolved = [row for row in details if row["status"] != "ok"]
+        print(json.dumps({"stage":"discovery","parent":PARENT,"sessions_requested":len(sessions),"sessions_priced":len(details)-len(unresolved),"sessions_unresolved":len(unresolved),"estimated_cost":cost,"unresolved":unresolved}, indent=2))
         if a.cmd == "download-discovery":
             if cost > a.max_cost: raise SystemExit(f"aborted: ${cost:.4f} exceeds max ${a.max_cost:.4f}")
             rows = download_discovery(client, sessions, a.cache_dir, a.output, dtes=dtes, targets=targets)
