@@ -32,7 +32,8 @@ PATH_SCHEMA = "cbbo-1m"
 class Candidate:
     session_date: date
     expiration: date
-    dte_sessions: int
+    calendar_dte: int
+    trading_sessions_to_expiry: int
     target_credit: float
     entry_time: datetime
     short_strike: float
@@ -142,11 +143,13 @@ def _latest_first_minute(rows: Iterable[dict[str, object]], session: date, expir
 def discover_candidates(frame: Any, session: date, *, dtes: Sequence[int], targets: Sequence[float], width: float = 10.0) -> list[Candidate]:
     rows = _frame_rows(frame)
     listed_expirations = sorted({row["expiration"] for row in rows if row["expiration"] >= session})
-    requested = {}
+    expiration_index = {exp: idx for idx, exp in enumerate(listed_expirations)}
+    requested: dict[int, date] = {}
     for dte in dtes:
-        index = int(dte)
-        if 0 <= index < len(listed_expirations):
-            requested[int(dte)] = listed_expirations[index]
+        exp = session + timedelta(days=int(dte))
+        if exp in expiration_index:
+            requested[int(dte)] = exp
+
     latest = _latest_first_minute(rows, session, set(requested.values()))
     result: list[Candidate] = []
     for dte in dtes:
@@ -157,26 +160,29 @@ def discover_candidates(frame: Any, session: date, *, dtes: Sequence[int], targe
         strikes = sorted(strike for e, strike in latest if e == exp)
         for short_strike in strikes:
             long_strike = short_strike - width
-            s = latest.get((exp, short_strike))
-            l = latest.get((exp, long_strike))
-            if not s or not l:
+            short_leg = latest.get((exp, short_strike))
+            long_leg = latest.get((exp, long_strike))
+            if not short_leg or not long_leg:
                 continue
-            mid = ((float(s["bid"]) + float(s["ask"])) / 2.0) - ((float(l["bid"]) + float(l["ask"])) / 2.0)
-            natural = float(s["bid"]) - float(l["ask"])
+            mid = ((float(short_leg["bid"]) + float(short_leg["ask"])) / 2.0) - ((float(long_leg["bid"]) + float(long_leg["ask"])) / 2.0)
+            natural = float(short_leg["bid"]) - float(long_leg["ask"])
             if not (0 < mid < width):
                 continue
             spreads.append(Candidate(
                 session_date=session,
                 expiration=exp,
-                dte_sessions=int(dte),
+                calendar_dte=(exp - session).days,
+                trading_sessions_to_expiry=expiration_index[exp],
                 target_credit=0.0,
-                entry_time=max(s["ts"], l["ts"]),
+                entry_time=max(short_leg["ts"], long_leg["ts"]),
                 short_strike=short_strike,
                 long_strike=long_strike,
-                short_symbol=str(s["symbol"]),
-                long_symbol=str(l["symbol"]),
-                short_bid=float(s["bid"]), short_ask=float(s["ask"]),
-                long_bid=float(l["bid"]), long_ask=float(l["ask"]),
+                short_symbol=str(short_leg["symbol"]),
+                long_symbol=str(long_leg["symbol"]),
+                short_bid=float(short_leg["bid"]),
+                short_ask=float(short_leg["ask"]),
+                long_bid=float(long_leg["bid"]),
+                long_ask=float(long_leg["ask"]),
                 mid_credit=mid,
                 natural_credit=natural,
             ))
@@ -186,7 +192,6 @@ def discover_candidates(frame: Any, session: date, *, dtes: Sequence[int], targe
             chosen = min(spreads, key=lambda x: (abs(x.mid_credit - target), x.entry_time, x.short_strike))
             result.append(Candidate(**{**asdict(chosen), "target_credit": float(target)}))
     return result
-
 
 def estimate_discovery(client: Any, sessions: Sequence[date]) -> tuple[float, list[dict[str, object]]]:
     total = 0.0
@@ -286,7 +291,8 @@ def load_candidates(path: Path) -> list[Candidate]:
     with path.open(newline="", encoding="utf-8") as fh:
         for r in csv.DictReader(fh):
             out.append(Candidate(
-                session_date=date.fromisoformat(r["session_date"]), expiration=date.fromisoformat(r["expiration"]), dte_sessions=int(r["dte_sessions"]),
+                session_date=date.fromisoformat(r["session_date"]), expiration=date.fromisoformat(r["expiration"]),
+                calendar_dte=int(r["calendar_dte"]), trading_sessions_to_expiry=int(r["trading_sessions_to_expiry"]),
                 target_credit=float(r["target_credit"]), entry_time=datetime.fromisoformat(r["entry_time"]), short_strike=float(r["short_strike"]), long_strike=float(r["long_strike"]),
                 short_symbol=r["short_symbol"], long_symbol=r["long_symbol"], short_bid=float(r["short_bid"]), short_ask=float(r["short_ask"]), long_bid=float(r["long_bid"]), long_ask=float(r["long_ask"]),
                 mid_credit=float(r["mid_credit"]), natural_credit=float(r["natural_credit"])))
@@ -334,6 +340,100 @@ def download_paths(client: Any, candidates: Sequence[Candidate], cache_dir: Path
     return count
 
 
+def _month_key(d: date) -> tuple[int, int]:
+    return d.year, d.month
+
+
+def _second_wednesday(year: int, month: int) -> date:
+    first = date(year, month, 1)
+    days_to_wed = (2 - first.weekday()) % 7
+    return first + timedelta(days=days_to_wed + 7)
+
+
+def _month_windows(start_date: date, end_date: date) -> list[tuple[date, date, date]]:
+    windows: list[tuple[date, date, date]] = []
+    cursor = date(start_date.year, start_date.month, 1)
+    while cursor <= end_date:
+        if cursor.month == 12:
+            next_month = date(cursor.year + 1, 1, 1)
+        else:
+            next_month = date(cursor.year, cursor.month + 1, 1)
+        month_end = next_month - timedelta(days=1)
+        lo = max(start_date, cursor)
+        hi = min(end_date, month_end)
+        sample = _second_wednesday(cursor.year, cursor.month)
+        if sample < lo or sample > hi:
+            span = (hi - lo).days
+            sample = lo + timedelta(days=span // 2)
+            while sample.weekday() >= 5 and sample <= hi:
+                sample += timedelta(days=1)
+            if sample > hi:
+                sample = lo
+                while sample.weekday() >= 5 and sample <= hi:
+                    sample += timedelta(days=1)
+        windows.append((lo, hi, sample))
+        cursor = next_month
+    return windows
+
+
+def estimate_opening_history_sampled(client: Any, ranges: Sequence[tuple[date, date]], workers: int = 8) -> list[dict[str, object]]:
+    all_samples = sorted({sample for start_date, end_date in ranges for _, _, sample in _month_windows(start_date, end_date)})
+
+    def price(sample: date) -> tuple[date, float | None, str | None]:
+        start = datetime.combine(sample, time(9, 30), NEW_YORK)
+        end = start + timedelta(minutes=2)
+        try:
+            local_client = historical_client()
+            cost = float(local_client.metadata.get_cost(
+                dataset=DATASET,
+                schema=DISCOVERY_SCHEMA,
+                stype_in="parent",
+                symbols=[PARENT],
+                start=start,
+                end=end,
+            ))
+            return sample, cost, None
+        except Exception as exc:
+            return sample, None, str(exc)
+
+    priced: dict[date, float] = {}
+    failures: dict[date, str] = {}
+    max_workers = max(1, min(int(workers), 12))
+    with ThreadPoolExecutor(max_workers=max_workers) as pool:
+        futures = [pool.submit(price, sample) for sample in all_samples]
+        for future in as_completed(futures):
+            sample, cost, error = future.result()
+            if cost is None:
+                failures[sample] = error or "unknown error"
+            else:
+                priced[sample] = cost
+
+    weekday_to_session_factor = 252.0 / (365.2425 * 5.0 / 7.0)
+    results: list[dict[str, object]] = []
+    for start_date, end_date in ranges:
+        estimated = 0.0
+        samples_used = 0
+        weekdays = 0
+        missing_samples: list[str] = []
+        for lo, hi, sample in _month_windows(start_date, end_date):
+            month_weekdays = len(weekdays_between(lo, hi))
+            weekdays += month_weekdays
+            if sample not in priced:
+                missing_samples.append(sample.isoformat())
+                continue
+            estimated += priced[sample] * month_weekdays * weekday_to_session_factor
+            samples_used += 1
+        results.append({
+            "start": start_date.isoformat(),
+            "end": end_date.isoformat(),
+            "months_sampled": samples_used,
+            "weekday_count": weekdays,
+            "estimated_trading_sessions": round(weekdays * weekday_to_session_factor),
+            "estimated_opening_discovery_cost": estimated,
+            "missing_sample_dates": missing_samples,
+        })
+    return results
+
 def main(argv: Sequence[str] | None = None) -> int:
     p = argparse.ArgumentParser(description=__doc__)
     sub = p.add_subparsers(dest="cmd", required=True)
@@ -348,6 +448,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     eh = sub.add_parser("estimate-history")
     eh.add_argument("--end", required=True)
     eh.add_argument("--starts", default="2013-04-01,2016-09-24,2021-09-24,2023-09-24,2025-09-24")
+    eh.add_argument("--workers", type=int, default=8)
     d = sub.add_parser("download-discovery", parents=[common]); d.add_argument("--cache-dir", type=Path, required=True); d.add_argument("--output", type=Path, required=True); d.add_argument("--max-cost", type=float, required=True)
     ep = sub.add_parser("estimate-paths"); ep.add_argument("--candidates", type=Path, required=True)
     dp = sub.add_parser("download-paths"); dp.add_argument("--candidates", type=Path, required=True); dp.add_argument("--cache-dir", type=Path, required=True); dp.add_argument("--output", type=Path, required=True); dp.add_argument("--max-cost", type=float, required=True)
@@ -377,31 +478,19 @@ def main(argv: Sequence[str] | None = None) -> int:
     client = historical_client()
     if a.cmd == "estimate-history":
         end_date = date.fromisoformat(a.end)
-        results = []
+        ranges: list[tuple[date, date]] = []
         for start_text in a.starts.split(","):
             start_date = date.fromisoformat(start_text.strip())
             if start_date > end_date:
                 raise SystemExit(f"start {start_date} is after end {end_date}")
-            start_ts = datetime.combine(start_date, time(9, 30), NEW_YORK)
-            end_ts = datetime.combine(end_date, time(9, 32), NEW_YORK)
-            cost = float(client.metadata.get_cost(
-                dataset=DATASET,
-                schema=DISCOVERY_SCHEMA,
-                stype_in="parent",
-                symbols=[PARENT],
-                start=start_ts,
-                end=end_ts,
-            ))
-            results.append({
-                "start": start_date.isoformat(),
-                "end": end_date.isoformat(),
-                "estimated_cost": cost,
-            })
+            ranges.append((start_date, end_date))
+        results = estimate_opening_history_sampled(client, ranges, workers=a.workers)
         print(json.dumps({
-            "stage": "history_discovery",
+            "stage": "history_discovery_sampled",
             "parent": PARENT,
             "schema": DISCOVERY_SCHEMA,
-            "note": "Each range is priced with one Databento metadata request over the continuous interval.",
+            "window": "09:30-09:32 America/New_York",
+            "method": "one two-minute sample per month, scaled to estimated trading sessions",
             "ranges": results,
         }, indent=2))
         return 0
@@ -411,10 +500,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         dtes = [int(x) for x in a.dtes.split(",")]
         targets = [float(x) for x in a.targets.split(",")]
         if a.start:
-            cost = estimate_discovery_range(client, date.fromisoformat(a.start), end_date)
+            sampled = estimate_opening_history_sampled(client, [(date.fromisoformat(a.start), end_date)], workers=a.workers)[0]
+            cost = float(sampled["estimated_opening_discovery_cost"])
             details = []
             unresolved = []
-            print(json.dumps({"stage":"discovery","parent":PARENT,"schema":DISCOVERY_SCHEMA,"range_start":a.start,"range_end":a.end,"sessions_requested":len(sessions),"estimated_cost":cost,"estimator":"single_range_request"}, indent=2))
+            print(json.dumps({"stage":"discovery","parent":PARENT,"schema":DISCOVERY_SCHEMA,"range_start":a.start,"range_end":a.end,"sessions_requested":len(sessions),"estimated_cost":cost,"estimator":"monthly_sampled_opening_windows","estimate_detail":sampled}, indent=2))
         else:
             cost, details = estimate_discovery(client, sessions)
             unresolved = [row for row in details if row["status"] != "ok"]
