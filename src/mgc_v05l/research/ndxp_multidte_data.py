@@ -1,7 +1,7 @@
 """Targeted Databento acquisition for NDXP 2DTE/3DTE vertical research.
 
 Two-stage design keeps OPRA cost/runtime bounded:
-1. Discover only the 09:30-09:31 ET NDXP chain with CBBO-1s.
+1. Discover only the 09:30-09:31 ET NDX option chain with CBBO-1m.
 2. Select a small set of 10-point put spreads, then download CBBO-1m only
    for those exact option symbols through expiration.
 
@@ -286,6 +286,33 @@ def main(argv: Sequence[str] | None = None) -> int:
     dp = sub.add_parser("download-paths"); dp.add_argument("--candidates", type=Path, required=True); dp.add_argument("--cache-dir", type=Path, required=True); dp.add_argument("--output", type=Path, required=True); dp.add_argument("--max-cost", type=float, required=True)
     a = p.parse_args(argv)
     client = historical_client()
+    if a.cmd == "estimate-history":
+        end_date = date.fromisoformat(a.end)
+        results = []
+        for start_text in a.starts.split(","):
+            start_date = date.fromisoformat(start_text.strip())
+            if start_date > end_date:
+                raise SystemExit(f"start {start_date} is after end {end_date}")
+            span_days = (end_date - start_date).days + 1
+            sessions = weekdays_back(end_date, span_days)
+            sessions = [d for d in sessions if start_date <= d <= end_date]
+            cost, details = estimate_discovery(client, sessions)
+            unresolved = [row for row in details if row["status"] != "ok"]
+            results.append({
+                "start": start_date.isoformat(),
+                "end": end_date.isoformat(),
+                "weekdays_requested": len(sessions),
+                "sessions_priced": len(details) - len(unresolved),
+                "sessions_unresolved": len(unresolved),
+                "estimated_cost": cost,
+            })
+        print(json.dumps({
+            "stage": "history_discovery",
+            "parent": PARENT,
+            "schema": DISCOVERY_SCHEMA,
+            "ranges": results,
+        }, indent=2))
+        return 0
     if a.cmd in {"estimate-discovery", "download-discovery"}:
         sessions = weekdays_back(date.fromisoformat(a.end), a.sessions)
         dtes = [int(x) for x in a.dtes.split(",")]
