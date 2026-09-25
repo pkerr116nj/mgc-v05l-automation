@@ -300,35 +300,80 @@ def load_candidates(path: Path) -> list[Candidate]:
     return out
 
 
-def estimate_paths(client: Any, candidates: Sequence[Candidate], workers: int = 8) -> float:
+def estimate_paths(client: Any, candidates: Sequence[Candidate], workers: int = 8) -> tuple[float, dict[str, object]]:
     by_session: dict[date, list[Candidate]] = {}
     for c in candidates:
         by_session.setdefault(c.session_date, []).append(c)
 
-    def price_one(item: tuple[date, list[Candidate]]) -> float:
-        session, rows = item
+    by_month: dict[tuple[int, int], list[date]] = {}
+    for session in sorted(by_session):
+        by_month.setdefault((session.year, session.month), []).append(session)
+
+    samples: list[tuple[tuple[int, int], date, int]] = []
+    for month_key, sessions in sorted(by_month.items()):
+        sample = sessions[len(sessions) // 2]
+        samples.append((month_key, sample, len(sessions)))
+
+    def price_sample(item: tuple[tuple[int, int], date, int]) -> tuple[tuple[int, int], date, int, float | None, str | None]:
+        month_key, session, session_count = item
+        rows = by_session[session]
         symbols = sorted({sym for c in rows for sym in (c.short_symbol, c.long_symbol)})
         end_date = max(c.expiration for c in rows)
         start = datetime.combine(session, time(9, 30), NEW_YORK)
         end = datetime.combine(end_date, time(16, 1), NEW_YORK)
-        local_client = historical_client()
-        return float(local_client.metadata.get_cost(
-            dataset=DATASET,
-            schema=PATH_SCHEMA,
-            stype_in="raw_symbol",
-            symbols=symbols,
-            start=start,
-            end=end,
-        ))
+        last_error = None
+        for _attempt in range(2):
+            try:
+                local_client = historical_client()
+                cost = float(local_client.metadata.get_cost(
+                    dataset=DATASET,
+                    schema=PATH_SCHEMA,
+                    stype_in="raw_symbol",
+                    symbols=symbols,
+                    start=start,
+                    end=end,
+                ))
+                return month_key, session, session_count, cost, None
+            except Exception as exc:
+                last_error = str(exc)
+        return month_key, session, session_count, None, last_error or "unknown error"
 
-    items = sorted(by_session.items())
-    max_workers = max(1, min(int(workers), 12))
-    total = 0.0
+    max_workers = max(1, min(int(workers), 6))
+    priced: list[dict[str, object]] = []
+    failures: list[dict[str, object]] = []
+    estimated_total = 0.0
     with ThreadPoolExecutor(max_workers=max_workers) as pool:
-        futures = [pool.submit(price_one, item) for item in items]
+        futures = [pool.submit(price_sample, item) for item in samples]
         for future in as_completed(futures):
-            total += future.result()
-    return total
+            month_key, session, session_count, sample_cost, error = future.result()
+            if sample_cost is None:
+                failures.append({
+                    "month": f"{month_key[0]:04d}-{month_key[1]:02d}",
+                    "sample_session": session.isoformat(),
+                    "qualifying_sessions": session_count,
+                    "error": error,
+                })
+                continue
+            month_estimate = sample_cost * session_count
+            estimated_total += month_estimate
+            priced.append({
+                "month": f"{month_key[0]:04d}-{month_key[1]:02d}",
+                "sample_session": session.isoformat(),
+                "qualifying_sessions": session_count,
+                "sample_cost": sample_cost,
+                "estimated_month_cost": month_estimate,
+            })
+
+    detail = {
+        "method": "one actual qualifying session sampled per month; sample cost multiplied by qualifying sessions in that month",
+        "qualifying_sessions": len(by_session),
+        "months_total": len(samples),
+        "months_priced": len(priced),
+        "months_failed": len(failures),
+        "priced_months": sorted(priced, key=lambda x: x["month"]),
+        "failures": sorted(failures, key=lambda x: x["month"]),
+    }
+    return estimated_total, detail
 
 def download_paths(client: Any, candidates: Sequence[Candidate], cache_dir: Path, out_csv: Path, workers: int = 8) -> int:
     import databento as db
@@ -583,8 +628,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             print(f"wrote {len(rows)} candidate rows to {a.output}")
         return 0
     candidates = load_candidates(a.candidates)
-    cost = estimate_paths(client, candidates, workers=a.workers)
-    print(json.dumps({"stage":"paths","candidates":len(candidates),"estimated_cost":cost}, indent=2))
+    cost, path_estimate_detail = estimate_paths(client, candidates, workers=a.workers)
+    print(json.dumps({"stage":"paths","candidates":len(candidates),"estimated_cost":cost,"estimate_detail":path_estimate_detail}, indent=2))
     if a.cmd == "download-paths":
         if cost > a.max_cost: raise SystemExit(f"aborted: ${cost:.4f} exceeds max ${a.max_cost:.4f}")
         count = download_paths(client, candidates, a.cache_dir, a.output, workers=a.workers)
