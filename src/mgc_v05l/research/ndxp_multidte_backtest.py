@@ -8,13 +8,14 @@ from datetime import date, datetime
 from pathlib import Path
 from typing import Sequence
 
-from ndxp_multidte_data import Candidate, load_candidates
+from mgc_v05l.research.ndxp_multidte_data import Candidate, load_candidates
 
 @dataclass(frozen=True)
 class Outcome:
     session_date: date
     expiration: date
-    dte_calendar: int
+    calendar_dte: int
+    trading_sessions_to_expiry: int
     target_credit: float
     entry_credit: float
     short_strike: float
@@ -78,17 +79,17 @@ def evaluate(candidates: Sequence[Candidate], paths, *, qty=20, fee_side=1.324, 
             gross=(entry-exit_debit)*100*qty
             fees=fee_side*qty*2
             max_loss=(10-entry)*100*qty + fees
-            out.append(Outcome(c.session_date,c.expiration,c.dte_calendar,c.target_credit,entry,c.short_strike,c.long_strike,name,t,exit_debit,qty,gross,fees,gross-fees,max_loss,(gross-fees)/max_loss,series[min_idx][2],max_debit,(series[min_idx][0]-c.entry_time).total_seconds()/60, target is not None and chosen[2] <= target))
+            out.append(Outcome(c.session_date,c.expiration,c.calendar_dte,c.trading_sessions_to_expiry,c.target_credit,entry,c.short_strike,c.long_strike,name,t,exit_debit,qty,gross,fees,gross-fees,max_loss,(gross-fees)/max_loss,series[min_idx][2],max_debit,(series[min_idx][0]-c.entry_time).total_seconds()/60, target is not None and chosen[2] <= target))
     return out
 
 
 def summarize(rows):
     groups=defaultdict(list)
-    for r in rows: groups[(r.dte_calendar,r.target_credit,r.exit_rule)].append(r)
+    for r in rows: groups[(r.calendar_dte,r.target_credit,r.exit_rule)].append(r)
     out=[]
     for key,trades in sorted(groups.items()):
         pnl=[x.net_pnl for x in trades]; wins=[x for x in pnl if x>0]; losses=[x for x in pnl if x<0]
-        out.append({"dte":key[0],"target_credit":key[1],"exit_rule":key[2],"trades":len(trades),"win_rate":len(wins)/len(trades),"avg_pnl":statistics.fmean(pnl),"median_pnl":statistics.median(pnl),"total_pnl":sum(pnl),"profit_factor":sum(wins)/abs(sum(losses)) if losses else None,"avg_min_debit":statistics.fmean(x.min_debit_seen for x in trades),"target_hit_rate":sum(x.hit_target for x in trades)/len(trades),"avg_return_on_max_risk":statistics.fmean(x.return_on_max_risk for x in trades),"worst_trade":min(pnl),"best_trade":max(pnl)})
+        out.append({"calendar_dte":key[0],"target_credit":key[1],"exit_rule":key[2],"trades":len(trades),"win_rate":len(wins)/len(trades),"avg_pnl":statistics.fmean(pnl),"median_pnl":statistics.median(pnl),"total_pnl":sum(pnl),"profit_factor":sum(wins)/abs(sum(losses)) if losses else None,"avg_min_debit":statistics.fmean(x.min_debit_seen for x in trades),"target_hit_rate":sum(x.hit_target for x in trades)/len(trades),"avg_return_on_max_risk":statistics.fmean(x.return_on_max_risk for x in trades),"worst_trade":min(pnl),"best_trade":max(pnl)})
     return out
 
 
