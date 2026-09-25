@@ -54,32 +54,31 @@ def pair_series(c: Candidate, paths):
         if t < c.entry_time.replace(second=0,microsecond=0): continue
         sb,sa=s[t]; lb,la=l[t]
         mid=((sb+sa)/2)-((lb+la)/2)
-        natural=sa-lb  # debit to buy back: short leg ask - long leg bid
-        if 0 <= mid <= 10 and 0 <= natural <= 10:
-            out.append((t,mid,natural))
+        if 0 <= mid <= 10:
+            out.append((t,mid))
     return out
 
 
-def evaluate(candidates: Sequence[Candidate], paths, *, qty=20, fee_side=1.324, exit_targets=(3.0,2.0,1.0,0.5), fill_haircut=0.25):
+def evaluate(candidates: Sequence[Candidate], paths, *, qty=20, fee_side=1.324, exit_targets=(3.0,2.0,1.0,0.5), entry_slippage=0.05, exit_slippage=0.05):
     out=[]
     for c in candidates:
         series=pair_series(c,paths)
         if not series: continue
-        entry=max(0.01, min(9.99, c.mid_credit-fill_haircut))
-        debits=[x[2] for x in series]
-        min_idx=min(range(len(series)), key=lambda i: series[i][2]); max_debit=max(debits)
+        entry=max(0.01, min(9.99, c.mid_credit-entry_slippage))
+        debits=[x[1] for x in series]
+        min_idx=min(range(len(series)), key=lambda i: series[i][1]); max_debit=max(debits)
         rules=[(f"target_{x:g}",x) for x in exit_targets] + [("eod_or_last",None)]
         for name,target in rules:
             chosen=None
             if target is not None:
-                chosen=next((row for row in series if row[2] <= target),None)
+                chosen=next((row for row in series if row[1] + exit_slippage <= target),None)
             if chosen is None: chosen=series[-1]
-            t,mid,natural=chosen
-            exit_debit=natural
+            t,mid=chosen
+            exit_debit=max(0.0, min(10.0, mid + exit_slippage))
             gross=(entry-exit_debit)*100*qty
             fees=fee_side*qty*2
             max_loss=(10-entry)*100*qty + fees
-            out.append(Outcome(c.session_date,c.expiration,c.calendar_dte,c.trading_sessions_to_expiry,c.target_credit,entry,c.short_strike,c.long_strike,name,t,exit_debit,qty,gross,fees,gross-fees,max_loss,(gross-fees)/max_loss,series[min_idx][2],max_debit,(series[min_idx][0]-c.entry_time).total_seconds()/60, target is not None and chosen[2] <= target))
+            out.append(Outcome(c.session_date,c.expiration,c.calendar_dte,c.trading_sessions_to_expiry,c.target_credit,entry,c.short_strike,c.long_strike,name,t,exit_debit,qty,gross,fees,gross-fees,max_loss,(gross-fees)/max_loss,series[min_idx][1],max_debit,(series[min_idx][0]-c.entry_time).total_seconds()/60, target is not None and exit_debit <= target))
     return out
 
 
@@ -102,14 +101,14 @@ def write_csv(path, rows):
 def main(argv=None):
     p=argparse.ArgumentParser(description=__doc__)
     p.add_argument("--candidates",type=Path,required=True); p.add_argument("--paths",type=Path,required=True); p.add_argument("--output-dir",type=Path,required=True)
-    p.add_argument("--qty",type=int,default=20); p.add_argument("--fee-side",type=float,default=1.324); p.add_argument("--entry-haircut",type=float,default=0.25); p.add_argument("--exit-targets",default="3,2,1,0.5")
+    p.add_argument("--qty",type=int,default=20); p.add_argument("--fee-side",type=float,default=1.324); p.add_argument("--entry-slippage",type=float,default=0.05); p.add_argument("--exit-slippage",type=float,default=0.05); p.add_argument("--exit-targets",default="3,2,1,0.5")
     a=p.parse_args(argv)
     candidates=load_candidates(a.candidates); paths=load_paths(a.paths)
     targets=tuple(float(x) for x in a.exit_targets.split(","))
-    rows=evaluate(candidates,paths,qty=a.qty,fee_side=a.fee_side,exit_targets=targets,fill_haircut=a.entry_haircut)
+    rows=evaluate(candidates,paths,qty=a.qty,fee_side=a.fee_side,exit_targets=targets,entry_slippage=a.entry_slippage,exit_slippage=a.exit_slippage)
     summary=summarize(rows); a.output_dir.mkdir(parents=True,exist_ok=True)
     write_csv(a.output_dir/"outcomes.csv",[{k:(v.isoformat() if hasattr(v,"isoformat") else v) for k,v in asdict(r).items()} for r in rows]); write_csv(a.output_dir/"summary.csv",summary)
-    report={"counts":{"candidates":len(candidates),"outcomes":len(rows)},"assumptions":{"qty":a.qty,"fee_per_contract_side":a.fee_side,"entry_mid_haircut":a.entry_haircut,"exit_uses_natural_debit":True,"targets":targets},"summary":summary}
+    report={"counts":{"candidates":len(candidates),"outcomes":len(rows)},"assumptions":{"qty":a.qty,"fee_per_contract_side":a.fee_side,"entry_mid_slippage":a.entry_slippage,"exit_mid_slippage":a.exit_slippage,"exit_uses_spread_mid":True,"targets":targets},"summary":summary}
     (a.output_dir/"report.json").write_text(json.dumps(report,indent=2,default=str)+"\n")
     print(json.dumps(report["counts"]))
     return 0
