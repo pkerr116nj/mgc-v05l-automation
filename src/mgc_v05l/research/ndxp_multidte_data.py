@@ -300,47 +300,113 @@ def load_candidates(path: Path) -> list[Candidate]:
     return out
 
 
-def estimate_paths(client: Any, candidates: Sequence[Candidate]) -> float:
+def estimate_paths(client: Any, candidates: Sequence[Candidate], workers: int = 8) -> float:
     by_session: dict[date, list[Candidate]] = {}
     for c in candidates:
         by_session.setdefault(c.session_date, []).append(c)
-    total = 0.0
-    for session, rows in sorted(by_session.items()):
-        symbols = sorted({s for c in rows for s in (c.short_symbol, c.long_symbol)})
+
+    def price_one(item: tuple[date, list[Candidate]]) -> float:
+        session, rows = item
+        symbols = sorted({sym for c in rows for sym in (c.short_symbol, c.long_symbol)})
         end_date = max(c.expiration for c in rows)
         start = datetime.combine(session, time(9, 30), NEW_YORK)
         end = datetime.combine(end_date, time(16, 1), NEW_YORK)
-        total += float(client.metadata.get_cost(dataset=DATASET, schema=PATH_SCHEMA, stype_in="raw_symbol", symbols=symbols, start=start, end=end))
+        local_client = historical_client()
+        return float(local_client.metadata.get_cost(
+            dataset=DATASET,
+            schema=PATH_SCHEMA,
+            stype_in="raw_symbol",
+            symbols=symbols,
+            start=start,
+            end=end,
+        ))
+
+    items = sorted(by_session.items())
+    max_workers = max(1, min(int(workers), 12))
+    total = 0.0
+    with ThreadPoolExecutor(max_workers=max_workers) as pool:
+        futures = [pool.submit(price_one, item) for item in items]
+        for future in as_completed(futures):
+            total += future.result()
     return total
 
-
-def download_paths(client: Any, candidates: Sequence[Candidate], cache_dir: Path, out_csv: Path) -> int:
+def download_paths(client: Any, candidates: Sequence[Candidate], cache_dir: Path, out_csv: Path, workers: int = 8) -> int:
     import databento as db
     by_session: dict[date, list[Candidate]] = {}
     for c in candidates:
         by_session.setdefault(c.session_date, []).append(c)
     cache_dir.mkdir(parents=True, exist_ok=True)
     out_csv.parent.mkdir(parents=True, exist_ok=True)
-    count = 0
-    with out_csv.open("w", newline="", encoding="utf-8") as fh:
-        fields = ["session_date", "quote_time", "symbol", "expiration", "strike", "bid", "ask"]
-        w = csv.DictWriter(fh, fieldnames=fields); w.writeheader()
-        for session, rows in sorted(by_session.items()):
-            symbols = sorted({s for c in rows for s in (c.short_symbol, c.long_symbol)})
-            end_date = max(c.expiration for c in rows)
-            cache = cache_dir / "ndxp-opt" / "selected-paths" / PATH_SCHEMA / f"{session.isoformat()}.dbn.zst"
-            cache.parent.mkdir(parents=True, exist_ok=True)
+
+    def fetch_one(item: tuple[date, list[Candidate]]) -> tuple[date, list[dict[str, object]], str | None]:
+        session, rows = item
+        symbols = sorted({sym for c in rows for sym in (c.short_symbol, c.long_symbol)})
+        end_date = max(c.expiration for c in rows)
+        cache = cache_dir / "ndxp-opt" / "selected-paths" / PATH_SCHEMA / f"{session.isoformat()}.dbn.zst"
+        cache.parent.mkdir(parents=True, exist_ok=True)
+        try:
             if cache.exists():
                 store = db.DBNStore.from_file(cache)
             else:
                 start = datetime.combine(session, time(9, 30), NEW_YORK)
                 end = datetime.combine(end_date, time(16, 1), NEW_YORK)
-                store = client.timeseries.get_range(dataset=DATASET, schema=PATH_SCHEMA, stype_in="raw_symbol", symbols=symbols, start=start, end=end, path=cache)
+                local_client = historical_client()
+                store = local_client.timeseries.get_range(
+                    dataset=DATASET,
+                    schema=PATH_SCHEMA,
+                    stype_in="raw_symbol",
+                    symbols=symbols,
+                    start=start,
+                    end=end,
+                    path=cache,
+                )
+            parsed = []
             for row in _frame_rows(store.to_df()):
-                w.writerow({"session_date": session.isoformat(), "quote_time": row["ts"].isoformat(), "symbol": row["symbol"], "expiration": row["expiration"].isoformat(), "strike": row["strike"], "bid": row["bid"], "ask": row["ask"]})
-                count += 1
-    return count
+                parsed.append({
+                    "session_date": session.isoformat(),
+                    "quote_time": row["ts"].isoformat(),
+                    "symbol": row["symbol"],
+                    "expiration": row["expiration"].isoformat(),
+                    "strike": row["strike"],
+                    "bid": row["bid"],
+                    "ask": row["ask"],
+                })
+            return session, parsed, None
+        except Exception as exc:
+            return session, [], str(exc)
 
+    results: dict[date, list[dict[str, object]]] = {}
+    failures: list[dict[str, str]] = []
+    max_workers = max(1, min(int(workers), 12))
+    with ThreadPoolExecutor(max_workers=max_workers) as pool:
+        futures = [pool.submit(fetch_one, item) for item in sorted(by_session.items())]
+        for future in as_completed(futures):
+            session, rows, error = future.result()
+            if error:
+                failures.append({"session": session.isoformat(), "error": error})
+            else:
+                results[session] = rows
+
+    count = 0
+    with out_csv.open("w", newline="", encoding="utf-8") as fh:
+        fields = ["session_date", "quote_time", "symbol", "expiration", "strike", "bid", "ask"]
+        writer = csv.DictWriter(fh, fieldnames=fields)
+        writer.writeheader()
+        for session in sorted(results):
+            for row in results[session]:
+                writer.writerow(row)
+                count += 1
+
+    failure_path = out_csv.with_suffix(".failures.json")
+    failure_path.write_text(json.dumps(sorted(failures, key=lambda x: x["session"]), indent=2) + "\n", encoding="utf-8")
+    print(json.dumps({
+        "path_sessions_requested": len(by_session),
+        "path_sessions_completed": len(results),
+        "path_sessions_failed": len(failures),
+        "path_rows": count,
+        "failure_log": str(failure_path),
+    }, indent=2))
+    return count
 
 def _month_key(d: date) -> tuple[int, int]:
     return d.year, d.month
@@ -452,8 +518,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     eh.add_argument("--starts", default="2013-04-01,2016-09-24,2021-09-24,2023-09-24,2025-09-24")
     eh.add_argument("--workers", type=int, default=8)
     d = sub.add_parser("download-discovery", parents=[common]); d.add_argument("--cache-dir", type=Path, required=True); d.add_argument("--output", type=Path, required=True); d.add_argument("--max-cost", type=float, required=True)
-    ep = sub.add_parser("estimate-paths"); ep.add_argument("--candidates", type=Path, required=True)
-    dp = sub.add_parser("download-paths"); dp.add_argument("--candidates", type=Path, required=True); dp.add_argument("--cache-dir", type=Path, required=True); dp.add_argument("--output", type=Path, required=True); dp.add_argument("--max-cost", type=float, required=True)
+    ep = sub.add_parser("estimate-paths"); ep.add_argument("--candidates", type=Path, required=True); ep.add_argument("--workers", type=int, default=8)
+    dp = sub.add_parser("download-paths"); dp.add_argument("--candidates", type=Path, required=True); dp.add_argument("--cache-dir", type=Path, required=True); dp.add_argument("--output", type=Path, required=True); dp.add_argument("--max-cost", type=float, required=True); dp.add_argument("--workers", type=int, default=8)
     ic = sub.add_parser("inspect-cache"); ic.add_argument("--file", type=Path, required=True)
     a = p.parse_args(argv)
     if a.cmd == "inspect-cache":
@@ -517,11 +583,11 @@ def main(argv: Sequence[str] | None = None) -> int:
             print(f"wrote {len(rows)} candidate rows to {a.output}")
         return 0
     candidates = load_candidates(a.candidates)
-    cost = estimate_paths(client, candidates)
+    cost = estimate_paths(client, candidates, workers=a.workers)
     print(json.dumps({"stage":"paths","candidates":len(candidates),"estimated_cost":cost}, indent=2))
     if a.cmd == "download-paths":
         if cost > a.max_cost: raise SystemExit(f"aborted: ${cost:.4f} exceeds max ${a.max_cost:.4f}")
-        count = download_paths(client, candidates, a.cache_dir, a.output)
+        count = download_paths(client, candidates, a.cache_dir, a.output, workers=a.workers)
         print(f"wrote {count} path rows to {a.output}")
     return 0
 
