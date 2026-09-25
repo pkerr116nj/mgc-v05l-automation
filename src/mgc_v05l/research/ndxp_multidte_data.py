@@ -141,10 +141,10 @@ def _latest_first_minute(rows: Iterable[dict[str, object]], session: date, expir
 
 def discover_candidates(frame: Any, session: date, *, dtes: Sequence[int], targets: Sequence[float], width: float = 10.0) -> list[Candidate]:
     rows = _frame_rows(frame)
-    listed_expirations = sorted({row["expiration"] for row in rows if row["expiration"] > session})
+    listed_expirations = sorted({row["expiration"] for row in rows if row["expiration"] >= session})
     requested = {}
     for dte in dtes:
-        index = int(dte) - 1
+        index = int(dte)
         if 0 <= index < len(listed_expirations):
             requested[int(dte)] = listed_expirations[index]
     latest = _latest_first_minute(rows, session, set(requested.values()))
