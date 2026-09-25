@@ -31,7 +31,7 @@ PATH_SCHEMA = "cbbo-1m"
 class Candidate:
     session_date: date
     expiration: date
-    dte_calendar: int
+    dte_sessions: int
     target_credit: float
     entry_time: datetime
     short_strike: float
@@ -126,11 +126,19 @@ def _latest_first_minute(rows: Iterable[dict[str, object]], session: date, expir
 
 
 def discover_candidates(frame: Any, session: date, *, dtes: Sequence[int], targets: Sequence[float], width: float = 10.0) -> list[Candidate]:
-    exps = {session + timedelta(days=int(dte)) for dte in dtes}
-    latest = _latest_first_minute(_frame_rows(frame), session, exps)
+    rows = _frame_rows(frame)
+    listed_expirations = sorted({row["expiration"] for row in rows if row["expiration"] > session})
+    requested = {}
+    for dte in dtes:
+        index = int(dte) - 1
+        if 0 <= index < len(listed_expirations):
+            requested[int(dte)] = listed_expirations[index]
+    latest = _latest_first_minute(rows, session, set(requested.values()))
     result: list[Candidate] = []
     for dte in dtes:
-        exp = session + timedelta(days=int(dte))
+        exp = requested.get(int(dte))
+        if exp is None:
+            continue
         spreads: list[Candidate] = []
         strikes = sorted(strike for e, strike in latest if e == exp)
         for short_strike in strikes:
@@ -146,7 +154,7 @@ def discover_candidates(frame: Any, session: date, *, dtes: Sequence[int], targe
             spreads.append(Candidate(
                 session_date=session,
                 expiration=exp,
-                dte_calendar=int(dte),
+                dte_sessions=int(dte),
                 target_credit=0.0,
                 entry_time=max(s["ts"], l["ts"]),
                 short_strike=short_strike,
@@ -206,7 +214,7 @@ def load_candidates(path: Path) -> list[Candidate]:
     with path.open(newline="", encoding="utf-8") as fh:
         for r in csv.DictReader(fh):
             out.append(Candidate(
-                session_date=date.fromisoformat(r["session_date"]), expiration=date.fromisoformat(r["expiration"]), dte_calendar=int(r["dte_calendar"]),
+                session_date=date.fromisoformat(r["session_date"]), expiration=date.fromisoformat(r["expiration"]), dte_sessions=int(r["dte_sessions"]),
                 target_credit=float(r["target_credit"]), entry_time=datetime.fromisoformat(r["entry_time"]), short_strike=float(r["short_strike"]), long_strike=float(r["long_strike"]),
                 short_symbol=r["short_symbol"], long_symbol=r["long_symbol"], short_bid=float(r["short_bid"]), short_ask=float(r["short_ask"]), long_bid=float(r["long_bid"]), long_ask=float(r["long_ask"]),
                 mid_credit=float(r["mid_credit"]), natural_credit=float(r["natural_credit"])))
