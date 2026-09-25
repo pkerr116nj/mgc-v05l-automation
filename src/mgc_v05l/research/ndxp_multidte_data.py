@@ -204,6 +204,19 @@ def estimate_discovery(client: Any, sessions: Sequence[date]) -> tuple[float, li
     return total, details
 
 
+def estimate_discovery_range(client: Any, start_date: date, end_date: date) -> float:
+    start = datetime.combine(start_date, time(9, 30), NEW_YORK)
+    end = datetime.combine(end_date, time(9, 31), NEW_YORK)
+    return float(client.metadata.get_cost(
+        dataset=DATASET,
+        schema=DISCOVERY_SCHEMA,
+        stype_in="parent",
+        symbols=[PARENT],
+        start=start,
+        end=end,
+    ))
+
+
 def download_discovery(client: Any, sessions: Sequence[date], cache_dir: Path, out_csv: Path, *, dtes: Sequence[int], targets: Sequence[float], workers: int = 8) -> list[Candidate]:
     import databento as db
     cache_dir.mkdir(parents=True, exist_ok=True)
@@ -375,9 +388,15 @@ def main(argv: Sequence[str] | None = None) -> int:
         sessions = weekdays_between(date.fromisoformat(a.start), end_date) if a.start else weekdays_back(end_date, a.sessions)
         dtes = [int(x) for x in a.dtes.split(",")]
         targets = [float(x) for x in a.targets.split(",")]
-        cost, details = estimate_discovery(client, sessions)
-        unresolved = [row for row in details if row["status"] != "ok"]
-        print(json.dumps({"stage":"discovery","parent":PARENT,"sessions_requested":len(sessions),"sessions_priced":len(details)-len(unresolved),"sessions_unresolved":len(unresolved),"estimated_cost":cost,"unresolved":unresolved}, indent=2))
+        if a.start:
+            cost = estimate_discovery_range(client, date.fromisoformat(a.start), end_date)
+            details = []
+            unresolved = []
+            print(json.dumps({"stage":"discovery","parent":PARENT,"schema":DISCOVERY_SCHEMA,"range_start":a.start,"range_end":a.end,"sessions_requested":len(sessions),"estimated_cost":cost,"estimator":"single_range_request"}, indent=2))
+        else:
+            cost, details = estimate_discovery(client, sessions)
+            unresolved = [row for row in details if row["status"] != "ok"]
+            print(json.dumps({"stage":"discovery","parent":PARENT,"sessions_requested":len(sessions),"sessions_priced":len(details)-len(unresolved),"sessions_unresolved":len(unresolved),"estimated_cost":cost,"unresolved":unresolved}, indent=2))
         if a.cmd == "download-discovery":
             if cost > a.max_cost: raise SystemExit(f"aborted: ${cost:.4f} exceeds max ${a.max_cost:.4f}")
             rows = download_discovery(client, sessions, a.cache_dir, a.output, dtes=dtes, targets=targets, workers=a.workers)
