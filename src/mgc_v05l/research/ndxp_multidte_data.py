@@ -227,7 +227,8 @@ def download_discovery(client: Any, sessions: Sequence[date], cache_dir: Path, o
     cache_dir.mkdir(parents=True, exist_ok=True)
 
     def fetch_one(session: date) -> tuple[date, list[Candidate], str | None]:
-        cache = cache_dir / f"{session.isoformat()}-opening-{DISCOVERY_SCHEMA}.dbn.zst"
+        cache = cache_dir / "ndxp-opt" / "opening-0930-0932" / DISCOVERY_SCHEMA / f"{session.isoformat()}.dbn.zst"
+        cache.parent.mkdir(parents=True, exist_ok=True)
         try:
             if cache.exists():
                 store = db.DBNStore.from_file(cache)
@@ -327,7 +328,8 @@ def download_paths(client: Any, candidates: Sequence[Candidate], cache_dir: Path
         for session, rows in sorted(by_session.items()):
             symbols = sorted({s for c in rows for s in (c.short_symbol, c.long_symbol)})
             end_date = max(c.expiration for c in rows)
-            cache = cache_dir / f"{session.isoformat()}-selected-{PATH_SCHEMA}.dbn.zst"
+            cache = cache_dir / "ndxp-opt" / "selected-paths" / PATH_SCHEMA / f"{session.isoformat()}.dbn.zst"
+            cache.parent.mkdir(parents=True, exist_ok=True)
             if cache.exists():
                 store = db.DBNStore.from_file(cache)
             else:
