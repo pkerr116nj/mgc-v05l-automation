@@ -1,7 +1,7 @@
 """Targeted Databento acquisition for NDXP 2DTE/3DTE vertical research.
 
 Two-stage design keeps OPRA cost/runtime bounded:
-1. Discover only the 09:30-09:31 ET NDX option chain with CBBO-1m.
+1. Discover the opening NDXP option chain through 09:32 ET with CBBO-1m.
 2. Select a small set of 10-point put spreads, then download CBBO-1m only
    for those exact option symbols through expiration.
 
@@ -23,7 +23,7 @@ from zoneinfo import ZoneInfo
 
 NEW_YORK = ZoneInfo("America/New_York")
 DATASET = "OPRA.PILLAR"
-PARENT = "NDX.OPT"
+PARENT = "NDXP.OPT"
 DISCOVERY_SCHEMA = "cbbo-1m"
 PATH_SCHEMA = "cbbo-1m"
 
@@ -125,7 +125,7 @@ def _frame_rows(frame: Any) -> list[dict[str, object]]:
 
 
 def _latest_first_minute(rows: Iterable[dict[str, object]], session: date, expirations: set[date]) -> dict[tuple[date, float], dict[str, object]]:
-    start = datetime.combine(session, time(9, 30), NEW_YORK)
+    start = datetime.combine(session, time(9, 31), NEW_YORK)
     end = start + timedelta(minutes=1)
     latest: dict[tuple[date, float], dict[str, object]] = {}
     for row in rows:
@@ -193,7 +193,7 @@ def estimate_discovery(client: Any, sessions: Sequence[date]) -> tuple[float, li
     details: list[dict[str, object]] = []
     for session in sessions:
         start = datetime.combine(session, time(9, 30), NEW_YORK)
-        end = start + timedelta(minutes=1)
+        end = start + timedelta(minutes=2)
         try:
             cost = float(client.metadata.get_cost(dataset=DATASET, schema=DISCOVERY_SCHEMA, stype_in="parent", symbols=[PARENT], start=start, end=end))
         except Exception as exc:
@@ -206,7 +206,7 @@ def estimate_discovery(client: Any, sessions: Sequence[date]) -> tuple[float, li
 
 def estimate_discovery_range(client: Any, start_date: date, end_date: date) -> float:
     start = datetime.combine(start_date, time(9, 30), NEW_YORK)
-    end = datetime.combine(end_date, time(9, 31), NEW_YORK)
+    end = datetime.combine(end_date, time(9, 32), NEW_YORK)
     return float(client.metadata.get_cost(
         dataset=DATASET,
         schema=DISCOVERY_SCHEMA,
@@ -228,7 +228,7 @@ def download_discovery(client: Any, sessions: Sequence[date], cache_dir: Path, o
                 store = db.DBNStore.from_file(cache)
             else:
                 start = datetime.combine(session, time(9, 30), NEW_YORK)
-                end = start + timedelta(minutes=1)
+                end = start + timedelta(minutes=2)
                 local_client = historical_client()
                 store = local_client.timeseries.get_range(
                     dataset=DATASET,
@@ -383,7 +383,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             if start_date > end_date:
                 raise SystemExit(f"start {start_date} is after end {end_date}")
             start_ts = datetime.combine(start_date, time(9, 30), NEW_YORK)
-            end_ts = datetime.combine(end_date, time(9, 31), NEW_YORK)
+            end_ts = datetime.combine(end_date, time(9, 32), NEW_YORK)
             cost = float(client.metadata.get_cost(
                 dataset=DATASET,
                 schema=DISCOVERY_SCHEMA,
