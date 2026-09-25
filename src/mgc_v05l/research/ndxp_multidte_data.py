@@ -351,7 +351,29 @@ def main(argv: Sequence[str] | None = None) -> int:
     d = sub.add_parser("download-discovery", parents=[common]); d.add_argument("--cache-dir", type=Path, required=True); d.add_argument("--output", type=Path, required=True); d.add_argument("--max-cost", type=float, required=True)
     ep = sub.add_parser("estimate-paths"); ep.add_argument("--candidates", type=Path, required=True)
     dp = sub.add_parser("download-paths"); dp.add_argument("--candidates", type=Path, required=True); dp.add_argument("--cache-dir", type=Path, required=True); dp.add_argument("--output", type=Path, required=True); dp.add_argument("--max-cost", type=float, required=True)
+    ic = sub.add_parser("inspect-cache"); ic.add_argument("--file", type=Path, required=True)
     a = p.parse_args(argv)
+    if a.cmd == "inspect-cache":
+        import databento as db
+        store = db.DBNStore.from_file(a.file)
+        print("metadata:")
+        print(store.metadata)
+        for map_symbols in (False, True):
+            try:
+                df = store.to_df(map_symbols=map_symbols).reset_index()
+            except TypeError:
+                df = store.to_df().reset_index()
+                map_symbols = "unsupported"
+            print(json.dumps({
+                "map_symbols": map_symbols,
+                "rows": int(len(df)),
+                "columns": [str(c) for c in df.columns],
+            }, indent=2))
+            print(df.head(8).to_string(index=False))
+            if "symbol" in df.columns:
+                print("sample_symbols:", df["symbol"].dropna().astype(str).head(12).tolist())
+            print("---")
+        return 0
     client = historical_client()
     if a.cmd == "estimate-history":
         end_date = date.fromisoformat(a.end)
