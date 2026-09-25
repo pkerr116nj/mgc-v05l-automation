@@ -23,7 +23,7 @@ from zoneinfo import ZoneInfo
 NEW_YORK = ZoneInfo("America/New_York")
 DATASET = "OPRA.PILLAR"
 PARENT = "NDX.OPT"
-DISCOVERY_SCHEMA = "cbbo-1s"
+DISCOVERY_SCHEMA = "cbbo-1m"
 PATH_SCHEMA = "cbbo-1m"
 
 
@@ -278,6 +278,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     common.add_argument("--dtes", default="2,3")
     common.add_argument("--targets", default="5,6,7")
     sub.add_parser("estimate-discovery", parents=[common])
+    eh = sub.add_parser("estimate-history")
+    eh.add_argument("--end", required=True)
+    eh.add_argument("--starts", default="2013-04-01,2016-09-24,2021-09-24,2023-09-24,2025-09-24")
     d = sub.add_parser("download-discovery", parents=[common]); d.add_argument("--cache-dir", type=Path, required=True); d.add_argument("--output", type=Path, required=True); d.add_argument("--max-cost", type=float, required=True)
     ep = sub.add_parser("estimate-paths"); ep.add_argument("--candidates", type=Path, required=True)
     dp = sub.add_parser("download-paths"); dp.add_argument("--candidates", type=Path, required=True); dp.add_argument("--cache-dir", type=Path, required=True); dp.add_argument("--output", type=Path, required=True); dp.add_argument("--max-cost", type=float, required=True)
