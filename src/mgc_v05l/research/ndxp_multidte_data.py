@@ -18,6 +18,7 @@ from dataclasses import asdict, dataclass
 from datetime import date, datetime, time, timedelta
 from pathlib import Path
 from typing import Any, Iterable, Sequence
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from zoneinfo import ZoneInfo
 
 NEW_YORK = ZoneInfo("America/New_York")
@@ -65,6 +66,19 @@ def weekdays_back(end: date, count: int) -> list[date]:
             out.append(cur)
         cur -= timedelta(days=1)
     return sorted(out)
+
+
+
+def weekdays_between(start: date, end: date) -> list[date]:
+    if start > end:
+        raise ValueError("start is after end")
+    out: list[date] = []
+    cur = start
+    while cur <= end:
+        if cur.weekday() < 5:
+            out.append(cur)
+        cur += timedelta(days=1)
+    return out
 
 
 def parse_osi(symbol: str) -> tuple[str, date, str, float]:
@@ -190,19 +204,48 @@ def estimate_discovery(client: Any, sessions: Sequence[date]) -> tuple[float, li
     return total, details
 
 
-def download_discovery(client: Any, sessions: Sequence[date], cache_dir: Path, out_csv: Path, *, dtes: Sequence[int], targets: Sequence[float]) -> list[Candidate]:
+def download_discovery(client: Any, sessions: Sequence[date], cache_dir: Path, out_csv: Path, *, dtes: Sequence[int], targets: Sequence[float], workers: int = 8) -> list[Candidate]:
     import databento as db
     cache_dir.mkdir(parents=True, exist_ok=True)
-    all_candidates: list[Candidate] = []
-    for session in sessions:
+
+    def fetch_one(session: date) -> tuple[date, list[Candidate], str | None]:
         cache = cache_dir / f"{session.isoformat()}-opening-{DISCOVERY_SCHEMA}.dbn.zst"
-        if cache.exists():
-            store = db.DBNStore.from_file(cache)
-        else:
-            start = datetime.combine(session, time(9, 30), NEW_YORK)
-            end = start + timedelta(minutes=1)
-            store = client.timeseries.get_range(dataset=DATASET, schema=DISCOVERY_SCHEMA, stype_in="parent", symbols=[PARENT], start=start, end=end, path=cache)
-        all_candidates.extend(discover_candidates(store.to_df(), session, dtes=dtes, targets=targets))
+        try:
+            if cache.exists():
+                store = db.DBNStore.from_file(cache)
+            else:
+                start = datetime.combine(session, time(9, 30), NEW_YORK)
+                end = start + timedelta(minutes=1)
+                local_client = historical_client()
+                store = local_client.timeseries.get_range(
+                    dataset=DATASET,
+                    schema=DISCOVERY_SCHEMA,
+                    stype_in="parent",
+                    symbols=[PARENT],
+                    start=start,
+                    end=end,
+                    path=cache,
+                )
+            return session, discover_candidates(store.to_df(), session, dtes=dtes, targets=targets), None
+        except Exception as exc:
+            return session, [], str(exc)
+
+    results: dict[date, list[Candidate]] = {}
+    failures: list[dict[str, str]] = []
+    max_workers = max(1, min(int(workers), 12))
+    with ThreadPoolExecutor(max_workers=max_workers) as pool:
+        futures = {pool.submit(fetch_one, session): session for session in sessions}
+        for future in as_completed(futures):
+            session, rows, error = future.result()
+            if error:
+                failures.append({"session": session.isoformat(), "error": error})
+            else:
+                results[session] = rows
+
+    all_candidates: list[Candidate] = []
+    for session in sorted(results):
+        all_candidates.extend(results[session])
+
     out_csv.parent.mkdir(parents=True, exist_ok=True)
     with out_csv.open("w", newline="", encoding="utf-8") as fh:
         fields = list(asdict(all_candidates[0]).keys()) if all_candidates else ["session_date"]
@@ -213,8 +256,17 @@ def download_discovery(client: Any, sessions: Sequence[date], cache_dir: Path, o
             for k in ("session_date", "expiration", "entry_time"):
                 rec[k] = rec[k].isoformat()
             w.writerow(rec)
-    return all_candidates
 
+    failure_path = out_csv.with_suffix(".failures.json")
+    failure_path.write_text(json.dumps(sorted(failures, key=lambda x: x["session"]), indent=2) + "\n", encoding="utf-8")
+    print(json.dumps({
+        "download_sessions_requested": len(sessions),
+        "download_sessions_completed": len(results),
+        "download_sessions_failed": len(failures),
+        "candidate_rows": len(all_candidates),
+        "failure_log": str(failure_path),
+    }, indent=2))
+    return all_candidates
 
 def load_candidates(path: Path) -> list[Candidate]:
     out: list[Candidate] = []
@@ -274,7 +326,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     sub = p.add_subparsers(dest="cmd", required=True)
     common = argparse.ArgumentParser(add_help=False)
     common.add_argument("--end", required=True)
+    common.add_argument("--start")
     common.add_argument("--sessions", type=int, default=60)
+    common.add_argument("--workers", type=int, default=8)
     common.add_argument("--dtes", default="2,3")
     common.add_argument("--targets", default="5,6,7")
     sub.add_parser("estimate-discovery", parents=[common])
@@ -317,7 +371,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         }, indent=2))
         return 0
     if a.cmd in {"estimate-discovery", "download-discovery"}:
-        sessions = weekdays_back(date.fromisoformat(a.end), a.sessions)
+        end_date = date.fromisoformat(a.end)
+        sessions = weekdays_between(date.fromisoformat(a.start), end_date) if a.start else weekdays_back(end_date, a.sessions)
         dtes = [int(x) for x in a.dtes.split(",")]
         targets = [float(x) for x in a.targets.split(",")]
         cost, details = estimate_discovery(client, sessions)
@@ -325,7 +380,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(json.dumps({"stage":"discovery","parent":PARENT,"sessions_requested":len(sessions),"sessions_priced":len(details)-len(unresolved),"sessions_unresolved":len(unresolved),"estimated_cost":cost,"unresolved":unresolved}, indent=2))
         if a.cmd == "download-discovery":
             if cost > a.max_cost: raise SystemExit(f"aborted: ${cost:.4f} exceeds max ${a.max_cost:.4f}")
-            rows = download_discovery(client, sessions, a.cache_dir, a.output, dtes=dtes, targets=targets)
+            rows = download_discovery(client, sessions, a.cache_dir, a.output, dtes=dtes, targets=targets, workers=a.workers)
             print(f"wrote {len(rows)} candidate rows to {a.output}")
         return 0
     candidates = load_candidates(a.candidates)
