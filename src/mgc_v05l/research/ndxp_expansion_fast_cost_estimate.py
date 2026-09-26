@@ -1,32 +1,13 @@
-"""Fast, bounded Databento cost estimator for the expanded NDXP event study.
+"""Fast bounded Databento cost estimator for expanded NDXP CMBP-1 research.
 
-Purpose
--------
-Estimate the cost of broad NDXP CMBP-1 capture without repeating the prior
-hundreds-of-calls pricing mistake.
-
-Design
-------
-* Exactly four representative regular sessions by default.
-* Two get_cost calls per session:
-    1. full-parent NDXP opening window, 09:30-10:00 ET
-    2. full-parent NDXP regular session, open-close
-* Maximum eight metadata calls total.
-* Four workers.
-* No data downloads.
-* No per-contract pricing loops.
-* Results are deliberately conservative because parent requests include more
-  contracts than the eventual $2-to-first-$10 surface.
-
-If the full-parent upper bound is cheap enough, prefer broad acquisition over
-engineering a surgical strike-by-strike downloader.
+Uses four representative sessions and three two-minute parent-symbol samples
+per session. Maximum: 12 metadata calls, four workers, zero downloads.
 """
 from __future__ import annotations
 
 import argparse
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
-from datetime import timedelta
 import json
 import math
 from pathlib import Path
@@ -66,61 +47,72 @@ class SampleRequest:
 
 
 def _sessions(start: str, end: str) -> pd.DatetimeIndex:
-    cal = xc.get_calendar("XNYS")
-    return cal.sessions_in_range(pd.Timestamp(start), pd.Timestamp(end))
+    return xc.get_calendar("XNYS").sessions_in_range(pd.Timestamp(start), pd.Timestamp(end))
 
 
 def representative_sessions(start: str, end: str, n: int = 4) -> list[str]:
-    """Deterministic evenly-spaced regular sessions; no outcome-based selection."""
     sessions = _sessions(start, end)
     if len(sessions) < n:
-        raise ValueError("Not enough sessions for requested sample")
-    # Avoid endpoints so one odd first/last day cannot dominate.
-    fractions = [(i + 1) / (n + 1) for i in range(n)]
-    idx = [min(len(sessions) - 1, max(0, round(f * (len(sessions) - 1)))) for f in fractions]
-    chosen = [sessions[i].strftime("%Y-%m-%d") for i in idx]
-    if len(set(chosen)) != n:
-        raise ValueError("Representative session selection collapsed")
-    return chosen
+        raise ValueError("Not enough sessions")
+    idx = [round(((i + 1) / (n + 1)) * (len(sessions) - 1)) for i in range(n)]
+    result = [sessions[i].strftime("%Y-%m-%d") for i in idx]
+    if len(set(result)) != n:
+        raise ValueError("Sample dates collapsed")
+    return result
 
 
 def build_requests(sample_dates: list[str]) -> list[SampleRequest]:
-    """Build only short parent-symbol samples so metadata pricing stays fast."""
     cal = xc.get_calendar("XNYS")
-    requests: list[SampleRequest] = []
+    out = []
     for day in sample_dates:
         if not cal.is_session(day):
-            raise ValueError(f"Non-session sample: {day}")
-        open_ts = cal.session_open(day)
-        close_ts = cal.session_close(day)
-        span = close_ts - open_ts
-        anchors = {
-            "opening_2m": open_ts,
-            "midday_2m": open_ts + span / 2,
-            "closing_2m": max(open_ts, close_ts - pd.Timedelta(minutes=2)),
-        }
-        for window, a in anchors.items():
-            b = min(a + pd.Timedelta(minutes=2), close_ts)
-            requests.append(
-                SampleRequest(
-                    session=day,
-                    window=window,
-                    start=a.isoformat(),
-                    end=b.isoformat(),
-                )
-            )
-    if len(requests) > MAX_CALLS:
-        raise ValueError(f"Metadata call cap exceeded: {len(requests)} > {MAX_CALLS}")
-    return requestsdef summarize(rows: list[dict], start: str, end: str) -> dict:
-    """Extrapolate from short parent samples; never price a long parent interval."""
-    session_count = len(_sessions(start, end))
-    per_minute = [float(r["cost_usd"]) / 2.0 for r in rows]
-    med_rate = median(per_minute)
-    avg_rate = mean(per_minute)
-    max_rate = max(per_minute)
-    regular_minutes = 390.0
-    opening_minutes = 30.0
+            raise ValueError(f"Non-session: {day}")
+        op = cal.session_open(day)
+        cl = cal.session_close(day)
+        span = cl - op
+        anchors = (
+            ("opening_2m", op),
+            ("midday_2m", op + span / 2),
+            ("closing_2m", cl - pd.Timedelta(minutes=2)),
+        )
+        for window, start in anchors:
+            end = min(start + pd.Timedelta(minutes=2), cl)
+            out.append(SampleRequest(day, window, start.isoformat(), end.isoformat()))
+    if len(out) > MAX_CALLS:
+        raise ValueError("Metadata call cap exceeded")
+    return out
 
+
+def quote_requests(
+    requests: list[SampleRequest],
+    call: Callable[[str, dict], float],
+    workers: int = MAX_WORKERS,
+) -> list[dict]:
+    if len(requests) > MAX_CALLS:
+        raise ValueError("Metadata call cap exceeded")
+    if not 1 <= workers <= MAX_WORKERS:
+        raise ValueError("Worker cap exceeded")
+
+    def one(req: SampleRequest) -> dict:
+        value = call("get_cost", req.params())
+        if not isinstance(value, (int, float)) or not math.isfinite(value) or value < 0:
+            raise ValueError("Invalid provider cost")
+        return {
+            "session": req.session,
+            "window": req.window,
+            "start": req.start,
+            "end": req.end,
+            "cost_usd": float(value),
+        }
+
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        return list(pool.map(one, requests))
+
+
+def summarize(rows: list[dict], start: str, end: str) -> dict:
+    session_count = len(_sessions(start, end))
+    rates = [float(r["cost_usd"]) / 2.0 for r in rows]
+    med, avg, high = median(rates), mean(rates), max(rates)
     return {
         "mode": "fast_short_parent_samples",
         "dataset": DATASET,
@@ -134,24 +126,56 @@ def build_requests(sample_dates: list[str]) -> list[SampleRequest]:
         "max_workers": MAX_WORKERS,
         "download_calls": 0,
         "sample_minutes_each": 2,
-        "interpretation": (
-            "Cost is extrapolated from short full-parent samples. This deliberately "
-            "avoids long-running metadata requests. Because the eventual capture is "
-            "restricted to the $2-to-first-$10, 0-5DTE surface, the parent projection "
-            "is an intentionally broad upper-bound planning estimate."
-        ),
-        "per_minute_parent_cost_usd": {
-            "median": med_rate,
-            "mean": avg_rate,
-            "max": max_rate,
-        },
+        "per_minute_parent_cost_usd": {"median": med, "mean": avg, "max": high},
         "projected": {
-            "opening_30m_total_median_usd": med_rate * opening_minutes * session_count,
-            "opening_30m_total_mean_usd": avg_rate * opening_minutes * session_count,
-            "opening_30m_total_high_usd": max_rate * opening_minutes * session_count,
-            "full_regular_session_total_median_usd": med_rate * regular_minutes * session_count,
-            "full_regular_session_total_mean_usd": avg_rate * regular_minutes * session_count,
-            "full_regular_session_total_high_usd": max_rate * regular_minutes * session_count,
+            "opening_30m_total_median_usd": med * 30 * session_count,
+            "opening_30m_total_mean_usd": avg * 30 * session_count,
+            "opening_30m_total_high_usd": high * 30 * session_count,
+            "full_regular_session_total_median_usd": med * 390 * session_count,
+            "full_regular_session_total_mean_usd": avg * 390 * session_count,
+            "full_regular_session_total_high_usd": high * 390 * session_count,
         },
+        "interpretation": (
+            "Broad parent-symbol planning estimate from short samples. The eventual "
+            "$2-to-first-$10, 0-5DTE surface should be narrower."
+        ),
         "rows": rows,
     }
+
+
+def main() -> None:
+    p = argparse.ArgumentParser(description=__doc__)
+    p.add_argument("--start", default=DEFAULT_START)
+    p.add_argument("--end", default=DEFAULT_END)
+    p.add_argument("--samples", type=int, default=4, choices=[2, 3, 4])
+    p.add_argument("--env-file", type=Path, default=Path(".env.local"))
+    p.add_argument("--output", type=Path, required=True)
+    p.add_argument("--offline", action="store_true")
+    args = p.parse_args()
+
+    if args.output.exists():
+        raise FileExistsError("Choose a new output path")
+    dates = representative_sessions(args.start, args.end, args.samples)
+    requests = build_requests(dates)
+    args.output.parent.mkdir(parents=True, exist_ok=True)
+
+    if args.offline:
+        result = {
+            "mode": "offline_preview",
+            "sample_dates": dates,
+            "planned_metadata_calls": len(requests),
+            "metadata_calls": 0,
+            "download_calls": 0,
+            "requests": [{"session": r.session, "window": r.window, "params": r.params()} for r in requests],
+        }
+    else:
+        rows = quote_requests(requests, http_metadata(load_key(args.env_file)))
+        result = summarize(rows, args.start, args.end)
+        result["sample_dates"] = dates
+
+    args.output.write_text(json.dumps(result, indent=2, sort_keys=True) + "\n")
+    print(json.dumps(result, indent=2))
+
+
+if __name__ == "__main__":
+    main()
