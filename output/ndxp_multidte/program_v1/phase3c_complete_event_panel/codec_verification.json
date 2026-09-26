@@ -1,0 +1,10 @@
+{
+  "source": "/Users/patrick/Dev/MGC-v05l-ndxp-research/outputs/ndxp_later_entries/20260920/cache/snapshots/2024-06-12-0945-0.dbn.zst",
+  "sha256": "fec237461553e56274e8c54ac3c35da1c92c17a9ef9de0db56280c56731abf65",
+  "rows": 11298,
+  "mapped_symbols": 834,
+  "prices_integer": true,
+  "timestamps_integer": true,
+  "action_bytes": true,
+  "no_network_calls": true
+}

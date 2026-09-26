@@ -1,0 +1,29 @@
+{
+  "status": "incomplete_provider_batch_pending",
+  "checked_at_utc": "2026-09-26T07:06:01.016528+00:00",
+  "fresh_quoted_usd": 2.123182499411,
+  "fresh_quoted_billable_bytes": 14248436560,
+  "pricing_metadata_calls": 1019,
+  "hard_ceiling_usd": 10,
+  "submitted_requests": 501,
+  "downloaded_requests": 0,
+  "planned_requests": 501,
+  "provider_states": {
+    "queued": 501
+  },
+  "actual_provider_cost_usd": null,
+  "actual_cost_complete": false,
+  "new_coverage_verified": false,
+  "scientific_findings_available": false,
+  "pending_outputs": [
+    "coverage_after_acquisition.csv",
+    "entry_execution_results.csv",
+    "target_execution_results.csv",
+    "execution_model_comparison.csv",
+    "false_negative_analysis.csv",
+    "path_taxonomy.csv",
+    "settlement_results.csv"
+  ],
+  "tests": 130,
+  "next_action": "Retrieve the saved provider jobs without resubmitting; then run analysis and the complete report"
+}
