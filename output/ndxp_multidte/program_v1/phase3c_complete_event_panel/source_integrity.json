@@ -1,5 +1,8 @@
 {
   "original_inputs_verified": 2430,
   "phase3b_sources_verified": 3,
-  "all_unchanged": true
+  "all_unchanged": true,
+  "continuation_checked_at_utc": "2026-09-26T07:55:31.199279+00:00",
+  "submitted_jobs_unchanged": true,
+  "submitted_jobs_sha256": "eacf24eaa19691f19aaae2703ad8384e6c10f50374377764b2b2f83bff9db47e"
 }

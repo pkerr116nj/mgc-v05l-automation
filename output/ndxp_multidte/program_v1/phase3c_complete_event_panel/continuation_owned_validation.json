@@ -1,0 +1,86 @@
+{
+  "source": "existing Phase 3B owned selected-leg cache",
+  "checks": [
+    {
+      "candidate_id": 939,
+      "events": 4,
+      "start_ns": 1680010259585634981,
+      "end_ns": 1680010319585634981,
+      "matching_fields": [
+        "timestamps",
+        "mid",
+        "bid",
+        "ask",
+        "duration",
+        "stale",
+        "invalid",
+        "unmatched"
+      ]
+    },
+    {
+      "candidate_id": 940,
+      "events": 329,
+      "start_ns": 1680096616269852059,
+      "end_ns": 1680096676269852059,
+      "matching_fields": [
+        "timestamps",
+        "mid",
+        "bid",
+        "ask",
+        "duration",
+        "stale",
+        "invalid",
+        "unmatched"
+      ]
+    },
+    {
+      "candidate_id": 941,
+      "events": 388,
+      "start_ns": 1680096615306987921,
+      "end_ns": 1680096675306987921,
+      "matching_fields": [
+        "timestamps",
+        "mid",
+        "bid",
+        "ask",
+        "duration",
+        "stale",
+        "invalid",
+        "unmatched"
+      ]
+    },
+    {
+      "candidate_id": 942,
+      "events": 344,
+      "start_ns": 1680096615726950701,
+      "end_ns": 1680096675726950701,
+      "matching_fields": [
+        "timestamps",
+        "mid",
+        "bid",
+        "ask",
+        "duration",
+        "stale",
+        "invalid",
+        "unmatched"
+      ]
+    },
+    {
+      "candidate_id": 943,
+      "events": 392,
+      "start_ns": 1680096615716765516,
+      "end_ns": 1680096675716765516,
+      "matching_fields": [
+        "timestamps",
+        "mid",
+        "bid",
+        "ask",
+        "duration",
+        "stale",
+        "invalid",
+        "unmatched"
+      ]
+    }
+  ],
+  "new_downloads": 0
+}

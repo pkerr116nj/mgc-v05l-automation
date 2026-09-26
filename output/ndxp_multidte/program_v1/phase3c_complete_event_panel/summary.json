@@ -1,6 +1,10 @@
 {
   "status": "incomplete_provider_batch_pending",
-  "checked_at_utc": "2026-09-26T07:06:01.016528+00:00",
+  "new_paid_requests": 0,
+  "existing_jobs_only": true,
+  "status_polls": 240,
+  "provider_errors": [],
+  "checked_at_utc": "2026-09-26T08:25:16.908490+00:00",
   "fresh_quoted_usd": 2.123182499411,
   "fresh_quoted_billable_bytes": 14248436560,
   "pricing_metadata_calls": 1019,
@@ -14,16 +18,50 @@
   "actual_provider_cost_usd": null,
   "actual_cost_complete": false,
   "new_coverage_verified": false,
-  "scientific_findings_available": false,
+  "event_execution_findings_available": false,
+  "independent_owned_results_available": true,
+  "minute_baseline_audit": {
+    "candidate_model_rows": 984,
+    "candidates": 246,
+    "execution_replay_complete": false,
+    "minute_cache_sha256": "e2405663a5fee0926e771baa6ecb1e93df898c653ad0a045353ad67f87ac0c99",
+    "proven_fills": false,
+    "rules_sha256": "70a22312ad5b7dbcb783a0333a0f504f710c9cefde5efc8dacd22e7a18ad80f3",
+    "status": "complete_frozen_minute_baselines_only"
+  },
   "pending_outputs": [
     "coverage_after_acquisition.csv",
     "entry_execution_results.csv",
     "target_execution_results.csv",
     "execution_model_comparison.csv",
     "false_negative_analysis.csv",
-    "path_taxonomy.csv",
-    "settlement_results.csv"
+    "path_taxonomy.csv"
   ],
-  "tests": 130,
+  "settlement_audit": {
+    "candidates": 246,
+    "date_source_joins_verified": 246,
+    "execution_replay_complete": false,
+    "max_absolute_quote_proxy_difference": 10.0,
+    "new_purchase_requests": 0,
+    "payoffs_recomputed": 246,
+    "quote_proxy_differences": 77,
+    "source_sha256": [
+      {
+        "path": "/Users/patrick/Dev/MGC-v05l-ndxp-research/outputs/ndxp_2026_ytd/20260921/xqc_settlements.csv",
+        "sha256": "7ff64928adb5e28abf384eaf19a67e9ff6dc10307774da4320d3d7c003de36c1"
+      },
+      {
+        "path": "/Users/patrick/Dev/MGC-v05l-ndxp-research/outputs/ndxp_naive_baseline/max_history/xqc_settlements.csv",
+        "sha256": "5325f23db46c162e9b29b4315b9304ad85ccc17c9d32d478800029146db26647"
+      },
+      {
+        "path": "/Users/patrick/Dev/MGC-v05l-ndxp-research/outputs/ndxp_naive_baseline/partial_event_snapshot/xqc_settlements.csv",
+        "sha256": "01debf152d55643135e708eb09d60886716590c8c6b68370a6f50cce0112c51d"
+      }
+    ],
+    "sources_verified": 3,
+    "status": "complete_owned_settlement_reaudit"
+  },
+  "tests": 175,
   "next_action": "Retrieve the saved provider jobs without resubmitting; then run analysis and the complete report"
 }

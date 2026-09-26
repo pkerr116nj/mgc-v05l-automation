@@ -170,6 +170,8 @@ def test_tiny_panel_replay_preserves_censoring_and_settlement(tmp_path,monkeypat
  monkeypatch.setattr(mod,'load_candidates',lambda p:[c])
  (old/'pilot_manifest.json').write_text(json.dumps(dict(candidate_ids=[0],sessions=['2024-01-02'])))
  (out/'new_raw_index.json').write_text('[]')
+ source=tmp_path/'xqc.csv';source.write_text('date,settlement,source\n2024-01-04,17000,FRED NASDAQXQC / Nasdaq XQC\n')
+ (old/'settlement_sources.json').write_text(json.dumps([dict(path=str(source),sha256=mod.digest(source))]))
  rows=[]
  for symbol,mids in [('S',[16.5,12.5]),('L',[10,10])]:
   for delta,mid in zip([1,2],mids):rows.append(dict(symbol=symbol,ts_recv=entry.value+delta*NS,ts_event=entry.value+delta*NS,bid_px_00=int((mid-.1)*NS),ask_px_00=int((mid+.1)*NS),bid_sz_00=20,ask_sz_00=20,action=b'A',price=0,size=0))
@@ -191,6 +193,14 @@ def test_tiny_panel_replay_preserves_censoring_and_settlement(tmp_path,monkeypat
  before={p.name:p.read_bytes() for p in out.iterdir() if p.suffix in ('.csv','.parquet') or p.name=='analysis_summary.json'}
  mod.analyze(cache)
  assert before=={p.name:p.read_bytes() for p in out.iterdir() if p.name in before}
+ audit=mod.audit_settlements()
+ assert audit['candidates']==audit['payoffs_recomputed']==1 and audit['quote_proxy_differences']==1
+ mod.baseline_models(cache)
+ independent=pd.read_parquet(out/'minute_baseline_outcomes.parquet').set_index('model')
+ replay=df[~df.model.str.startswith('event_')].set_index('model')
+ assert len(independent)==4 and independent.pnl.to_dict()==replay.pnl.to_dict()
+ source.write_text(source.read_text().replace('17000','17001'))
+ with pytest.raises(ValueError,match='source changed'):mod.audit_settlements()
 
 
 def test_provider_prefixed_checksum_and_complete_partial_resume(tmp_path):
@@ -203,7 +213,8 @@ def test_provider_prefixed_checksum_and_complete_partial_resume(tmp_path):
  assert r['reused'] and (tmp_path/'data').read_bytes()==b'abc'
 
 
-def test_pending_jobs_have_unknown_cost_and_resume_without_purchase(tmp_path,monkeypatch):
+@pytest.mark.parametrize('provider_state',['queued','failed','expired'])
+def test_pending_jobs_have_unknown_cost_and_resume_without_purchase(tmp_path,monkeypatch,provider_state):
  from mgc_v05l.research import ndxp_panel_acquire as mod
  from mgc_v05l.research.ndxp_complete_panel import cache_key,digest
  from datetime import datetime,timezone,timedelta
@@ -216,8 +227,9 @@ def test_pending_jobs_have_unknown_cost_and_resume_without_purchase(tmp_path,mon
  # Old pricing cannot authorize a new purchase, but free retrieval is permitted.
  results={cache_key(dict(method=m,params=r)):dict(status='ok',value=1,request=dict(method=m,params=r),quoted_at_utc=(datetime.now(timezone.utc)-timedelta(days=2)).isoformat()) for m in ('get_cost','get_billable_size')}
  (tmp_path/'preflight_quote.json').write_text(json.dumps(dict(manifest_sha256=checksum,results=results)))
- (tmp_path/'jobs').mkdir();job=dict(r,id='already-paid-intent',state='queued',cost_usd=None)
+ (tmp_path/'jobs').mkdir();job=dict(r,id='already-paid-intent',state=provider_state,cost_usd=None)
  (tmp_path/'jobs'/f'{mod.request_key(r)}.json').write_text(json.dumps(dict(request=r,job=job,reused_prior_job=False)))
+ (tmp_path/'submitted_jobs.json').write_text(json.dumps([dict(request=r,job=job,reused_prior_job=False)]))
  class Batch:
   def list_jobs(self):return [job]
   def submit_job(self,**kwargs):raise AssertionError('No duplicate purchase')
@@ -230,4 +242,49 @@ def test_pending_jobs_have_unknown_cost_and_resume_without_purchase(tmp_path,mon
   assert evidence['actual_provider_cost_usd'] is None
   assert not evidence['actual_cost_complete'] and evidence['completed_requests']==0
   assert evidence['known_completed_cost_usd']==0 and len(evidence['remaining_jobs'])==1
+  assert evidence['new_paid_requests']==0 and evidence['existing_jobs_only']
+  assert bool(evidence['errors'])==(provider_state!='queued')
  assert len(list(tmp_path.glob('acquisition_receipts_previous_*.json')))==1
+
+
+@pytest.mark.parametrize('mutation',['missing','duplicate','wrong_request','wrong_provider_mapping'])
+def test_continuation_mapping_guard_precedes_any_provider_call(tmp_path,monkeypatch,mutation):
+ from mgc_v05l.research import ndxp_panel_acquire as mod
+ import json
+ r=request();r.pop('date');manifest={'requests':[r]}
+ saved=[dict(request=dict(r),job=dict(r,id='saved',state='queued'),reused_prior_job=False)]
+ if mutation=='missing':saved=[]
+ elif mutation=='duplicate':saved*=2
+ elif mutation=='wrong_request':saved[0]['request']['schema']='mbp-1'
+ else:saved[0]['job']['end']='2024-07-03T12:00:00-04:00'
+ (tmp_path/'preflight_quote.json').write_text('{}')
+ (tmp_path/'submitted_jobs.json').write_text(json.dumps(saved))
+ monkeypatch.setattr(mod,'OUT',tmp_path);monkeypatch.setattr(mod,'finalize',lambda:manifest)
+ def forbidden(*args,**kwargs):raise AssertionError('Validation must precede network/auth')
+ monkeypatch.setattr(mod,'load_key',forbidden);monkeypatch.setattr(mod.db,'Historical',forbidden)
+ with pytest.raises(ValueError):mod.acquire(max_polls=1)
+
+
+def test_window_duration_clips_at_boundary_without_float_timestamp_loss():
+ import numpy as np
+ from mgc_v05l.research.ndxp_panel_analysis import window_seconds,NS
+ base=pd.Timestamp('2024-01-02T14:31:00Z').value
+ t=np.array([base,base+59*NS+750000000,base+60*NS+250000000],dtype=np.int64)
+ duration=np.array([1.,.5,1.]);prefix=np.r_[0,np.cumsum(duration)]
+ assert window_seconds(t,duration,base,base+60*NS)==1.25
+ assert window_seconds(t,duration,base,base+60*NS,prefix)==1.25
+ assert window_seconds(t,duration,base+61*NS,base)==0
+
+
+@pytest.mark.parametrize('mutation',['valid','schema','interval','symbols'])
+def test_downloaded_header_is_confined_to_saved_request(mutation):
+ from types import SimpleNamespace
+ from mgc_v05l.research.ndxp_panel_analysis import validate_header
+ r=request();r.pop('date')
+ header=SimpleNamespace(dataset=r['dataset'],schema=r['schema'],stype_in=r['stype_in'],start=pd.Timestamp(r['start']).value,end=pd.Timestamp(r['end']).value,symbols=r['symbols'],mappings={s:[] for s in r['symbols']})
+ if mutation=='schema':header.schema='mbp-1'
+ elif mutation=='interval':header.start-=1
+ elif mutation=='symbols':header.symbols=['NDXP.OPT']
+ if mutation=='valid':validate_header(header,r)
+ else:
+  with pytest.raises(ValueError):validate_header(header,r)

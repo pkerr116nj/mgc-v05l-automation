@@ -5,3 +5,4 @@ jobs/
 downloads/
 reconciled_absent/
 retry_intents/
+acquisition_receipts_previous_*.json

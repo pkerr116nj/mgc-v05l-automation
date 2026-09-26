@@ -57,6 +57,16 @@ def write_derived(path,value):
 def first_index(mask):
     ii=np.flatnonzero(mask);return int(ii[0]) if len(ii) else None
 
+def window_seconds(t,duration,start,end,prefix=None):
+    """Phase 3B window convention: event starts inside, duration clipped at end."""
+    if end<=start:return 0.0
+    j=int(np.searchsorted(t,start));k=int(np.searchsorted(t,end))
+    if k<=j:return 0.0
+    total=float(prefix[k]-prefix[j]) if prefix is not None else float(duration[j:k].sum())
+    excess=max(0.,float(duration[k-1])-max(0.,(end-int(t[k-1]))/NS))
+    return max(0.,total-excess)
+
+
 def pnl(entry,debit):return (entry-debit)*2000-1.324*40
 
 def summarize(rows):
@@ -89,6 +99,15 @@ def fast_count(t,mid,good,until):
     return count
 
 
+def validate_header(header,request):
+    if str(header.dataset)!=request['dataset'] or str(header.schema)!=request['schema'] or str(header.stype_in)!=request['stype_in']:
+        raise ValueError('Downloaded DBN metadata does not match saved request')
+    if not pd.Timestamp(request['start']).value<=int(header.start)<int(header.end)<=pd.Timestamp(request['end']).value:
+        raise ValueError('Downloaded DBN interval exceeds saved request')
+    if not set(header.symbols)<=set(request['symbols']) or not set(header.mappings)<=set(request['symbols']):
+        raise ValueError('Downloaded DBN includes symbols outside frozen request')
+
+
 def cache_new():
     cache=Path('/tmp/phase3c_events');cache.mkdir(exist_ok=True)
     receipts=json.loads((OUT/'acquisition_receipts.json').read_text());records=[]
@@ -98,7 +117,7 @@ def cache_new():
             p=Path(f['path'])
             if not p.name.endswith('.dbn.zst'):continue
             key=f['sha256'];dest=cache/(key+'.parquet');h=db.DBNStore.from_file(p).metadata
-            if str(h.schema)!='cmbp-1':raise ValueError('Unexpected schema')
+            validate_header(h,receipt['request'])
             if not dest.exists():
                 import pyarrow as pa,pyarrow.parquet as pq
                 writer=None;temporary=dest.with_suffix('.parquet.part')
@@ -127,6 +146,67 @@ def load_legs(c,index):
         df=pd.read_parquet(path,columns=columns,filters=[('symbol','in',symbols),('ts_recv','>=',start),('ts_recv','<',end)])
         for s,g in df.groupby('symbol'):groups[s].append(g)
     return [pd.concat(groups[s],ignore_index=True).drop_duplicates() if groups[s] else pd.DataFrame(columns=columns) for s in symbols]
+
+
+def audit_settlements():
+    """Rejoin owned settlement sources independently of pending event delivery."""
+    from .ndxp_owned_execution import settlement_join
+    panel=json.loads((OLD/'pilot_manifest.json').read_text())
+    candidates=load_candidates(Path('output/ndxp_multidte/candidates_2021-09-24_2026-09-24.csv'))
+    dates={str(candidates[cid].expiration) for cid in panel['candidate_ids']}
+    records=[];sources=json.loads((OLD/'settlement_sources.json').read_text())
+    for source in sources:
+        if digest(source['path'])!=source['sha256']:raise ValueError('Owned XQC source changed')
+        with Path(source['path']).open() as f:
+            records.extend(r for r in csv.DictReader(f) if r['date'] in dates)
+    prior={int(r['candidate_id']):r for r in csv.DictReader((OLD/'settlement_audit.csv').open())}
+    rows=[]
+    for cid in panel['candidate_ids']:
+        c=candidates[cid];sr=prior[cid];value,status=settlement_join(c.expiration,records)
+        if value is None or status!=sr['status'] or value!=float(sr['xqc']):raise ValueError('Settlement source/date join disagreement')
+        intrinsic=settlement_payoff(value,c.short_strike,c.long_strike)
+        if abs(intrinsic-float(sr['intrinsic']))>1e-8:raise ValueError('Settlement payoff disagreement')
+        rows.append(dict(candidate_id=cid,session_date=str(c.session_date),expiration=str(c.expiration),calendar_dte=c.calendar_dte,target_credit=c.target_credit,xqc=value,status=status,intrinsic=intrinsic,last_quote_mid=sr['last_quote_mid'],intrinsic_minus_last_quote=intrinsic-float(sr['last_quote_mid']),frozen_entry_hold_to_settlement_pnl=pnl(c.mid_credit-.05,intrinsic)))
+    writecsv(OUT/'settlement_results.csv',rows)
+    result=dict(status='complete_owned_settlement_reaudit',candidates=len(rows),sources_verified=len(sources),date_source_joins_verified=len(rows),payoffs_recomputed=len(rows),quote_proxy_differences=sum(abs(r['intrinsic_minus_last_quote'])>1e-9 for r in rows),max_absolute_quote_proxy_difference=max(abs(r['intrinsic_minus_last_quote']) for r in rows),execution_replay_complete=False,new_purchase_requests=0,source_sha256=sources)
+    write_derived(OUT/'settlement_completion.json',result)
+    return result
+
+
+def minute_model(c,series,settlement,model):
+    if model not in RULES['models'] or model.startswith('event_'):raise ValueError('Frozen minute model required')
+    times=np.array([x[0] for x in series],dtype=np.int64)
+    mids=np.array([x[1] for x in series])
+    rows=[(pd.Timestamp(t,unit='ns',tz='UTC').to_pydatetime(),m) for t,m in series]
+    mode='persist_2' if model.startswith('persist_2') else 'persist_3' if model.startswith('persist_3') else 'touch'
+    hit=target_exit(rows,3,.05,mode)
+    debit=float(mids[hit])+.05 if hit is not None else min(10.,float(settlement['last_quote_mid'])+.05) if model=='minute_touch_original_quote_terminal' else float(settlement['intrinsic'])
+    return dict(modeled_entry_price=c.mid_credit-.05,modeled_exit_debit=debit,exit_ns=int(times[hit]) if hit is not None else None,terminal_fallback=hit is None,pnl=pnl(c.mid_credit-.05,debit))
+
+
+def baseline_models(cache=Path('/tmp/phase3b_events')):
+    """Independent frozen minute/settlement baselines; no event-fill claims."""
+    audit_settlements()
+    candidates=load_candidates(Path('output/ndxp_multidte/candidates_2021-09-24_2026-09-24.csv'))
+    panel=json.loads((OLD/'pilot_manifest.json').read_text())
+    minute={int(k):v for k,v in json.loads((cache/'pilot_minutes.json').read_text()).items()}
+    settlements={int(r['candidate_id']):r for r in csv.DictReader((OUT/'settlement_results.csv').open())}
+    rows=[]
+    for cid in panel['candidate_ids']:
+        c=candidates[cid]
+        for model in RULES['models']:
+            if model.startswith('event_'):continue
+            rows.append(dict(candidate_id=cid,session_date=str(c.session_date),calendar_dte=c.calendar_dte,target_credit=c.target_credit,model=model,**minute_model(c,minute[cid],settlements[cid],model)))
+    pd.DataFrame(rows).to_parquet(OUT/'minute_baseline_outcomes.parquet',index=False)
+    comparison=[]
+    for dte in (2,3):
+        for credit in (5.,6.,7.):
+            for model in RULES['models']:
+                if model.startswith('event_'):continue
+                comparison.append(dict(calendar_dte=dte,target_credit=credit,model=model,**summarize([r for r in rows if r['calendar_dte']==dte and r['target_credit']==credit and r['model']==model])))
+    writecsv(OUT/'minute_baseline_comparison.csv',comparison)
+    write_derived(OUT/'minute_baseline_completion.json',dict(status='complete_frozen_minute_baselines_only',candidates=len(panel['candidate_ids']),candidate_model_rows=len(rows),execution_replay_complete=False,proven_fills=False,rules_sha256=digest(OUT/'execution_rules.json'),minute_cache_sha256=digest(cache/'pilot_minutes.json')))
+    return comparison
 
 
 def analyze(cache=Path('/tmp/phase3b_events')):
@@ -171,11 +251,11 @@ def analyze(cache=Path('/tmp/phase3b_events')):
         good&=in_session;duration=np.where(good,duration,0)
         entry_mask=(t<entry+60*NS)&good;fill_i=first_index(entry_mask&(mid>=c.target_credit))
         fill=int(t[fill_i]) if fill_i is not None else None;after=(t>fill) if fill is not None else np.zeros(len(t),bool)
-        fresh=float(duration.sum());entry_seconds=float(duration[entry_mask].sum());source_complete=gap_seconds==0;complete=source_complete and fresh/expected>=.95 and entry_seconds>=57
+        fresh=float(duration.sum());entry_duration=np.minimum(duration[entry_mask],(entry+60*NS-t[entry_mask])/NS);entry_seconds=float(entry_duration.sum());source_complete=gap_seconds==0;complete=source_complete and fresh/expected>=.95 and entry_seconds>=57
         base=dict(candidate_id=cid,session_date=str(c.session_date),expiration=str(c.expiration),calendar_dte=c.calendar_dte,target_credit=c.target_credit)
         coverage.append(dict(**base,source_complete=source_complete,missing_source_leg_seconds=gap_seconds,events=len(t),fresh_valid_seconds=fresh,required_seconds=expected,fresh_fraction=fresh/expected,entry_fresh_seconds=entry_seconds,phase3b_complete=complete,stale_events=int(a['stale'].sum()),invalid_events=int(a['invalid'].sum())))
         valid_entry_mid=mid[entry_mask]
-        e=dict(**base,modeled_entry_supported=fill is not None,modeled_fill_ns=fill,modeled_credit=c.target_credit-.05,first_mid=float(valid_entry_mid[0]) if len(valid_entry_mid) else None,last_mid=float(valid_entry_mid[-1]) if len(valid_entry_mid) else None,median_mid=float(np.median(valid_entry_mid)) if len(valid_entry_mid) else None,entry_fresh_seconds=entry_seconds,marketable_seconds=float(duration[entry_mask&(a['bid']>=c.target_credit)].sum()),plausible_seconds=float(duration[entry_mask&(mid>=c.target_credit)].sum()),median_width=float(np.median(a['width'][entry_mask])) if entry_mask.any() else None)
+        e=dict(**base,modeled_entry_supported=fill is not None,modeled_fill_ns=fill,modeled_credit=c.target_credit-.05,first_mid=float(valid_entry_mid[0]) if len(valid_entry_mid) else None,last_mid=float(valid_entry_mid[-1]) if len(valid_entry_mid) else None,median_mid=float(np.median(valid_entry_mid)) if len(valid_entry_mid) else None,entry_fresh_seconds=entry_seconds,marketable_seconds=float(entry_duration[a['bid'][entry_mask]>=c.target_credit].sum()),plausible_seconds=float(entry_duration[mid[entry_mask]>=c.target_credit].sum()),median_width=float(np.median(a['width'][entry_mask])) if entry_mask.any() else None)
         for h in (5,15,30,60,120,300):
             j=np.searchsorted(t,entry+h*NS,side='right')-1;e[f'plus_{h}s_mid']=float(mid[j]) if j>=0 and good[j] and a['until'][j]>=entry+h*NS else None
         e.update(entry_updates=int((t<entry+60*NS).sum()),updates_per_second=float((t<entry+60*NS).sum()/60),positive_sizes_at_fill=bool(a['positive_sizes'][fill_i]) if fill_i is not None else None,marketable_fraction=e['marketable_seconds']/60,plausible_fraction=e['plausible_seconds']/60)
@@ -193,7 +273,7 @@ def analyze(cache=Path('/tmp/phase3b_events')):
         for i in np.flatnonzero(touch):
             lo=max(int(tt[i])-30*NS,(fill+1) if fill is not None else entry);hi=int(tt[i])+60*NS;j=np.searchsorted(t,lo);k=np.searchsorted(t,hi)
             strong=prefixes['event_strong'][k]>prefixes['event_strong'][j];plausible=prefixes['event_strong_plausible'][k]>prefixes['event_strong_plausible'][j]
-            observed=max(0,float(durprefix[k]-durprefix[j]));classification='strong' if strong else 'plausible' if plausible else 'ambiguous'
+            observed=window_seconds(t,duration,lo,hi,durprefix);classification='strong' if strong else 'plausible' if plausible else 'ambiguous'
             if fill is not None and observed>=.95*(hi-lo)/NS and not np.any(a['bid'][j:k]<=3):classification='unlikely'
             classes[classification]+=1
             p2=i+1<len(tt) and touch[i+1] and tt[i+1]-tt[i]==60*NS
@@ -229,9 +309,8 @@ def analyze(cache=Path('/tmp/phase3b_events')):
             if event:
                 i=hits[model];debit=3 if i is not None else intrinsic;entry_px=c.target_credit-(.25 if model=='event_conservative' else .05);exit_ns=int(t[i]) if i is not None else None
             else:
-                mode='persist_2' if model.startswith('persist_2') else 'persist_3' if model.startswith('persist_3') else 'touch'
-                i=target_exit(dtseries,3,.05,mode);debit=mm[i]+.05 if i is not None else min(10.,float(sr['last_quote_mid'])+.05) if model=='minute_touch_original_quote_terminal' else intrinsic
-                entry_px=c.mid_credit-.05;exit_ns=int(tt[i]) if i is not None else None
+                baseline=minute_model(c,series,sr,model)
+                i=None if baseline['terminal_fallback'] else 0;debit=baseline['modeled_exit_debit'];entry_px=baseline['modeled_entry_price'];exit_ns=baseline['exit_ns']
             outcomes.append(dict(**base,model=model,entry_supported=fill is not None,source_complete=source_complete,phase3b_complete=complete,eligible=eligible,modeled_entry_price=entry_px,modeled_exit_debit=debit,exit_ns=exit_ns,terminal_fallback=i is None,pnl=pnl(entry_px,debit) if eligible and debit is not None else None))
         print('analyzed',ordinal+1,'/',len(ids),'candidate',cid,'events',len(t),'fresh',round(fresh/expected,3),flush=True)
         del a,t,mid,duration,good;gc.collect()
@@ -248,4 +327,8 @@ def analyze(cache=Path('/tmp/phase3b_events')):
     assert digest(OUT/'execution_rules.json')==freeze
     write_derived(OUT/'analysis_summary.json',dict(candidates=len(ids),sessions=len(panel['sessions']),source_complete_candidates=sum(r['source_complete'] for r in coverage),fresh_complete_candidates=sum(r['phase3b_complete'] for r in coverage),supported_entries=sum(r['modeled_entry_supported'] for r in entries),rules_sha256=freeze,source_complete_sessions=len({r['session_date'] for r in coverage if all(x['source_complete'] for x in coverage if x['session_date']==r['session_date'])}),complete_sessions=len({r['session_date'] for r in coverage if all(x['phase3b_complete'] for x in coverage if x['session_date']==r['session_date'])})))
 
-if __name__=='__main__':analyze()
+if __name__=='__main__':
+    import sys
+    if '--settlements-only' in sys.argv:print(json.dumps(audit_settlements(),indent=2))
+    elif '--minute-baselines-only' in sys.argv:print(json.dumps(baseline_models(),indent=2))
+    else:analyze()

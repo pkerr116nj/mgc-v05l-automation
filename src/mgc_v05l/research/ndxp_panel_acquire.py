@@ -90,32 +90,29 @@ def download_file(detail,destination,key,get=requests.get):
 def acquire(max_polls=240):
     if not isinstance(max_polls,int) or not 1<=max_polls<=240:raise ValueError('Status poll budget must be 1..240')
     manifest=finalize();quote=json.loads((OUT/'preflight_quote.json').read_text())
-    already_submitted=all((OUT/'jobs'/f'{request_key(r)}.json').exists() and json.loads((OUT/'jobs'/f'{request_key(r)}.json').read_text())['request']==r for r in manifest['requests'])
-    cost=authorize(manifest,quote,digest(OUT/'final_request_manifest.json'),require_fresh=not already_submitted)
+    # Continuation mode has no path to submit_job: committed IDs are the authority.
+    results=json.loads((OUT/'submitted_jobs.json').read_text())
+    expected_requests={request_key(r):r for r in manifest['requests']}
+    if len(results)!=len(expected_requests) or {request_key(r['request']) for r in results}!=set(expected_requests):
+        raise ValueError('Saved jobs do not exactly cover the immutable manifest')
+    if len({r['job']['id'] for r in results})!=len(results):raise ValueError('Duplicate saved provider job ID')
+    for r in results:
+        if r['request']!=expected_requests[request_key(r['request'])] or not matches(r['job'],r['request']):
+            raise ValueError('Saved job/request mapping mismatch')
+    cost=authorize(manifest,quote,digest(OUT/'final_request_manifest.json'),require_fresh=False)
     expected=json.loads((OUT/'manifest_digest.json').read_text())['sha256']
     if digest(OUT/'final_request_manifest.json')!=expected:raise ValueError('Immutable manifest changed')
     key=load_key('.env.local');client=db.Historical(key)
-    for sub in ('intents','jobs','raw','downloads','reconciled_absent','retry_intents'): (OUT/sub).mkdir(exist_ok=True)
-    known=client.batch.list_jobs()
-    print('authorized quoted USD',cost,'requests',len(manifest['requests']),'workers 4',flush=True)
-    results=[];errors=[]
-    with ThreadPoolExecutor(4) as pool:
-        futures={pool.submit(submit_once,r,client.batch,OUT,known):r for r in manifest['requests']}
-        for i,f in enumerate(as_completed(futures),1):
-            try:results.append(f.result())
-            except Exception as e:errors.append(dict(request_key=request_key(futures[f]),error_type=type(e).__name__))
-            if i%25==0:print('submitted/reused',i,'errors',len(errors),flush=True)
-    # One reconciliation pass can recover a response lost after successful submission.
-    if errors:
-        known=client.batch.list_jobs();errors=[];results=[]
-        for r in manifest['requests']:
-            try:results.append(submit_once(r,client.batch,OUT,known))
-            except Exception as e:errors.append(dict(request_key=request_key(r),error_type=type(e).__name__))
+    for sub in ('raw','downloads'): (OUT/sub).mkdir(exist_ok=True)
+    print('existing jobs only',len(results),'new paid requests 0; workers 4',flush=True)
+    errors=[]
     completed={};last_jobs={r['job']['id']:r['job'] for r in results}
     def fetch(r,job):
         k=request_key(r['request']);record=OUT/'downloads'/f'{k}.json'
         if record.exists():
             result=json.loads(record.read_text())
+            if result['request']!=r['request'] or result['job']['id']!=job['id'] or not matches(result['job'],r['request']):
+                raise ValueError('Cached download receipt mapping mismatch')
             for f in result['files']:
                 if digest(f['path'])!=f['sha256']:raise ValueError('Immutable raw integrity failed')
             return k,result
@@ -126,16 +123,33 @@ def acquire(max_polls=240):
     # At most 240 status polls, 15s apart. No unbounded loops or paid retries.
     polls=0
     for turn in range(max_polls):
-        known=client.batch.list_jobs();polls+=1;last_jobs.update({j['id']:j for j in known if j['id'] in last_jobs})
+        known=client.batch.list_jobs();polls+=1
+        observed={j['id']:j for j in known}
+        errors=[]
+        for r in results:
+            jid=r['job']['id'];job=observed.get(jid)
+            if job is None:
+                errors.append(dict(job_id=jid,error_type='saved_job_missing_from_provider'));continue
+            if not matches(job,r['request']):
+                errors.append(dict(job_id=jid,error_type='provider_request_mapping_mismatch'));continue
+            last_jobs[jid]=job
+            if job['state'] not in ('queued','processing','received','done'):
+                errors.append(dict(job_id=jid,error_type='provider_terminal_or_unknown_state',state=job['state']))
+        if errors:break
         ready=[r for r in results if request_key(r['request']) not in completed and last_jobs[r['job']['id']]['state']=='done']
         with ThreadPoolExecutor(4) as pool:
-            for k,result in pool.map(lambda r:fetch(r,last_jobs[r['job']['id']]),ready):completed[k]=result
+            futures={pool.submit(fetch,r,last_jobs[r['job']['id']]):r for r in ready}
+            for future in as_completed(futures):
+                try:
+                    k,result=future.result();completed[k]=result
+                except Exception as exc:
+                    errors.append(dict(job_id=futures[future]['job']['id'],error_type=type(exc).__name__,stage='download_or_integrity'))
         print('downloaded',len(completed),'/',len(results),'status polls',polls,flush=True)
-        if len(completed)==len(results):break
+        if errors or len(completed)==len(results):break
         if turn+1<max_polls:time.sleep(15)
     actual=sum(float(r['job']['cost_usd']) for r in completed.values() if not r['reused_prior_job'] and r['job'].get('cost_usd') is not None)
     cost_complete=len(completed)==len(manifest['requests']) and all(r['job'].get('cost_usd') is not None for r in completed.values())
-    evidence=dict(quoted_cost_usd=cost,actual_provider_cost_usd=actual if cost_complete else None,known_completed_cost_usd=actual,actual_cost_complete=cost_complete,completed_requests=len(completed),planned_requests=len(manifest['requests']),status_polls=polls,errors=errors,receipts=list(completed.values()),remaining_jobs=[safe_job(j) for j in last_jobs.values() if j['state']!='done'])
+    evidence=dict(quoted_cost_usd=cost,actual_provider_cost_usd=actual if cost_complete else None,known_completed_cost_usd=actual,actual_cost_complete=cost_complete,completed_requests=len(completed),planned_requests=len(manifest['requests']),status_polls=polls,new_paid_requests=0,existing_jobs_only=True,checked_at_utc=datetime.now(timezone.utc).isoformat(),errors=errors,receipts=list(completed.values()),remaining_jobs=[safe_job(j) for j in last_jobs.values() if j['state']!='done'])
     aggregate=OUT/'acquisition_receipts.json'
     if aggregate.exists():aggregate.rename(OUT/f'acquisition_receipts_previous_{time.time_ns()}.json')
     save(aggregate,evidence);print('actual cost',evidence['actual_provider_cost_usd'],'completed',len(completed),flush=True)

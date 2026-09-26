@@ -1,8 +1,9 @@
 {
-  "tests": 130,
+  "tests": 175,
   "failures": 0,
   "errors": 0,
   "skipped": 0,
+  "test_command": "PYTHONPATH=src .venv/bin/python -m pytest -q tests/unit/test_ndxp_complete_panel.py tests/unit/test_ndxp_owned_execution.py tests/unit/test_ndxp_multidte*.py tests/unit/test_mgc_v05l_ndxp_*.py tests/unit/test_index_options_phase3a.py",
   "test_cases": [
     {
       "module": "tests.unit.test_ndxp_complete_panel",
@@ -106,7 +107,51 @@
     },
     {
       "module": "tests.unit.test_ndxp_complete_panel",
-      "name": "test_pending_jobs_have_unknown_cost_and_resume_without_purchase"
+      "name": "test_pending_jobs_have_unknown_cost_and_resume_without_purchase[queued]"
+    },
+    {
+      "module": "tests.unit.test_ndxp_complete_panel",
+      "name": "test_pending_jobs_have_unknown_cost_and_resume_without_purchase[failed]"
+    },
+    {
+      "module": "tests.unit.test_ndxp_complete_panel",
+      "name": "test_pending_jobs_have_unknown_cost_and_resume_without_purchase[expired]"
+    },
+    {
+      "module": "tests.unit.test_ndxp_complete_panel",
+      "name": "test_continuation_mapping_guard_precedes_any_provider_call[missing]"
+    },
+    {
+      "module": "tests.unit.test_ndxp_complete_panel",
+      "name": "test_continuation_mapping_guard_precedes_any_provider_call[duplicate]"
+    },
+    {
+      "module": "tests.unit.test_ndxp_complete_panel",
+      "name": "test_continuation_mapping_guard_precedes_any_provider_call[wrong_request]"
+    },
+    {
+      "module": "tests.unit.test_ndxp_complete_panel",
+      "name": "test_continuation_mapping_guard_precedes_any_provider_call[wrong_provider_mapping]"
+    },
+    {
+      "module": "tests.unit.test_ndxp_complete_panel",
+      "name": "test_window_duration_clips_at_boundary_without_float_timestamp_loss"
+    },
+    {
+      "module": "tests.unit.test_ndxp_complete_panel",
+      "name": "test_downloaded_header_is_confined_to_saved_request[valid]"
+    },
+    {
+      "module": "tests.unit.test_ndxp_complete_panel",
+      "name": "test_downloaded_header_is_confined_to_saved_request[schema]"
+    },
+    {
+      "module": "tests.unit.test_ndxp_complete_panel",
+      "name": "test_downloaded_header_is_confined_to_saved_request[interval]"
+    },
+    {
+      "module": "tests.unit.test_ndxp_complete_panel",
+      "name": "test_downloaded_header_is_confined_to_saved_request[symbols]"
     },
     {
       "module": "tests.unit.test_ndxp_owned_execution",
@@ -423,6 +468,142 @@
     {
       "module": "tests.unit.test_mgc_v05l_ndxp_naive_data",
       "name": "test_cost_estimator_uses_one_minute_parent_requests"
+    },
+    {
+      "module": "tests.unit.test_mgc_v05l_ndxp_terminal",
+      "name": "test_call_credit_vertical_payload_and_risk_are_exact"
+    },
+    {
+      "module": "tests.unit.test_mgc_v05l_ndxp_terminal",
+      "name": "test_close_vertical_is_net_debit_with_opposite_leg_actions"
+    },
+    {
+      "module": "tests.unit.test_mgc_v05l_ndxp_terminal",
+      "name": "test_put_credit_vertical_requires_short_higher_than_long"
+    },
+    {
+      "module": "tests.unit.test_mgc_v05l_ndxp_terminal",
+      "name": "test_invalid_spreads_fail_closed[proposed0-must be one of]"
+    },
+    {
+      "module": "tests.unit.test_mgc_v05l_ndxp_terminal",
+      "name": "test_invalid_spreads_fail_closed[proposed1-sell the lower strike]"
+    },
+    {
+      "module": "tests.unit.test_mgc_v05l_ndxp_terminal",
+      "name": "test_invalid_spreads_fail_closed[proposed2-same supported NDX]"
+    },
+    {
+      "module": "tests.unit.test_mgc_v05l_ndxp_terminal",
+      "name": "test_invalid_spreads_fail_closed[proposed3-between 1 and 100]"
+    },
+    {
+      "module": "tests.unit.test_mgc_v05l_ndxp_terminal",
+      "name": "test_supported_index_products_and_widths_build_valid_orders"
+    },
+    {
+      "module": "tests.unit.test_mgc_v05l_ndxp_terminal",
+      "name": "test_broker_truth_supplies_required_schwab_order_time_window"
+    },
+    {
+      "module": "tests.unit.test_mgc_v05l_ndxp_terminal",
+      "name": "test_terminal_defaults_to_confirmed_schwab_ndx_symbol"
+    },
+    {
+      "module": "tests.unit.test_mgc_v05l_ndxp_terminal",
+      "name": "test_terminal_selection_switches_product_and_default_width"
+    },
+    {
+      "module": "tests.unit.test_mgc_v05l_ndxp_terminal",
+      "name": "test_schwab_open_interest_gamma_is_labeled_estimated_and_finds_walls"
+    },
+    {
+      "module": "tests.unit.test_mgc_v05l_ndxp_terminal",
+      "name": "test_schwab_chain_canonicalizes_ndx_to_confirmed_index_symbol"
+    },
+    {
+      "module": "tests.unit.test_mgc_v05l_ndxp_terminal",
+      "name": "test_schwab_gamma_chain_uses_cached_multi_expiration_request"
+    },
+    {
+      "module": "tests.unit.test_mgc_v05l_ndxp_terminal",
+      "name": "test_access_check_uses_aapl_for_quote_connectivity"
+    },
+    {
+      "module": "tests.unit.test_mgc_v05l_ndxp_terminal",
+      "name": "test_live_trading_requires_both_runtime_and_launch_gates"
+    },
+    {
+      "module": "tests.unit.test_mgc_v05l_ndxp_terminal",
+      "name": "test_live_trading_accepts_valid_quantity_close_and_replace"
+    },
+    {
+      "module": "tests.unit.test_mgc_v05l_ndxp_terminal",
+      "name": "test_live_trading_client_and_same_origin_guards"
+    },
+    {
+      "module": "tests.unit.test_mgc_v05l_ndxp_terminal",
+      "name": "test_databento_feed_uses_one_session_and_maps_opra_quotes"
+    },
+    {
+      "module": "tests.unit.test_mgc_v05l_ndxp_terminal",
+      "name": "test_hybrid_adapter_replaces_schwab_option_quotes_with_databento"
+    },
+    {
+      "module": "tests.unit.test_mgc_v05l_ndxp_terminal",
+      "name": "test_diagnostics_distinguish_client_schwab_and_stale_data"
+    },
+    {
+      "module": "tests.unit.test_mgc_v05l_ndxp_terminal",
+      "name": "test_diagnostics_identify_databento_entitlement_and_partial_quotes"
+    },
+    {
+      "module": "tests.unit.test_mgc_v05l_ndxp_terminal",
+      "name": "test_demo_service_builds_preview_but_never_transmits"
+    },
+    {
+      "module": "tests.unit.test_mgc_v05l_ndxp_terminal",
+      "name": "test_live_trading_uses_exact_single_use_preview_and_selected_account"
+    },
+    {
+      "module": "tests.unit.test_mgc_v05l_ndxp_terminal",
+      "name": "test_expected_range_fails_closed_when_model_quotes_are_stale"
+    },
+    {
+      "module": "tests.unit.test_mgc_v05l_ndxp_terminal",
+      "name": "test_closed_session_uses_one_bounded_latest_close_snapshot"
+    },
+    {
+      "module": "tests.unit.test_mgc_v05l_ndxp_terminal",
+      "name": "test_closed_snapshot_rejects_inputs_from_different_market_dates"
+    },
+    {
+      "module": "tests.unit.test_mgc_v05l_ndxp_terminal",
+      "name": "test_market_normalization_binds_index_value_to_schwab_quote_timestamp"
+    },
+    {
+      "module": "tests.unit.test_mgc_v05l_ndxp_terminal",
+      "name": "test_independent_gamma_scenarios_use_credit_position_convention"
+    },
+    {
+      "module": "tests.unit.test_mgc_v05l_ndxp_terminal",
+      "name": "test_empty_market_poll_retains_last_valid_chain_and_reports_error"
+    },
+    {
+      "module": "tests.unit.test_mgc_v05l_ndxp_terminal",
+      "name": "test_non_loopback_server_refuses_live_or_unapproved_demo"
+    },
+    {
+      "module": "tests.unit.test_mgc_v05l_ndxp_terminal",
+      "name": "test_teleport_demo_requires_demo_flag"
+    },
+    {
+      "module": "tests.unit.test_mgc_v05l_ndxp_terminal",
+      "name": "test_lan_live_allows_schwab_only_and_rejects_demo"
+    },
+    {
+      "module": "tests.unit.test_mgc_v05l_ndxp_terminal",
+      "name": "test_mobile_chain_keeps_strikes_fixed_and_allows_positive_midpoint_sell"
     },
     {
       "module": "tests.unit.test_index_options_phase3a",

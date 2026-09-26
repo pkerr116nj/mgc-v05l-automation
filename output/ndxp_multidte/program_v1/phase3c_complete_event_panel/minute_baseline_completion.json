@@ -1,0 +1,9 @@
+{
+  "candidate_model_rows": 984,
+  "candidates": 246,
+  "execution_replay_complete": false,
+  "minute_cache_sha256": "e2405663a5fee0926e771baa6ecb1e93df898c653ad0a045353ad67f87ac0c99",
+  "proven_fills": false,
+  "rules_sha256": "70a22312ad5b7dbcb783a0333a0f504f710c9cefde5efc8dacd22e7a18ad80f3",
+  "status": "complete_frozen_minute_baselines_only"
+}
