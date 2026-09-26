@@ -1,0 +1,68 @@
+{
+  "assignment": "docs/specs/INDEX_OPTIONS_COMPRESSION_PHASE3A_CODEX_ASSIGNMENT.md",
+  "base_commit": "17dbc4bde9",
+  "branch": "codex/ndxp-multidte-credit-research",
+  "cost_and_storage": "data_acquisition_manifest.json: estimates per instrument/layer, plus optional extensions and explicitly unquoted ancillary sources",
+  "existing_files_changed": [],
+  "files_created": [
+    "output/ndxp_multidte/program_v1/catalog_jobs.json",
+    "output/ndxp_multidte/program_v1/catalog_quotes.json",
+    "output/ndxp_multidte/program_v1/completion_evidence.json",
+    "output/ndxp_multidte/program_v1/data_acquisition_manifest.json",
+    "output/ndxp_multidte/program_v1/data_acquisition_plan.md",
+    "output/ndxp_multidte/program_v1/local_inventory.json",
+    "output/ndxp_multidte/program_v1/sample_jobs.json",
+    "output/ndxp_multidte/program_v1/sample_quotes.json",
+    "src/mgc_v05l/research/index_options_acquisition_plan.py",
+    "src/mgc_v05l/research/index_options_local_inventory.py",
+    "src/mgc_v05l/research/index_options_metadata_estimator.py",
+    "tests/unit/test_index_options_phase3a.py"
+  ],
+  "operator_decisions": [
+    "Approve a concrete selected-contract/date manifest and spending cap before any purchase.",
+    "Confirm current OPRA plan, fees, older-history entitlements and Plus/Unlimited quotes; no upgrade now.",
+    "Approve 60-session development pilot definition and prioritization; no strategy selection from 2026.",
+    "Confirm portable cache location/disk headroom and source licensing; do not move/delete existing caches.",
+    "Choose whether/when to fund optional AM cohorts, older structural history, other-instrument event pilots or proprietary complex-book data."
+  ],
+  "recommendation": [
+    "0. Index existing NDXP headers/contracts/time windows and XQC settlement dates; audit exact 2/3DTE overlap, repair only approved gaps. No acquisition cost to reuse.",
+    "1. NDXP development-only 60-session second/event pilot: disprove transient-mark fills before expanding history. Reuse first; new selected windows only after approval.",
+    "2. SPXW structural baseline 2021-09-24..2026-09-24, PM only; best like-for-like cash-settled comparator.",
+    "3. QQQ structural baseline with exercise/dividend/physical-delivery model frozen first; cheaper Nasdaq-linked control but mechanically different.",
+    "4. RUTW structural baseline; preserve pre/post daily-expiry listing differences.",
+    "5. Only instruments retaining evidence receive 60-session path/execution pilots; earlier structural history is optional, not an automatic purchase."
+  ],
+  "source_evidence_sha256": {
+    "catalog_jobs.json": "5263bb2849e9917b9c21e1c1fa900f189a60774891e6640252e099cab9372f7a",
+    "catalog_quotes.json": "8ed8a30444e24df713d15a8f5582f03becd544dddd00affc521b9251ebe37bc8",
+    "data_acquisition_manifest.json": "3aef53a762b45f59e0d09cf9e644357286613ed3f52a11cd294e5e4abe586757",
+    "data_acquisition_plan.md": "1f3d7b7fcc65ce535085268c1153347671591aba74e8b3153500e9543c376d5e",
+    "local_inventory.json": "1855b8e7c3e136fccb33f80ca3b09a8a644a3bc97819b8736d14bd6f7f9c7697",
+    "sample_jobs.json": "d742e6f5feb8c29bf48e4d9589f16bc3394f94aedda2ce641ab44e174014d18f",
+    "sample_quotes.json": "2f44d0a61889e0ec39f9de0e9864bf97d036dee3dc6d68188b3bb60df2bce14b"
+  },
+  "tests": {
+    "command": "PYTHONPATH=src .venv/bin/python -m pytest -q tests/unit/test_index_options_phase3a.py tests/unit/test_ndxp_multidte*.py tests/unit/test_mgc_v05l_ndxp_naive*.py",
+    "failed": 0,
+    "new_phase3a_tests": 25,
+    "passed": 78,
+    "skipped": 0
+  },
+  "upgrade_recommendation": "No upgrade justified yet; reuse and bounded usage-based windows first.",
+  "verification": {
+    "broker_actions": 0,
+    "download_calls": 0,
+    "instrument_layer_designs": 12,
+    "live_code_changes": 0,
+    "max_concurrency": 4,
+    "metadata_api_calls": 43,
+    "metadata_failures_disclosed": 6,
+    "new_inventory_raw_size_mtime_unchanged": true,
+    "offline_manifest_and_plan_byte_identical": true,
+    "phase1_raw_sha256_manifest_still_matches": true,
+    "purchases": 0,
+    "raw_files_in_phase1_hash_check": 2430,
+    "subscription_changes": 0
+  }
+}

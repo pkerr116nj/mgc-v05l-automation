@@ -1,0 +1,20 @@
+[
+  {
+    "method": "list_unit_prices",
+    "params": {
+      "dataset": "OPRA.PILLAR"
+    }
+  },
+  {
+    "method": "get_dataset_range",
+    "params": {
+      "dataset": "OPRA.PILLAR"
+    }
+  },
+  {
+    "method": "list_schemas",
+    "params": {
+      "dataset": "OPRA.PILLAR"
+    }
+  }
+]

@@ -1,0 +1,2486 @@
+{
+  "already_owned_data": [
+    {
+      "bytes": 8770,
+      "file_count": 1,
+      "location": "/Users/patrick/Dev/MGC-v05l-ndxp-research/outputs/ndxp_2026_ytd/20260921/xqc_settlements.csv",
+      "quality": [
+        "No semantic completeness or fills inferred from cache presence."
+      ],
+      "row_count": 179,
+      "schemas": [
+        "daily PM settlement"
+      ],
+      "source": [
+        "FRED NASDAQXQC / Nasdaq XQC"
+      ],
+      "sufficiency": {
+        "execution": "no",
+        "path": "no",
+        "structural": "terminal payoff reference pending source/holiday validation"
+      }
+    },
+    {
+      "bytes": 42710,
+      "file_count": 1,
+      "location": "/Users/patrick/Dev/MGC-v05l-ndxp-research/outputs/ndxp_naive_baseline/max_history/xqc_settlements.csv",
+      "quality": [
+        "No semantic completeness or fills inferred from cache presence."
+      ],
+      "row_count": 873,
+      "schemas": [
+        "daily PM settlement"
+      ],
+      "source": [
+        "FRED NASDAQXQC / Nasdaq XQC"
+      ],
+      "sufficiency": {
+        "execution": "no",
+        "path": "no",
+        "structural": "terminal payoff reference pending source/holiday validation"
+      }
+    },
+    {
+      "bytes": 23448,
+      "file_count": 1,
+      "location": "/Users/patrick/Dev/MGC-v05l-ndxp-research/outputs/ndxp_naive_baseline/partial_event_snapshot/xqc_settlements.csv",
+      "quality": [
+        "No semantic completeness or fills inferred from cache presence."
+      ],
+      "row_count": 479,
+      "schemas": [
+        "daily PM settlement"
+      ],
+      "source": [
+        "FRED NASDAQXQC / Nasdaq XQC"
+      ],
+      "sufficiency": {
+        "execution": "no",
+        "path": "no",
+        "structural": "terminal payoff reference pending source/holiday validation"
+      }
+    },
+    {
+      "bytes": 10607479,
+      "file_count": 251,
+      "location": "/Users/patrick/Dev/MGC-v05l-automation/output/ndxp_multidte/discovery_cache",
+      "quality": [
+        "No semantic completeness or fills inferred from cache presence."
+      ],
+      "row_count": null,
+      "schemas": [
+        "cbbo-1m"
+      ],
+      "source": [
+        "OPRA.PILLAR"
+      ],
+      "sufficiency": {
+        "execution": "insufficient",
+        "path": "sampled bars only",
+        "structural": "partial; inspect exact contract/date overlap"
+      }
+    },
+    {
+      "bytes": 383885184,
+      "file_count": 1254,
+      "location": "/Users/patrick/Dev/MGC-v05l-automation/output/ndxp_multidte/discovery_cache/ndxp-opt/opening-0930-0932/cbbo-1m",
+      "quality": [
+        "No semantic completeness or fills inferred from cache presence."
+      ],
+      "row_count": null,
+      "schemas": [
+        "cbbo-1m"
+      ],
+      "source": [
+        "OPRA.PILLAR"
+      ],
+      "sufficiency": {
+        "execution": "insufficient",
+        "path": "sampled bars only",
+        "structural": "partial; inspect exact contract/date overlap"
+      }
+    },
+    {
+      "bytes": 345097,
+      "file_count": 1,
+      "location": "/Users/patrick/Dev/MGC-v05l-automation/output/ndxp_multidte/ndxp_validation_cache",
+      "quality": [
+        "No semantic completeness or fills inferred from cache presence."
+      ],
+      "row_count": null,
+      "schemas": [
+        "cbbo-1m"
+      ],
+      "source": [
+        "OPRA.PILLAR"
+      ],
+      "sufficiency": {
+        "execution": "insufficient",
+        "path": "sampled bars only",
+        "structural": "partial; inspect exact contract/date overlap"
+      }
+    },
+    {
+      "bytes": 128498347,
+      "file_count": 913,
+      "location": "/Users/patrick/Dev/MGC-v05l-automation/output/ndxp_multidte/path_cache/ndxp-opt/selected-paths/cbbo-1m",
+      "quality": [
+        "No semantic completeness or fills inferred from cache presence."
+      ],
+      "row_count": null,
+      "schemas": [
+        "cbbo-1m"
+      ],
+      "source": [
+        "OPRA.PILLAR"
+      ],
+      "sufficiency": {
+        "execution": "insufficient",
+        "path": "sampled bars only",
+        "structural": "partial; inspect exact contract/date overlap"
+      }
+    },
+    {
+      "bytes": 3280913,
+      "file_count": 1,
+      "location": "/Users/patrick/Dev/MGC-v05l-ndxp-research/outputs/ndxp_2026_ytd/20260921",
+      "quality": [
+        "No semantic completeness or fills inferred from cache presence."
+      ],
+      "row_count": null,
+      "schemas": [
+        "ohlcv-1m"
+      ],
+      "source": [
+        "XNAS.ITCH"
+      ],
+      "sufficiency": {
+        "execution": "insufficient",
+        "path": "sampled bars only",
+        "structural": "partial; inspect exact contract/date overlap"
+      }
+    },
+    {
+      "bytes": 58945742,
+      "file_count": 177,
+      "location": "/Users/patrick/Dev/MGC-v05l-ndxp-research/outputs/ndxp_2026_ytd/20260921/cache/definitions",
+      "quality": [
+        "No semantic completeness or fills inferred from cache presence."
+      ],
+      "row_count": null,
+      "schemas": [
+        "definition"
+      ],
+      "source": [
+        "OPRA.PILLAR"
+      ],
+      "sufficiency": {
+        "execution": "insufficient",
+        "path": "sampled bars only",
+        "structural": "partial; inspect exact contract/date overlap"
+      }
+    },
+    {
+      "bytes": 3779088257,
+      "file_count": 86,
+      "location": "/Users/patrick/Dev/MGC-v05l-ndxp-research/outputs/ndxp_2026_ytd/20260921/cache/paths",
+      "quality": [
+        "No semantic completeness or fills inferred from cache presence."
+      ],
+      "row_count": null,
+      "schemas": [
+        "cmbp-1"
+      ],
+      "source": [
+        "OPRA.PILLAR"
+      ],
+      "sufficiency": {
+        "execution": "quote-event context only, not complex-book fill proof",
+        "path": "partial event windows; can derive second bars",
+        "structural": "partial; inspect exact contract/date overlap"
+      }
+    },
+    {
+      "bytes": 254452776,
+      "file_count": 600,
+      "location": "/Users/patrick/Dev/MGC-v05l-ndxp-research/outputs/ndxp_2026_ytd/20260921/cache/snapshots",
+      "quality": [
+        "No semantic completeness or fills inferred from cache presence."
+      ],
+      "row_count": null,
+      "schemas": [
+        "cmbp-1"
+      ],
+      "source": [
+        "OPRA.PILLAR"
+      ],
+      "sufficiency": {
+        "execution": "quote-event context only, not complex-book fill proof",
+        "path": "partial event windows; can derive second bars",
+        "structural": "partial; inspect exact contract/date overlap"
+      }
+    },
+    {
+      "bytes": 229694271,
+      "file_count": 502,
+      "location": "/Users/patrick/Dev/MGC-v05l-ndxp-research/outputs/ndxp_later_entries/20260920/cache/definitions",
+      "quality": [
+        "No semantic completeness or fills inferred from cache presence."
+      ],
+      "row_count": null,
+      "schemas": [
+        "definition"
+      ],
+      "source": [
+        "OPRA.PILLAR"
+      ],
+      "sufficiency": {
+        "execution": "insufficient",
+        "path": "sampled bars only",
+        "structural": "partial; inspect exact contract/date overlap"
+      }
+    },
+    {
+      "bytes": 380768426,
+      "file_count": 20,
+      "location": "/Users/patrick/Dev/MGC-v05l-ndxp-research/outputs/ndxp_later_entries/20260920/cache/paths",
+      "quality": [
+        "No semantic completeness or fills inferred from cache presence."
+      ],
+      "row_count": null,
+      "schemas": [
+        "cmbp-1"
+      ],
+      "source": [
+        "OPRA.PILLAR"
+      ],
+      "sufficiency": {
+        "execution": "quote-event context only, not complex-book fill proof",
+        "path": "partial event windows; can derive second bars",
+        "structural": "partial; inspect exact contract/date overlap"
+      }
+    },
+    {
+      "bytes": 537120407,
+      "file_count": 1578,
+      "location": "/Users/patrick/Dev/MGC-v05l-ndxp-research/outputs/ndxp_later_entries/20260920/cache/snapshots",
+      "quality": [
+        "No semantic completeness or fills inferred from cache presence."
+      ],
+      "row_count": null,
+      "schemas": [
+        "cmbp-1"
+      ],
+      "source": [
+        "OPRA.PILLAR"
+      ],
+      "sufficiency": {
+        "execution": "quote-event context only, not complex-book fill proof",
+        "path": "partial event windows; can derive second bars",
+        "structural": "partial; inspect exact contract/date overlap"
+      }
+    },
+    {
+      "bytes": 8128133,
+      "file_count": 1,
+      "location": "/Users/patrick/Dev/MGC-v05l-ndxp-research/outputs/ndxp_morning_filters/20260920",
+      "quality": [
+        "No semantic completeness or fills inferred from cache presence."
+      ],
+      "row_count": null,
+      "schemas": [
+        "ohlcv-1m"
+      ],
+      "source": [
+        "XNAS.ITCH"
+      ],
+      "sufficiency": {
+        "execution": "insufficient",
+        "path": "sampled bars only",
+        "structural": "partial; inspect exact contract/date overlap"
+      }
+    },
+    {
+      "bytes": 4985917200,
+      "file_count": 142,
+      "location": "/Users/patrick/Dev/MGC-v05l-ndxp-research/outputs/ndxp_morning_filters/20260920/cache/paths",
+      "quality": [
+        "No semantic completeness or fills inferred from cache presence."
+      ],
+      "row_count": null,
+      "schemas": [
+        "cmbp-1"
+      ],
+      "source": [
+        "OPRA.PILLAR"
+      ],
+      "sufficiency": {
+        "execution": "quote-event context only, not complex-book fill proof",
+        "path": "partial event windows; can derive second bars",
+        "structural": "partial; inspect exact contract/date overlap"
+      }
+    },
+    {
+      "bytes": 43964873636,
+      "file_count": 873,
+      "location": "/Users/patrick/Dev/MGC-v05l-ndxp-research/outputs/ndxp_naive_baseline/max_history/event_open/dbn_cache",
+      "quality": [
+        "No semantic completeness or fills inferred from cache presence."
+      ],
+      "row_count": null,
+      "schemas": [
+        "cmbp-1"
+      ],
+      "source": [
+        "OPRA.PILLAR"
+      ],
+      "sufficiency": {
+        "execution": "quote-event context only, not complex-book fill proof",
+        "path": "partial event windows; can derive second bars",
+        "structural": "partial; inspect exact contract/date overlap"
+      }
+    },
+    {
+      "bytes": 487176,
+      "file_count": 2,
+      "location": "/Users/patrick/Dev/MGC-v05l-ndxp-research/outputs/ndxp_naive_baseline/max_history/event_open/dbn_cache/definitions",
+      "quality": [
+        "No semantic completeness or fills inferred from cache presence."
+      ],
+      "row_count": null,
+      "schemas": [
+        "definition"
+      ],
+      "source": [
+        "OPRA.PILLAR"
+      ],
+      "sufficiency": {
+        "execution": "insufficient",
+        "path": "sampled bars only",
+        "structural": "partial; inspect exact contract/date overlap"
+      }
+    },
+    {
+      "bytes": 112975426,
+      "file_count": 2,
+      "location": "/Users/patrick/Dev/MGC-v05l-ndxp-research/outputs/ndxp_naive_baseline/max_history/event_open/dbn_cache/quarantine",
+      "quality": [
+        "No semantic completeness or fills inferred from cache presence.",
+        "QUARANTINED: exclude until independently repaired; no reuse credit."
+      ],
+      "row_count": null,
+      "schemas": [
+        "cmbp-1"
+      ],
+      "source": [
+        "OPRA.PILLAR"
+      ],
+      "sufficiency": {
+        "execution": "quote-event context only, not complex-book fill proof",
+        "path": "partial event windows; can derive second bars",
+        "structural": "partial; inspect exact contract/date overlap"
+      }
+    },
+    {
+      "bytes": 47306067637,
+      "file_count": 665,
+      "location": "/Users/patrick/Dev/MGC-v05l-ndxp-research/outputs/ndxp_naive_baseline/max_history/event_open/stop_paths/cache",
+      "quality": [
+        "No semantic completeness or fills inferred from cache presence."
+      ],
+      "row_count": null,
+      "schemas": [
+        "cmbp-1"
+      ],
+      "source": [
+        "OPRA.PILLAR"
+      ],
+      "sufficiency": {
+        "execution": "quote-event context only, not complex-book fill proof",
+        "path": "partial event windows; can derive second bars",
+        "structural": "partial; inspect exact contract/date overlap"
+      }
+    },
+    {
+      "bytes": 138966,
+      "file_count": 1,
+      "location": "/Users/patrick/Dev/MGC-v05l-ndxp-research/outputs/ndxp_naive_baseline/max_history/quarantine",
+      "quality": [
+        "No semantic completeness or fills inferred from cache presence.",
+        "2023-05-04-NDXP_OPT-cmbp-1.dbn.zst: DBNError",
+        "QUARANTINED: exclude until independently repaired; no reuse credit."
+      ],
+      "row_count": null,
+      "schemas": [],
+      "source": [],
+      "sufficiency": {
+        "execution": "insufficient",
+        "path": "sampled bars only",
+        "structural": "partial; inspect exact contract/date overlap"
+      }
+    },
+    {
+      "bytes": 11923177840,
+      "file_count": 173,
+      "location": "/Users/patrick/Dev/MGC-v05l-ndxp-research/outputs/ndxp_red_candle/20260921/cache/paths",
+      "quality": [
+        "No semantic completeness or fills inferred from cache presence."
+      ],
+      "row_count": null,
+      "schemas": [
+        "cmbp-1"
+      ],
+      "source": [
+        "OPRA.PILLAR"
+      ],
+      "sufficiency": {
+        "execution": "quote-event context only, not complex-book fill proof",
+        "path": "partial event windows; can derive second bars",
+        "structural": "partial; inspect exact contract/date overlap"
+      }
+    },
+    {
+      "bytes": 46278784,
+      "file_count": 681,
+      "location": "/Users/patrick/Dev/MGC-v05l-ndxp-research/outputs/ndxp_red_candle/20260921/cache/qqq_1s",
+      "quality": [
+        "No semantic completeness or fills inferred from cache presence."
+      ],
+      "row_count": null,
+      "schemas": [
+        "ohlcv-1s"
+      ],
+      "source": [
+        "XNAS.ITCH"
+      ],
+      "sufficiency": {
+        "execution": "insufficient",
+        "path": "sampled bars only",
+        "structural": "partial; inspect exact contract/date overlap"
+      }
+    },
+    {
+      "bytes": 1170071257,
+      "file_count": 3303,
+      "location": "/Users/patrick/Dev/MGC-v05l-ndxp-research/outputs/ndxp_red_candle/20260921/cache/snapshots",
+      "quality": [
+        "No semantic completeness or fills inferred from cache presence."
+      ],
+      "row_count": null,
+      "schemas": [
+        "cmbp-1"
+      ],
+      "source": [
+        "OPRA.PILLAR"
+      ],
+      "sufficiency": {
+        "execution": "quote-event context only, not complex-book fill proof",
+        "path": "partial event windows; can derive second bars",
+        "structural": "partial; inspect exact contract/date overlap"
+      }
+    },
+    {
+      "bytes": 2322674380,
+      "file_count": 46,
+      "location": "/Users/patrick/Dev/MGC-v05l-ndxp-research/outputs/ndxp_stabilized/20260921/cache/paths",
+      "quality": [
+        "No semantic completeness or fills inferred from cache presence."
+      ],
+      "row_count": null,
+      "schemas": [
+        "cmbp-1"
+      ],
+      "source": [
+        "OPRA.PILLAR"
+      ],
+      "sufficiency": {
+        "execution": "quote-event context only, not complex-book fill proof",
+        "path": "partial event windows; can derive second bars",
+        "structural": "partial; inspect exact contract/date overlap"
+      }
+    },
+    {
+      "bytes": 363312106,
+      "file_count": 1168,
+      "location": "/Users/patrick/Dev/MGC-v05l-ndxp-research/outputs/ndxp_stabilized/20260921/cache/snapshots",
+      "quality": [
+        "No semantic completeness or fills inferred from cache presence."
+      ],
+      "row_count": null,
+      "schemas": [
+        "cmbp-1"
+      ],
+      "source": [
+        "OPRA.PILLAR"
+      ],
+      "sufficiency": {
+        "execution": "quote-event context only, not complex-book fill proof",
+        "path": "partial event windows; can derive second bars",
+        "structural": "partial; inspect exact contract/date overlap"
+      }
+    },
+    {
+      "bytes": 316802,
+      "file_count": 1,
+      "location": "/Users/patrick/Dev/MGC-v05l-automation/outputs/reports/trend_participation_engine/raw_bars/databento_minute_backfill/symbol=ES/year=2026/month=04",
+      "quality": [
+        "No semantic completeness or fills inferred from cache presence."
+      ],
+      "row_count": 9659,
+      "schemas": [
+        "parquet: raw_bars_1m"
+      ],
+      "source": [
+        "local research warehouse; upstream provenance must be checked"
+      ],
+      "sufficiency": {
+        "execution": "no",
+        "path": "not second-level options",
+        "structural": "underlying/regime context only"
+      }
+    },
+    {
+      "bytes": 936923,
+      "file_count": 1,
+      "location": "/Users/patrick/Dev/MGC-v05l-automation/outputs/reports/trend_participation_engine/raw_bars/databento_minute_backfill/symbol=ES/year=2026/month=05",
+      "quality": [
+        "No semantic completeness or fills inferred from cache presence."
+      ],
+      "row_count": 28740,
+      "schemas": [
+        "parquet: raw_bars_1m"
+      ],
+      "source": [
+        "local research warehouse; upstream provenance must be checked"
+      ],
+      "sufficiency": {
+        "execution": "no",
+        "path": "not second-level options",
+        "structural": "underlying/regime context only"
+      }
+    },
+    {
+      "bytes": 980377,
+      "file_count": 1,
+      "location": "/Users/patrick/Dev/MGC-v05l-automation/outputs/reports/trend_participation_engine/raw_bars/databento_minute_backfill/symbol=ES/year=2026/month=06",
+      "quality": [
+        "No semantic completeness or fills inferred from cache presence."
+      ],
+      "row_count": 30116,
+      "schemas": [
+        "parquet: raw_bars_1m"
+      ],
+      "source": [
+        "local research warehouse; upstream provenance must be checked"
+      ],
+      "sufficiency": {
+        "execution": "no",
+        "path": "not second-level options",
+        "structural": "underlying/regime context only"
+      }
+    },
+    {
+      "bytes": 32496,
+      "file_count": 1,
+      "location": "/Users/patrick/Dev/MGC-v05l-automation/outputs/reports/trend_participation_engine/raw_bars/databento_minute_backfill/symbol=ES/year=2026/month=07",
+      "quality": [
+        "No semantic completeness or fills inferred from cache presence."
+      ],
+      "row_count": 790,
+      "schemas": [
+        "parquet: raw_bars_1m"
+      ],
+      "source": [
+        "local research warehouse; upstream provenance must be checked"
+      ],
+      "sufficiency": {
+        "execution": "no",
+        "path": "not second-level options",
+        "structural": "underlying/regime context only"
+      }
+    },
+    {
+      "bytes": 826904,
+      "file_count": 1,
+      "location": "/Users/patrick/Dev/MGC-v05l-automation/outputs/reports/trend_participation_engine/raw_bars/databento_minute_backfill/symbol=MES/year=2019/month=05",
+      "quality": [
+        "No semantic completeness or fills inferred from cache presence."
+      ],
+      "row_count": 26598,
+      "schemas": [
+        "parquet: raw_bars_1m"
+      ],
+      "source": [
+        "local research warehouse; upstream provenance must be checked"
+      ],
+      "sufficiency": {
+        "execution": "no",
+        "path": "not second-level options",
+        "structural": "underlying/regime context only"
+      }
+    },
+    {
+      "bytes": 839842,
+      "file_count": 1,
+      "location": "/Users/patrick/Dev/MGC-v05l-automation/outputs/reports/trend_participation_engine/raw_bars/databento_minute_backfill/symbol=MES/year=2019/month=06",
+      "quality": [
+        "No semantic completeness or fills inferred from cache presence."
+      ],
+      "row_count": 26929,
+      "schemas": [
+        "parquet: raw_bars_1m"
+      ],
+      "source": [
+        "local research warehouse; upstream provenance must be checked"
+      ],
+      "sufficiency": {
+        "execution": "no",
+        "path": "not second-level options",
+        "structural": "underlying/regime context only"
+      }
+    },
+    {
+      "bytes": 902478,
+      "file_count": 1,
+      "location": "/Users/patrick/Dev/MGC-v05l-automation/outputs/reports/trend_participation_engine/raw_bars/databento_minute_backfill/symbol=MES/year=2019/month=07",
+      "quality": [
+        "No semantic completeness or fills inferred from cache presence."
+      ],
+      "row_count": 29875,
+      "schemas": [
+        "parquet: raw_bars_1m"
+      ],
+      "source": [
+        "local research warehouse; upstream provenance must be checked"
+      ],
+      "sufficiency": {
+        "execution": "no",
+        "path": "not second-level options",
+        "structural": "underlying/regime context only"
+      }
+    },
+    {
+      "bytes": 934628,
+      "file_count": 1,
+      "location": "/Users/patrick/Dev/MGC-v05l-automation/outputs/reports/trend_participation_engine/raw_bars/databento_minute_backfill/symbol=MES/year=2019/month=08",
+      "quality": [
+        "No semantic completeness or fills inferred from cache presence."
+      ],
+      "row_count": 29842,
+      "schemas": [
+        "parquet: raw_bars_1m"
+      ],
+      "source": [
+        "local research warehouse; upstream provenance must be checked"
+      ],
+      "sufficiency": {
+        "execution": "no",
+        "path": "not second-level options",
+        "structural": "underlying/regime context only"
+      }
+    },
+    {
+      "bytes": 857823,
+      "file_count": 1,
+      "location": "/Users/patrick/Dev/MGC-v05l-automation/outputs/reports/trend_participation_engine/raw_bars/databento_minute_backfill/symbol=MES/year=2019/month=09",
+      "quality": [
+        "No semantic completeness or fills inferred from cache presence."
+      ],
+      "row_count": 28173,
+      "schemas": [
+        "parquet: raw_bars_1m"
+      ],
+      "source": [
+        "local research warehouse; upstream provenance must be checked"
+      ],
+      "sufficiency": {
+        "execution": "no",
+        "path": "not second-level options",
+        "structural": "underlying/regime context only"
+      }
+    },
+    {
+      "bytes": 954134,
+      "file_count": 1,
+      "location": "/Users/patrick/Dev/MGC-v05l-automation/outputs/reports/trend_participation_engine/raw_bars/databento_minute_backfill/symbol=MES/year=2019/month=10",
+      "quality": [
+        "No semantic completeness or fills inferred from cache presence."
+      ],
+      "row_count": 30997,
+      "schemas": [
+        "parquet: raw_bars_1m"
+      ],
+      "source": [
+        "local research warehouse; upstream provenance must be checked"
+      ],
+      "sufficiency": {
+        "execution": "no",
+        "path": "not second-level options",
+        "structural": "underlying/regime context only"
+      }
+    },
+    {
+      "bytes": 835380,
+      "file_count": 1,
+      "location": "/Users/patrick/Dev/MGC-v05l-automation/outputs/reports/trend_participation_engine/raw_bars/databento_minute_backfill/symbol=MES/year=2019/month=11",
+      "quality": [
+        "No semantic completeness or fills inferred from cache presence."
+      ],
+      "row_count": 27536,
+      "schemas": [
+        "parquet: raw_bars_1m"
+      ],
+      "source": [
+        "local research warehouse; upstream provenance must be checked"
+      ],
+      "sufficiency": {
+        "execution": "no",
+        "path": "not second-level options",
+        "structural": "underlying/regime context only"
+      }
+    },
+    {
+      "bytes": 828477,
+      "file_count": 1,
+      "location": "/Users/patrick/Dev/MGC-v05l-automation/outputs/reports/trend_participation_engine/raw_bars/databento_minute_backfill/symbol=MES/year=2019/month=12",
+      "quality": [
+        "No semantic completeness or fills inferred from cache presence."
+      ],
+      "row_count": 27088,
+      "schemas": [
+        "parquet: raw_bars_1m"
+      ],
+      "source": [
+        "local research warehouse; upstream provenance must be checked"
+      ],
+      "sufficiency": {
+        "execution": "no",
+        "path": "not second-level options",
+        "structural": "underlying/regime context only"
+      }
+    },
+    {
+      "bytes": 316092,
+      "file_count": 1,
+      "location": "/Users/patrick/Dev/MGC-v05l-automation/outputs/reports/trend_participation_engine/raw_bars/databento_minute_backfill/symbol=MES/year=2026/month=04",
+      "quality": [
+        "No semantic completeness or fills inferred from cache presence."
+      ],
+      "row_count": 9660,
+      "schemas": [
+        "parquet: raw_bars_1m"
+      ],
+      "source": [
+        "local research warehouse; upstream provenance must be checked"
+      ],
+      "sufficiency": {
+        "execution": "no",
+        "path": "not second-level options",
+        "structural": "underlying/regime context only"
+      }
+    },
+    {
+      "bytes": 935648,
+      "file_count": 1,
+      "location": "/Users/patrick/Dev/MGC-v05l-automation/outputs/reports/trend_participation_engine/raw_bars/databento_minute_backfill/symbol=MES/year=2026/month=05",
+      "quality": [
+        "No semantic completeness or fills inferred from cache presence."
+      ],
+      "row_count": 28740,
+      "schemas": [
+        "parquet: raw_bars_1m"
+      ],
+      "source": [
+        "local research warehouse; upstream provenance must be checked"
+      ],
+      "sufficiency": {
+        "execution": "no",
+        "path": "not second-level options",
+        "structural": "underlying/regime context only"
+      }
+    },
+    {
+      "bytes": 980217,
+      "file_count": 1,
+      "location": "/Users/patrick/Dev/MGC-v05l-automation/outputs/reports/trend_participation_engine/raw_bars/databento_minute_backfill/symbol=MES/year=2026/month=06",
+      "quality": [
+        "No semantic completeness or fills inferred from cache presence."
+      ],
+      "row_count": 30120,
+      "schemas": [
+        "parquet: raw_bars_1m"
+      ],
+      "source": [
+        "local research warehouse; upstream provenance must be checked"
+      ],
+      "sufficiency": {
+        "execution": "no",
+        "path": "not second-level options",
+        "structural": "underlying/regime context only"
+      }
+    },
+    {
+      "bytes": 32728,
+      "file_count": 1,
+      "location": "/Users/patrick/Dev/MGC-v05l-automation/outputs/reports/trend_participation_engine/raw_bars/databento_minute_backfill/symbol=MES/year=2026/month=07",
+      "quality": [
+        "No semantic completeness or fills inferred from cache presence."
+      ],
+      "row_count": 790,
+      "schemas": [
+        "parquet: raw_bars_1m"
+      ],
+      "source": [
+        "local research warehouse; upstream provenance must be checked"
+      ],
+      "sufficiency": {
+        "execution": "no",
+        "path": "not second-level options",
+        "structural": "underlying/regime context only"
+      }
+    },
+    {
+      "bytes": 853409,
+      "file_count": 1,
+      "location": "/Users/patrick/Dev/MGC-v05l-automation/outputs/reports/trend_participation_engine/raw_bars/databento_minute_backfill/symbol=MNQ/year=2019/month=05",
+      "quality": [
+        "No semantic completeness or fills inferred from cache presence."
+      ],
+      "row_count": 25660,
+      "schemas": [
+        "parquet: raw_bars_1m"
+      ],
+      "source": [
+        "local research warehouse; upstream provenance must be checked"
+      ],
+      "sufficiency": {
+        "execution": "no",
+        "path": "not second-level options",
+        "structural": "underlying/regime context only"
+      }
+    },
+    {
+      "bytes": 873688,
+      "file_count": 1,
+      "location": "/Users/patrick/Dev/MGC-v05l-automation/outputs/reports/trend_participation_engine/raw_bars/databento_minute_backfill/symbol=MNQ/year=2019/month=06",
+      "quality": [
+        "No semantic completeness or fills inferred from cache presence."
+      ],
+      "row_count": 26193,
+      "schemas": [
+        "parquet: raw_bars_1m"
+      ],
+      "source": [
+        "local research warehouse; upstream provenance must be checked"
+      ],
+      "sufficiency": {
+        "execution": "no",
+        "path": "not second-level options",
+        "structural": "underlying/regime context only"
+      }
+    },
+    {
+      "bytes": 953782,
+      "file_count": 1,
+      "location": "/Users/patrick/Dev/MGC-v05l-automation/outputs/reports/trend_participation_engine/raw_bars/databento_minute_backfill/symbol=MNQ/year=2019/month=07",
+      "quality": [
+        "No semantic completeness or fills inferred from cache presence."
+      ],
+      "row_count": 30398,
+      "schemas": [
+        "parquet: raw_bars_1m"
+      ],
+      "source": [
+        "local research warehouse; upstream provenance must be checked"
+      ],
+      "sufficiency": {
+        "execution": "no",
+        "path": "not second-level options",
+        "structural": "underlying/regime context only"
+      }
+    },
+    {
+      "bytes": 982330,
+      "file_count": 1,
+      "location": "/Users/patrick/Dev/MGC-v05l-automation/outputs/reports/trend_participation_engine/raw_bars/databento_minute_backfill/symbol=MNQ/year=2019/month=08",
+      "quality": [
+        "No semantic completeness or fills inferred from cache presence."
+      ],
+      "row_count": 29834,
+      "schemas": [
+        "parquet: raw_bars_1m"
+      ],
+      "source": [
+        "local research warehouse; upstream provenance must be checked"
+      ],
+      "sufficiency": {
+        "execution": "no",
+        "path": "not second-level options",
+        "structural": "underlying/regime context only"
+      }
+    },
+    {
+      "bytes": 900546,
+      "file_count": 1,
+      "location": "/Users/patrick/Dev/MGC-v05l-automation/outputs/reports/trend_participation_engine/raw_bars/databento_minute_backfill/symbol=MNQ/year=2019/month=09",
+      "quality": [
+        "No semantic completeness or fills inferred from cache presence."
+      ],
+      "row_count": 28263,
+      "schemas": [
+        "parquet: raw_bars_1m"
+      ],
+      "source": [
+        "local research warehouse; upstream provenance must be checked"
+      ],
+      "sufficiency": {
+        "execution": "no",
+        "path": "not second-level options",
+        "structural": "underlying/regime context only"
+      }
+    },
+    {
+      "bytes": 1013061,
+      "file_count": 1,
+      "location": "/Users/patrick/Dev/MGC-v05l-automation/outputs/reports/trend_participation_engine/raw_bars/databento_minute_backfill/symbol=MNQ/year=2019/month=10",
+      "quality": [
+        "No semantic completeness or fills inferred from cache presence."
+      ],
+      "row_count": 31222,
+      "schemas": [
+        "parquet: raw_bars_1m"
+      ],
+      "source": [
+        "local research warehouse; upstream provenance must be checked"
+      ],
+      "sufficiency": {
+        "execution": "no",
+        "path": "not second-level options",
+        "structural": "underlying/regime context only"
+      }
+    },
+    {
+      "bytes": 893644,
+      "file_count": 1,
+      "location": "/Users/patrick/Dev/MGC-v05l-automation/outputs/reports/trend_participation_engine/raw_bars/databento_minute_backfill/symbol=MNQ/year=2019/month=11",
+      "quality": [
+        "No semantic completeness or fills inferred from cache presence."
+      ],
+      "row_count": 28013,
+      "schemas": [
+        "parquet: raw_bars_1m"
+      ],
+      "source": [
+        "local research warehouse; upstream provenance must be checked"
+      ],
+      "sufficiency": {
+        "execution": "no",
+        "path": "not second-level options",
+        "structural": "underlying/regime context only"
+      }
+    },
+    {
+      "bytes": 915784,
+      "file_count": 1,
+      "location": "/Users/patrick/Dev/MGC-v05l-automation/outputs/reports/trend_participation_engine/raw_bars/databento_minute_backfill/symbol=MNQ/year=2019/month=12",
+      "quality": [
+        "No semantic completeness or fills inferred from cache presence."
+      ],
+      "row_count": 28172,
+      "schemas": [
+        "parquet: raw_bars_1m"
+      ],
+      "source": [
+        "local research warehouse; upstream provenance must be checked"
+      ],
+      "sufficiency": {
+        "execution": "no",
+        "path": "not second-level options",
+        "structural": "underlying/regime context only"
+      }
+    },
+    {
+      "bytes": 367283,
+      "file_count": 1,
+      "location": "/Users/patrick/Dev/MGC-v05l-automation/outputs/reports/trend_participation_engine/raw_bars/databento_minute_backfill/symbol=MNQ/year=2026/month=04",
+      "quality": [
+        "No semantic completeness or fills inferred from cache presence."
+      ],
+      "row_count": 9660,
+      "schemas": [
+        "parquet: raw_bars_1m"
+      ],
+      "source": [
+        "local research warehouse; upstream provenance must be checked"
+      ],
+      "sufficiency": {
+        "execution": "no",
+        "path": "not second-level options",
+        "structural": "underlying/regime context only"
+      }
+    },
+    {
+      "bytes": 1099131,
+      "file_count": 1,
+      "location": "/Users/patrick/Dev/MGC-v05l-automation/outputs/reports/trend_participation_engine/raw_bars/databento_minute_backfill/symbol=MNQ/year=2026/month=05",
+      "quality": [
+        "No semantic completeness or fills inferred from cache presence."
+      ],
+      "row_count": 28740,
+      "schemas": [
+        "parquet: raw_bars_1m"
+      ],
+      "source": [
+        "local research warehouse; upstream provenance must be checked"
+      ],
+      "sufficiency": {
+        "execution": "no",
+        "path": "not second-level options",
+        "structural": "underlying/regime context only"
+      }
+    },
+    {
+      "bytes": 1131120,
+      "file_count": 1,
+      "location": "/Users/patrick/Dev/MGC-v05l-automation/outputs/reports/trend_participation_engine/raw_bars/databento_minute_backfill/symbol=MNQ/year=2026/month=06",
+      "quality": [
+        "No semantic completeness or fills inferred from cache presence."
+      ],
+      "row_count": 30120,
+      "schemas": [
+        "parquet: raw_bars_1m"
+      ],
+      "source": [
+        "local research warehouse; upstream provenance must be checked"
+      ],
+      "sufficiency": {
+        "execution": "no",
+        "path": "not second-level options",
+        "structural": "underlying/regime context only"
+      }
+    },
+    {
+      "bytes": 40547,
+      "file_count": 1,
+      "location": "/Users/patrick/Dev/MGC-v05l-automation/outputs/reports/trend_participation_engine/raw_bars/databento_minute_backfill/symbol=MNQ/year=2026/month=07",
+      "quality": [
+        "No semantic completeness or fills inferred from cache presence."
+      ],
+      "row_count": 790,
+      "schemas": [
+        "parquet: raw_bars_1m"
+      ],
+      "source": [
+        "local research warehouse; upstream provenance must be checked"
+      ],
+      "sufficiency": {
+        "execution": "no",
+        "path": "not second-level options",
+        "structural": "underlying/regime context only"
+      }
+    },
+    {
+      "bytes": 359223,
+      "file_count": 1,
+      "location": "/Users/patrick/Dev/MGC-v05l-automation/outputs/reports/trend_participation_engine/raw_bars/databento_minute_backfill/symbol=NQ/year=2026/month=04",
+      "quality": [
+        "No semantic completeness or fills inferred from cache presence."
+      ],
+      "row_count": 9660,
+      "schemas": [
+        "parquet: raw_bars_1m"
+      ],
+      "source": [
+        "local research warehouse; upstream provenance must be checked"
+      ],
+      "sufficiency": {
+        "execution": "no",
+        "path": "not second-level options",
+        "structural": "underlying/regime context only"
+      }
+    },
+    {
+      "bytes": 1081441,
+      "file_count": 1,
+      "location": "/Users/patrick/Dev/MGC-v05l-automation/outputs/reports/trend_participation_engine/raw_bars/databento_minute_backfill/symbol=NQ/year=2026/month=05",
+      "quality": [
+        "No semantic completeness or fills inferred from cache presence."
+      ],
+      "row_count": 28740,
+      "schemas": [
+        "parquet: raw_bars_1m"
+      ],
+      "source": [
+        "local research warehouse; upstream provenance must be checked"
+      ],
+      "sufficiency": {
+        "execution": "no",
+        "path": "not second-level options",
+        "structural": "underlying/regime context only"
+      }
+    },
+    {
+      "bytes": 1107739,
+      "file_count": 1,
+      "location": "/Users/patrick/Dev/MGC-v05l-automation/outputs/reports/trend_participation_engine/raw_bars/databento_minute_backfill/symbol=NQ/year=2026/month=06",
+      "quality": [
+        "No semantic completeness or fills inferred from cache presence."
+      ],
+      "row_count": 30095,
+      "schemas": [
+        "parquet: raw_bars_1m"
+      ],
+      "source": [
+        "local research warehouse; upstream provenance must be checked"
+      ],
+      "sufficiency": {
+        "execution": "no",
+        "path": "not second-level options",
+        "structural": "underlying/regime context only"
+      }
+    },
+    {
+      "bytes": 39043,
+      "file_count": 1,
+      "location": "/Users/patrick/Dev/MGC-v05l-automation/outputs/reports/trend_participation_engine/raw_bars/databento_minute_backfill/symbol=NQ/year=2026/month=07",
+      "quality": [
+        "No semantic completeness or fills inferred from cache presence."
+      ],
+      "row_count": 790,
+      "schemas": [
+        "parquet: raw_bars_1m"
+      ],
+      "source": [
+        "local research warehouse; upstream provenance must be checked"
+      ],
+      "sufficiency": {
+        "execution": "no",
+        "path": "not second-level options",
+        "structural": "underlying/regime context only"
+      }
+    },
+    {
+      "bytes": 50455,
+      "file_count": 1,
+      "location": "/Users/patrick/Dev/MGC-v05l-automation/outputs/research_platform/warehouse/historical_evaluator/datasets/vix_daily",
+      "quality": [
+        "No semantic completeness or fills inferred from cache presence."
+      ],
+      "row_count": 1663,
+      "schemas": [
+        "parquet: daily VIX"
+      ],
+      "source": [
+        "local research warehouse; upstream provenance must be checked"
+      ],
+      "sufficiency": {
+        "execution": "no",
+        "path": "not second-level options",
+        "structural": "underlying/regime context only"
+      }
+    },
+    {
+      "bytes": 1461,
+      "file_count": 1,
+      "location": "/Users/patrick/Dev/MGC-v05l-automation/outputs/warehouse_historical_evaluator_gc_q2_entry_acceptance_dry_run/datasets/vix_daily",
+      "quality": [
+        "No semantic completeness or fills inferred from cache presence."
+      ],
+      "row_count": 0,
+      "schemas": [
+        "parquet: daily VIX"
+      ],
+      "source": [
+        "local research warehouse; upstream provenance must be checked"
+      ],
+      "sufficiency": {
+        "execution": "no",
+        "path": "not second-level options",
+        "structural": "empty schema only"
+      }
+    },
+    {
+      "bytes": 1461,
+      "file_count": 1,
+      "location": "/Users/patrick/Dev/MGC-v05l-automation/outputs/warehouse_historical_evaluator_gc_q3_entry_acceptance_dry_run/datasets/vix_daily",
+      "quality": [
+        "No semantic completeness or fills inferred from cache presence."
+      ],
+      "row_count": 0,
+      "schemas": [
+        "parquet: daily VIX"
+      ],
+      "source": [
+        "local research warehouse; upstream provenance must be checked"
+      ],
+      "sufficiency": {
+        "execution": "no",
+        "path": "not second-level options",
+        "structural": "empty schema only"
+      }
+    },
+    {
+      "bytes": 1461,
+      "file_count": 1,
+      "location": "/Users/patrick/Dev/MGC-v05l-automation/outputs/warehouse_historical_evaluator_gc_q4_entry_acceptance_dry_run/datasets/vix_daily",
+      "quality": [
+        "No semantic completeness or fills inferred from cache presence."
+      ],
+      "row_count": 0,
+      "schemas": [
+        "parquet: daily VIX"
+      ],
+      "source": [
+        "local research warehouse; upstream provenance must be checked"
+      ],
+      "sufficiency": {
+        "execution": "no",
+        "path": "not second-level options",
+        "structural": "empty schema only"
+      }
+    }
+  ],
+  "as_of": "2026-09-26",
+  "catalog_evidence": {
+    "get_dataset_range": {
+      "end": "2026-09-25T13:30:00.000000000Z",
+      "schema": {
+        "cbbo-1m": {
+          "end": "2026-09-25T13:30:00.000000000Z",
+          "start": "2013-04-01T00:00:00.000000000Z"
+        },
+        "cbbo-1s": {
+          "end": "2026-09-25T13:30:00.000000000Z",
+          "start": "2025-02-20T00:00:00.000000000Z"
+        },
+        "cmbp-1": {
+          "end": "2026-09-25T13:30:00.000000000Z",
+          "start": "2023-03-28T00:00:00.000000000Z"
+        },
+        "definition": {
+          "end": "2026-09-25T13:30:00.000000000Z",
+          "start": "2013-04-01T00:00:00.000000000Z"
+        },
+        "ohlcv-1d": {
+          "end": "2026-09-25T13:30:00.000000000Z",
+          "start": "2013-04-01T00:00:00.000000000Z"
+        },
+        "ohlcv-1h": {
+          "end": "2026-09-25T13:30:00.000000000Z",
+          "start": "2013-04-01T00:00:00.000000000Z"
+        },
+        "ohlcv-1m": {
+          "end": "2026-09-25T13:30:00.000000000Z",
+          "start": "2013-04-01T00:00:00.000000000Z"
+        },
+        "ohlcv-1s": {
+          "end": "2026-09-25T13:30:00.000000000Z",
+          "start": "2013-04-01T00:00:00.000000000Z"
+        },
+        "statistics": {
+          "end": "2026-09-25T13:30:00.000000000Z",
+          "start": "2013-04-01T00:00:00.000000000Z"
+        },
+        "status": {
+          "end": "2026-09-25T13:30:00.000000000Z",
+          "start": "2024-07-17T00:00:00.000000000Z"
+        },
+        "tcbbo": {
+          "end": "2026-09-25T13:30:00.000000000Z",
+          "start": "2023-03-28T00:00:00.000000000Z"
+        },
+        "trades": {
+          "end": "2026-09-25T13:30:00.000000000Z",
+          "start": "2013-04-01T00:00:00.000000000Z"
+        }
+      },
+      "start": "2013-04-01T00:00:00.000000000Z"
+    },
+    "list_schemas": [
+      "cmbp-1",
+      "cbbo-1s",
+      "cbbo-1m",
+      "tcbbo",
+      "trades",
+      "ohlcv-1s",
+      "ohlcv-1m",
+      "ohlcv-1h",
+      "ohlcv-1d",
+      "statistics",
+      "status",
+      "definition"
+    ],
+    "list_unit_prices": [
+      {
+        "mode": "historical",
+        "unit_prices": {
+          "cbbo-1m": 2.0,
+          "cbbo-1s": 2.0,
+          "cmbp-1": 0.16,
+          "definition": 5.0,
+          "ohlcv-1d": 600.0,
+          "ohlcv-1h": 600.0,
+          "ohlcv-1m": 280.0,
+          "ohlcv-1s": 280.0,
+          "statistics": 11.0,
+          "status": 5.0,
+          "tcbbo": 210.0,
+          "trades": 280.0
+        }
+      },
+      {
+        "mode": "historical-streaming",
+        "unit_prices": {
+          "cbbo-1m": 2.0,
+          "cbbo-1s": 2.0,
+          "cmbp-1": 0.16,
+          "definition": 5.0,
+          "ohlcv-1d": 600.0,
+          "ohlcv-1h": 600.0,
+          "ohlcv-1m": 280.0,
+          "ohlcv-1s": 280.0,
+          "statistics": 11.0,
+          "status": 5.0,
+          "tcbbo": 210.0,
+          "trades": 280.0
+        }
+      },
+      {
+        "mode": "live",
+        "unit_prices": {
+          "cbbo-1m": 2.4,
+          "cbbo-1s": 2.4,
+          "cmbp-1": 0.2,
+          "definition": 6.0,
+          "ohlcv-1d": 720.0,
+          "ohlcv-1h": 720.0,
+          "ohlcv-1m": 336.0,
+          "ohlcv-1s": 336.0,
+          "statistics": 13.2,
+          "status": 6.0,
+          "tcbbo": 252.0,
+          "trades": 336.0
+        }
+      }
+    ]
+  },
+  "data_gaps_by_instrument": {
+    "NDXP": [
+      "Two multi-DTE minute path sessions missing (2026-09-22/23).",
+      "Owned event windows require exact 2/3DTE symbol/time intersection; sampled old stop paths are 0DTE and openings often stop before 09:31.",
+      "XQC CSV covers 2023-03-28..2026-09-18; frozen baseline settlement dates outside this span remain gaps.",
+      "No verified cash NDX intraday store found; reuse NQ/MNQ and QQQ proxies with timestamp/roll checks."
+    ],
+    "QQQ": [
+      "No QQQ option history identified; owned QQQ equity is venue-specific context only.",
+      "Equity history before 2024 and after 2026-09-18 not verified in scoped caches.",
+      "Dividend, OCC adjustment and assignment/deliverable records need validation; no index cash-settlement shortcut."
+    ],
+    "RUT": [
+      "No RUT/RUTW option history or official settlement series identified.",
+      "No verified cash RUT/RTY/IWM tape in scoped inventory; do not assume NQ or ES is interchangeable.",
+      "Daily-expiry coverage changes in 2024 and historical AM/PM series must remain separate."
+    ],
+    "SPX": [
+      "No SPX/SPXW option history or official settlement series identified.",
+      "SPXW PM first; AM SPX optional separately. ES/MES minute proxies exist, not cash SPX second-level or complex-book data."
+    ]
+  },
+  "evidence_sha256": {
+    "catalog_quotes.json": "8ed8a30444e24df713d15a8f5582f03becd544dddd00affc521b9251ebe37bc8",
+    "local_inventory.json": "1855b8e7c3e136fccb33f80ca3b09a8a644a3bc97819b8736d14bd6f7f9c7697",
+    "sample_quotes.json": "2f44d0a61889e0ec39f9de0e9864bf97d036dee3dc6d68188b3bb60df2bce14b"
+  },
+  "instruments": {
+    "NDXP": {
+      "comparability": "Frozen 10-point put vertical, literal 2/3 calendar DTE, credits 5/6/7. Earlier root-history extension needs listing audit; 2016 sample failed and is not zero-cost evidence.",
+      "exercise": "European",
+      "expirations": "Currently Mon\u2013Fri including PM monthly series; use actual historical listings and holidays. Keep NDX AM/XQO separate.",
+      "historical_start_design": "2018-02-02",
+      "mechanics_sources": [
+        "ndxp",
+        "ndxp_history"
+      ],
+      "multiplier": 100,
+      "parents": [
+        "NDXP.OPT"
+      ],
+      "preferred_root": "NDXP",
+      "roots": [
+        "NDXP"
+      ],
+      "settlement": "cash, PM; official XQC"
+    },
+    "QQQ": {
+      "comparability": "QQQ equity OHLCV is not option history. Dividends, early assignment, pin/after-hours risk, corporate actions and physical delivery break index-settlement equivalence; a 10-point width is not equal underlying-normalized risk.",
+      "exercise": "American",
+      "expirations": "Monthly and weekday short-term expirations where historically listed; verify holidays, adjusted contracts and deliverables.",
+      "historical_start_design": "2013-04-01",
+      "mechanics_sources": [
+        "qqq"
+      ],
+      "multiplier": 100,
+      "parents": [
+        "QQQ.OPT"
+      ],
+      "preferred_root": "QQQ",
+      "roots": [
+        "QQQ"
+      ],
+      "settlement": "physical delivery of normally 100 ETF shares; early exercise/assignment possible"
+    },
+    "RUT": {
+      "comparability": "Historical daily availability differs; keep AM RUT separate. Smaller underlying level changes relative width and risk.",
+      "exercise": "European",
+      "expirations": "RUT monthly third Friday; RUTW weekly/EOM and Mon\u2013Fri daily suite since January 8, 2024. Older specification page lists Friday only; dated daily-launch notice resolves that omission.",
+      "historical_start_design": "2013-04-01",
+      "mechanics_sources": [
+        "rut",
+        "rut_daily",
+        "settlement"
+      ],
+      "multiplier": 100,
+      "parents": [
+        "RUT.OPT",
+        "RUTW.OPT"
+      ],
+      "preferred_root": "RUTW",
+      "roots": [
+        "RUT",
+        "RUTW"
+      ],
+      "settlement": "RUT AM (RLS); RUTW PM cash"
+    },
+    "SPX": {
+      "comparability": "Use SPXW for PM comparison. SPX AM is a separately budgeted optional cohort; never silently merge roots.",
+      "exercise": "European",
+      "expirations": "SPX traditional third-Friday monthly; SPXW daily/weekly, PM third-Friday and end-of-month where listed. AM last trading day generally precedes settlement.",
+      "historical_start_design": "2013-04-01",
+      "mechanics_sources": [
+        "spx",
+        "settlement"
+      ],
+      "multiplier": 100,
+      "parents": [
+        "SPX.OPT",
+        "SPXW.OPT"
+      ],
+      "preferred_root": "SPXW",
+      "roots": [
+        "SPX",
+        "SPXW"
+      ],
+      "settlement": "SPX traditional AM (SET); SPXW PM cash"
+    }
+  },
+  "metadata_calls": {
+    "catalog": 3,
+    "downloads": 0,
+    "failed_samples": [
+      {
+        "error_type": "TimeoutError",
+        "request": {
+          "method": "get_billable_size",
+          "params": {
+            "dataset": "OPRA.PILLAR",
+            "end": "2024-06-12T09:30:10-04:00",
+            "schema": "cmbp-1",
+            "start": "2024-06-12T09:30:00-04:00",
+            "stype_in": "parent",
+            "symbols": [
+              "SPXW.OPT"
+            ]
+          }
+        }
+      },
+      {
+        "error_type": "TimeoutError",
+        "request": {
+          "method": "get_billable_size",
+          "params": {
+            "dataset": "OPRA.PILLAR",
+            "end": "2024-06-12T09:30:10-04:00",
+            "schema": "cmbp-1",
+            "start": "2024-06-12T09:30:00-04:00",
+            "stype_in": "parent",
+            "symbols": [
+              "QQQ.OPT"
+            ]
+          }
+        }
+      },
+      {
+        "error_type": "HTTPError",
+        "request": {
+          "method": "get_billable_size",
+          "params": {
+            "dataset": "OPRA.PILLAR",
+            "end": "2016-06-15T09:32:00-04:00",
+            "schema": "cbbo-1m",
+            "start": "2016-06-15T09:30:00-04:00",
+            "stype_in": "parent",
+            "symbols": [
+              "NDXP.OPT"
+            ]
+          }
+        }
+      },
+      {
+        "error_type": "TimeoutError",
+        "request": {
+          "method": "get_cost",
+          "params": {
+            "dataset": "OPRA.PILLAR",
+            "end": "2024-06-12T09:30:10-04:00",
+            "schema": "cmbp-1",
+            "start": "2024-06-12T09:30:00-04:00",
+            "stype_in": "parent",
+            "symbols": [
+              "SPXW.OPT"
+            ]
+          }
+        }
+      },
+      {
+        "error_type": "TimeoutError",
+        "request": {
+          "method": "get_cost",
+          "params": {
+            "dataset": "OPRA.PILLAR",
+            "end": "2024-06-12T09:30:10-04:00",
+            "schema": "cmbp-1",
+            "start": "2024-06-12T09:30:00-04:00",
+            "stype_in": "parent",
+            "symbols": [
+              "NDXP.OPT"
+            ]
+          }
+        }
+      },
+      {
+        "error_type": "HTTPError",
+        "request": {
+          "method": "get_cost",
+          "params": {
+            "dataset": "OPRA.PILLAR",
+            "end": "2016-06-15T09:32:00-04:00",
+            "schema": "cbbo-1m",
+            "start": "2016-06-15T09:30:00-04:00",
+            "stype_in": "parent",
+            "symbols": [
+              "NDXP.OPT"
+            ]
+          }
+        }
+      }
+    ],
+    "maximum_workers": 4,
+    "purchases": 0,
+    "samples": 40,
+    "total": 43
+  },
+  "operator_decisions": [
+    "Approve a concrete selected-contract/date manifest and spending cap before any purchase.",
+    "Confirm current OPRA plan, fees, older-history entitlements and Plus/Unlimited quotes; no upgrade now.",
+    "Approve 60-session development pilot definition and prioritization; no strategy selection from 2026.",
+    "Confirm portable cache location/disk headroom and source licensing; do not move/delete existing caches.",
+    "Choose whether/when to fund optional AM cohorts, older structural history, other-instrument event pilots or proprietary complex-book data."
+  ],
+  "optional_later_data": [
+    {
+      "category": "optional_later_data",
+      "estimate": {
+        "billable_GiB": {
+          "central": 0.0171,
+          "high": 0.0343,
+          "low": 0.0086
+        },
+        "components": {
+          "definition_usd": 0.009765625,
+          "opening_usd": 0.026172697544,
+          "selected_paths_usd": 0.004184246063232422
+        },
+        "compressed_GiB": {
+          "central": 0.0043,
+          "high": 0.0086,
+          "low": 0.0017
+        },
+        "cost_usd": {
+          "central": 0.0401,
+          "high": 0.0802,
+          "low": 0.0201
+        },
+        "download_requests_upper": 6,
+        "estimate_label": "sample_scaled_plus_explicit_record_model",
+        "methodology": "Median successful 2-minute parent cost/size samples \u00d7 session count + 12 legs \u00d7 3 sessions \u00d7 390 minutes \u00d7 80 bytes + 1 MiB/day definitions. Half-to-double cost/byte range; 10\u201350% DBN compression range; actual listing days can reduce totals. Provider sub-10-minute quotes may overestimate. NDXP costs are only a conservative two-session gap budget, not repurchase of the owned five-year store.",
+        "sessions_assumed": 2
+      },
+      "id": "NDXP_structural",
+      "request_design": {
+        "cache": "output/ndxp_multidte/program_v1/raw/{dataset}/{schema}/{root}/{session}/{sha256_canonical_request}.dbn.zst",
+        "cache_rules": "Read existing index first; merge overlapping symbol/time windows; never overwrite originals. Save request, SHA-256, byte size, source schema/version, timestamp semantics, symbol mapping, quality notices, and receipt. Derive second bars locally from owned CMBP-1 when possible.",
+        "dataset": "OPRA.PILLAR",
+        "date_range": [
+          "2021-09-24",
+          "2026-09-24"
+        ],
+        "download_authorized": false,
+        "expected_calls": "At most 3 \u00d7 session_count before reuse: discovery + definitions + batched selected-leg paths. Calendar/expiry prefilter; concurrency 4. These are FUTURE acquisition calls, not estimator calls.",
+        "full_chain": "Opening discovery and daily definitions only; paths selected-contract",
+        "instrument": "NDXP",
+        "layer": "structural",
+        "long_extension": [
+          "2018-02-02",
+          "2021-09-23"
+        ],
+        "optional_extension_estimate": {
+          "billable_GiB": {
+            "central": 7.7092,
+            "high": 15.4184,
+            "low": 3.8546
+          },
+          "components": {
+            "definition_usd": 4.39453125,
+            "opening_usd": 11.7777138948,
+            "selected_paths_usd": 1.8829107284545898
+          },
+          "compressed_GiB": {
+            "central": 1.9273,
+            "high": 3.8546,
+            "low": 0.7709
+          },
+          "cost_usd": {
+            "central": 18.0552,
+            "high": 36.1103,
+            "low": 9.0276
+          },
+          "download_requests_upper": 2700,
+          "estimate_label": "sample_scaled_plus_explicit_record_model",
+          "methodology": "Median successful 2-minute parent cost/size samples \u00d7 session count + 12 legs \u00d7 3 sessions \u00d7 390 minutes \u00d7 80 bytes + 1 MiB/day definitions. Half-to-double cost/byte range; 10\u201350% DBN compression range; actual listing days can reduce totals. Provider sub-10-minute quotes may overestimate.",
+          "sessions_assumed": 900
+        },
+        "partition": [
+          "development 2021-09-24..2024-12-31",
+          "validation 2025",
+          "holdout 2026-01-01..2026-09-24"
+        ],
+        "root_policy": "AM root excluded from initial PM baseline; same-name chain is not root equivalence.",
+        "schemas": [
+          "cbbo-1m",
+          "definition"
+        ],
+        "strategy": "Full preferred-root chain 09:30\u201309:32 ET once per trading day; select 2/3-calendar-DTE put legs near credits 5/6/7 causally; selected legs only 09:30 entry through expiration close. Definitions once/day/root for listing and deliverables. No whole-market or continuous multiyear query.",
+        "stype": [
+          "parent",
+          "raw_symbol"
+        ],
+        "symbols": [
+          "NDXP.OPT",
+          "selected raw OSI legs after local discovery"
+        ],
+        "timezone": "America/New_York"
+      }
+    },
+    {
+      "category": "optional_later_data",
+      "estimate": {
+        "billable_GiB": {
+          "central": 8.3429,
+          "high": 83.4292,
+          "low": 2.0857
+        },
+        "compressed_GiB": {
+          "central": 2.0857,
+          "high": 41.7146,
+          "low": 0.2086
+        },
+        "cost_usd": {
+          "central": 1.3349,
+          "high": 13.3487,
+          "low": 0.3337
+        },
+        "download_requests_upper": 240,
+        "estimate_label": "engineering_scenario_NOT_instrument_quote",
+        "methodology": "NDXP selected-leg CMBP 30m billable-size anchor 7465120 bytes / 6 legs, scaled to 12 legs \u00d7 60 minutes \u00d7 60 sessions. Explicit unmeasured activity multiplier 5.0 for SPX; low/high 0.25\u201310\u00d7. Execution adds TCBBO at 0.05 prints/leg/sec \u00d7 80 bytes; zero-trade sample is not generalized.",
+        "overlap": "Derive seconds from acquired/owned events; no separate CBBO-1s download for the same window.",
+        "sessions_assumed": 60
+      },
+      "id": "SPX_path",
+      "request_design": {
+        "cache": "output/ndxp_multidte/program_v1/raw/{dataset}/{schema}/{root}/{session}/{sha256_canonical_request}.dbn.zst",
+        "cache_rules": "Read existing index first; merge overlapping symbol/time windows; never overwrite originals. Save request, SHA-256, byte size, source schema/version, timestamp semantics, symbol mapping, quality notices, and receipt. Derive second bars locally from owned CMBP-1 when possible.",
+        "dataset": "OPRA.PILLAR",
+        "date_range": [
+          "2023-03-28",
+          "2024-12-31"
+        ],
+        "download_authorized": false,
+        "expected_calls": "Up to 240 selected-contract window requests for 60 sessions; local reuse first; four workers; cache/deduplicate.",
+        "full_chain": false,
+        "instrument": "SPX",
+        "layer": "path",
+        "optional_later_date_range": [
+          "2025-02-20",
+          "2026-09-24"
+        ],
+        "schema_gate": "Direct CBBO-1s starts 2025-02-20 per captured catalog; development seconds must be reconstructed from CMBP-1 (available 2023-03-28). No seconds before CMBP coverage; no synthetic interpolation through gaps.",
+        "schemas": [
+          "cmbp-1",
+          "cbbo-1s"
+        ],
+        "strategy": "60 development candidate sessions chosen deterministically across calendar months before path outcomes: first qualifying session then fixed spacing. 30-minute opening window plus three non-overlapping 10-minute windows around first $3/$7/$9 crossings or time-matched controls. Maximum 60 minutes/session across at most 12 legs. Outcome-centered windows are measurement labels, never causal entry selection.",
+        "stype": [
+          "raw_symbol"
+        ],
+        "symbols": "Selected raw OSI legs only; union at most 12 per sampled session",
+        "timezone": "America/New_York"
+      }
+    },
+    {
+      "category": "optional_later_data",
+      "estimate": {
+        "billable_GiB": {
+          "central": 1.1137,
+          "high": 11.1368,
+          "low": 0.2784
+        },
+        "compressed_GiB": {
+          "central": 0.2781,
+          "high": 5.5684,
+          "low": 0.0278
+        },
+        "cost_usd": {
+          "central": 0.4483,
+          "high": 4.4835,
+          "low": 0.1121
+        },
+        "download_requests_upper": 480,
+        "estimate_label": "engineering_scenario_NOT_instrument_quote",
+        "methodology": "NDXP selected-leg CMBP 30m billable-size anchor 7465120 bytes / 6 legs, scaled to 12 legs \u00d7 8 minutes \u00d7 60 sessions. Explicit unmeasured activity multiplier 5.0 for SPX; low/high 0.25\u201310\u00d7. Execution adds TCBBO at 0.05 prints/leg/sec \u00d7 80 bytes; zero-trade sample is not generalized.",
+        "overlap": "Execution CMBP is contained in the path pilot: do not add its bytes/cost twice. TCBBO incremental central cost 0.2704",
+        "sessions_assumed": 60
+      },
+      "id": "SPX_execution",
+      "request_design": {
+        "cache": "output/ndxp_multidte/program_v1/raw/{dataset}/{schema}/{root}/{session}/{sha256_canonical_request}.dbn.zst",
+        "cache_rules": "Read existing index first; merge overlapping symbol/time windows; never overwrite originals. Save request, SHA-256, byte size, source schema/version, timestamp semantics, symbol mapping, quality notices, and receipt. Derive second bars locally from owned CMBP-1 when possible.",
+        "dataset": "OPRA.PILLAR",
+        "date_range": [
+          "2023-03-28",
+          "2024-12-31"
+        ],
+        "download_authorized": false,
+        "expected_calls": "Up to 240 CMBP + 240 TCBBO windows standalone; CMBP adds zero downloads if path windows cover all events.",
+        "full_chain": false,
+        "instrument": "SPX",
+        "layer": "execution",
+        "limitation": "OPRA top-of-book and prints cannot identify complex-order queue position, routing, auction participation or guarantee a 20-lot spread fill. Proprietary complex-book/trade-linkage data or prospective paper/broker observations require a separate feasibility/permission gate.",
+        "schemas": [
+          "cmbp-1",
+          "tcbbo"
+        ],
+        "strategy": "60 development sessions \u00d7 four 2-minute windows around entry/first target/adverse crossing/control. Preserve nanosecond timestamps, venue, NBBO size, conditions and gaps; CMBP from the path pilot is reused, TCBBO only where incremental trade context is needed.",
+        "stype": [
+          "raw_symbol"
+        ],
+        "symbols": "Same selected raw OSI legs as path pilot",
+        "timezone": "America/New_York"
+      }
+    },
+    {
+      "category": "optional_later_data",
+      "estimate": {
+        "billable_GiB": {
+          "central": 8.3429,
+          "high": 83.4292,
+          "low": 2.0857
+        },
+        "compressed_GiB": {
+          "central": 2.0857,
+          "high": 41.7146,
+          "low": 0.2086
+        },
+        "cost_usd": {
+          "central": 1.3349,
+          "high": 13.3487,
+          "low": 0.3337
+        },
+        "download_requests_upper": 240,
+        "estimate_label": "engineering_scenario_NOT_instrument_quote",
+        "methodology": "NDXP selected-leg CMBP 30m billable-size anchor 7465120 bytes / 6 legs, scaled to 12 legs \u00d7 60 minutes \u00d7 60 sessions. Explicit unmeasured activity multiplier 5.0 for QQQ; low/high 0.25\u201310\u00d7. Execution adds TCBBO at 0.05 prints/leg/sec \u00d7 80 bytes; zero-trade sample is not generalized.",
+        "overlap": "Derive seconds from acquired/owned events; no separate CBBO-1s download for the same window.",
+        "sessions_assumed": 60
+      },
+      "id": "QQQ_path",
+      "request_design": {
+        "cache": "output/ndxp_multidte/program_v1/raw/{dataset}/{schema}/{root}/{session}/{sha256_canonical_request}.dbn.zst",
+        "cache_rules": "Read existing index first; merge overlapping symbol/time windows; never overwrite originals. Save request, SHA-256, byte size, source schema/version, timestamp semantics, symbol mapping, quality notices, and receipt. Derive second bars locally from owned CMBP-1 when possible.",
+        "dataset": "OPRA.PILLAR",
+        "date_range": [
+          "2023-03-28",
+          "2024-12-31"
+        ],
+        "download_authorized": false,
+        "expected_calls": "Up to 240 selected-contract window requests for 60 sessions; local reuse first; four workers; cache/deduplicate.",
+        "full_chain": false,
+        "instrument": "QQQ",
+        "layer": "path",
+        "optional_later_date_range": [
+          "2025-02-20",
+          "2026-09-24"
+        ],
+        "schema_gate": "Direct CBBO-1s starts 2025-02-20 per captured catalog; development seconds must be reconstructed from CMBP-1 (available 2023-03-28). No seconds before CMBP coverage; no synthetic interpolation through gaps.",
+        "schemas": [
+          "cmbp-1",
+          "cbbo-1s"
+        ],
+        "strategy": "60 development candidate sessions chosen deterministically across calendar months before path outcomes: first qualifying session then fixed spacing. 30-minute opening window plus three non-overlapping 10-minute windows around first $3/$7/$9 crossings or time-matched controls. Maximum 60 minutes/session across at most 12 legs. Outcome-centered windows are measurement labels, never causal entry selection.",
+        "stype": [
+          "raw_symbol"
+        ],
+        "symbols": "Selected raw OSI legs only; union at most 12 per sampled session",
+        "timezone": "America/New_York"
+      }
+    },
+    {
+      "category": "optional_later_data",
+      "estimate": {
+        "billable_GiB": {
+          "central": 1.1137,
+          "high": 11.1368,
+          "low": 0.2784
+        },
+        "compressed_GiB": {
+          "central": 0.2781,
+          "high": 5.5684,
+          "low": 0.0278
+        },
+        "cost_usd": {
+          "central": 0.4483,
+          "high": 4.4835,
+          "low": 0.1121
+        },
+        "download_requests_upper": 480,
+        "estimate_label": "engineering_scenario_NOT_instrument_quote",
+        "methodology": "NDXP selected-leg CMBP 30m billable-size anchor 7465120 bytes / 6 legs, scaled to 12 legs \u00d7 8 minutes \u00d7 60 sessions. Explicit unmeasured activity multiplier 5.0 for QQQ; low/high 0.25\u201310\u00d7. Execution adds TCBBO at 0.05 prints/leg/sec \u00d7 80 bytes; zero-trade sample is not generalized.",
+        "overlap": "Execution CMBP is contained in the path pilot: do not add its bytes/cost twice. TCBBO incremental central cost 0.2704",
+        "sessions_assumed": 60
+      },
+      "id": "QQQ_execution",
+      "request_design": {
+        "cache": "output/ndxp_multidte/program_v1/raw/{dataset}/{schema}/{root}/{session}/{sha256_canonical_request}.dbn.zst",
+        "cache_rules": "Read existing index first; merge overlapping symbol/time windows; never overwrite originals. Save request, SHA-256, byte size, source schema/version, timestamp semantics, symbol mapping, quality notices, and receipt. Derive second bars locally from owned CMBP-1 when possible.",
+        "dataset": "OPRA.PILLAR",
+        "date_range": [
+          "2023-03-28",
+          "2024-12-31"
+        ],
+        "download_authorized": false,
+        "expected_calls": "Up to 240 CMBP + 240 TCBBO windows standalone; CMBP adds zero downloads if path windows cover all events.",
+        "full_chain": false,
+        "instrument": "QQQ",
+        "layer": "execution",
+        "limitation": "OPRA top-of-book and prints cannot identify complex-order queue position, routing, auction participation or guarantee a 20-lot spread fill. Proprietary complex-book/trade-linkage data or prospective paper/broker observations require a separate feasibility/permission gate.",
+        "schemas": [
+          "cmbp-1",
+          "tcbbo"
+        ],
+        "strategy": "60 development sessions \u00d7 four 2-minute windows around entry/first target/adverse crossing/control. Preserve nanosecond timestamps, venue, NBBO size, conditions and gaps; CMBP from the path pilot is reused, TCBBO only where incremental trade context is needed.",
+        "stype": [
+          "raw_symbol"
+        ],
+        "symbols": "Same selected raw OSI legs as path pilot",
+        "timezone": "America/New_York"
+      }
+    },
+    {
+      "category": "optional_later_data",
+      "estimate": {
+        "billable_GiB": {
+          "central": 3.3372,
+          "high": 33.3717,
+          "low": 0.8343
+        },
+        "compressed_GiB": {
+          "central": 0.8343,
+          "high": 16.6858,
+          "low": 0.0834
+        },
+        "cost_usd": {
+          "central": 0.5339,
+          "high": 5.3395,
+          "low": 0.1335
+        },
+        "download_requests_upper": 240,
+        "estimate_label": "engineering_scenario_NOT_instrument_quote",
+        "methodology": "NDXP selected-leg CMBP 30m billable-size anchor 7465120 bytes / 6 legs, scaled to 12 legs \u00d7 60 minutes \u00d7 60 sessions. Explicit unmeasured activity multiplier 2.0 for RUT; low/high 0.25\u201310\u00d7. Execution adds TCBBO at 0.05 prints/leg/sec \u00d7 80 bytes; zero-trade sample is not generalized.",
+        "overlap": "Derive seconds from acquired/owned events; no separate CBBO-1s download for the same window.",
+        "sessions_assumed": 60
+      },
+      "id": "RUT_path",
+      "request_design": {
+        "cache": "output/ndxp_multidte/program_v1/raw/{dataset}/{schema}/{root}/{session}/{sha256_canonical_request}.dbn.zst",
+        "cache_rules": "Read existing index first; merge overlapping symbol/time windows; never overwrite originals. Save request, SHA-256, byte size, source schema/version, timestamp semantics, symbol mapping, quality notices, and receipt. Derive second bars locally from owned CMBP-1 when possible.",
+        "dataset": "OPRA.PILLAR",
+        "date_range": [
+          "2023-03-28",
+          "2024-12-31"
+        ],
+        "download_authorized": false,
+        "expected_calls": "Up to 240 selected-contract window requests for 60 sessions; local reuse first; four workers; cache/deduplicate.",
+        "full_chain": false,
+        "instrument": "RUT",
+        "layer": "path",
+        "optional_later_date_range": [
+          "2025-02-20",
+          "2026-09-24"
+        ],
+        "schema_gate": "Direct CBBO-1s starts 2025-02-20 per captured catalog; development seconds must be reconstructed from CMBP-1 (available 2023-03-28). No seconds before CMBP coverage; no synthetic interpolation through gaps.",
+        "schemas": [
+          "cmbp-1",
+          "cbbo-1s"
+        ],
+        "strategy": "60 development candidate sessions chosen deterministically across calendar months before path outcomes: first qualifying session then fixed spacing. 30-minute opening window plus three non-overlapping 10-minute windows around first $3/$7/$9 crossings or time-matched controls. Maximum 60 minutes/session across at most 12 legs. Outcome-centered windows are measurement labels, never causal entry selection.",
+        "stype": [
+          "raw_symbol"
+        ],
+        "symbols": "Selected raw OSI legs only; union at most 12 per sampled session",
+        "timezone": "America/New_York"
+      }
+    },
+    {
+      "category": "optional_later_data",
+      "estimate": {
+        "billable_GiB": {
+          "central": 0.4462,
+          "high": 4.4624,
+          "low": 0.1116
+        },
+        "compressed_GiB": {
+          "central": 0.1112,
+          "high": 2.2312,
+          "low": 0.0111
+        },
+        "cost_usd": {
+          "central": 0.3416,
+          "high": 3.4156,
+          "low": 0.0854
+        },
+        "download_requests_upper": 480,
+        "estimate_label": "engineering_scenario_NOT_instrument_quote",
+        "methodology": "NDXP selected-leg CMBP 30m billable-size anchor 7465120 bytes / 6 legs, scaled to 12 legs \u00d7 8 minutes \u00d7 60 sessions. Explicit unmeasured activity multiplier 2.0 for RUT; low/high 0.25\u201310\u00d7. Execution adds TCBBO at 0.05 prints/leg/sec \u00d7 80 bytes; zero-trade sample is not generalized.",
+        "overlap": "Execution CMBP is contained in the path pilot: do not add its bytes/cost twice. TCBBO incremental central cost 0.2704",
+        "sessions_assumed": 60
+      },
+      "id": "RUT_execution",
+      "request_design": {
+        "cache": "output/ndxp_multidte/program_v1/raw/{dataset}/{schema}/{root}/{session}/{sha256_canonical_request}.dbn.zst",
+        "cache_rules": "Read existing index first; merge overlapping symbol/time windows; never overwrite originals. Save request, SHA-256, byte size, source schema/version, timestamp semantics, symbol mapping, quality notices, and receipt. Derive second bars locally from owned CMBP-1 when possible.",
+        "dataset": "OPRA.PILLAR",
+        "date_range": [
+          "2023-03-28",
+          "2024-12-31"
+        ],
+        "download_authorized": false,
+        "expected_calls": "Up to 240 CMBP + 240 TCBBO windows standalone; CMBP adds zero downloads if path windows cover all events.",
+        "full_chain": false,
+        "instrument": "RUT",
+        "layer": "execution",
+        "limitation": "OPRA top-of-book and prints cannot identify complex-order queue position, routing, auction participation or guarantee a 20-lot spread fill. Proprietary complex-book/trade-linkage data or prospective paper/broker observations require a separate feasibility/permission gate.",
+        "schemas": [
+          "cmbp-1",
+          "tcbbo"
+        ],
+        "strategy": "60 development sessions \u00d7 four 2-minute windows around entry/first target/adverse crossing/control. Preserve nanosecond timestamps, venue, NBBO size, conditions and gaps; CMBP from the path pilot is reused, TCBBO only where incremental trade context is needed.",
+        "stype": [
+          "raw_symbol"
+        ],
+        "symbols": "Same selected raw OSI legs as path pilot",
+        "timezone": "America/New_York"
+      }
+    }
+  ],
+  "quality_controls": [
+    "Known NDXP degraded dates 2024-06-03 and 2025-10-22 retained; missing 2026-09-22/23 acquisition sessions retained.",
+    "No conditional holdout analysis: inventory headers/counts only; development sample dates frozen before pilot outcomes.",
+    "Sample timeout and missing-symbol requests are disclosed in failed_samples; failures are not zero cost.",
+    "Datetime windows explicit ET with DST; metadata/DBN UTC retained. Historical listing calendars govern literal DTE; no assumed weekday expirations.",
+    "Sub-10-minute provider quote/size estimates can over-report; definitions need full-day estimates. Pilot projections are scenarios, not exact bills.",
+    "Use bar availability/end timestamps for causal features; daily VIX close is not available at that morning entry.",
+    "The inventory detects external live diagnostic-log growth; read-only scanner does not alter those files. Raw caches must remain unchanged."
+  ],
+  "recommended_new_data": [
+    {
+      "category": "recommended_new_data",
+      "estimate": {
+        "billable_GiB": {
+          "central": 1.6686,
+          "high": 16.6858,
+          "low": 0.4171
+        },
+        "compressed_GiB": {
+          "central": 0.4171,
+          "high": 8.3429,
+          "low": 0.0417
+        },
+        "cost_usd": {
+          "central": 0.267,
+          "high": 2.6697,
+          "low": 0.0667
+        },
+        "download_requests_upper": 240,
+        "estimate_label": "engineering_scenario_NOT_instrument_quote",
+        "methodology": "NDXP selected-leg CMBP 30m billable-size anchor 7465120 bytes / 6 legs, scaled to 12 legs \u00d7 60 minutes \u00d7 60 sessions. Explicit unmeasured activity multiplier 1.0 for NDXP; low/high 0.25\u201310\u00d7. Execution adds TCBBO at 0.05 prints/leg/sec \u00d7 80 bytes; zero-trade sample is not generalized.",
+        "overlap": "Derive seconds from acquired/owned events; no separate CBBO-1s download for the same window.",
+        "sessions_assumed": 60
+      },
+      "id": "NDXP_path",
+      "request_design": {
+        "cache": "output/ndxp_multidte/program_v1/raw/{dataset}/{schema}/{root}/{session}/{sha256_canonical_request}.dbn.zst",
+        "cache_rules": "Read existing index first; merge overlapping symbol/time windows; never overwrite originals. Save request, SHA-256, byte size, source schema/version, timestamp semantics, symbol mapping, quality notices, and receipt. Derive second bars locally from owned CMBP-1 when possible.",
+        "dataset": "OPRA.PILLAR",
+        "date_range": [
+          "2023-03-28",
+          "2024-12-31"
+        ],
+        "download_authorized": false,
+        "expected_calls": "Up to 240 selected-contract window requests for 60 sessions; local reuse first; four workers; cache/deduplicate.",
+        "full_chain": false,
+        "instrument": "NDXP",
+        "layer": "path",
+        "optional_later_date_range": [
+          "2025-02-20",
+          "2026-09-24"
+        ],
+        "schema_gate": "Direct CBBO-1s starts 2025-02-20 per captured catalog; development seconds must be reconstructed from CMBP-1 (available 2023-03-28). No seconds before CMBP coverage; no synthetic interpolation through gaps.",
+        "schemas": [
+          "cmbp-1",
+          "cbbo-1s"
+        ],
+        "strategy": "60 development candidate sessions chosen deterministically across calendar months before path outcomes: first qualifying session then fixed spacing. 30-minute opening window plus three non-overlapping 10-minute windows around first $3/$7/$9 crossings or time-matched controls. Maximum 60 minutes/session across at most 12 legs. Outcome-centered windows are measurement labels, never causal entry selection.",
+        "stype": [
+          "raw_symbol"
+        ],
+        "symbols": "Selected raw OSI legs only; union at most 12 per sampled session",
+        "timezone": "America/New_York"
+      }
+    },
+    {
+      "category": "recommended_new_data",
+      "estimate": {
+        "billable_GiB": {
+          "central": 0.2238,
+          "high": 2.2377,
+          "low": 0.0559
+        },
+        "compressed_GiB": {
+          "central": 0.0556,
+          "high": 1.1188,
+          "low": 0.0056
+        },
+        "cost_usd": {
+          "central": 0.306,
+          "high": 3.0596,
+          "low": 0.0765
+        },
+        "download_requests_upper": 480,
+        "estimate_label": "engineering_scenario_NOT_instrument_quote",
+        "methodology": "NDXP selected-leg CMBP 30m billable-size anchor 7465120 bytes / 6 legs, scaled to 12 legs \u00d7 8 minutes \u00d7 60 sessions. Explicit unmeasured activity multiplier 1.0 for NDXP; low/high 0.25\u201310\u00d7. Execution adds TCBBO at 0.05 prints/leg/sec \u00d7 80 bytes; zero-trade sample is not generalized.",
+        "overlap": "Execution CMBP is contained in the path pilot: do not add its bytes/cost twice. TCBBO incremental central cost 0.2704",
+        "sessions_assumed": 60
+      },
+      "id": "NDXP_execution",
+      "request_design": {
+        "cache": "output/ndxp_multidte/program_v1/raw/{dataset}/{schema}/{root}/{session}/{sha256_canonical_request}.dbn.zst",
+        "cache_rules": "Read existing index first; merge overlapping symbol/time windows; never overwrite originals. Save request, SHA-256, byte size, source schema/version, timestamp semantics, symbol mapping, quality notices, and receipt. Derive second bars locally from owned CMBP-1 when possible.",
+        "dataset": "OPRA.PILLAR",
+        "date_range": [
+          "2023-03-28",
+          "2024-12-31"
+        ],
+        "download_authorized": false,
+        "expected_calls": "Up to 240 CMBP + 240 TCBBO windows standalone; CMBP adds zero downloads if path windows cover all events.",
+        "full_chain": false,
+        "instrument": "NDXP",
+        "layer": "execution",
+        "limitation": "OPRA top-of-book and prints cannot identify complex-order queue position, routing, auction participation or guarantee a 20-lot spread fill. Proprietary complex-book/trade-linkage data or prospective paper/broker observations require a separate feasibility/permission gate.",
+        "schemas": [
+          "cmbp-1",
+          "tcbbo"
+        ],
+        "strategy": "60 development sessions \u00d7 four 2-minute windows around entry/first target/adverse crossing/control. Preserve nanosecond timestamps, venue, NBBO size, conditions and gaps; CMBP from the path pilot is reused, TCBBO only where incremental trade context is needed.",
+        "stype": [
+          "raw_symbol"
+        ],
+        "symbols": "Same selected raw OSI legs as path pilot",
+        "timezone": "America/New_York"
+      }
+    },
+    {
+      "category": "recommended_new_data",
+      "estimate": {
+        "billable_GiB": {
+          "central": 12.0096,
+          "high": 24.0193,
+          "low": 6.0048
+        },
+        "components": {
+          "definition_usd": 6.123046875,
+          "opening_usd": 18.946539759774,
+          "selected_paths_usd": 2.6235222816467285
+        },
+        "compressed_GiB": {
+          "central": 3.0024,
+          "high": 6.0048,
+          "low": 1.201
+        },
+        "cost_usd": {
+          "central": 27.6931,
+          "high": 55.3862,
+          "low": 13.8466
+        },
+        "download_requests_upper": 3762,
+        "estimate_label": "sample_scaled_plus_explicit_record_model",
+        "methodology": "Median successful 2-minute parent cost/size samples \u00d7 session count + 12 legs \u00d7 3 sessions \u00d7 390 minutes \u00d7 80 bytes + 1 MiB/day definitions. Half-to-double cost/byte range; 10\u201350% DBN compression range; actual listing days can reduce totals. Provider sub-10-minute quotes may overestimate.",
+        "sessions_assumed": 1254
+      },
+      "id": "SPX_structural",
+      "request_design": {
+        "cache": "output/ndxp_multidte/program_v1/raw/{dataset}/{schema}/{root}/{session}/{sha256_canonical_request}.dbn.zst",
+        "cache_rules": "Read existing index first; merge overlapping symbol/time windows; never overwrite originals. Save request, SHA-256, byte size, source schema/version, timestamp semantics, symbol mapping, quality notices, and receipt. Derive second bars locally from owned CMBP-1 when possible.",
+        "dataset": "OPRA.PILLAR",
+        "date_range": [
+          "2021-09-24",
+          "2026-09-24"
+        ],
+        "download_authorized": false,
+        "expected_calls": "At most 3 \u00d7 session_count before reuse: discovery + definitions + batched selected-leg paths. Calendar/expiry prefilter; concurrency 4. These are FUTURE acquisition calls, not estimator calls.",
+        "full_chain": "Opening discovery and daily definitions only; paths selected-contract",
+        "instrument": "SPX",
+        "layer": "structural",
+        "long_extension": [
+          "2013-04-01",
+          "2021-09-23"
+        ],
+        "optional_extension_estimate": {
+          "billable_GiB": {
+            "central": 20.4758,
+            "high": 40.9515,
+            "low": 10.2379
+          },
+          "components": {
+            "definition_usd": 10.439453125,
+            "opening_usd": 32.302792668578,
+            "selected_paths_usd": 4.472959041595459
+          },
+          "compressed_GiB": {
+            "central": 5.1189,
+            "high": 10.2379,
+            "low": 2.0476
+          },
+          "cost_usd": {
+            "central": 47.2152,
+            "high": 94.4304,
+            "low": 23.6076
+          },
+          "download_requests_upper": 6414,
+          "estimate_label": "sample_scaled_plus_explicit_record_model",
+          "methodology": "Median successful 2-minute parent cost/size samples \u00d7 session count + 12 legs \u00d7 3 sessions \u00d7 390 minutes \u00d7 80 bytes + 1 MiB/day definitions. Half-to-double cost/byte range; 10\u201350% DBN compression range; actual listing days can reduce totals. Provider sub-10-minute quotes may overestimate.",
+          "sessions_assumed": 2138
+        },
+        "partition": [
+          "development 2021-09-24..2024-12-31",
+          "validation 2025",
+          "holdout 2026-01-01..2026-09-24"
+        ],
+        "root_policy": "AM root excluded from initial PM baseline; same-name chain is not root equivalence.",
+        "schemas": [
+          "cbbo-1m",
+          "definition"
+        ],
+        "strategy": "Full preferred-root chain 09:30\u201309:32 ET once per trading day; select 2/3-calendar-DTE put legs near credits 5/6/7 causally; selected legs only 09:30 entry through expiration close. Definitions once/day/root for listing and deliverables. No whole-market or continuous multiyear query.",
+        "stype": [
+          "parent",
+          "raw_symbol"
+        ],
+        "symbols": [
+          "SPXW.OPT",
+          "selected raw OSI legs after local discovery"
+        ],
+        "timezone": "America/New_York"
+      }
+    },
+    {
+      "category": "recommended_new_data",
+      "estimate": {
+        "billable_GiB": {
+          "central": 8.8918,
+          "high": 17.7836,
+          "low": 4.4459
+        },
+        "components": {
+          "definition_usd": 6.123046875,
+          "opening_usd": 12.710815966265999,
+          "selected_paths_usd": 2.6235222816467285
+        },
+        "compressed_GiB": {
+          "central": 2.2229,
+          "high": 4.4459,
+          "low": 0.8892
+        },
+        "cost_usd": {
+          "central": 21.4574,
+          "high": 42.9148,
+          "low": 10.7287
+        },
+        "download_requests_upper": 3762,
+        "estimate_label": "sample_scaled_plus_explicit_record_model",
+        "methodology": "Median successful 2-minute parent cost/size samples \u00d7 session count + 12 legs \u00d7 3 sessions \u00d7 390 minutes \u00d7 80 bytes + 1 MiB/day definitions. Half-to-double cost/byte range; 10\u201350% DBN compression range; actual listing days can reduce totals. Provider sub-10-minute quotes may overestimate.",
+        "sessions_assumed": 1254
+      },
+      "id": "QQQ_structural",
+      "request_design": {
+        "cache": "output/ndxp_multidte/program_v1/raw/{dataset}/{schema}/{root}/{session}/{sha256_canonical_request}.dbn.zst",
+        "cache_rules": "Read existing index first; merge overlapping symbol/time windows; never overwrite originals. Save request, SHA-256, byte size, source schema/version, timestamp semantics, symbol mapping, quality notices, and receipt. Derive second bars locally from owned CMBP-1 when possible.",
+        "dataset": "OPRA.PILLAR",
+        "date_range": [
+          "2021-09-24",
+          "2026-09-24"
+        ],
+        "download_authorized": false,
+        "expected_calls": "At most 3 \u00d7 session_count before reuse: discovery + definitions + batched selected-leg paths. Calendar/expiry prefilter; concurrency 4. These are FUTURE acquisition calls, not estimator calls.",
+        "full_chain": "Opening discovery and daily definitions only; paths selected-contract",
+        "instrument": "QQQ",
+        "layer": "structural",
+        "long_extension": [
+          "2013-04-01",
+          "2021-09-23"
+        ],
+        "optional_extension_estimate": {
+          "billable_GiB": {
+            "central": 15.16,
+            "high": 30.32,
+            "low": 7.58
+          },
+          "components": {
+            "definition_usd": 10.439453125,
+            "opening_usd": 21.671231687301997,
+            "selected_paths_usd": 4.472959041595459
+          },
+          "compressed_GiB": {
+            "central": 3.79,
+            "high": 7.58,
+            "low": 1.516
+          },
+          "cost_usd": {
+            "central": 36.5836,
+            "high": 73.1673,
+            "low": 18.2918
+          },
+          "download_requests_upper": 6414,
+          "estimate_label": "sample_scaled_plus_explicit_record_model",
+          "methodology": "Median successful 2-minute parent cost/size samples \u00d7 session count + 12 legs \u00d7 3 sessions \u00d7 390 minutes \u00d7 80 bytes + 1 MiB/day definitions. Half-to-double cost/byte range; 10\u201350% DBN compression range; actual listing days can reduce totals. Provider sub-10-minute quotes may overestimate.",
+          "sessions_assumed": 2138
+        },
+        "partition": [
+          "development 2021-09-24..2024-12-31",
+          "validation 2025",
+          "holdout 2026-01-01..2026-09-24"
+        ],
+        "root_policy": "AM root excluded from initial PM baseline; same-name chain is not root equivalence.",
+        "schemas": [
+          "cbbo-1m",
+          "definition"
+        ],
+        "strategy": "Full preferred-root chain 09:30\u201309:32 ET once per trading day; select 2/3-calendar-DTE put legs near credits 5/6/7 causally; selected legs only 09:30 entry through expiration close. Definitions once/day/root for listing and deliverables. No whole-market or continuous multiyear query.",
+        "stype": [
+          "parent",
+          "raw_symbol"
+        ],
+        "symbols": [
+          "QQQ.OPT",
+          "selected raw OSI legs after local discovery"
+        ],
+        "timezone": "America/New_York"
+      }
+    },
+    {
+      "category": "recommended_new_data",
+      "estimate": {
+        "billable_GiB": {
+          "central": 7.7481,
+          "high": 15.4962,
+          "low": 3.874
+        },
+        "components": {
+          "definition_usd": 6.123046875,
+          "opening_usd": 10.423455834198,
+          "selected_paths_usd": 2.6235222816467285
+        },
+        "compressed_GiB": {
+          "central": 1.937,
+          "high": 3.874,
+          "low": 0.7748
+        },
+        "cost_usd": {
+          "central": 19.17,
+          "high": 38.34,
+          "low": 9.585
+        },
+        "download_requests_upper": 3762,
+        "estimate_label": "sample_scaled_plus_explicit_record_model",
+        "methodology": "Median successful 2-minute parent cost/size samples \u00d7 session count + 12 legs \u00d7 3 sessions \u00d7 390 minutes \u00d7 80 bytes + 1 MiB/day definitions. Half-to-double cost/byte range; 10\u201350% DBN compression range; actual listing days can reduce totals. Provider sub-10-minute quotes may overestimate.",
+        "sessions_assumed": 1254
+      },
+      "id": "RUT_structural",
+      "request_design": {
+        "cache": "output/ndxp_multidte/program_v1/raw/{dataset}/{schema}/{root}/{session}/{sha256_canonical_request}.dbn.zst",
+        "cache_rules": "Read existing index first; merge overlapping symbol/time windows; never overwrite originals. Save request, SHA-256, byte size, source schema/version, timestamp semantics, symbol mapping, quality notices, and receipt. Derive second bars locally from owned CMBP-1 when possible.",
+        "dataset": "OPRA.PILLAR",
+        "date_range": [
+          "2021-09-24",
+          "2026-09-24"
+        ],
+        "download_authorized": false,
+        "expected_calls": "At most 3 \u00d7 session_count before reuse: discovery + definitions + batched selected-leg paths. Calendar/expiry prefilter; concurrency 4. These are FUTURE acquisition calls, not estimator calls.",
+        "full_chain": "Opening discovery and daily definitions only; paths selected-contract",
+        "instrument": "RUT",
+        "layer": "structural",
+        "long_extension": [
+          "2013-04-01",
+          "2021-09-23"
+        ],
+        "optional_extension_estimate": {
+          "billable_GiB": {
+            "central": 13.2101,
+            "high": 26.4202,
+            "low": 6.605
+          },
+          "components": {
+            "definition_usd": 10.439453125,
+            "opening_usd": 17.771410345706002,
+            "selected_paths_usd": 4.472959041595459
+          },
+          "compressed_GiB": {
+            "central": 3.3025,
+            "high": 6.605,
+            "low": 1.321
+          },
+          "cost_usd": {
+            "central": 32.6838,
+            "high": 65.3676,
+            "low": 16.3419
+          },
+          "download_requests_upper": 6414,
+          "estimate_label": "sample_scaled_plus_explicit_record_model",
+          "methodology": "Median successful 2-minute parent cost/size samples \u00d7 session count + 12 legs \u00d7 3 sessions \u00d7 390 minutes \u00d7 80 bytes + 1 MiB/day definitions. Half-to-double cost/byte range; 10\u201350% DBN compression range; actual listing days can reduce totals. Provider sub-10-minute quotes may overestimate.",
+          "sessions_assumed": 2138
+        },
+        "partition": [
+          "development 2021-09-24..2024-12-31",
+          "validation 2025",
+          "holdout 2026-01-01..2026-09-24"
+        ],
+        "root_policy": "AM root excluded from initial PM baseline; same-name chain is not root equivalence.",
+        "schemas": [
+          "cbbo-1m",
+          "definition"
+        ],
+        "strategy": "Full preferred-root chain 09:30\u201309:32 ET once per trading day; select 2/3-calendar-DTE put legs near credits 5/6/7 causally; selected legs only 09:30 entry through expiration close. Definitions once/day/root for listing and deliverables. No whole-market or continuous multiyear query.",
+        "stype": [
+          "parent",
+          "raw_symbol"
+        ],
+        "symbols": [
+          "RUTW.OPT",
+          "selected raw OSI legs after local discovery"
+        ],
+        "timezone": "America/New_York"
+      }
+    }
+  ],
+  "schema_version": 1,
+  "scope": "Phase 3A planning and inventory only",
+  "sequence": [
+    "0. Index existing NDXP headers/contracts/time windows and XQC settlement dates; audit exact 2/3DTE overlap, repair only approved gaps. No acquisition cost to reuse.",
+    "1. NDXP development-only 60-session second/event pilot: disprove transient-mark fills before expanding history. Reuse first; new selected windows only after approval.",
+    "2. SPXW structural baseline 2021-09-24..2026-09-24, PM only; best like-for-like cash-settled comparator.",
+    "3. QQQ structural baseline with exercise/dividend/physical-delivery model frozen first; cheaper Nasdaq-linked control but mechanically different.",
+    "4. RUTW structural baseline; preserve pre/post daily-expiry listing differences.",
+    "5. Only instruments retaining evidence receive 60-session path/execution pilots; earlier structural history is optional, not an automatic purchase."
+  ],
+  "sources": {
+    "catalog": "https://databento.com/datasets/OPRA.PILLAR",
+    "cost": "https://databento.com/docs/api-reference-historical?historical=http",
+    "ndxp": "https://www.nasdaq.com/NDX_NDXP_Factsheet",
+    "ndxp_history": "https://nasdaqtrader.com/MicroNews.aspx?id=2018-04",
+    "opra": "https://databento.com/docs/venues-and-datasets/opra-pillar",
+    "opra_plans": "https://databento.com/blog/introducing-new-opra-pricing-plans",
+    "pricing": "https://databento.com/pricing",
+    "qqq": "https://www.nasdaq.com/products/north-american-markets/nasdaq-100-options-xnd-ndx",
+    "rut": "https://www.cboe.com/tradable_products/ftse_russell/russell_2000_index_options/rut_specifications",
+    "rut_daily": "https://ir.cboe.com/news/news-details/2023/Cboe-TO-OFFER-DAILY-EXPIRIES-FOR-RUSSELL-2000-INDEX-OPTIONS-SUITE-BEGINNING-JANUARY-8-2024/default.aspx",
+    "settlement": "https://www.cboe.com/index_settlement_values/weeklys_settlement_values/",
+    "spx": "https://www.cboe.com/tradable_products/sp_500/spx_weekly_options/specifications",
+    "symbology": "https://databento.com/docs/examples/options/equity-options-introduction/using-parent-symbology-to-fetch-an-option-chain"
+  },
+  "supporting_data_design": [
+    {
+      "cost_label": "unquoted; no paid provider assumed",
+      "cost_usd": null,
+      "dataset_schema": "Daily official settlement values, not option last quotes",
+      "instrument": "NDXP",
+      "range": "2021-09-24..2026-09-25 only missing expiration dates",
+      "requests": "Reuse 873 local rows first; one bounded public-history range request if separately authorized, not executed",
+      "source": "Existing XQC CSV, then Nasdaq XQC official history or FRED NASDAQXQC mirror with source validation",
+      "storage": "under 1 MiB for daily research window, engineering estimate"
+    },
+    {
+      "cost_label": "unquoted; verify access and terms",
+      "cost_usd": null,
+      "dataset_schema": "Official daily settlement series, PM SPX/RUT separate from AM SET/RLS",
+      "instrument": "SPX/RUT",
+      "range": "2021-09-24..2026-09-25",
+      "requests": "Stage per-index monthly history queries or supported bulk export; estimate/permission gate before paid DataShop products",
+      "source": "https://www.cboe.com/index_settlement_values/weeklys_settlement_values/",
+      "storage": "under 1 MiB per daily index series, engineering estimate"
+    },
+    {
+      "cost_label": "unquoted until exact gaps and current equity entitlements known",
+      "cost_usd": null,
+      "dataset_schema": "XNAS.ITCH ohlcv-1m/ohlcv-1s; raw_symbol QQQ; venue-only scope explicitly retained",
+      "instrument": "QQQ",
+      "range": "2021-09-24..2026-09-24; only uncovered windows",
+      "requests": "Monthly 1m chunks; selected opening 1s windows; no underlying tick-wide download",
+      "source": "Existing XNAS.ITCH equity DBN plus supported historical equity schema if gaps remain; OCC adjustments and dividend calendar",
+      "storage": "roughly 0.05\u20130.2 GiB raw for five years of QQQ 1m, excluding options; scenario"
+    },
+    {
+      "cost_label": "exact incremental acquisition cost for local reuse only",
+      "cost_usd": 0,
+      "dataset_schema": "NQ/MNQ/ES/MES GLBX.MDP3 ohlcv-1m context; VIX daily",
+      "instrument": "All",
+      "range": "Align causal availability to each candidate, not contemporaneous future daily close",
+      "requests": "No new data until physical backing/coverage audit; proposed gap pricing bounded separately",
+      "source": "Local futures parquet/canonical coverage reports and Cboe-source VIX daily parquet",
+      "storage": "Existing stores; small joined feature tables, size deferred to feature schema"
+    }
+  ],
+  "unnecessary_data": [
+    "Repurchasing existing NDXP minute/event windows or QQQ equity/VIX context before coverage intersection.",
+    "Full-market OPRA or full-chain multi-year event downloads.",
+    "Duplicate CBBO-1s for event windows already owned; compute second samples locally.",
+    "Independent leg-natural fill envelopes as complex-order execution truth.",
+    "AM SPX/RUT/NDX substituted into PM cohorts; pre-2018 NDX history treated as homogeneous NDXP."
+  ],
+  "upgrade_analysis": {
+    "break_even": "Upgrade only if incremental committed subscription+license cost is below remaining unique payable bytes \u00d7 applicable rates AFTER reuse and included-schema coverage, over the same commitment period.",
+    "current_entitlement": "Unknown; metadata.get_cost respects account discounts, so sample charges may already include existing entitlements. list_unit_prices is the marginal rate reference, not an account invoice.",
+    "plus_unlimited": "Current OPRA quotes, annual commitment, included schemas/date ranges, professional status and fees not independently verified. Request a written offer before economic comparison; no subscription change made.",
+    "price_caveat": "OPRA-specific $199 advertised June 2025; confirm current account offer. The generic pricing page currently renders CME tiers; do not apply its Plus/Unlimited dollar amounts to OPRA.",
+    "price_source": "https://databento.com/blog/introducing-new-opra-pricing-plans",
+    "recommendation": "No upgrade justified yet; reuse and bounded usage-based windows first.",
+    "reuse": "Keep immutable compressed DBN + small partitioned Parquet derivatives. Local replay incurs no new provider charge; avoid re-downloading or broad CSV expansion. Existing research footprint is about 442 GB logical, dominated by duplicate/normalized event history.",
+    "standard_advertised_usd_month": 199
+  }
+}

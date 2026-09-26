@@ -1,0 +1,159 @@
+{
+  "cache_hits": 0,
+  "call_count": 3,
+  "download_calls": 0,
+  "max_concurrency": 4,
+  "results": {
+    "3fd5e6fbe2a766b792d129e4ecb53116cbceb985fb4c1772a60fa33d461e8d06": {
+      "cost_label": "metadata",
+      "request": {
+        "method": "list_schemas",
+        "params": {
+          "dataset": "OPRA.PILLAR"
+        }
+      },
+      "status": "ok",
+      "value": [
+        "cmbp-1",
+        "cbbo-1s",
+        "cbbo-1m",
+        "tcbbo",
+        "trades",
+        "ohlcv-1s",
+        "ohlcv-1m",
+        "ohlcv-1h",
+        "ohlcv-1d",
+        "statistics",
+        "status",
+        "definition"
+      ]
+    },
+    "af7240f7c859e69ef77e666202baff5099d48be271ad5c6d2540cfcce7b50158": {
+      "cost_label": "metadata",
+      "request": {
+        "method": "get_dataset_range",
+        "params": {
+          "dataset": "OPRA.PILLAR"
+        }
+      },
+      "status": "ok",
+      "value": {
+        "end": "2026-09-25T13:30:00.000000000Z",
+        "schema": {
+          "cbbo-1m": {
+            "end": "2026-09-25T13:30:00.000000000Z",
+            "start": "2013-04-01T00:00:00.000000000Z"
+          },
+          "cbbo-1s": {
+            "end": "2026-09-25T13:30:00.000000000Z",
+            "start": "2025-02-20T00:00:00.000000000Z"
+          },
+          "cmbp-1": {
+            "end": "2026-09-25T13:30:00.000000000Z",
+            "start": "2023-03-28T00:00:00.000000000Z"
+          },
+          "definition": {
+            "end": "2026-09-25T13:30:00.000000000Z",
+            "start": "2013-04-01T00:00:00.000000000Z"
+          },
+          "ohlcv-1d": {
+            "end": "2026-09-25T13:30:00.000000000Z",
+            "start": "2013-04-01T00:00:00.000000000Z"
+          },
+          "ohlcv-1h": {
+            "end": "2026-09-25T13:30:00.000000000Z",
+            "start": "2013-04-01T00:00:00.000000000Z"
+          },
+          "ohlcv-1m": {
+            "end": "2026-09-25T13:30:00.000000000Z",
+            "start": "2013-04-01T00:00:00.000000000Z"
+          },
+          "ohlcv-1s": {
+            "end": "2026-09-25T13:30:00.000000000Z",
+            "start": "2013-04-01T00:00:00.000000000Z"
+          },
+          "statistics": {
+            "end": "2026-09-25T13:30:00.000000000Z",
+            "start": "2013-04-01T00:00:00.000000000Z"
+          },
+          "status": {
+            "end": "2026-09-25T13:30:00.000000000Z",
+            "start": "2024-07-17T00:00:00.000000000Z"
+          },
+          "tcbbo": {
+            "end": "2026-09-25T13:30:00.000000000Z",
+            "start": "2023-03-28T00:00:00.000000000Z"
+          },
+          "trades": {
+            "end": "2026-09-25T13:30:00.000000000Z",
+            "start": "2013-04-01T00:00:00.000000000Z"
+          }
+        },
+        "start": "2013-04-01T00:00:00.000000000Z"
+      }
+    },
+    "de7deedaa0afd43c8e857a652c0bcc09afa9077362d7b3f1ea085495d579ab24": {
+      "cost_label": "metadata",
+      "request": {
+        "method": "list_unit_prices",
+        "params": {
+          "dataset": "OPRA.PILLAR"
+        }
+      },
+      "status": "ok",
+      "value": [
+        {
+          "mode": "historical",
+          "unit_prices": {
+            "cbbo-1m": 2.0,
+            "cbbo-1s": 2.0,
+            "cmbp-1": 0.16,
+            "definition": 5.0,
+            "ohlcv-1d": 600.0,
+            "ohlcv-1h": 600.0,
+            "ohlcv-1m": 280.0,
+            "ohlcv-1s": 280.0,
+            "statistics": 11.0,
+            "status": 5.0,
+            "tcbbo": 210.0,
+            "trades": 280.0
+          }
+        },
+        {
+          "mode": "historical-streaming",
+          "unit_prices": {
+            "cbbo-1m": 2.0,
+            "cbbo-1s": 2.0,
+            "cmbp-1": 0.16,
+            "definition": 5.0,
+            "ohlcv-1d": 600.0,
+            "ohlcv-1h": 600.0,
+            "ohlcv-1m": 280.0,
+            "ohlcv-1s": 280.0,
+            "statistics": 11.0,
+            "status": 5.0,
+            "tcbbo": 210.0,
+            "trades": 280.0
+          }
+        },
+        {
+          "mode": "live",
+          "unit_prices": {
+            "cbbo-1m": 2.4,
+            "cbbo-1s": 2.4,
+            "cmbp-1": 0.2,
+            "definition": 6.0,
+            "ohlcv-1d": 720.0,
+            "ohlcv-1h": 720.0,
+            "ohlcv-1m": 336.0,
+            "ohlcv-1s": 336.0,
+            "statistics": 13.2,
+            "status": 6.0,
+            "tcbbo": 252.0,
+            "trades": 336.0
+          }
+        }
+      ]
+    }
+  }
+}

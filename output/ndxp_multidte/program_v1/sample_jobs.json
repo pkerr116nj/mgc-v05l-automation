@@ -1,0 +1,562 @@
+[
+  {
+    "method": "get_cost",
+    "params": {
+      "dataset": "OPRA.PILLAR",
+      "schema": "cbbo-1m",
+      "stype_in": "parent",
+      "symbols": [
+        "NDXP.OPT"
+      ],
+      "start": "2016-06-15T09:30:00-04:00",
+      "end": "2016-06-15T09:32:00-04:00"
+    }
+  },
+  {
+    "method": "get_billable_size",
+    "params": {
+      "dataset": "OPRA.PILLAR",
+      "schema": "cbbo-1m",
+      "stype_in": "parent",
+      "symbols": [
+        "NDXP.OPT"
+      ],
+      "start": "2016-06-15T09:30:00-04:00",
+      "end": "2016-06-15T09:32:00-04:00"
+    }
+  },
+  {
+    "method": "get_cost",
+    "params": {
+      "dataset": "OPRA.PILLAR",
+      "schema": "cbbo-1m",
+      "stype_in": "parent",
+      "symbols": [
+        "NDXP.OPT"
+      ],
+      "start": "2021-06-16T09:30:00-04:00",
+      "end": "2021-06-16T09:32:00-04:00"
+    }
+  },
+  {
+    "method": "get_billable_size",
+    "params": {
+      "dataset": "OPRA.PILLAR",
+      "schema": "cbbo-1m",
+      "stype_in": "parent",
+      "symbols": [
+        "NDXP.OPT"
+      ],
+      "start": "2021-06-16T09:30:00-04:00",
+      "end": "2021-06-16T09:32:00-04:00"
+    }
+  },
+  {
+    "method": "get_cost",
+    "params": {
+      "dataset": "OPRA.PILLAR",
+      "schema": "cbbo-1m",
+      "stype_in": "parent",
+      "symbols": [
+        "NDXP.OPT"
+      ],
+      "start": "2024-06-12T09:30:00-04:00",
+      "end": "2024-06-12T09:32:00-04:00"
+    }
+  },
+  {
+    "method": "get_billable_size",
+    "params": {
+      "dataset": "OPRA.PILLAR",
+      "schema": "cbbo-1m",
+      "stype_in": "parent",
+      "symbols": [
+        "NDXP.OPT"
+      ],
+      "start": "2024-06-12T09:30:00-04:00",
+      "end": "2024-06-12T09:32:00-04:00"
+    }
+  },
+  {
+    "method": "get_cost",
+    "params": {
+      "dataset": "OPRA.PILLAR",
+      "schema": "cmbp-1",
+      "stype_in": "parent",
+      "symbols": [
+        "NDXP.OPT"
+      ],
+      "start": "2024-06-12T09:30:00-04:00",
+      "end": "2024-06-12T09:30:10-04:00"
+    }
+  },
+  {
+    "method": "get_billable_size",
+    "params": {
+      "dataset": "OPRA.PILLAR",
+      "schema": "cmbp-1",
+      "stype_in": "parent",
+      "symbols": [
+        "NDXP.OPT"
+      ],
+      "start": "2024-06-12T09:30:00-04:00",
+      "end": "2024-06-12T09:30:10-04:00"
+    }
+  },
+  {
+    "method": "get_cost",
+    "params": {
+      "dataset": "OPRA.PILLAR",
+      "schema": "cbbo-1m",
+      "stype_in": "parent",
+      "symbols": [
+        "SPXW.OPT"
+      ],
+      "start": "2016-06-15T09:30:00-04:00",
+      "end": "2016-06-15T09:32:00-04:00"
+    }
+  },
+  {
+    "method": "get_billable_size",
+    "params": {
+      "dataset": "OPRA.PILLAR",
+      "schema": "cbbo-1m",
+      "stype_in": "parent",
+      "symbols": [
+        "SPXW.OPT"
+      ],
+      "start": "2016-06-15T09:30:00-04:00",
+      "end": "2016-06-15T09:32:00-04:00"
+    }
+  },
+  {
+    "method": "get_cost",
+    "params": {
+      "dataset": "OPRA.PILLAR",
+      "schema": "cbbo-1m",
+      "stype_in": "parent",
+      "symbols": [
+        "SPXW.OPT"
+      ],
+      "start": "2021-06-16T09:30:00-04:00",
+      "end": "2021-06-16T09:32:00-04:00"
+    }
+  },
+  {
+    "method": "get_billable_size",
+    "params": {
+      "dataset": "OPRA.PILLAR",
+      "schema": "cbbo-1m",
+      "stype_in": "parent",
+      "symbols": [
+        "SPXW.OPT"
+      ],
+      "start": "2021-06-16T09:30:00-04:00",
+      "end": "2021-06-16T09:32:00-04:00"
+    }
+  },
+  {
+    "method": "get_cost",
+    "params": {
+      "dataset": "OPRA.PILLAR",
+      "schema": "cbbo-1m",
+      "stype_in": "parent",
+      "symbols": [
+        "SPXW.OPT"
+      ],
+      "start": "2024-06-12T09:30:00-04:00",
+      "end": "2024-06-12T09:32:00-04:00"
+    }
+  },
+  {
+    "method": "get_billable_size",
+    "params": {
+      "dataset": "OPRA.PILLAR",
+      "schema": "cbbo-1m",
+      "stype_in": "parent",
+      "symbols": [
+        "SPXW.OPT"
+      ],
+      "start": "2024-06-12T09:30:00-04:00",
+      "end": "2024-06-12T09:32:00-04:00"
+    }
+  },
+  {
+    "method": "get_cost",
+    "params": {
+      "dataset": "OPRA.PILLAR",
+      "schema": "cmbp-1",
+      "stype_in": "parent",
+      "symbols": [
+        "SPXW.OPT"
+      ],
+      "start": "2024-06-12T09:30:00-04:00",
+      "end": "2024-06-12T09:30:10-04:00"
+    }
+  },
+  {
+    "method": "get_billable_size",
+    "params": {
+      "dataset": "OPRA.PILLAR",
+      "schema": "cmbp-1",
+      "stype_in": "parent",
+      "symbols": [
+        "SPXW.OPT"
+      ],
+      "start": "2024-06-12T09:30:00-04:00",
+      "end": "2024-06-12T09:30:10-04:00"
+    }
+  },
+  {
+    "method": "get_cost",
+    "params": {
+      "dataset": "OPRA.PILLAR",
+      "schema": "cbbo-1m",
+      "stype_in": "parent",
+      "symbols": [
+        "QQQ.OPT"
+      ],
+      "start": "2016-06-15T09:30:00-04:00",
+      "end": "2016-06-15T09:32:00-04:00"
+    }
+  },
+  {
+    "method": "get_billable_size",
+    "params": {
+      "dataset": "OPRA.PILLAR",
+      "schema": "cbbo-1m",
+      "stype_in": "parent",
+      "symbols": [
+        "QQQ.OPT"
+      ],
+      "start": "2016-06-15T09:30:00-04:00",
+      "end": "2016-06-15T09:32:00-04:00"
+    }
+  },
+  {
+    "method": "get_cost",
+    "params": {
+      "dataset": "OPRA.PILLAR",
+      "schema": "cbbo-1m",
+      "stype_in": "parent",
+      "symbols": [
+        "QQQ.OPT"
+      ],
+      "start": "2021-06-16T09:30:00-04:00",
+      "end": "2021-06-16T09:32:00-04:00"
+    }
+  },
+  {
+    "method": "get_billable_size",
+    "params": {
+      "dataset": "OPRA.PILLAR",
+      "schema": "cbbo-1m",
+      "stype_in": "parent",
+      "symbols": [
+        "QQQ.OPT"
+      ],
+      "start": "2021-06-16T09:30:00-04:00",
+      "end": "2021-06-16T09:32:00-04:00"
+    }
+  },
+  {
+    "method": "get_cost",
+    "params": {
+      "dataset": "OPRA.PILLAR",
+      "schema": "cbbo-1m",
+      "stype_in": "parent",
+      "symbols": [
+        "QQQ.OPT"
+      ],
+      "start": "2024-06-12T09:30:00-04:00",
+      "end": "2024-06-12T09:32:00-04:00"
+    }
+  },
+  {
+    "method": "get_billable_size",
+    "params": {
+      "dataset": "OPRA.PILLAR",
+      "schema": "cbbo-1m",
+      "stype_in": "parent",
+      "symbols": [
+        "QQQ.OPT"
+      ],
+      "start": "2024-06-12T09:30:00-04:00",
+      "end": "2024-06-12T09:32:00-04:00"
+    }
+  },
+  {
+    "method": "get_cost",
+    "params": {
+      "dataset": "OPRA.PILLAR",
+      "schema": "cmbp-1",
+      "stype_in": "parent",
+      "symbols": [
+        "QQQ.OPT"
+      ],
+      "start": "2024-06-12T09:30:00-04:00",
+      "end": "2024-06-12T09:30:10-04:00"
+    }
+  },
+  {
+    "method": "get_billable_size",
+    "params": {
+      "dataset": "OPRA.PILLAR",
+      "schema": "cmbp-1",
+      "stype_in": "parent",
+      "symbols": [
+        "QQQ.OPT"
+      ],
+      "start": "2024-06-12T09:30:00-04:00",
+      "end": "2024-06-12T09:30:10-04:00"
+    }
+  },
+  {
+    "method": "get_cost",
+    "params": {
+      "dataset": "OPRA.PILLAR",
+      "schema": "cbbo-1m",
+      "stype_in": "parent",
+      "symbols": [
+        "RUTW.OPT"
+      ],
+      "start": "2016-06-15T09:30:00-04:00",
+      "end": "2016-06-15T09:32:00-04:00"
+    }
+  },
+  {
+    "method": "get_billable_size",
+    "params": {
+      "dataset": "OPRA.PILLAR",
+      "schema": "cbbo-1m",
+      "stype_in": "parent",
+      "symbols": [
+        "RUTW.OPT"
+      ],
+      "start": "2016-06-15T09:30:00-04:00",
+      "end": "2016-06-15T09:32:00-04:00"
+    }
+  },
+  {
+    "method": "get_cost",
+    "params": {
+      "dataset": "OPRA.PILLAR",
+      "schema": "cbbo-1m",
+      "stype_in": "parent",
+      "symbols": [
+        "RUTW.OPT"
+      ],
+      "start": "2021-06-16T09:30:00-04:00",
+      "end": "2021-06-16T09:32:00-04:00"
+    }
+  },
+  {
+    "method": "get_billable_size",
+    "params": {
+      "dataset": "OPRA.PILLAR",
+      "schema": "cbbo-1m",
+      "stype_in": "parent",
+      "symbols": [
+        "RUTW.OPT"
+      ],
+      "start": "2021-06-16T09:30:00-04:00",
+      "end": "2021-06-16T09:32:00-04:00"
+    }
+  },
+  {
+    "method": "get_cost",
+    "params": {
+      "dataset": "OPRA.PILLAR",
+      "schema": "cbbo-1m",
+      "stype_in": "parent",
+      "symbols": [
+        "RUTW.OPT"
+      ],
+      "start": "2024-06-12T09:30:00-04:00",
+      "end": "2024-06-12T09:32:00-04:00"
+    }
+  },
+  {
+    "method": "get_billable_size",
+    "params": {
+      "dataset": "OPRA.PILLAR",
+      "schema": "cbbo-1m",
+      "stype_in": "parent",
+      "symbols": [
+        "RUTW.OPT"
+      ],
+      "start": "2024-06-12T09:30:00-04:00",
+      "end": "2024-06-12T09:32:00-04:00"
+    }
+  },
+  {
+    "method": "get_cost",
+    "params": {
+      "dataset": "OPRA.PILLAR",
+      "schema": "cmbp-1",
+      "stype_in": "parent",
+      "symbols": [
+        "RUTW.OPT"
+      ],
+      "start": "2024-06-12T09:30:00-04:00",
+      "end": "2024-06-12T09:30:10-04:00"
+    }
+  },
+  {
+    "method": "get_billable_size",
+    "params": {
+      "dataset": "OPRA.PILLAR",
+      "schema": "cmbp-1",
+      "stype_in": "parent",
+      "symbols": [
+        "RUTW.OPT"
+      ],
+      "start": "2024-06-12T09:30:00-04:00",
+      "end": "2024-06-12T09:30:10-04:00"
+    }
+  },
+  {
+    "method": "get_cost",
+    "params": {
+      "dataset": "OPRA.PILLAR",
+      "schema": "cmbp-1",
+      "stype_in": "raw_symbol",
+      "symbols": [
+        "NDXP  240614P19460000",
+        "NDXP  240614P19470000",
+        "NDXP  240614P19500000",
+        "NDXP  240614P19510000",
+        "NDXP  240614P19540000",
+        "NDXP  240614P19550000"
+      ],
+      "start": "2024-06-12T09:30:00-04:00",
+      "end": "2024-06-12T10:00:00-04:00"
+    }
+  },
+  {
+    "method": "get_billable_size",
+    "params": {
+      "dataset": "OPRA.PILLAR",
+      "schema": "cmbp-1",
+      "stype_in": "raw_symbol",
+      "symbols": [
+        "NDXP  240614P19460000",
+        "NDXP  240614P19470000",
+        "NDXP  240614P19500000",
+        "NDXP  240614P19510000",
+        "NDXP  240614P19540000",
+        "NDXP  240614P19550000"
+      ],
+      "start": "2024-06-12T09:30:00-04:00",
+      "end": "2024-06-12T10:00:00-04:00"
+    }
+  },
+  {
+    "method": "get_cost",
+    "params": {
+      "dataset": "OPRA.PILLAR",
+      "schema": "cbbo-1s",
+      "stype_in": "raw_symbol",
+      "symbols": [
+        "NDXP  250613P22020000",
+        "NDXP  250613P22030000",
+        "NDXP  250613P22110000",
+        "NDXP  250613P22120000",
+        "NDXP  250613P22180000",
+        "NDXP  250613P22190000"
+      ],
+      "start": "2025-06-11T09:30:00-04:00",
+      "end": "2025-06-11T10:00:00-04:00"
+    }
+  },
+  {
+    "method": "get_billable_size",
+    "params": {
+      "dataset": "OPRA.PILLAR",
+      "schema": "cbbo-1s",
+      "stype_in": "raw_symbol",
+      "symbols": [
+        "NDXP  250613P22020000",
+        "NDXP  250613P22030000",
+        "NDXP  250613P22110000",
+        "NDXP  250613P22120000",
+        "NDXP  250613P22180000",
+        "NDXP  250613P22190000"
+      ],
+      "start": "2025-06-11T09:30:00-04:00",
+      "end": "2025-06-11T10:00:00-04:00"
+    }
+  },
+  {
+    "method": "get_cost",
+    "params": {
+      "dataset": "OPRA.PILLAR",
+      "schema": "tcbbo",
+      "stype_in": "raw_symbol",
+      "symbols": [
+        "NDXP  240614P19460000",
+        "NDXP  240614P19470000",
+        "NDXP  240614P19500000",
+        "NDXP  240614P19510000",
+        "NDXP  240614P19540000",
+        "NDXP  240614P19550000"
+      ],
+      "start": "2024-06-12T09:30:00-04:00",
+      "end": "2024-06-12T09:32:00-04:00"
+    }
+  },
+  {
+    "method": "get_billable_size",
+    "params": {
+      "dataset": "OPRA.PILLAR",
+      "schema": "tcbbo",
+      "stype_in": "raw_symbol",
+      "symbols": [
+        "NDXP  240614P19460000",
+        "NDXP  240614P19470000",
+        "NDXP  240614P19500000",
+        "NDXP  240614P19510000",
+        "NDXP  240614P19540000",
+        "NDXP  240614P19550000"
+      ],
+      "start": "2024-06-12T09:30:00-04:00",
+      "end": "2024-06-12T09:32:00-04:00"
+    }
+  },
+  {
+    "method": "get_cost",
+    "params": {
+      "dataset": "OPRA.PILLAR",
+      "schema": "cmbp-1",
+      "stype_in": "raw_symbol",
+      "symbols": [
+        "NDXP  240614P19460000",
+        "NDXP  240614P19470000",
+        "NDXP  240614P19500000",
+        "NDXP  240614P19510000",
+        "NDXP  240614P19540000",
+        "NDXP  240614P19550000"
+      ],
+      "start": "2024-06-12T09:30:00-04:00",
+      "end": "2024-06-12T09:32:00-04:00"
+    }
+  },
+  {
+    "method": "get_billable_size",
+    "params": {
+      "dataset": "OPRA.PILLAR",
+      "schema": "cmbp-1",
+      "stype_in": "raw_symbol",
+      "symbols": [
+        "NDXP  240614P19460000",
+        "NDXP  240614P19470000",
+        "NDXP  240614P19500000",
+        "NDXP  240614P19510000",
+        "NDXP  240614P19540000",
+        "NDXP  240614P19550000"
+      ],
+      "start": "2024-06-12T09:30:00-04:00",
+      "end": "2024-06-12T09:32:00-04:00"
+    }
+  }
+]
