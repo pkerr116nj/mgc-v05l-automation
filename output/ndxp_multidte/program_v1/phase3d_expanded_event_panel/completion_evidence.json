@@ -1,0 +1,128 @@
+{
+  "status": "blocked_observed_budget_risk",
+  "assignment_complete": false,
+  "progress": {
+    "status": "blocked_observed_budget_risk",
+    "assignment_complete": false,
+    "opening_sessions_completed": 1,
+    "required_sessions": 877,
+    "entry_to_expiration_sessions_completed": 0,
+    "candidate_counts": null,
+    "downloaded_gb": 0.983074708,
+    "elapsed_acquisition_seconds": 498.9264643192291,
+    "failed_requests": 1,
+    "completed_metered_upper_usd": 0.55852824416,
+    "cumulative_metered_upper_plus_reserved_usd": 1.8410882441599998,
+    "actual_provider_charge_usd": null,
+    "session_counts_by_year": {
+      "2023": 1,
+      "2024": 0,
+      "2025": 0,
+      "2026": 0
+    },
+    "by_dte_side_record_counts": [
+      {
+        "calendar_dte": 0,
+        "side": "C",
+        "records": 1233070
+      },
+      {
+        "calendar_dte": 0,
+        "side": "P",
+        "records": 1334859
+      },
+      {
+        "calendar_dte": 1,
+        "side": "C",
+        "records": 1574322
+      },
+      {
+        "calendar_dte": 1,
+        "side": "P",
+        "records": 1526680
+      },
+      {
+        "calendar_dte": 2,
+        "side": "C",
+        "records": 1610224
+      },
+      {
+        "calendar_dte": 2,
+        "side": "P",
+        "records": 1719524
+      },
+      {
+        "calendar_dte": 3,
+        "side": "C",
+        "records": 1884590
+      },
+      {
+        "calendar_dte": 3,
+        "side": "P",
+        "records": 2249690
+      }
+    ],
+    "opening_credit_region_counts": null
+  },
+  "tests": {
+    "tests": 203,
+    "failures": 0,
+    "errors": 0,
+    "skipped": 0,
+    "seconds": 4.44
+  },
+  "frozen_benchmark_hashes_verified": true,
+  "raw_files_committed": false,
+  "owned_profile_reproduced": true,
+  "outputs": {
+    ".gitignore": {
+      "bytes": 59,
+      "sha256": "623f9ac370e438c4d518816bb24bb7ec06ccda5d58836d543842ee2781a53dfd"
+    },
+    "acquisition_evidence.json": {
+      "bytes": 101561,
+      "sha256": "2708ab8c1b39cb12ca8de4bb1b044e2503328f0f529b4c532072601547aaa795"
+    },
+    "assignment.md": {
+      "bytes": 5375,
+      "sha256": "a53b48276d038ba8ccdb9c48829574697b114b36f2e9984bad621186178bdc12"
+    },
+    "budget_stop.json": {
+      "bytes": 1445,
+      "sha256": "a94d5ab64654f71a30e95ecd30495bd6c09339125f440a0491765ece63b0e76b"
+    },
+    "frozen_benchmark_sha256.json": {
+      "bytes": 466,
+      "sha256": "56d38937e178029d08de848fc71cfb635c34a5d6effbcbade3a337510106f176"
+    },
+    "full_session_manifest.json": {
+      "bytes": 310839,
+      "sha256": "fa93c14bca85db6fe6c72d1135f458615dc895e5147a81fb1c6999958c43cb2b"
+    },
+    "opening_session_manifest.json": {
+      "bytes": 313470,
+      "sha256": "4111c53e88a4cbcf5396e271d449abeb3c195fce926a03b5e5bc64c2a7ae18cc"
+    },
+    "owned_opening_record_profile.json": {
+      "bytes": 849,
+      "sha256": "a9f1449f436322bf2223fc633975407623dda68d64e13440fa380f7242379a10"
+    },
+    "progress_summary.json": {
+      "bytes": 1306,
+      "sha256": "763839fd7f53f3eee6372be67dae77e88d365e1e1aed691606b4d87312301d22"
+    },
+    "research_report.md": {
+      "bytes": 7276,
+      "sha256": "0e667be4c1fb880e38e00406cc8aa8ea5d6223ffa5522aabc83ed8bdf39febe4"
+    },
+    "test_results.json": {
+      "bytes": 86,
+      "sha256": "30004ee2562f09d726a0e350f4d18823c31fb50e80fa9226ca127d73de8df127"
+    },
+    "unit_rate.json": {
+      "bytes": 1352,
+      "sha256": "3783b80ba65f34ee29f6ef6c5834d9884375fa646316dfaae78d0f87f42d1bb4"
+    }
+  },
+  "commit_sha_resolution": "git log -1 --format=%H -- output/ndxp_multidte/program_v1/phase3d_expanded_event_panel/completion_evidence.json"
+}

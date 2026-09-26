@@ -1,0 +1,63 @@
+{
+  "status": "blocked_observed_budget_risk",
+  "assignment_complete": false,
+  "opening_sessions_completed": 1,
+  "required_sessions": 877,
+  "entry_to_expiration_sessions_completed": 0,
+  "candidate_counts": null,
+  "downloaded_gb": 0.983074708,
+  "elapsed_acquisition_seconds": 498.9264643192291,
+  "failed_requests": 1,
+  "completed_metered_upper_usd": 0.55852824416,
+  "cumulative_metered_upper_plus_reserved_usd": 1.8410882441599998,
+  "actual_provider_charge_usd": null,
+  "session_counts_by_year": {
+    "2023": 1,
+    "2024": 0,
+    "2025": 0,
+    "2026": 0
+  },
+  "by_dte_side_record_counts": [
+    {
+      "calendar_dte": 0,
+      "side": "C",
+      "records": 1233070
+    },
+    {
+      "calendar_dte": 0,
+      "side": "P",
+      "records": 1334859
+    },
+    {
+      "calendar_dte": 1,
+      "side": "C",
+      "records": 1574322
+    },
+    {
+      "calendar_dte": 1,
+      "side": "P",
+      "records": 1526680
+    },
+    {
+      "calendar_dte": 2,
+      "side": "C",
+      "records": 1610224
+    },
+    {
+      "calendar_dte": 2,
+      "side": "P",
+      "records": 1719524
+    },
+    {
+      "calendar_dte": 3,
+      "side": "C",
+      "records": 1884590
+    },
+    {
+      "calendar_dte": 3,
+      "side": "P",
+      "records": 2249690
+    }
+  ],
+  "opening_credit_region_counts": null
+}

@@ -1,0 +1,20 @@
+{
+  "status": "blocked_observed_budget_risk",
+  "assignment_complete": false,
+  "recorded_at_utc": "2026-09-26T11:20:40.187314+00:00",
+  "reason": "Broad parent opening capture is not operationally reasonable under the authorized $100 ceiling. Even restricting the observed first opening to 0-5 DTE exceeds the ceiling when scaled at the observed density, before subsequent paths.",
+  "evidence_kind": "Arithmetic on data already acquired; no metadata cost estimation or extra sampling",
+  "hard_ceiling_usd": 100,
+  "completed_opening_sessions": 1,
+  "required_sessions": 877,
+  "full_opening_metered_upper_usd": 0.55852824416,
+  "near_expiry_observed_record_cost_usd": 0.1681018752,
+  "near_expiry_openings_at_observed_density_usd": 147.4253445504,
+  "full_parent_openings_at_observed_density_usd": 489.82927012832,
+  "uncertainty": "One observed session is not a representative provider quote or proof of total cost. It is concrete evidence that the ceiling could be exceeded, which the assignment defines as a stop condition.",
+  "selected_contract_paths_acquired": false,
+  "expanded_research_panel_complete": false,
+  "candidate_counts": null,
+  "candidate_counts_note": "No expanded candidate panel constructed; counts by opening credit are unavailable, not zero.",
+  "next_required_step": "Resolve a correct narrower opening-universe design using owned data, or revise the authorized ceiling/storage, before additional paid requests."
+}

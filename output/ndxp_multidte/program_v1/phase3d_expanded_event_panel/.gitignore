@@ -1,0 +1,6 @@
+raw/
+receipts/
+intents/
+transfers/
+*.log
+.acquisition.lock

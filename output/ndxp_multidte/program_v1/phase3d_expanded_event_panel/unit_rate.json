@@ -1,0 +1,58 @@
+{
+  "checked_at_utc": "2026-09-26T11:05:06.089601+00:00",
+  "purpose": "Single unit-rate lookup for hard request record-limit budgeting; no cost estimation or sampling",
+  "rates": [
+    {
+      "mode": "historical",
+      "unit_prices": {
+        "cmbp-1": 0.16,
+        "cbbo-1s": 2.0,
+        "cbbo-1m": 2.0,
+        "tcbbo": 210.0,
+        "trades": 280.0,
+        "ohlcv-1s": 280.0,
+        "ohlcv-1m": 280.0,
+        "ohlcv-1h": 600.0,
+        "ohlcv-1d": 600.0,
+        "statistics": 11.0,
+        "status": 5.0,
+        "definition": 5.0
+      }
+    },
+    {
+      "mode": "historical-streaming",
+      "unit_prices": {
+        "cmbp-1": 0.16,
+        "cbbo-1s": 2.0,
+        "cbbo-1m": 2.0,
+        "tcbbo": 210.0,
+        "trades": 280.0,
+        "ohlcv-1s": 280.0,
+        "ohlcv-1m": 280.0,
+        "ohlcv-1h": 600.0,
+        "ohlcv-1d": 600.0,
+        "statistics": 11.0,
+        "status": 5.0,
+        "definition": 5.0
+      }
+    },
+    {
+      "mode": "live",
+      "unit_prices": {
+        "cmbp-1": 0.2,
+        "cbbo-1s": 2.4,
+        "cbbo-1m": 2.4,
+        "tcbbo": 252.0,
+        "trades": 336.0,
+        "ohlcv-1s": 336.0,
+        "ohlcv-1m": 336.0,
+        "ohlcv-1h": 720.0,
+        "ohlcv-1d": 720.0,
+        "statistics": 13.2,
+        "status": 6.0,
+        "definition": 6.0
+      }
+    }
+  ],
+  "cmbp1_record_bytes": 80
+}

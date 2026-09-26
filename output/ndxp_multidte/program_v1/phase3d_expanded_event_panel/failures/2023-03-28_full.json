@@ -1,0 +1,23 @@
+{
+  "request": {
+    "mode": "full",
+    "params": {
+      "dataset": "OPRA.PILLAR",
+      "end": "2023-03-28T20:00:00+00:00",
+      "limit": 100000000,
+      "schema": "cmbp-1",
+      "start": "2023-03-28T13:30:00+00:00",
+      "stype_in": "parent",
+      "symbols": [
+        "NDXP.OPT"
+      ]
+    },
+    "session": "2023-03-28"
+  },
+  "error_type": "BentoServerError",
+  "http_status": 504,
+  "compressed_bytes": 0,
+  "automatic_retry": false,
+  "evidence_source": "/tmp/phase3d_acquire.log",
+  "note": "Original failed attempt predates structured failure logging; traceback confirms HTTP 504."
+}

@@ -1,0 +1,49 @@
+{
+  "total_records": 43625045,
+  "near_expiry_records": 13132959,
+  "near_expiry_record_share": 0.3010417295844623,
+  "near_expiry_symbols": 2962,
+  "by_dte_side": [
+    {
+      "calendar_dte": 0,
+      "side": "C",
+      "records": 1233070
+    },
+    {
+      "calendar_dte": 0,
+      "side": "P",
+      "records": 1334859
+    },
+    {
+      "calendar_dte": 1,
+      "side": "C",
+      "records": 1574322
+    },
+    {
+      "calendar_dte": 1,
+      "side": "P",
+      "records": 1526680
+    },
+    {
+      "calendar_dte": 2,
+      "side": "C",
+      "records": 1610224
+    },
+    {
+      "calendar_dte": 2,
+      "side": "P",
+      "records": 1719524
+    },
+    {
+      "calendar_dte": 3,
+      "side": "C",
+      "records": 1884590
+    },
+    {
+      "calendar_dte": 3,
+      "side": "P",
+      "records": 2249690
+    }
+  ],
+  "network_calls": 0
+}
