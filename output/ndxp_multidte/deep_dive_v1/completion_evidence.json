@@ -1,0 +1,65 @@
+{
+  "scope": "Phases 1 and 2 only",
+  "base_commit": "a84ca30156",
+  "phase1_commit": "c87a820ff3",
+  "exact_created_files": [
+    "output/ndxp_multidte/deep_dive_v1/baseline_reproduction.csv",
+    "output/ndxp_multidte/deep_dive_v1/completion_evidence.json",
+    "output/ndxp_multidte/deep_dive_v1/data_quality_report.json",
+    "output/ndxp_multidte/deep_dive_v1/execution_robustness.csv",
+    "output/ndxp_multidte/deep_dive_v1/failure_anatomy.csv",
+    "output/ndxp_multidte/deep_dive_v1/path_features.csv",
+    "output/ndxp_multidte/deep_dive_v1/report.json",
+    "output/ndxp_multidte/deep_dive_v1/research_report.md",
+    "src/mgc_v05l/research/ndxp_multidte_deep_dive.py",
+    "src/mgc_v05l/research/ndxp_multidte_path_features.py",
+    "src/mgc_v05l/research/ndxp_multidte_robustness.py",
+    "src/mgc_v05l/research/ndxp_multidte_validation.py",
+    "tests/unit/test_ndxp_multidte_path_features.py",
+    "tests/unit/test_ndxp_multidte_validation.py"
+  ],
+  "existing_files_modified": [],
+  "tests": {
+    "command": "PYTHONPATH=src .venv/bin/python -m pytest -q tests/unit/test_ndxp_multidte*.py tests/unit/test_mgc_v05l_ndxp_naive*.py",
+    "passed": 53,
+    "failed": 0
+  },
+  "integration_evidence": {
+    "baseline_groups_matched": 30,
+    "feature_rows": 3738,
+    "unique_candidate_ids": 3738,
+    "missing_candidate_paths": 9,
+    "execution_matrix_groups": 480,
+    "trade_evaluations": 298320,
+    "raw_manifest_matches_phase1": true
+  },
+  "inputs": {
+    "candidate_rows": 3738,
+    "candidate_sessions": 915,
+    "path_rows": 8979954,
+    "path_sessions": 913,
+    "discovery_successful_sessions": 1254,
+    "missing_path_sessions": [
+      "2026-09-22",
+      "2026-09-23"
+    ]
+  },
+  "controls": {
+    "remote_requests": 0,
+    "market_data_purchases": 0,
+    "live_trading_code_changes": 0,
+    "holdout_rule_tuning": false
+  },
+  "phase3": [
+    "Phase 3 local NDX/NQ/MNQ/VIX inventory and causal timestamp audit not performed (out of scope).",
+    "No verified PM settlement source; terminal quote outcomes remain provisional.",
+    "Two missing path sessions cannot be replenished under this no-acquisition assignment."
+  ],
+  "caveats": [
+    "Terminal marks are last quotes, not settlement.",
+    "Known degraded dates are specification-sourced; original warning logs were unavailable.",
+    "911 candidate paths end more than one minute before expiration close.",
+    "238,028 out-of-bounds and 10,348 unmatched candidate-path minutes excluded; these counts can repeat shared observations.",
+    "Next-minute missing observations fall back to terminal quote, with explicit counts."
+  ]
+}

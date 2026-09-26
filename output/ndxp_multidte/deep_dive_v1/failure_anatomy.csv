@@ -1,0 +1,7 @@
+partition,calendar_dte,target_credit,target,category,count,group_count,severe_9_before_success_count,median_minutes_to_3,median_max_before_3,median_underwater_before_3,median_best_improvement_before_failure
+development,2,6,3,clean_success,40,396,0,47.5,6.099999999999994,0.5,
+development,2,6,3,adverse_then_success,252,396,100,1500.0,8.550000000000011,236.5,
+development,2,6,3,failure,104,396,0,,,,1.7250000000000014
+development,3,6,3,clean_success,55,382,0,64.0,6.050000000000011,1,
+development,3,6,3,adverse_then_success,230,382,75,1652.5,8.350000000000009,169.5,
+development,3,6,3,failure,97,382,0,,,,1.849999999999966
