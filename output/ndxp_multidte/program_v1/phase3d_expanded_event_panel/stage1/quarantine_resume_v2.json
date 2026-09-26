@@ -1,0 +1,17 @@
+{
+  "capacity_source": "native_df_kP",
+  "checkpoint_sessions_complete": 28,
+  "completed_units": 63,
+  "failed_units_not_retried": 21,
+  "heartbeat_seconds": 240,
+  "isolated_failure_policy": "quarantine unit, retain reservation, continue independent units without retries",
+  "native_free_floor_bytes": 50000000000,
+  "stage2_modified": false,
+  "status": "resume_started_not_acquisition_complete",
+  "systemic_failure_policy": "stop dispatch and drain workers on authentication, storage, budget, integrity errors or 12 consecutive request failures without success",
+  "tests_passed": 46,
+  "total_sessions": 877,
+  "unattempted_units": 1708,
+  "worker_b_modified": false,
+  "workers": 4
+}

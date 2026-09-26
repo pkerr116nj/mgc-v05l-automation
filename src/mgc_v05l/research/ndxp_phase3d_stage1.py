@@ -14,12 +14,14 @@ import math
 import os
 import uuid
 from pathlib import Path
-import shutil
+import subprocess
 import threading
 import time
 import warnings
 
 import databento as db
+from databento.common.error import BentoError
+import requests
 import numpy as np
 import pandas as pd
 import zstandard
@@ -33,6 +35,10 @@ CEILING = 500.0
 LIMIT = 100_000_000
 LOCK = threading.Lock()
 ACCOUNTED = {}
+NAS_MOUNT = Path("/Volumes/Personal-Drive")
+NAS_FREE_FLOOR = 50_000_000_000
+HEARTBEAT_SECONDS = 240
+SYSTEMIC_FAILURE_STREAK = 12
 
 
 def save(path,value):
@@ -100,6 +106,86 @@ def units(session):
         start=session['start'],end=session['end'],limit=LIMIT)) for i in range(0,len(session['symbols']),2000)]
 
 
+def native_capacity(path):
+    """Use native 64-bit df; macOS statvfs wraps this SMB mount at 2**32 blocks."""
+    result=subprocess.run(['/bin/df','-kP',str(path)],check=True,capture_output=True,
+                          text=True,timeout=15,env={**os.environ,'LC_ALL':'C'})
+    rows=result.stdout.strip().splitlines()
+    if len(rows)!=2:raise RuntimeError('Unexpected native df output')
+    fields=rows[1].split()
+    if len(fields)!=6:raise RuntimeError('Invalid native df capacity columns')
+    filesystem,total,used,available,percent,mount=fields
+    total,used,available=map(int,(total,used,available))
+    if min(total,used,available)<0 or total<=0 or available>total:
+        raise RuntimeError('Invalid native df capacity values')
+    if Path(path).is_relative_to(NAS_MOUNT) and (mount!=str(NAS_MOUNT) or not filesystem.startswith('//')):
+        raise RuntimeError('NAS SMB mount unavailable; refusing local fallback')
+    return dict(source='native_df_kP',mount=mount,total_bytes=total*1024,available_bytes=available*1024)
+
+
+def quarantine(req,root,reason):
+    directory=root/'quarantine';directory.mkdir(exist_ok=True)
+    path=directory/(req['key']+'.json')
+    if not path.exists():save(path,dict(key=req['key'],reason=reason,automatic_retry=False,
+                                      quarantined_utc=datetime.now(timezone.utc).isoformat()))
+
+
+def checkpoint_queue(plan,root,raw_root):
+    pending=[]
+    for session in plan['sessions']:
+        for req in units(session):
+            name=req['key']+'.json'
+            receipt=root/'receipts'/name;transfer=root/'transfers'/name
+            failed=(root/'failures'/name).exists() or (root/'quarantine'/name).exists()
+            uncertain=((root/'intents'/name).exists() or (raw_root/(req['key']+'.dbn.zst')).exists()) and not transfer.exists()
+            if failed or (not receipt.exists() and uncertain):
+                quarantine(req,root,'existing_failed_or_uncertain_attempt');continue
+            # Completed receipts and transfers are checksum-validated by retrieve, never bought again.
+            pending.append(req)
+    return pending
+
+
+def isolated_request_failure(exc):
+    """Only remote request failures are isolated; local integrity/admission errors stop."""
+    message=str(exc).lower()
+    if any(token in message for token in ('no space left','disk quota','input/output error',
+            'read-only file system','permission denied','device not configured','stale file handle')):
+        return False
+    status=getattr(exc,'http_status',None)
+    if status is not None:return isinstance(status,int) and 500<=status<600
+    return isinstance(exc,(BentoError,requests.exceptions.RequestException,TimeoutError,ConnectionError))
+
+
+def dispatch(pending,worker,workers,on_failure,on_progress,draining=lambda:False,
+             systemic_failure_streak=SYSTEMIC_FAILURE_STREAK):
+    """Drain active work on systemic errors; quarantine individual failures and keep dispatching."""
+    from concurrent.futures import wait,FIRST_COMPLETED
+    errors=[];fatal=False;streak=0
+    with ThreadPoolExecutor(workers) as pool:
+        iterator=iter(pending);active={}
+        def fill():
+            while not fatal and len(active)<workers:
+                req=next(iterator,None)
+                if req is None:break
+                active[pool.submit(worker,req)]=req
+        fill();on_progress(len(active))
+        while active:
+            ready,_=wait(active,timeout=45,return_when=FIRST_COMPLETED)
+            for future in ready:
+                req=active.pop(future)
+                try:
+                    future.result();streak=0
+                except Exception as exc:
+                    isolated=isolated_request_failure(exc)
+                    on_failure(req,exc)
+                    errors.append(dict(key=req['key'],error_type=type(exc).__name__,isolated=isolated))
+                    streak+=1
+                    if not isolated or streak>=systemic_failure_streak:fatal=True
+            if draining():fatal=True
+            fill();on_progress(len(active))
+    return errors,fatal
+
+
 def confirmed_rejection(failure,raw):
     # SDK check_http_error executes before opening a data file. A returned 5xx
     # without any file is a confirmed rejected request, not an interrupted stream.
@@ -118,7 +204,7 @@ def accounting(root=ROOT, prior_root=None):
             if receipt.exists():
                 result=json.loads(receipt.read_text())
                 if not result.get('accounting_alias_for'):completed+=result['metered_upper_cost_usd']
-            elif (directory/'failures'/path.name).exists():
+            elif (directory/'failures'/path.name).exists() or (directory/'quarantine'/path.name).exists():
                 failed+=intent['reserved_cost_usd']
             else:
                 # A stale unresolved intent is uncertain, not a currently active stream.
@@ -221,6 +307,8 @@ def retrieve(req,root,raw_root,rate,client,validator=verify):
         result=json.loads(receipt.read_text())
         if result['request']!=req or base.digest(Path(result['path']))!=result['sha256']:raise ValueError('Completed cache integrity failure')
         return result
+    if (root/'failures'/(key+'.json')).exists() or (root/'quarantine'/(key+'.json')).exists():
+        raise RuntimeError('Uncertain prior paid attempt; quarantined, no duplicate retry')
     if transfer.exists():
         result=json.loads(transfer.read_text())
         if result['request']!=req or base.digest(raw)!=result['sha256']:raise ValueError('Transferred cache integrity failure')
@@ -229,10 +317,11 @@ def retrieve(req,root,raw_root,rate,client,validator=verify):
             if intent.exists() or raw.exists():raise RuntimeError('Uncertain prior paid attempt; no duplicate retry')
             reservation=(req['params']['limit']*80+base.HEADER_ALLOWANCE)/1e9*rate
             if exposure(root)+reservation>CEILING:raise RuntimeError('Next coarse retrieval would exceed $500 reserved ceiling')
-            if shutil.disk_usage(raw_root).free<req['params']['limit']*80+base.HEADER_ALLOWANCE+base.DISK_RESERVE:
+            capacity=native_capacity(raw_root)
+            if capacity['available_bytes']<req['params']['limit']*80+base.HEADER_ALLOWANCE+NAS_FREE_FLOOR:
                 raise RuntimeError('Insufficient storage for bounded stream')
             before=exposure(root)
-            save(intent,dict(request=req,reserved_cost_usd=reservation,started_utc=datetime.now(timezone.utc).isoformat()))
+            save(intent,dict(request=req,reserved_cost_usd=reservation,started_utc=datetime.now(timezone.utc).isoformat(),capacity_admission=capacity))
             ACCOUNTED[str(root)]=before+reservation
         started=time.monotonic()
         try:
@@ -258,7 +347,7 @@ def retrieve(req,root,raw_root,rate,client,validator=verify):
     return result
 
 
-def progress(plan,started,root=ROOT):
+def progress(plan,started,root=ROOT,active_workers=0,emit=True):
     receipts=[json.loads(p.read_text()) for p in (root/'receipts').glob('*.json')]
     receipts=[r for r in receipts if not r['request'].get('retry_of')]
     keys={r['request']['key'] for r in receipts}
@@ -269,17 +358,20 @@ def progress(plan,started,root=ROOT):
                 units_completed=len(receipts),gb_acquired=(sum(p.stat().st_size for p in RAW.glob('*.dbn.zst'))+prior['compressed_bytes'])/1e9,
                 gb_validated=(sum(r['compressed_bytes'] for r in receipts)+prior['compressed_bytes'])/1e9,
                 elapsed_seconds=time.monotonic()-started,failures=len(failures),prior_phase3d_failures=1,
+                active_workers=active_workers,quarantined_failures=len(list((root/'quarantine').glob('*.json'))),
+                heartbeat_interval_seconds=HEARTBEAT_SECONDS,updated_utc=datetime.now(timezone.utc).isoformat(),
                 **accounting(root),
                 hard_ceiling_usd=CEILING)
     tmp=root/'progress.tmp';tmp.write_text(json.dumps(result,indent=2)+'\n');tmp.replace(root/'progress.json')
-    print(f"{len(done)}/{len(plan['sessions'])} sessions | {result['gb_acquired']:.3f} GB | {result['elapsed_seconds']:.0f}s | {len(failures)} new failures | ${result['completed_estimated_metered_cost_usd']:.3f} completed estimated metered / ${result['uncertain_failed_request_reservation_usd']:.3f} uncertain failed reservation / ${result['active_reservation_usd']:.3f} active reservation",flush=True)
+    if emit:
+        print(f"{len(done)}/{len(plan['sessions'])} sessions | {result['gb_acquired']:.3f} GB | {active_workers} active workers | {result['quarantined_failures']} quarantined failures | ${result['completed_estimated_metered_cost_usd']:.3f} completed estimated cost | ${result['uncertain_failed_request_reservation_usd']:.3f} uncertain reservation | ${result['active_reservation_usd']:.3f} active reservation | {result['elapsed_seconds']:.0f}s elapsed",flush=True)
     return result
 
 
 
 def run(workers=4):
     if not 1<=workers<=8:raise ValueError('One to eight workers required')
-    for p in ('intents','receipts','transfers','failures'):(ROOT/p).mkdir(parents=True,exist_ok=True)
+    for p in ('intents','receipts','transfers','failures','quarantine'):(ROOT/p).mkdir(parents=True,exist_ok=True)
     RAW.mkdir(parents=True,exist_ok=True)
     plan=build_manifest();rate=base.unit_rate(base.OUT)
     original=json.loads((base.OUT/'receipts'/'2023-03-28_opening.json').read_text())
@@ -290,44 +382,34 @@ def run(workers=4):
     save(ROOT/f'request_count_audit_{time.time_ns()}.json',audit)
     print(json.dumps(audit,sort_keys=True),flush=True)
     client=db.Historical(load_key('.env.local'));started=time.monotonic()
-    pending=[r for s in plan['sessions'] for r in units(s)]
-    # Isolate uncertain units instead of repurchasing them or blocking unrelated sessions.
-    pending=[r for r in pending if not ((ROOT/'intents'/(r['key']+'.json')).exists()
-             and not (ROOT/'receipts'/(r['key']+'.json')).exists()
-             and not (ROOT/'transfers'/(r['key']+'.json')).exists())]
-    errors=[];fatal=False;progress(plan,started)
-    # Rolling bounded workers. Isolate provider 5xx failures; repair confirmed rejections afterward.
-    with ThreadPoolExecutor(workers) as pool:
-        iterator=iter(pending);active={}
-        for req in list(next(iterator,None) for _ in range(workers)):
-            if req:active[pool.submit(retrieve,req,ROOT,RAW,rate,client)]=req
-        while active:
-            from concurrent.futures import wait,FIRST_COMPLETED
-            ready,_=wait(active,timeout=45,return_when=FIRST_COMPLETED)
-            for future in ready:
-                req=active.pop(future)
-                try:future.result()
-                except Exception as exc:
-                    errors.append(dict(key=req['key'],error_type=type(exc).__name__))
-                    # A failed remote unit remains reserved and is never retried.
-                    # Continue independent sessions for server-side 5xx errors only.
-                    if not isinstance(getattr(exc,'http_status',None),int) or not 500<=exc.http_status<600:fatal=True
-                if (ROOT/'drain.flag').exists():fatal=True
-                if not fatal:
-                    following=next(iterator,None)
-                    if following:active[pool.submit(retrieve,following,ROOT,RAW,rate,client)]=following
-            progress(plan,started)
+    pending=checkpoint_queue(plan,ROOT,RAW)
+    exposure(ROOT,refresh=True)
+    last_heartbeat=[float('-inf')]
+    def report(active):
+        now=time.monotonic();emit=now-last_heartbeat[0]>=HEARTBEAT_SECONDS
+        progress(plan,started,active_workers=active,emit=emit)
+        if emit:last_heartbeat[0]=now
+    def failed(req,exc):
+        if (ROOT/'intents'/(req['key']+'.json')).exists() or (RAW/(req['key']+'.dbn.zst')).exists():
+            quarantine(req,ROOT,type(exc).__name__)
+        print(json.dumps(dict(event='request_failure',key=req['key'],error_type=type(exc).__name__,
+                              http_status=getattr(exc,'http_status',None),
+                              disposition='quarantine_and_continue' if isolated_request_failure(exc) else 'systemic_stop'),sort_keys=True),flush=True)
+    errors,fatal=dispatch(pending,lambda req:retrieve(req,ROOT,RAW,rate,client),workers,failed,report,
+                          draining=lambda:(ROOT/'drain.flag').exists())
     # Failed attempts retain reservations and are not repurchased automatically.
     unresolved=[r['key'] for session in plan['sessions'] for r in units(session)
                 if not (ROOT/'receipts'/(r['key']+'.json')).exists()]
-    if fatal or unresolved:
-        save(ROOT/f'stop_{time.time_ns()}.json',dict(errors=errors,unresolved_units=unresolved,fatal=fatal))
-        raise RuntimeError('Acquisition stopped; preserve uncertain attempts and inspect evidence')
+    save(ROOT/f'queue_result_{time.time_ns()}.json',dict(errors=errors,unresolved_units=unresolved,fatal=fatal,
+         unambiguous_queue_exhausted=not fatal,quarantined_units_require_reconciliation=bool(unresolved)))
+    if fatal:
+        progress(plan,started)
+        raise RuntimeError('Systemic acquisition stop; active work drained and uncertain attempts preserved')
     return progress(plan,started)
 
 
 if __name__=='__main__':
-    parser=argparse.ArgumentParser();parser.add_argument('--workers',type=int,default=8);parser.add_argument('--manifest-only',action='store_true');args=parser.parse_args()
+    parser=argparse.ArgumentParser();parser.add_argument('--workers',type=int,default=4);parser.add_argument('--manifest-only',action='store_true');args=parser.parse_args()
     ROOT.mkdir(parents=True,exist_ok=True)
     with (ROOT/'.acquisition.lock').open('a') as lock:
         fcntl.flock(lock,fcntl.LOCK_EX|fcntl.LOCK_NB)
