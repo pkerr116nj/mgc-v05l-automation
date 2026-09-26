@@ -1,0 +1,5 @@
+raw/
+quote_cache/
+receipts/
+intents/
+acquisition_receipts_previous_*.json

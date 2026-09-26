@@ -1,0 +1,125 @@
+{
+  "estimate_method": "Six activity strata from prior fragment-price evidence; largest symbol-minute exposure per stratum. Twice the highest sampled dollars (or bytes) per regular symbol-minute applied to all requests, including cross-request duplication. Conservative stress estimate, not a provider guarantee or exact full quote.",
+  "gate_reason": "conservative estimate within new $10 ceiling",
+  "hard_new_spend_ceiling_usd": 10.0,
+  "manifest_sha256": "221e0d42c3ed8b90122ab25ab122ff090a13cff24b712943ada300fa94473632",
+  "planning": {
+    "consolidation_alternative": {
+      "original_fragment_count": 501,
+      "provider_request_count": 60
+    },
+    "expected_operational_complexity": "60 immutable session streams, at most four workers, one network attempt per session; no batch dependency",
+    "metadata_call_count": 12,
+    "projected_bytes": 39240181432.71328,
+    "projected_cost": 5.847242688031746,
+    "provider_request_count": 60
+  },
+  "purchase_allowed": true,
+  "results": [
+    {
+      "method": "get_cost",
+      "pilot_session": "2023-07-03",
+      "quoted_at_utc": "2026-09-26T08:35:44.604388+00:00",
+      "status": "ok",
+      "symbol_minutes": 9890.0,
+      "value": 0.019100379944
+    },
+    {
+      "method": "get_billable_size",
+      "pilot_session": "2023-07-03",
+      "quoted_at_utc": "2026-09-26T08:35:41.517944+00:00",
+      "status": "ok",
+      "symbol_minutes": 9890.0,
+      "value": 128180480
+    },
+    {
+      "method": "get_cost",
+      "pilot_session": "2023-04-03",
+      "quoted_at_utc": "2026-09-26T08:35:42.235842+00:00",
+      "status": "ok",
+      "symbol_minutes": 18708.0,
+      "value": 0.025433814526
+    },
+    {
+      "method": "get_billable_size",
+      "pilot_session": "2023-04-03",
+      "quoted_at_utc": "2026-09-26T08:35:41.068502+00:00",
+      "status": "ok",
+      "symbol_minutes": 18708.0,
+      "value": 170683440
+    },
+    {
+      "method": "get_cost",
+      "pilot_session": "2023-04-17",
+      "quoted_at_utc": "2026-09-26T08:35:42.471238+00:00",
+      "status": "ok",
+      "symbol_minutes": 18708.0,
+      "value": 0.034038150311
+    },
+    {
+      "method": "get_billable_size",
+      "pilot_session": "2023-04-17",
+      "quoted_at_utc": "2026-09-26T08:35:51.970953+00:00",
+      "status": "ok",
+      "symbol_minutes": 18708.0,
+      "value": 228426160
+    },
+    {
+      "method": "get_cost",
+      "pilot_session": "2023-08-01",
+      "quoted_at_utc": "2026-09-26T08:35:45.791579+00:00",
+      "status": "ok",
+      "symbol_minutes": 18708.0,
+      "value": 0.036380577087
+    },
+    {
+      "method": "get_billable_size",
+      "pilot_session": "2023-08-01",
+      "quoted_at_utc": "2026-09-26T08:35:43.597056+00:00",
+      "status": "ok",
+      "symbol_minutes": 18708.0,
+      "value": 244145920
+    },
+    {
+      "method": "get_cost",
+      "pilot_session": "2023-09-18",
+      "quoted_at_utc": "2026-09-26T08:35:44.669543+00:00",
+      "status": "ok",
+      "symbol_minutes": 18708.0,
+      "value": 0.057362627983
+    },
+    {
+      "method": "get_billable_size",
+      "pilot_session": "2023-09-18",
+      "quoted_at_utc": "2026-09-26T08:35:44.880551+00:00",
+      "status": "ok",
+      "symbol_minutes": 18708.0,
+      "value": 384954080
+    },
+    {
+      "method": "get_cost",
+      "pilot_session": "2024-09-16",
+      "quoted_at_utc": "2026-09-26T08:35:47.203682+00:00",
+      "status": "ok",
+      "symbol_minutes": 18708.0,
+      "value": 0.088448166847
+    },
+    {
+      "method": "get_billable_size",
+      "pilot_session": "2024-09-16",
+      "quoted_at_utc": "2026-09-26T08:35:49.240001+00:00",
+      "status": "ok",
+      "symbol_minutes": 18708.0,
+      "value": 593565600
+    }
+  ],
+  "sample_sessions": [
+    "2023-07-03",
+    "2023-04-03",
+    "2023-04-17",
+    "2023-08-01",
+    "2023-09-18",
+    "2024-09-16"
+  ],
+  "uncertainty": "Unobserved activity can exceed sampled rates; overnight/extended-session padding is included in sampled provider prices. No metadata retries."
+}

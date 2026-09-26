@@ -1,0 +1,371 @@
+{
+  "status": "completed_direct_recovery_and_frozen_analysis",
+  "assignment_complete": true,
+  "tests": {
+    "tests": 189,
+    "failures": 0,
+    "errors": 0,
+    "skipped": 0,
+    "seconds": 4.485,
+    "command": "PYTHONPATH=src .venv/bin/python -m pytest -q tests/unit/test_ndxp_direct_recovery.py tests/unit/test_ndxp_complete_panel.py tests/unit/test_ndxp_owned_execution.py tests/unit/test_ndxp_multidte*.py tests/unit/test_mgc_v05l_ndxp_*.py tests/unit/test_index_options_phase3a.py --junitxml=/tmp/phase3c_direct_tests.xml"
+  },
+  "summary": {
+    "status": "completed_direct_recovery_and_frozen_analysis",
+    "requests": 60,
+    "original_fragments": 501,
+    "new_conservative_estimate_usd": 5.847242688031746,
+    "actual_new_spend_usd": null,
+    "actual_spend_note": "Not exposed by SDK direct streaming; the conservative estimate is not an actual bill.",
+    "pricing_calls": 12,
+    "batch_api_calls": 0,
+    "wall_clock_acquisition_seconds": 3824.373684082995,
+    "downloaded_bytes": 3679853774,
+    "coverage": {
+      "candidates": 246,
+      "complete_sessions": 0,
+      "fresh_complete_candidates": 1,
+      "rules_sha256": "70a22312ad5b7dbcb783a0333a0f504f710c9cefde5efc8dacd22e7a18ad80f3",
+      "sessions": 60,
+      "source_complete_candidates": 246,
+      "source_complete_sessions": 60,
+      "supported_entries": 246
+    },
+    "entry_fresh_complete_candidates": 97,
+    "target_windows": 46635,
+    "target_windows_95pct_fresh": 9546,
+    "primary_six_findings": [
+      {
+        "dte": 2,
+        "candidates": 43,
+        "supported_entries": 43,
+        "naturally_marketable_entries": 0,
+        "median_entry_quote_width": 29.30000000000004,
+        "strong_first_target_20lot_displayed": 0,
+        "plausible_first_target_20lot_displayed": 0,
+        "strong_targets": 16,
+        "strong_or_plausible_targets": 43,
+        "conservative_targets": 16,
+        "missed_minute_mid_crossings": 45185,
+        "missed_minute_ask_crossings": 105,
+        "persist_2_rejected_supported": 193,
+        "persist_3_rejected_supported": 307
+      },
+      {
+        "dte": 3,
+        "candidates": 39,
+        "supported_entries": 39,
+        "naturally_marketable_entries": 0,
+        "median_entry_quote_width": 22.0,
+        "strong_first_target_20lot_displayed": 0,
+        "plausible_first_target_20lot_displayed": 0,
+        "strong_targets": 15,
+        "strong_or_plausible_targets": 39,
+        "conservative_targets": 15,
+        "missed_minute_mid_crossings": 32757,
+        "missed_minute_ask_crossings": 105,
+        "persist_2_rejected_supported": 190,
+        "persist_3_rejected_supported": 293
+      }
+    ],
+    "primary_six_models": [
+      {
+        "calendar_dte": 2,
+        "target_credit": 6.0,
+        "cohort": "supported_entry_matched",
+        "model": "minute_touch_original_quote_terminal",
+        "trades": 43,
+        "excluded": 0,
+        "mean_pnl": 2316.8074418605,
+        "win_rate": 0.6976744186,
+        "profit_factor": 1.9285500177,
+        "gross_profit": 206911.2,
+        "gross_loss": 107288.4800000001
+      },
+      {
+        "calendar_dte": 2,
+        "target_credit": 6.0,
+        "cohort": "supported_entry_matched",
+        "model": "minute_touch_settlement",
+        "trades": 43,
+        "excluded": 0,
+        "mean_pnl": 2316.8074418605,
+        "win_rate": 0.6976744186,
+        "profit_factor": 1.9285500177,
+        "gross_profit": 206911.2,
+        "gross_loss": 107288.4800000001
+      },
+      {
+        "calendar_dte": 2,
+        "target_credit": 6.0,
+        "cohort": "supported_entry_matched",
+        "model": "persist_2_settlement",
+        "trades": 43,
+        "excluded": 0,
+        "mean_pnl": -2345.0530232558,
+        "win_rate": 0.3953488372,
+        "profit_factor": 0.5117712588,
+        "gross_profit": 105699.6799999998,
+        "gross_loss": 206536.96
+      },
+      {
+        "calendar_dte": 2,
+        "target_credit": 6.0,
+        "cohort": "supported_entry_matched",
+        "model": "persist_3_settlement",
+        "trades": 43,
+        "excluded": 0,
+        "mean_pnl": -2153.1925581395,
+        "win_rate": 0.3953488372,
+        "profit_factor": 0.5517156832,
+        "gross_profit": 113949.6799999999,
+        "gross_loss": 206536.96
+      },
+      {
+        "calendar_dte": 2,
+        "target_credit": 6.0,
+        "cohort": "supported_entry_matched",
+        "model": "event_strong",
+        "trades": 43,
+        "excluded": 0,
+        "mean_pnl": -2796.2158139535,
+        "win_rate": 0.3720930233,
+        "profit_factor": 0.4375914449,
+        "gross_profit": 93552.64,
+        "gross_loss": 213789.9199999998
+      },
+      {
+        "calendar_dte": 2,
+        "target_credit": 6.0,
+        "cohort": "supported_entry_matched",
+        "model": "event_strong_plausible",
+        "trades": 43,
+        "excluded": 0,
+        "mean_pnl": 5847.04,
+        "win_rate": 1.0,
+        "profit_factor": null,
+        "gross_profit": 251422.7200000001,
+        "gross_loss": 0.0
+      },
+      {
+        "calendar_dte": 2,
+        "target_credit": 6.0,
+        "cohort": "supported_entry_matched",
+        "model": "event_conservative",
+        "trades": 43,
+        "excluded": 0,
+        "mean_pnl": -3196.2158139535,
+        "win_rate": 0.3720930233,
+        "profit_factor": 0.3880523222,
+        "gross_profit": 87152.64,
+        "gross_loss": 224589.9199999997
+      },
+      {
+        "calendar_dte": 3,
+        "target_credit": 6.0,
+        "cohort": "supported_entry_matched",
+        "model": "minute_touch_original_quote_terminal",
+        "trades": 39,
+        "excluded": 0,
+        "mean_pnl": 795.7579487179,
+        "win_rate": 0.5897435897,
+        "profit_factor": 1.2442755206,
+        "gross_profit": 158081.9199999996,
+        "gross_loss": 127047.3600000002
+      },
+      {
+        "calendar_dte": 3,
+        "target_credit": 6.0,
+        "cohort": "supported_entry_matched",
+        "model": "minute_touch_settlement",
+        "trades": 39,
+        "excluded": 0,
+        "mean_pnl": 716.2707692308,
+        "win_rate": 0.5897435897,
+        "profit_factor": 1.2146379304,
+        "gross_profit": 158081.9199999996,
+        "gross_loss": 130147.3599999999
+      },
+      {
+        "calendar_dte": 3,
+        "target_credit": 6.0,
+        "cohort": "supported_entry_matched",
+        "model": "persist_2_settlement",
+        "trades": 39,
+        "excluded": 0,
+        "mean_pnl": -1814.4984615385,
+        "win_rate": 0.4358974359,
+        "profit_factor": 0.603477475,
+        "gross_profit": 107699.6799999999,
+        "gross_loss": 178465.12
+      },
+      {
+        "calendar_dte": 3,
+        "target_credit": 6.0,
+        "cohort": "supported_entry_matched",
+        "model": "persist_3_settlement",
+        "trades": 39,
+        "excluded": 0,
+        "mean_pnl": -1745.2676923077,
+        "win_rate": 0.4358974359,
+        "profit_factor": 0.6186064818,
+        "gross_profit": 110399.6799999999,
+        "gross_loss": 178465.12
+      },
+      {
+        "calendar_dte": 3,
+        "target_credit": 6.0,
+        "cohort": "supported_entry_matched",
+        "model": "event_strong",
+        "trades": 39,
+        "excluded": 0,
+        "mean_pnl": -2768.3446153846,
+        "win_rate": 0.3846153846,
+        "profit_factor": 0.4482298454,
+        "gross_profit": 87705.6,
+        "gross_loss": 195671.04
+      },
+      {
+        "calendar_dte": 3,
+        "target_credit": 6.0,
+        "cohort": "supported_entry_matched",
+        "model": "event_strong_plausible",
+        "trades": 39,
+        "excluded": 0,
+        "mean_pnl": 5847.04,
+        "win_rate": 1.0,
+        "profit_factor": null,
+        "gross_profit": 228034.5600000001,
+        "gross_loss": 0.0
+      },
+      {
+        "calendar_dte": 3,
+        "target_credit": 6.0,
+        "cohort": "supported_entry_matched",
+        "model": "event_conservative",
+        "trades": 39,
+        "excluded": 0,
+        "mean_pnl": -3168.3446153846,
+        "win_rate": 0.3846153846,
+        "profit_factor": 0.3980376384,
+        "gross_profit": 81705.6,
+        "gross_loss": 205271.0399999998
+      }
+    ],
+    "all_cohort_false_negatives": {
+      "missed_minute_cross_mid": 258644,
+      "missed_minute_cross_ask": 556,
+      "p2_rejected_supported": 1158,
+      "p3_rejected_supported": 1829,
+      "p2_approved_not_strong": 13118,
+      "p3_approved_not_strong": 12483,
+      "fast_sequences": 74020
+    },
+    "settlements": {
+      "candidates": 246,
+      "quote_proxy_differences": 77
+    },
+    "taxonomy": {
+      "censored/insufficient coverage": 245,
+      "adverse-then-success": 1
+    },
+    "quality_warning_count": 69,
+    "decoded_records_verified": 185888177,
+    "tests": 189,
+    "next_phase": "Resolve NDXP entry and exit model sensitivity with frozen replay and prospective timestamped complex-order paper/shadow observations before SPXW expansion"
+  },
+  "raw_files_verified": 60,
+  "original_inputs_verified": 2430,
+  "original_batch_receipts_unchanged": true,
+  "manifest_sha256": "221e0d42c3ed8b90122ab25ab122ff090a13cff24b712943ada300fa94473632",
+  "outputs": {
+    ".gitignore": {
+      "bytes": 74,
+      "sha256": "2b263ace2f8228fdd93daed5810414168186ef3d2628a93d82d029ef3e6d3f1f"
+    },
+    "acquisition_receipts.json": {
+      "bytes": 73928,
+      "sha256": "67181e798c8d872d98f1e308d8bf6038f5def9ebcfc472bd6c15c595f8a81123"
+    },
+    "analysis_summary.json": {
+      "bytes": 287,
+      "sha256": "faa964d904aa471801881d709661fd366a96f8f8ea607616c89ece8b7edd83b8"
+    },
+    "candidate_model_outcomes.csv": {
+      "bytes": 217920,
+      "sha256": "8334ee5adbffe318e7b3f6d0bbf6aea369a772b7e28c1af719b45c2433c79b22"
+    },
+    "coverage_after_acquisition.csv": {
+      "bytes": 30978,
+      "sha256": "fd9ff6274e5bb153f55b1bb62a60c988bcd8da75fe46c5355d0a0cda479da36e"
+    },
+    "entry_execution_results.csv": {
+      "bytes": 87649,
+      "sha256": "a881e2bb43ad1f075d752088e70e040127b1043e80b854eef34534f88d3a1ab0"
+    },
+    "execution_model_comparison.csv": {
+      "bytes": 14828,
+      "sha256": "6ab2b8a46766594b6fa3d61a14468fc4fe7851080254d34abf17b69528e9ec57"
+    },
+    "execution_rules.json": {
+      "bytes": 1214,
+      "sha256": "70a22312ad5b7dbcb783a0333a0f504f710c9cefde5efc8dacd22e7a18ad80f3"
+    },
+    "false_negative_analysis.csv": {
+      "bytes": 15016,
+      "sha256": "70dcc19f4303b9dcca0c17b736ddb1c3a04dd129395626dd7313fd2789423c8b"
+    },
+    "new_raw_index.json": {
+      "bytes": 153915,
+      "sha256": "e64fc2f4d3c62cc38fc88dd3bd0c7525299fc5be468df9b30bec3eb4f094cb4f"
+    },
+    "path_taxonomy.csv": {
+      "bytes": 30230,
+      "sha256": "0179902829d6d8041ac4de925f0f375216af87dc4bf73f6b437ba55ddb78565a"
+    },
+    "preflight_quote.json": {
+      "bytes": 3988,
+      "sha256": "32a56bf41a70eb3bc98c9ae898d31dab4215d5f40b8d16b61d7e7f4a714076b2"
+    },
+    "real_data_integration.json": {
+      "bytes": 730,
+      "sha256": "80961d31154a6776bf337ec1de9483ab5e314ebbc30ad6ae70701e4c069b3d16"
+    },
+    "record_verification.json": {
+      "bytes": 37744,
+      "sha256": "3dcf81a7ed16facb85cc9d529a69223f63c98ccf9091e5cac767693cbd4b3a67"
+    },
+    "reproducibility.json": {
+      "bytes": 1150,
+      "sha256": "08f99a863b2c070b9860ca91817b39598391f05fb2c0794663c6535240f5f9e3"
+    },
+    "research_report.md": {
+      "bytes": 11981,
+      "sha256": "e748bfce7cc3e57c8a9eebc8318e80ef86ae62bf9f956dbd5367706fa6150016"
+    },
+    "session_request_manifest.json": {
+      "bytes": 58794,
+      "sha256": "221e0d42c3ed8b90122ab25ab122ff090a13cff24b712943ada300fa94473632"
+    },
+    "settlement_results.csv": {
+      "bytes": 28523,
+      "sha256": "27f1f2bcb9839da31888c0a238db1fec281edcefa48e93fda40916a2c910eb1e"
+    },
+    "summary.json": {
+      "bytes": 7806,
+      "sha256": "44cca61a4aad720b6593873aae681ce94f7cc9458e8fcec6b4249858d5b325ee"
+    },
+    "target_execution_results.csv": {
+      "bytes": 75076,
+      "sha256": "eb72556040898ae95fbdab4f37dda27f163cbdecac9bf04dfddf62876f7466a3"
+    },
+    "test_results.json": {
+      "bytes": 418,
+      "sha256": "b63d6caa4be893867ff6e87d22614e5b1f9643a89f26ef1a89e61359f0e8e155"
+    },
+    "touch_window_evidence.parquet": {
+      "bytes": 1444791,
+      "sha256": "e00bde3b7f71261d0b3e9eea91e83e34db36a4448779130e30e702393e919364"
+    }
+  },
+  "commit_sha_resolution": "git log -1 --format=%H -- output/ndxp_multidte/program_v1/phase3c_direct_recovery/completion_evidence.json"
+}

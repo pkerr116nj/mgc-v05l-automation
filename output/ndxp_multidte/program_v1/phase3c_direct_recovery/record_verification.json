@@ -1,0 +1,1086 @@
+[
+  {
+    "exact_symbol_and_timestamp_bounds_verified": true,
+    "first_recv_ns": 1680010260009600890,
+    "last_recv_ns": 1680292799863583078,
+    "observed_symbols": [
+      "NDXP  230330P12660000",
+      "NDXP  230330P12670000",
+      "NDXP  230330P12700000",
+      "NDXP  230330P12710000",
+      "NDXP  230330P12810000",
+      "NDXP  230330P12820000",
+      "NDXP  230331P12750000",
+      "NDXP  230331P12760000",
+      "NDXP  230331P12780000",
+      "NDXP  230331P12790000",
+      "NDXP  230331P12840000",
+      "NDXP  230331P12850000"
+    ],
+    "path": "output/ndxp_multidte/program_v1/phase3c_direct_recovery/raw/2023-03-28.dbn.zst",
+    "records": 2747400,
+    "sha256": "5c32424ed1d759b56cf19e49ca9a2be57cd73ae98f53a1e4163113ce896d95ad"
+  },
+  {
+    "exact_symbol_and_timestamp_bounds_verified": true,
+    "first_recv_ns": 1680096660073060509,
+    "last_recv_ns": 1680292799980360587,
+    "observed_symbols": [
+      "NDXP  230331P12830000",
+      "NDXP  230331P12840000",
+      "NDXP  230331P12860000",
+      "NDXP  230331P12870000",
+      "NDXP  230331P12930000",
+      "NDXP  230331P12940000"
+    ],
+    "path": "output/ndxp_multidte/program_v1/phase3c_direct_recovery/raw/2023-03-29.dbn.zst",
+    "records": 1132558,
+    "sha256": "c602671c9964a61c8e2d5a504c0d24d63e96bb71d6bc08fe59a3f59e29cd7832"
+  },
+  {
+    "exact_symbol_and_timestamp_bounds_verified": true,
+    "first_recv_ns": 1680269460089018741,
+    "last_recv_ns": 1680551999743130011,
+    "observed_symbols": [
+      "NDXP  230403P12990000",
+      "NDXP  230403P13000000",
+      "NDXP  230403P13030000",
+      "NDXP  230403P13040000",
+      "NDXP  230403P13070000",
+      "NDXP  230403P13080000"
+    ],
+    "path": "output/ndxp_multidte/program_v1/phase3c_direct_recovery/raw/2023-03-31.dbn.zst",
+    "records": 1067561,
+    "sha256": "a120142af989e16ec9b4e90e203334cbc8a3efb01c936781c3540ee9fa3c4bf0"
+  },
+  {
+    "exact_symbol_and_timestamp_bounds_verified": true,
+    "first_recv_ns": 1680528660266346872,
+    "last_recv_ns": 1680811199979954488,
+    "observed_symbols": [
+      "NDXP  230405P13100000",
+      "NDXP  230405P13110000",
+      "NDXP  230405P13160000",
+      "NDXP  230405P13170000",
+      "NDXP  230405P13220000",
+      "NDXP  230405P13230000",
+      "NDXP  230406P13110000",
+      "NDXP  230406P13120000",
+      "NDXP  230406P13170000",
+      "NDXP  230406P13180000",
+      "NDXP  230406P13280000",
+      "NDXP  230406P13290000"
+    ],
+    "path": "output/ndxp_multidte/program_v1/phase3c_direct_recovery/raw/2023-04-03.dbn.zst",
+    "records": 2132355,
+    "sha256": "0e4439aa3695d7556a6f86ff85332a5cbeb6e0ad0332c6e37b901a2621db6e79"
+  },
+  {
+    "exact_symbol_and_timestamp_bounds_verified": true,
+    "first_recv_ns": 1681738260005064511,
+    "last_recv_ns": 1682020799139814594,
+    "observed_symbols": [
+      "NDXP  230419P13070000",
+      "NDXP  230419P13080000",
+      "NDXP  230419P13100000",
+      "NDXP  230419P13110000",
+      "NDXP  230419P13180000",
+      "NDXP  230419P13190000",
+      "NDXP  230420P13080000",
+      "NDXP  230420P13090000",
+      "NDXP  230420P13130000",
+      "NDXP  230420P13140000",
+      "NDXP  230420P13210000",
+      "NDXP  230420P13220000"
+    ],
+    "path": "output/ndxp_multidte/program_v1/phase3c_direct_recovery/raw/2023-04-17.dbn.zst",
+    "records": 2853233,
+    "sha256": "d54c976d790d11f54cfd288ca70dd8dbef1fb2a8a5b4f0eb26923a4c928aad83"
+  },
+  {
+    "exact_symbol_and_timestamp_bounds_verified": true,
+    "first_recv_ns": 1682688660246644991,
+    "last_recv_ns": 1682971199842818440,
+    "observed_symbols": [
+      "NDXP  230501P13170000",
+      "NDXP  230501P13180000",
+      "NDXP  230501P13230000",
+      "NDXP  230501P13240000",
+      "NDXP  230501P13250000",
+      "NDXP  230501P13260000"
+    ],
+    "path": "output/ndxp_multidte/program_v1/phase3c_direct_recovery/raw/2023-04-28.dbn.zst",
+    "records": 1181135,
+    "sha256": "fb0657e1b53e6f5c168c3a10a543a31fd0d0f218f0ce1663b0f66ead0b879cbd"
+  },
+  {
+    "exact_symbol_and_timestamp_bounds_verified": true,
+    "first_recv_ns": 1682947860021159471,
+    "last_recv_ns": 1683230399581011064,
+    "observed_symbols": [
+      "NDXP  230503P13250000",
+      "NDXP  230503P13260000",
+      "NDXP  230503P13310000",
+      "NDXP  230503P13320000",
+      "NDXP  230503P13360000",
+      "NDXP  230503P13370000",
+      "NDXP  230504P13250000",
+      "NDXP  230504P13260000",
+      "NDXP  230504P13350000",
+      "NDXP  230504P13360000",
+      "NDXP  230504P13410000",
+      "NDXP  230504P13420000"
+    ],
+    "path": "output/ndxp_multidte/program_v1/phase3c_direct_recovery/raw/2023-05-01.dbn.zst",
+    "records": 2281990,
+    "sha256": "9b6bca9718df10d146e04d8fc440d39d7e8f046a106d0961aa8f8d45cbf07a00"
+  },
+  {
+    "exact_symbol_and_timestamp_bounds_verified": true,
+    "first_recv_ns": 1683898260014331286,
+    "last_recv_ns": 1684180797135969258,
+    "observed_symbols": [
+      "NDXP  230515P13420000",
+      "NDXP  230515P13430000",
+      "NDXP  230515P13460000",
+      "NDXP  230515P13470000",
+      "NDXP  230515P13490000",
+      "NDXP  230515P13500000"
+    ],
+    "path": "output/ndxp_multidte/program_v1/phase3c_direct_recovery/raw/2023-05-12.dbn.zst",
+    "records": 609672,
+    "sha256": "38915df6a38eab87be7f872dedb8c71daf5522dc93113cf0cd180afe047bc676"
+  },
+  {
+    "exact_symbol_and_timestamp_bounds_verified": true,
+    "first_recv_ns": 1685539860020717558,
+    "last_recv_ns": 1685735999960307013,
+    "observed_symbols": [
+      "NDXP  230602P14300000",
+      "NDXP  230602P14310000",
+      "NDXP  230602P14390000",
+      "NDXP  230602P14400000",
+      "NDXP  230602P14490000",
+      "NDXP  230602P14500000"
+    ],
+    "path": "output/ndxp_multidte/program_v1/phase3c_direct_recovery/raw/2023-05-31.dbn.zst",
+    "records": 2009742,
+    "sha256": "e5951ee3528114490a7818f0cd3bc5104c37d88f9a4db41f2850aba37525b6bc"
+  },
+  {
+    "exact_symbol_and_timestamp_bounds_verified": true,
+    "first_recv_ns": 1685712660000274235,
+    "last_recv_ns": 1685995199899792645,
+    "observed_symbols": [
+      "NDXP  230605P14560000",
+      "NDXP  230605P14570000",
+      "NDXP  230605P14700000",
+      "NDXP  230605P14710000",
+      "NDXP  230605P14840000",
+      "NDXP  230605P14850000"
+    ],
+    "path": "output/ndxp_multidte/program_v1/phase3c_direct_recovery/raw/2023-06-02.dbn.zst",
+    "records": 1117706,
+    "sha256": "98b18c5dfaf4ee470bf5d405f87dbda3a8c31372fc9fe4ea67bd859194c2e9af"
+  },
+  {
+    "exact_symbol_and_timestamp_bounds_verified": true,
+    "first_recv_ns": 1686663060021462080,
+    "last_recv_ns": 1686859199640317650,
+    "observed_symbols": [
+      "NDXP  230615P14920000",
+      "NDXP  230615P14930000",
+      "NDXP  230615P14990000",
+      "NDXP  230615P15000000",
+      "NDXP  230615P15080000",
+      "NDXP  230615P15090000"
+    ],
+    "path": "output/ndxp_multidte/program_v1/phase3c_direct_recovery/raw/2023-06-13.dbn.zst",
+    "records": 1805760,
+    "sha256": "e6887be30dad065663e19f628a6e8341b449206165b0c2c40d34a6c324db0820"
+  },
+  {
+    "exact_symbol_and_timestamp_bounds_verified": true,
+    "first_recv_ns": 1688131860047821227,
+    "last_recv_ns": 1688403599168905045,
+    "observed_symbols": [
+      "NDXP  230703P15070000",
+      "NDXP  230703P15080000",
+      "NDXP  230703P15130000",
+      "NDXP  230703P15140000",
+      "NDXP  230703P15600000",
+      "NDXP  230703P15610000"
+    ],
+    "path": "output/ndxp_multidte/program_v1/phase3c_direct_recovery/raw/2023-06-30.dbn.zst",
+    "records": 798334,
+    "sha256": "31467f33aa48eb687c826acfba92088863ead98fe6fde08fad30c82c941d846b"
+  },
+  {
+    "exact_symbol_and_timestamp_bounds_verified": true,
+    "first_recv_ns": 1688391060075217588,
+    "last_recv_ns": 1688673599973376575,
+    "observed_symbols": [
+      "NDXP  230705P15200000",
+      "NDXP  230705P15210000",
+      "NDXP  230705P15230000",
+      "NDXP  230705P15240000",
+      "NDXP  230705P15250000",
+      "NDXP  230705P15260000",
+      "NDXP  230706P15300000",
+      "NDXP  230706P15310000",
+      "NDXP  230706P15340000",
+      "NDXP  230706P15350000"
+    ],
+    "path": "output/ndxp_multidte/program_v1/phase3c_direct_recovery/raw/2023-07-03.dbn.zst",
+    "records": 1600401,
+    "sha256": "f36459a4c60dc8c0555b31307fea8f9585e61699f0ff0862433a1107c43bce1f"
+  },
+  {
+    "exact_symbol_and_timestamp_bounds_verified": true,
+    "first_recv_ns": 1689600660087762695,
+    "last_recv_ns": 1689883199751889153,
+    "observed_symbols": [
+      "NDXP  230719P15690000",
+      "NDXP  230719P15700000",
+      "NDXP  230719P15710000",
+      "NDXP  230719P15740000",
+      "NDXP  230719P15750000",
+      "NDXP  230720P15650000",
+      "NDXP  230720P15660000",
+      "NDXP  230720P15700000",
+      "NDXP  230720P15710000",
+      "NDXP  230720P15790000",
+      "NDXP  230720P15800000"
+    ],
+    "path": "output/ndxp_multidte/program_v1/phase3c_direct_recovery/raw/2023-07-17.dbn.zst",
+    "records": 4343691,
+    "sha256": "bab17c0176102e4a2a379e5fc6b99e4ecb7684cbdda5f7dd1d44a2d3ed5c7809"
+  },
+  {
+    "exact_symbol_and_timestamp_bounds_verified": true,
+    "first_recv_ns": 1690810260007054628,
+    "last_recv_ns": 1691092793153400734,
+    "observed_symbols": [
+      "NDXP  230802P15750000",
+      "NDXP  230802P15760000",
+      "NDXP  230802P15830000",
+      "NDXP  230802P15840000",
+      "NDXP  230802P15930000",
+      "NDXP  230802P15940000",
+      "NDXP  230803P15750000",
+      "NDXP  230803P15760000",
+      "NDXP  230803P15920000",
+      "NDXP  230803P15930000",
+      "NDXP  230803P15940000"
+    ],
+    "path": "output/ndxp_multidte/program_v1/phase3c_direct_recovery/raw/2023-07-31.dbn.zst",
+    "records": 2668196,
+    "sha256": "6be3ff8c238201348b808ddb0f6def724fd8d70829bbdd3859e89dd9eb57b455"
+  },
+  {
+    "exact_symbol_and_timestamp_bounds_verified": true,
+    "first_recv_ns": 1690896660009305131,
+    "last_recv_ns": 1691179191294893378,
+    "observed_symbols": [
+      "NDXP  230803P15700000",
+      "NDXP  230803P15710000",
+      "NDXP  230803P15740000",
+      "NDXP  230803P15750000",
+      "NDXP  230803P15790000",
+      "NDXP  230803P15800000",
+      "NDXP  230804P15690000",
+      "NDXP  230804P15700000",
+      "NDXP  230804P15850000",
+      "NDXP  230804P15860000",
+      "NDXP  230804P16170000",
+      "NDXP  230804P16180000"
+    ],
+    "path": "output/ndxp_multidte/program_v1/phase3c_direct_recovery/raw/2023-08-01.dbn.zst",
+    "records": 3049826,
+    "sha256": "24252dcbeb7a017fbff3c320c0472fb6f5836b7f12ea4b1d91ea9c7074a513e9"
+  },
+  {
+    "exact_symbol_and_timestamp_bounds_verified": true,
+    "first_recv_ns": 1692106260006607337,
+    "last_recv_ns": 1692302399630954069,
+    "observed_symbols": [
+      "NDXP  230817P15150000",
+      "NDXP  230817P15160000",
+      "NDXP  230817P15290000",
+      "NDXP  230817P15300000",
+      "NDXP  230817P16040000",
+      "NDXP  230817P16050000"
+    ],
+    "path": "output/ndxp_multidte/program_v1/phase3c_direct_recovery/raw/2023-08-15.dbn.zst",
+    "records": 1480488,
+    "sha256": "4ae85b7ca9ecb7b10260f1c26883bf28a8e9f9ef7e7859865eb72f46756d6ec6"
+  },
+  {
+    "exact_symbol_and_timestamp_bounds_verified": true,
+    "first_recv_ns": 1693402260000659017,
+    "last_recv_ns": 1693598399608596016,
+    "observed_symbols": [
+      "NDXP  230901P15400000",
+      "NDXP  230901P15410000",
+      "NDXP  230901P15480000",
+      "NDXP  230901P15490000",
+      "NDXP  230901P15630000",
+      "NDXP  230901P15640000"
+    ],
+    "path": "output/ndxp_multidte/program_v1/phase3c_direct_recovery/raw/2023-08-30.dbn.zst",
+    "records": 4001283,
+    "sha256": "bc88bbe45ef5aaaba2870e7e0b972630bb7bfab86e9099ba70fded7d2ff16945"
+  },
+  {
+    "exact_symbol_and_timestamp_bounds_verified": true,
+    "first_recv_ns": 1693920660020549760,
+    "last_recv_ns": 1694203199991455873,
+    "observed_symbols": [
+      "NDXP  230907P15530000",
+      "NDXP  230907P15540000",
+      "NDXP  230907P15550000",
+      "NDXP  230907P15560000",
+      "NDXP  230907P15600000",
+      "NDXP  230907P15610000",
+      "NDXP  230908P15480000",
+      "NDXP  230908P15490000",
+      "NDXP  230908P15540000",
+      "NDXP  230908P15550000",
+      "NDXP  230908P16200000",
+      "NDXP  230908P16210000"
+    ],
+    "path": "output/ndxp_multidte/program_v1/phase3c_direct_recovery/raw/2023-09-05.dbn.zst",
+    "records": 3673927,
+    "sha256": "57edd90a718badf170ff171ce019cc6c3a81b8bc001217cb72173c7162c4f5f1"
+  },
+  {
+    "exact_symbol_and_timestamp_bounds_verified": true,
+    "first_recv_ns": 1695043860018704768,
+    "last_recv_ns": 1695326399997574807,
+    "observed_symbols": [
+      "NDXP  230920P15200000",
+      "NDXP  230920P15210000",
+      "NDXP  230920P15260000",
+      "NDXP  230920P15270000",
+      "NDXP  230920P15310000",
+      "NDXP  230920P15320000",
+      "NDXP  230921P15200000",
+      "NDXP  230921P15210000",
+      "NDXP  230921P15280000",
+      "NDXP  230921P15290000",
+      "NDXP  230921P15370000",
+      "NDXP  230921P15380000"
+    ],
+    "path": "output/ndxp_multidte/program_v1/phase3c_direct_recovery/raw/2023-09-18.dbn.zst",
+    "records": 4808406,
+    "sha256": "6a3a70307675a30019225cbf767d2119eb0ba09ca3940d93edab48ffd0e0488f"
+  },
+  {
+    "exact_symbol_and_timestamp_bounds_verified": true,
+    "first_recv_ns": 1695994260002711163,
+    "last_recv_ns": 1696276799161258341,
+    "observed_symbols": [
+      "NDXP  231002P14910000",
+      "NDXP  231002P14920000",
+      "NDXP  231002P14930000",
+      "NDXP  231002P14940000",
+      "NDXP  231002P14980000",
+      "NDXP  231002P14990000"
+    ],
+    "path": "output/ndxp_multidte/program_v1/phase3c_direct_recovery/raw/2023-09-29.dbn.zst",
+    "records": 1719832,
+    "sha256": "ac3e76a94ff5d0105be83dae82f6d47970f2e452b0406185706374e287cb1425"
+  },
+  {
+    "exact_symbol_and_timestamp_bounds_verified": true,
+    "first_recv_ns": 1696253460007581258,
+    "last_recv_ns": 1696535999524773703,
+    "observed_symbols": [
+      "NDXP  231004P14710000",
+      "NDXP  231004P14720000",
+      "NDXP  231004P14730000",
+      "NDXP  231004P14740000",
+      "NDXP  231004P14940000",
+      "NDXP  231004P14950000",
+      "NDXP  231005P14760000",
+      "NDXP  231005P14770000",
+      "NDXP  231005P14830000",
+      "NDXP  231005P14840000",
+      "NDXP  231005P14970000",
+      "NDXP  231005P14980000"
+    ],
+    "path": "output/ndxp_multidte/program_v1/phase3c_direct_recovery/raw/2023-10-02.dbn.zst",
+    "records": 6869189,
+    "sha256": "4a09e240606545e52483b044821bd02741a4411265baa4ae73378ea468290b20"
+  },
+  {
+    "exact_symbol_and_timestamp_bounds_verified": true,
+    "first_recv_ns": 1697463060020666571,
+    "last_recv_ns": 1697745599850194047,
+    "observed_symbols": [
+      "NDXP  231018P15070000",
+      "NDXP  231018P15080000",
+      "NDXP  231018P15180000",
+      "NDXP  231018P15190000",
+      "NDXP  231018P15230000",
+      "NDXP  231018P15240000",
+      "NDXP  231019P15130000",
+      "NDXP  231019P15140000",
+      "NDXP  231019P15230000",
+      "NDXP  231019P15240000",
+      "NDXP  231019P15280000",
+      "NDXP  231019P15290000"
+    ],
+    "path": "output/ndxp_multidte/program_v1/phase3c_direct_recovery/raw/2023-10-16.dbn.zst",
+    "records": 7015638,
+    "sha256": "908fbe13b3c6d3465851baec62fd1d425fd4fa4402b46d798b8cdc3acf6e7316"
+  },
+  {
+    "exact_symbol_and_timestamp_bounds_verified": true,
+    "first_recv_ns": 1698759060019419087,
+    "last_recv_ns": 1699041599498908983,
+    "observed_symbols": [
+      "NDXP  231102P14350000",
+      "NDXP  231102P14360000",
+      "NDXP  231102P14500000",
+      "NDXP  231102P14510000",
+      "NDXP  231102P14520000",
+      "NDXP  231103P14380000",
+      "NDXP  231103P14390000",
+      "NDXP  231103P14470000",
+      "NDXP  231103P14480000",
+      "NDXP  231103P14550000",
+      "NDXP  231103P14560000"
+    ],
+    "path": "output/ndxp_multidte/program_v1/phase3c_direct_recovery/raw/2023-10-31.dbn.zst",
+    "records": 5820297,
+    "sha256": "87ecd250f3c8b68ff6bd67e4b84cb195bd6acf84cad26f104a0d1376007e437a"
+  },
+  {
+    "exact_symbol_and_timestamp_bounds_verified": true,
+    "first_recv_ns": 1698845460058781657,
+    "last_recv_ns": 1699041599957963448,
+    "observed_symbols": [
+      "NDXP  231103P14480000",
+      "NDXP  231103P14490000",
+      "NDXP  231103P14640000",
+      "NDXP  231103P14650000",
+      "NDXP  231103P15280000",
+      "NDXP  231103P15290000"
+    ],
+    "path": "output/ndxp_multidte/program_v1/phase3c_direct_recovery/raw/2023-11-01.dbn.zst",
+    "records": 2044406,
+    "sha256": "8ab7f0212a27ff116fcfa0a0b72bcd1e586794d471d32a5a7da1ebeccd8679c9"
+  },
+  {
+    "exact_symbol_and_timestamp_bounds_verified": true,
+    "first_recv_ns": 1699972260091253533,
+    "last_recv_ns": 1700168399963974514,
+    "observed_symbols": [
+      "NDXP  231116P15780000",
+      "NDXP  231116P15790000",
+      "NDXP  231116P15830000",
+      "NDXP  231116P15840000",
+      "NDXP  231116P15870000",
+      "NDXP  231116P15880000"
+    ],
+    "path": "output/ndxp_multidte/program_v1/phase3c_direct_recovery/raw/2023-11-14.dbn.zst",
+    "records": 3526227,
+    "sha256": "4c6b646a3d9ea185be00bb1d816ae8e9469ef89988fc79b38119348a2e6a6bdb"
+  },
+  {
+    "exact_symbol_and_timestamp_bounds_verified": true,
+    "first_recv_ns": 1701268260008040745,
+    "last_recv_ns": 1701464399936367294,
+    "observed_symbols": [
+      "NDXP  231201P16130000",
+      "NDXP  231201P16140000",
+      "NDXP  231201P16190000",
+      "NDXP  231201P16200000",
+      "NDXP  231201P16230000",
+      "NDXP  231201P16240000"
+    ],
+    "path": "output/ndxp_multidte/program_v1/phase3c_direct_recovery/raw/2023-11-29.dbn.zst",
+    "records": 2181263,
+    "sha256": "979a541d9ee47b36ea32692c2059e78f431180a7be5d6308a8271b0e6d6ff7c1"
+  },
+  {
+    "exact_symbol_and_timestamp_bounds_verified": true,
+    "first_recv_ns": 1701441060024630791,
+    "last_recv_ns": 1701723599101539150,
+    "observed_symbols": [
+      "NDXP  231204P15890000",
+      "NDXP  231204P15900000",
+      "NDXP  231204P15940000",
+      "NDXP  231204P15950000",
+      "NDXP  231204P15970000",
+      "NDXP  231204P15980000"
+    ],
+    "path": "output/ndxp_multidte/program_v1/phase3c_direct_recovery/raw/2023-12-01.dbn.zst",
+    "records": 2434585,
+    "sha256": "bf141eed588ff5331eacefaf96251a817703ca2e7b7ad51d561d6aa2314e8eb5"
+  },
+  {
+    "exact_symbol_and_timestamp_bounds_verified": true,
+    "first_recv_ns": 1702391460023189975,
+    "last_recv_ns": 1702587595810978169,
+    "observed_symbols": [
+      "NDXP  231214P16230000",
+      "NDXP  231214P16240000",
+      "NDXP  231214P16260000",
+      "NDXP  231214P16270000",
+      "NDXP  231214P16360000",
+      "NDXP  231214P16370000"
+    ],
+    "path": "output/ndxp_multidte/program_v1/phase3c_direct_recovery/raw/2023-12-12.dbn.zst",
+    "records": 2859341,
+    "sha256": "51122a637fe6c73e7e1993c80a35d835b1ba1ce79de0eed0be3ebcc68425d48b"
+  },
+  {
+    "exact_symbol_and_timestamp_bounds_verified": true,
+    "first_recv_ns": 1703687460007152374,
+    "last_recv_ns": 1703883590817692052,
+    "observed_symbols": [
+      "NDXP  231229P16940000",
+      "NDXP  231229P16950000",
+      "NDXP  231229P16970000",
+      "NDXP  231229P16980000",
+      "NDXP  231229P17050000",
+      "NDXP  231229P17060000"
+    ],
+    "path": "output/ndxp_multidte/program_v1/phase3c_direct_recovery/raw/2023-12-27.dbn.zst",
+    "records": 1994062,
+    "sha256": "29707074e6a79e46ecfe53e436409e4063c05e13f810e66a488a16b5f7a3cd98"
+  },
+  {
+    "exact_symbol_and_timestamp_bounds_verified": true,
+    "first_recv_ns": 1704205860011214543,
+    "last_recv_ns": 1704488398930803924,
+    "observed_symbols": [
+      "NDXP  240104P16710000",
+      "NDXP  240104P16720000",
+      "NDXP  240104P16750000",
+      "NDXP  240104P16760000",
+      "NDXP  240104P16800000",
+      "NDXP  240104P16810000",
+      "NDXP  240105P16710000",
+      "NDXP  240105P16720000",
+      "NDXP  240105P16750000",
+      "NDXP  240105P16760000",
+      "NDXP  240105P16830000",
+      "NDXP  240105P16840000"
+    ],
+    "path": "output/ndxp_multidte/program_v1/phase3c_direct_recovery/raw/2024-01-02.dbn.zst",
+    "records": 3424663,
+    "sha256": "b3a7bfad500c13cf309c5edc49accc1f33bb16f520477e1f50903968805f139a"
+  },
+  {
+    "exact_symbol_and_timestamp_bounds_verified": true,
+    "first_recv_ns": 1705674660012758602,
+    "last_recv_ns": 1705957181722072664,
+    "observed_symbols": [
+      "NDXP  240122P17060000",
+      "NDXP  240122P17070000",
+      "NDXP  240122P17100000",
+      "NDXP  240122P17110000",
+      "NDXP  240122P17150000",
+      "NDXP  240122P17160000"
+    ],
+    "path": "output/ndxp_multidte/program_v1/phase3c_direct_recovery/raw/2024-01-19.dbn.zst",
+    "records": 2866635,
+    "sha256": "f8e7bb132382355827c024edf1ee948c9825f17915b3d2277e077464b2d6db0c"
+  },
+  {
+    "exact_symbol_and_timestamp_bounds_verified": true,
+    "first_recv_ns": 1706711460001469497,
+    "last_recv_ns": 1706907590495465553,
+    "observed_symbols": [
+      "NDXP  240202P17290000",
+      "NDXP  240202P17300000",
+      "NDXP  240202P17380000",
+      "NDXP  240202P17390000",
+      "NDXP  240202P17590000",
+      "NDXP  240202P17600000"
+    ],
+    "path": "output/ndxp_multidte/program_v1/phase3c_direct_recovery/raw/2024-01-31.dbn.zst",
+    "records": 3498273,
+    "sha256": "aa6f9b275f11853eeb2ce740966af720e7f8d46c4b837482180468d6ba426e9c"
+  },
+  {
+    "exact_symbol_and_timestamp_bounds_verified": true,
+    "first_recv_ns": 1706884260015233174,
+    "last_recv_ns": 1707166799944452143,
+    "observed_symbols": [
+      "NDXP  240205P17430000",
+      "NDXP  240205P17440000",
+      "NDXP  240205P17470000",
+      "NDXP  240205P17480000",
+      "NDXP  240205P17550000",
+      "NDXP  240205P17560000"
+    ],
+    "path": "output/ndxp_multidte/program_v1/phase3c_direct_recovery/raw/2024-02-02.dbn.zst",
+    "records": 5057370,
+    "sha256": "53b41e9dc7547956a39b93247128a0842428d33a7ec47e7a0e23fce8f91d787a"
+  },
+  {
+    "exact_symbol_and_timestamp_bounds_verified": true,
+    "first_recv_ns": 1707834660017117501,
+    "last_recv_ns": 1708030799896709584,
+    "observed_symbols": [
+      "NDXP  240215P17550000",
+      "NDXP  240215P17560000",
+      "NDXP  240215P17630000",
+      "NDXP  240215P17640000",
+      "NDXP  240215P17930000",
+      "NDXP  240215P17940000"
+    ],
+    "path": "output/ndxp_multidte/program_v1/phase3c_direct_recovery/raw/2024-02-13.dbn.zst",
+    "records": 4360632,
+    "sha256": "18d4972ab24a44c0fa6d34591be03a1549f5ba18b619e44923aedb3e1c49b3c8"
+  },
+  {
+    "exact_symbol_and_timestamp_bounds_verified": true,
+    "first_recv_ns": 1709130660065172905,
+    "last_recv_ns": 1709326799594649989,
+    "observed_symbols": [
+      "NDXP  240301P17900000",
+      "NDXP  240301P17910000",
+      "NDXP  240301P18040000",
+      "NDXP  240301P18050000",
+      "NDXP  240301P18090000",
+      "NDXP  240301P18100000"
+    ],
+    "path": "output/ndxp_multidte/program_v1/phase3c_direct_recovery/raw/2024-02-28.dbn.zst",
+    "records": 3942892,
+    "sha256": "f8f93f47adcc887bd8b9d7e4e9a8badd000b3ee11a508d9a9749a35363cb5efe"
+  },
+  {
+    "exact_symbol_and_timestamp_bounds_verified": true,
+    "first_recv_ns": 1709303460006614010,
+    "last_recv_ns": 1709585995598556626,
+    "observed_symbols": [
+      "NDXP  240304P18090000",
+      "NDXP  240304P18100000",
+      "NDXP  240304P18130000",
+      "NDXP  240304P18140000",
+      "NDXP  240304P18180000",
+      "NDXP  240304P18190000"
+    ],
+    "path": "output/ndxp_multidte/program_v1/phase3c_direct_recovery/raw/2024-03-01.dbn.zst",
+    "records": 3127134,
+    "sha256": "0c6450dff18df523331a2efd3f4b8eda71c7586a0d3bb7b746fca56a89e376b9"
+  },
+  {
+    "exact_symbol_and_timestamp_bounds_verified": true,
+    "first_recv_ns": 1710250260032777291,
+    "last_recv_ns": 1710446399684730089,
+    "observed_symbols": [
+      "NDXP  240314P18150000",
+      "NDXP  240314P18160000",
+      "NDXP  240314P18170000",
+      "NDXP  240314P18180000",
+      "NDXP  240314P18190000",
+      "NDXP  240314P18200000"
+    ],
+    "path": "output/ndxp_multidte/program_v1/phase3c_direct_recovery/raw/2024-03-12.dbn.zst",
+    "records": 4647593,
+    "sha256": "5f6a633a7e1e9318aa4bd6408e865fe11299f94f2ab30b58639731273dead0f9"
+  },
+  {
+    "exact_symbol_and_timestamp_bounds_verified": true,
+    "first_recv_ns": 1711459860000370998,
+    "last_recv_ns": 1711655998158358207,
+    "observed_symbols": [
+      "NDXP  240328P18360000",
+      "NDXP  240328P18370000",
+      "NDXP  240328P18440000",
+      "NDXP  240328P18450000",
+      "NDXP  240328P18470000",
+      "NDXP  240328P18480000"
+    ],
+    "path": "output/ndxp_multidte/program_v1/phase3c_direct_recovery/raw/2024-03-26.dbn.zst",
+    "records": 2153110,
+    "sha256": "bd35e87c3c5b076eec49ee3efd74c37da54793be098385791076f2c2235a7cc8"
+  },
+  {
+    "exact_symbol_and_timestamp_bounds_verified": true,
+    "first_recv_ns": 1711978260002041847,
+    "last_recv_ns": 1712260797782400371,
+    "observed_symbols": [
+      "NDXP  240403P18290000",
+      "NDXP  240403P18300000",
+      "NDXP  240403P18340000",
+      "NDXP  240403P18350000",
+      "NDXP  240403P18370000",
+      "NDXP  240403P18380000",
+      "NDXP  240404P18330000",
+      "NDXP  240404P18340000",
+      "NDXP  240404P18370000",
+      "NDXP  240404P18380000",
+      "NDXP  240404P18430000",
+      "NDXP  240404P18440000"
+    ],
+    "path": "output/ndxp_multidte/program_v1/phase3c_direct_recovery/raw/2024-04-01.dbn.zst",
+    "records": 5227485,
+    "sha256": "df448ad84ad6d29b5d40db18c80229431211e2805acfc0df074812f1fafb9e66"
+  },
+  {
+    "exact_symbol_and_timestamp_bounds_verified": true,
+    "first_recv_ns": 1713187860000230801,
+    "last_recv_ns": 1713470399559240261,
+    "observed_symbols": [
+      "NDXP  240417P18190000",
+      "NDXP  240417P18200000",
+      "NDXP  240417P18240000",
+      "NDXP  240417P18250000",
+      "NDXP  240417P18290000",
+      "NDXP  240417P18300000",
+      "NDXP  240418P18140000",
+      "NDXP  240418P18150000",
+      "NDXP  240418P18280000",
+      "NDXP  240418P18290000",
+      "NDXP  240418P18300000"
+    ],
+    "path": "output/ndxp_multidte/program_v1/phase3c_direct_recovery/raw/2024-04-15.dbn.zst",
+    "records": 4353398,
+    "sha256": "92dff5e146507e9a289f668c63faf6b93b3a288cf9c3c9ab803b8f68d8d23500"
+  },
+  {
+    "exact_symbol_and_timestamp_bounds_verified": true,
+    "first_recv_ns": 1714483860003840252,
+    "last_recv_ns": 1714766399271046201,
+    "observed_symbols": [
+      "NDXP  240502P17740000",
+      "NDXP  240502P17750000",
+      "NDXP  240502P17880000",
+      "NDXP  240502P17890000",
+      "NDXP  240502P17910000",
+      "NDXP  240502P17920000",
+      "NDXP  240503P17760000",
+      "NDXP  240503P17770000",
+      "NDXP  240503P17810000",
+      "NDXP  240503P17820000",
+      "NDXP  240503P17940000",
+      "NDXP  240503P17950000"
+    ],
+    "path": "output/ndxp_multidte/program_v1/phase3c_direct_recovery/raw/2024-04-30.dbn.zst",
+    "records": 5839410,
+    "sha256": "2dc92077b29dbb088dd23e3175ed40a900bf184d246253ce38ac3a01326ca78f"
+  },
+  {
+    "exact_symbol_and_timestamp_bounds_verified": true,
+    "first_recv_ns": 1714570260001373493,
+    "last_recv_ns": 1714766399012524615,
+    "observed_symbols": [
+      "NDXP  240503P17380000",
+      "NDXP  240503P17390000",
+      "NDXP  240503P17480000",
+      "NDXP  240503P17490000",
+      "NDXP  240503P17650000",
+      "NDXP  240503P17660000"
+    ],
+    "path": "output/ndxp_multidte/program_v1/phase3c_direct_recovery/raw/2024-05-01.dbn.zst",
+    "records": 3727623,
+    "sha256": "7819165a59100c2685b20af0aa02ae3d3c0c849d2a0d789162cbafe7084f9887"
+  },
+  {
+    "exact_symbol_and_timestamp_bounds_verified": true,
+    "first_recv_ns": 1715693460093364981,
+    "last_recv_ns": 1715889597514089745,
+    "observed_symbols": [
+      "NDXP  240516P18290000",
+      "NDXP  240516P18300000",
+      "NDXP  240516P18340000",
+      "NDXP  240516P18350000",
+      "NDXP  240516P18410000",
+      "NDXP  240516P18420000"
+    ],
+    "path": "output/ndxp_multidte/program_v1/phase3c_direct_recovery/raw/2024-05-14.dbn.zst",
+    "records": 2162568,
+    "sha256": "6bc0c35bc92bd475b7d910a17cf41f67d2da892726568caf6f12ef88d646625a"
+  },
+  {
+    "exact_symbol_and_timestamp_bounds_verified": true,
+    "first_recv_ns": 1717162260026061912,
+    "last_recv_ns": 1717444798125350953,
+    "observed_symbols": [
+      "NDXP  240603P18540000",
+      "NDXP  240603P18550000",
+      "NDXP  240603P18660000",
+      "NDXP  240603P18670000",
+      "NDXP  240603P18680000",
+      "NDXP  240603P18690000"
+    ],
+    "path": "output/ndxp_multidte/program_v1/phase3c_direct_recovery/raw/2024-05-31.dbn.zst",
+    "records": 3268661,
+    "sha256": "f58e1ba7443669dd83be7a0127dd64596df41d16f0828ec906d13d9718628033"
+  },
+  {
+    "exact_symbol_and_timestamp_bounds_verified": true,
+    "first_recv_ns": 1717421460007712881,
+    "last_recv_ns": 1717703999640808639,
+    "observed_symbols": [
+      "NDXP  240605P18690000",
+      "NDXP  240605P18700000",
+      "NDXP  240605P18750000",
+      "NDXP  240605P18760000",
+      "NDXP  240605P18780000",
+      "NDXP  240605P18790000",
+      "NDXP  240606P18680000",
+      "NDXP  240606P18690000",
+      "NDXP  240606P18740000",
+      "NDXP  240606P18750000",
+      "NDXP  240606P18900000",
+      "NDXP  240606P18910000"
+    ],
+    "path": "output/ndxp_multidte/program_v1/phase3c_direct_recovery/raw/2024-06-03.dbn.zst",
+    "records": 6186798,
+    "sha256": "83dcc242758f1a4141fa92ff11e330c63fef264beaece6139b3da6a4ddd44eea"
+  },
+  {
+    "exact_symbol_and_timestamp_bounds_verified": true,
+    "first_recv_ns": 1718371860009482826,
+    "last_recv_ns": 1718654399228976638,
+    "observed_symbols": [
+      "NDXP  240617P19580000",
+      "NDXP  240617P19590000",
+      "NDXP  240617P19600000",
+      "NDXP  240617P19610000",
+      "NDXP  240617P19680000",
+      "NDXP  240617P19690000"
+    ],
+    "path": "output/ndxp_multidte/program_v1/phase3c_direct_recovery/raw/2024-06-14.dbn.zst",
+    "records": 3309091,
+    "sha256": "f18a59f0d198341eda7eae9db4bdf5d11d5f2ec586f6f2a3c26daaa1ad3a5c1f"
+  },
+  {
+    "exact_symbol_and_timestamp_bounds_verified": true,
+    "first_recv_ns": 1719581460007498779,
+    "last_recv_ns": 1719863999530233206,
+    "observed_symbols": [
+      "NDXP  240701P19810000",
+      "NDXP  240701P19820000",
+      "NDXP  240701P19860000",
+      "NDXP  240701P19870000",
+      "NDXP  240701P19930000",
+      "NDXP  240701P19940000"
+    ],
+    "path": "output/ndxp_multidte/program_v1/phase3c_direct_recovery/raw/2024-06-28.dbn.zst",
+    "records": 2807169,
+    "sha256": "52235e6e8fb72a4c972ce6722195e112dab95ce3faf5cc680092ac23bee11e09"
+  },
+  {
+    "exact_symbol_and_timestamp_bounds_verified": true,
+    "first_recv_ns": 1721050260012427997,
+    "last_recv_ns": 1721332799902117072,
+    "observed_symbols": [
+      "NDXP  240717P20420000",
+      "NDXP  240717P20430000",
+      "NDXP  240717P20480000",
+      "NDXP  240717P20490000",
+      "NDXP  240717P20590000",
+      "NDXP  240717P20600000",
+      "NDXP  240718P20490000",
+      "NDXP  240718P20500000",
+      "NDXP  240718P20510000",
+      "NDXP  240718P20550000",
+      "NDXP  240718P20560000"
+    ],
+    "path": "output/ndxp_multidte/program_v1/phase3c_direct_recovery/raw/2024-07-15.dbn.zst",
+    "records": 4941048,
+    "sha256": "67e64c8081f2230c0bd365af63b81bc3ce1d9983a1ac5bc127d1a8d7c0910156"
+  },
+  {
+    "exact_symbol_and_timestamp_bounds_verified": true,
+    "first_recv_ns": 1722432660005260836,
+    "last_recv_ns": 1722628795613401079,
+    "observed_symbols": [
+      "NDXP  240802P19280000",
+      "NDXP  240802P19290000",
+      "NDXP  240802P19400000",
+      "NDXP  240802P19410000",
+      "NDXP  240802P19420000"
+    ],
+    "path": "output/ndxp_multidte/program_v1/phase3c_direct_recovery/raw/2024-07-31.dbn.zst",
+    "records": 3392842,
+    "sha256": "8fb8bb090dcf5c0cbb26a2ddc3d6ebc5245e718547a520ab28cb2dac6418222b"
+  },
+  {
+    "exact_symbol_and_timestamp_bounds_verified": true,
+    "first_recv_ns": 1723815060000782129,
+    "last_recv_ns": 1724097599752166611,
+    "observed_symbols": [
+      "NDXP  240819P19320000",
+      "NDXP  240819P19330000",
+      "NDXP  240819P19420000",
+      "NDXP  240819P19430000",
+      "NDXP  240819P19540000",
+      "NDXP  240819P19550000"
+    ],
+    "path": "output/ndxp_multidte/program_v1/phase3c_direct_recovery/raw/2024-08-16.dbn.zst",
+    "records": 2387656,
+    "sha256": "531b79700be3ec4f154e4d3bbee12f72f61ca65c536f4a4a57f67a1d043f1c37"
+  },
+  {
+    "exact_symbol_and_timestamp_bounds_verified": true,
+    "first_recv_ns": 1724851860021365175,
+    "last_recv_ns": 1725047996621695961,
+    "observed_symbols": [
+      "NDXP  240830P19760000",
+      "NDXP  240830P19770000",
+      "NDXP  240830P19830000",
+      "NDXP  240830P19840000",
+      "NDXP  240830P19930000",
+      "NDXP  240830P19940000"
+    ],
+    "path": "output/ndxp_multidte/program_v1/phase3c_direct_recovery/raw/2024-08-28.dbn.zst",
+    "records": 1141415,
+    "sha256": "c632512d41f48af1359568c9a23c19bac8acd2c8723afa6b17a30b0e5713e683"
+  },
+  {
+    "exact_symbol_and_timestamp_bounds_verified": true,
+    "first_recv_ns": 1725370260014570218,
+    "last_recv_ns": 1725652792859186674,
+    "observed_symbols": [
+      "NDXP  240905P19440000",
+      "NDXP  240905P19450000",
+      "NDXP  240905P19510000",
+      "NDXP  240905P19520000",
+      "NDXP  240905P19610000",
+      "NDXP  240905P19620000",
+      "NDXP  240906P19440000",
+      "NDXP  240906P19450000",
+      "NDXP  240906P19530000",
+      "NDXP  240906P19540000",
+      "NDXP  240906P19680000",
+      "NDXP  240906P19690000"
+    ],
+    "path": "output/ndxp_multidte/program_v1/phase3c_direct_recovery/raw/2024-09-03.dbn.zst",
+    "records": 1960289,
+    "sha256": "b2f5cd194b4ba7e77d5cdb1ca99616dd4f7f1a58407860630a0fb4bbf462e950"
+  },
+  {
+    "exact_symbol_and_timestamp_bounds_verified": true,
+    "first_recv_ns": 1726493460030752375,
+    "last_recv_ns": 1726775999759908047,
+    "observed_symbols": [
+      "NDXP  240918P19420000",
+      "NDXP  240918P19430000",
+      "NDXP  240918P19570000",
+      "NDXP  240918P19580000",
+      "NDXP  240918P19610000",
+      "NDXP  240918P19620000",
+      "NDXP  240919P19450000",
+      "NDXP  240919P19460000",
+      "NDXP  240919P19540000",
+      "NDXP  240919P19550000",
+      "NDXP  240919P19780000",
+      "NDXP  240919P19790000"
+    ],
+    "path": "output/ndxp_multidte/program_v1/phase3c_direct_recovery/raw/2024-09-16.dbn.zst",
+    "records": 7416100,
+    "sha256": "2d13d03def1ee2ccd080536e8b575695e34b93896536b6ca6856c1fcc127d984"
+  },
+  {
+    "exact_symbol_and_timestamp_bounds_verified": true,
+    "first_recv_ns": 1727789460012457844,
+    "last_recv_ns": 1728071999732575106,
+    "observed_symbols": [
+      "NDXP  241003P20090000",
+      "NDXP  241003P20100000",
+      "NDXP  241003P20160000",
+      "NDXP  241003P20170000",
+      "NDXP  241003P20200000",
+      "NDXP  241003P20210000",
+      "NDXP  241004P20110000",
+      "NDXP  241004P20120000",
+      "NDXP  241004P20160000",
+      "NDXP  241004P20170000",
+      "NDXP  241004P20250000",
+      "NDXP  241004P20260000"
+    ],
+    "path": "output/ndxp_multidte/program_v1/phase3c_direct_recovery/raw/2024-10-01.dbn.zst",
+    "records": 3371796,
+    "sha256": "0c220cb359c1f1af25af20e22a557cfef1e8b018aa0373d12df73354cd7238ad"
+  },
+  {
+    "exact_symbol_and_timestamp_bounds_verified": true,
+    "first_recv_ns": 1728999060023053981,
+    "last_recv_ns": 1729195199975672143,
+    "observed_symbols": [
+      "NDXP  241017P20480000",
+      "NDXP  241017P20490000",
+      "NDXP  241017P20550000",
+      "NDXP  241017P20560000",
+      "NDXP  241017P20640000",
+      "NDXP  241017P20650000"
+    ],
+    "path": "output/ndxp_multidte/program_v1/phase3c_direct_recovery/raw/2024-10-15.dbn.zst",
+    "records": 1265182,
+    "sha256": "c59726c646907070730127df3f003ede9ec9b711a46b6cafec010425de6351c9"
+  },
+  {
+    "exact_symbol_and_timestamp_bounds_verified": true,
+    "first_recv_ns": 1731681060033261546,
+    "last_recv_ns": 1731963599979364584,
+    "observed_symbols": [
+      "NDXP  241118P20670000",
+      "NDXP  241118P20680000",
+      "NDXP  241118P20720000",
+      "NDXP  241118P20730000",
+      "NDXP  241118P20800000",
+      "NDXP  241118P20810000"
+    ],
+    "path": "output/ndxp_multidte/program_v1/phase3c_direct_recovery/raw/2024-11-15.dbn.zst",
+    "records": 956501,
+    "sha256": "335aa0b1d52dd49892cea4c6ed87d2b25702b7401f2cc1a5a6fbae853da53f8b"
+  },
+  {
+    "exact_symbol_and_timestamp_bounds_verified": true,
+    "first_recv_ns": 1732890660003834419,
+    "last_recv_ns": 1733173198846537702,
+    "observed_symbols": [
+      "NDXP  241202P20790000",
+      "NDXP  241202P20800000",
+      "NDXP  241202P20830000",
+      "NDXP  241202P20840000",
+      "NDXP  241202P20880000",
+      "NDXP  241202P20890000"
+    ],
+    "path": "output/ndxp_multidte/program_v1/phase3c_direct_recovery/raw/2024-11-29.dbn.zst",
+    "records": 1374626,
+    "sha256": "30946ecceb1300f3e58cbdcadf55a264be8bf48428797a1ab013334961754a2d"
+  },
+  {
+    "exact_symbol_and_timestamp_bounds_verified": true,
+    "first_recv_ns": 1733927460008174232,
+    "last_recv_ns": 1734123599796873011,
+    "observed_symbols": [
+      "NDXP  241213P21550000",
+      "NDXP  241213P21560000",
+      "NDXP  241213P21630000",
+      "NDXP  241213P21640000",
+      "NDXP  241213P21710000",
+      "NDXP  241213P21720000"
+    ],
+    "path": "output/ndxp_multidte/program_v1/phase3c_direct_recovery/raw/2024-12-11.dbn.zst",
+    "records": 4792534,
+    "sha256": "89c4ed68b2278d7c51aea60c2999aaf43299cbeb082d9b7c0b34fc79f0cae605"
+  },
+  {
+    "exact_symbol_and_timestamp_bounds_verified": true,
+    "first_recv_ns": 1735309860008966892,
+    "last_recv_ns": 1735592399967339853,
+    "observed_symbols": [
+      "NDXP  241230P21630000",
+      "NDXP  241230P21640000",
+      "NDXP  241230P21710000",
+      "NDXP  241230P21720000",
+      "NDXP  241230P21740000",
+      "NDXP  241230P21750000"
+    ],
+    "path": "output/ndxp_multidte/program_v1/phase3c_direct_recovery/raw/2024-12-27.dbn.zst",
+    "records": 1099179,
+    "sha256": "314624cb47af45855404c8bf110d50ede2bea0bcc08cfcdc4c02c94cfe3caaf7"
+  }
+]

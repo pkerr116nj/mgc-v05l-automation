@@ -1,0 +1,24 @@
+{
+  "complete": "full exact-symbol requested regular-session source intervals AND >=95% fresh valid paired duration AND >=57 of first60 fresh seconds",
+  "conservative": "spread ask +0.25 <=3, entry slippage 0.25; exit limit debit 3",
+  "contracts": 20,
+  "entry": "Phase 3B first fresh valid midpoint >= nominal cohort credit in first 60s; hypothetical complex midpoint support, not proven fill",
+  "entry_price": "nominal credit minus 0.05; conservative nominal minus 0.25",
+  "event_plausible": "spread midpoint <=3 and positive sizes on all four leg sides",
+  "event_strong": "spread ask <=3 with positive short ask/long bid sizes",
+  "fee_per_contract_per_side": 1.324,
+  "max_leg_age_ns": 1000000000,
+  "models": [
+    "minute_touch_original_quote_terminal",
+    "minute_touch_settlement",
+    "persist_2_settlement",
+    "persist_3_settlement",
+    "event_strong",
+    "event_strong_plausible",
+    "event_conservative"
+  ],
+  "no_tuning": true,
+  "resting": "active strictly after modeled entry timestamp, first qualifying event closes the modeled position",
+  "terminal": "owned validated XQC intrinsic; no evidence fill means hypothetical hold-to-settlement, not proof of no real fill",
+  "version": 1
+}

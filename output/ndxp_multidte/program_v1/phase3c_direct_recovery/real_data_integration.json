@@ -1,0 +1,20 @@
+{
+  "status": "passed_real_direct_artifact_replay",
+  "candidate_id": 939,
+  "source_file": {
+    "bytes": 51839494,
+    "path": "output/ndxp_multidte/program_v1/phase3c_direct_recovery/raw/2023-03-28.dbn.zst",
+    "sha256": "5c32424ed1d759b56cf19e49ca9a2be57cd73ae98f53a1e4163113ce896d95ad"
+  },
+  "summary": {
+    "candidates": 1,
+    "complete_sessions": 0,
+    "fresh_complete_candidates": 0,
+    "rules_sha256": "70a22312ad5b7dbcb783a0333a0f504f710c9cefde5efc8dacd22e7a18ad80f3",
+    "sessions": 1,
+    "source_complete_candidates": 1,
+    "source_complete_sessions": 1,
+    "supported_entries": 1
+  },
+  "note": "Temporary one-candidate integration check; final full-panel outputs are generated separately without tuning"
+}

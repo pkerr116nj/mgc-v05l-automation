@@ -1,0 +1,8 @@
+{
+  "tests": 189,
+  "failures": 0,
+  "errors": 0,
+  "skipped": 0,
+  "seconds": 4.485,
+  "command": "PYTHONPATH=src .venv/bin/python -m pytest -q tests/unit/test_ndxp_direct_recovery.py tests/unit/test_ndxp_complete_panel.py tests/unit/test_ndxp_owned_execution.py tests/unit/test_ndxp_multidte*.py tests/unit/test_mgc_v05l_ndxp_*.py tests/unit/test_index_options_phase3a.py --junitxml=/tmp/phase3c_direct_tests.xml"
+}

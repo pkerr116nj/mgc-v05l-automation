@@ -1,0 +1,10 @@
+{
+  "candidates": 246,
+  "complete_sessions": 0,
+  "fresh_complete_candidates": 1,
+  "rules_sha256": "70a22312ad5b7dbcb783a0333a0f504f710c9cefde5efc8dacd22e7a18ad80f3",
+  "sessions": 60,
+  "source_complete_candidates": 246,
+  "source_complete_sessions": 60,
+  "supported_entries": 246
+}

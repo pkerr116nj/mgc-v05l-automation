@@ -108,9 +108,15 @@ def validate_header(header,request):
         raise ValueError('Downloaded DBN includes symbols outside frozen request')
 
 
+def validate_body(frame,request):
+    lo=pd.Timestamp(request['start']).value;hi=pd.Timestamp(request['end']).value
+    if not frame.symbol.isin(request['symbols']).all() or not ((frame.ts_recv>=lo)&(frame.ts_recv<hi)).all():
+        raise ValueError('Decoded body contains symbols/timestamps outside saved request')
+
+
 def cache_new():
     cache=Path('/tmp/phase3c_events');cache.mkdir(exist_ok=True)
-    receipts=json.loads((OUT/'acquisition_receipts.json').read_text());records=[]
+    receipts=json.loads((OUT/'acquisition_receipts.json').read_text());records=[];verification=[]
     if receipts['completed_requests']!=receipts['planned_requests']:raise ValueError('Finish acquisition before building the complete-panel cache')
     for receipt in receipts['receipts']:
         for f in receipt['files']:
@@ -132,8 +138,17 @@ def cache_new():
                 if writer:
                     writer.close();temporary.rename(dest)
                 else:pd.DataFrame(columns=['symbol','ts_recv','ts_event','bid_px_00','ask_px_00','bid_sz_00','ask_sz_00','action','price','size']).to_parquet(dest,index=False)
+            # Verify body fields as well as headers, including reused Parquet caches.
+            import pyarrow.parquet as pq
+            body_rows=0;seen=set();first=last=None
+            for batch in pq.ParquetFile(dest).iter_batches(batch_size=250000,columns=['symbol','ts_recv']):
+                frame=batch.to_pandas();validate_body(frame,receipt['request']);body_rows+=len(frame);seen.update(frame.symbol.unique())
+                if len(frame):
+                    lo=int(frame.ts_recv.min());hi=int(frame.ts_recv.max());first=lo if first is None else min(first,lo);last=hi if last is None else max(last,hi)
+            verification.append(dict(path=str(p),sha256=key,records=body_rows,observed_symbols=sorted(seen),first_recv_ns=first,last_recv_ns=last,exact_symbol_and_timestamp_bounds_verified=True))
             for symbol in h.mappings:records.append(dict(symbol=symbol,parquet=str(dest),start=int(h.start),end=int(h.end),path=str(p)))
-    save(OUT/'new_raw_index.json',records)
+    write_derived(OUT/'record_verification.json',verification)
+    write_derived(OUT/'new_raw_index.json',records)
     return records
 
 
@@ -279,7 +294,7 @@ def analyze(cache=Path('/tmp/phase3b_events')):
             p2=i+1<len(tt) and touch[i+1] and tt[i+1]-tt[i]==60*NS
             p3=p2 and i+2<len(tt) and touch[i+2] and tt[i+2]-tt[i+1]==60*NS
             p2reject+=plausible and not p2;p3reject+=plausible and not p3;p2nostrong+=p2 and not strong;p3nostrong+=p3 and not strong
-            windows.append(dict(candidate_id=cid,touch_ns=int(tt[i]),classification=classification,fresh_seconds=observed,persist_2=bool(p2),persist_3=bool(p3)))
+            windows.append(dict(candidate_id=cid,touch_ns=int(tt[i]),classification=classification,fresh_seconds=observed,required_seconds=max(0,(hi-lo)/NS),fresh_fraction=observed/((hi-lo)/NS) if hi>lo else None,window_start_ns=lo,window_end_ns=hi,persist_2=bool(p2),persist_3=bool(p3)))
         for field in ('cross_mid','cross_ask'):
             crossed=t[after&good&a[field]];fc['missed_minute_'+field]=sum(int(x//(60*NS)) not in bins for x in crossed)
         fast=fast_count(t[after],mid[after],good[after],a['until'][after])
@@ -303,7 +318,6 @@ def analyze(cache=Path('/tmp/phase3b_events')):
             assert 0<=intrinsic<=10
             assert abs(settlement_payoff(float(sr['xqc']),c.short_strike,c.long_strike)-intrinsic)<1e-8
         settlement_rows.append(dict(**base,xqc=sr['xqc'],status=sr['status'],intrinsic=intrinsic,last_quote_mid=sr['last_quote_mid'],intrinsic_minus_last_quote=sr['intrinsic_minus_last_quote'],frozen_entry_hold_to_settlement_pnl=pnl(c.mid_credit-.05,intrinsic) if intrinsic is not None else None))
-        dtseries=[(pd.Timestamp(x,unit='ns',tz='UTC').to_pydatetime(),m) for x,m in series]
         for model in RULES['models']:
             event=model.startswith('event_');eligible=(fill is not None and source_complete) if event else True
             if event:
@@ -329,6 +343,8 @@ def analyze(cache=Path('/tmp/phase3b_events')):
 
 if __name__=='__main__':
     import sys
+    if '--direct' in sys.argv:
+        OUT=OUT.parent/'phase3c_direct_recovery'
     if '--settlements-only' in sys.argv:print(json.dumps(audit_settlements(),indent=2))
     elif '--minute-baselines-only' in sys.argv:print(json.dumps(baseline_models(),indent=2))
     else:analyze()

@@ -1,0 +1,17 @@
+{
+  "full_frozen_replays": 2,
+  "network_calls_during_reproduction": 0,
+  "byte_identical": true,
+  "scientific_artifacts": {
+    "path_taxonomy.csv": "0179902829d6d8041ac4de925f0f375216af87dc4bf73f6b437ba55ddb78565a",
+    "candidate_model_outcomes.csv": "8334ee5adbffe318e7b3f6d0bbf6aea369a772b7e28c1af719b45c2433c79b22",
+    "coverage_after_acquisition.csv": "fd9ff6274e5bb153f55b1bb62a60c988bcd8da75fe46c5355d0a0cda479da36e",
+    "settlement_results.csv": "27f1f2bcb9839da31888c0a238db1fec281edcefa48e93fda40916a2c910eb1e",
+    "target_execution_results.csv": "eb72556040898ae95fbdab4f37dda27f163cbdecac9bf04dfddf62876f7466a3",
+    "false_negative_analysis.csv": "70dcc19f4303b9dcca0c17b736ddb1c3a04dd129395626dd7313fd2789423c8b",
+    "execution_model_comparison.csv": "6ab2b8a46766594b6fa3d61a14468fc4fe7851080254d34abf17b69528e9ec57",
+    "entry_execution_results.csv": "a881e2bb43ad1f075d752088e70e040127b1043e80b854eef34534f88d3a1ab0",
+    "touch_window_evidence.parquet": "e00bde3b7f71261d0b3e9eea91e83e34db36a4448779130e30e702393e919364",
+    "analysis_summary.json": "faa964d904aa471801881d709661fd366a96f8f8ea607616c89ece8b7edd83b8"
+  }
+}
