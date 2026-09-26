@@ -1,0 +1,21 @@
+{
+  "compressed_bytes": 131611,
+  "elapsed_seconds": 8.488572291913442,
+  "execution_coverage": false,
+  "metered_upper_cost_usd": 0.00011209056,
+  "path": "output/ndxp_multidte/program_v1/phase3d_expanded_event_panel/stage1/inventory_2026-09-24.dbn.zst",
+  "request": {
+    "dataset": "OPRA.PILLAR",
+    "end": "2026-09-24T14:00:00+00:00",
+    "limit": 1,
+    "schema": "cmbp-1",
+    "start": "2026-09-24T13:30:00+00:00",
+    "stype_in": "parent",
+    "symbols": [
+      "NDXP.OPT"
+    ]
+  },
+  "sha256": "5f57fad519179eb711b190f53952065245fbaf460de871c78e71490d5f8b2556",
+  "symbol_mappings": 12506,
+  "uncompressed_bytes": 700566
+}

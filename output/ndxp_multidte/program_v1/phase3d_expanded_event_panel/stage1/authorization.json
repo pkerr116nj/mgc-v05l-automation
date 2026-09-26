@@ -1,0 +1,13 @@
+{
+  "hard_total_phase3d_ceiling_usd": 500,
+  "authority": "Patrick explicitly revised Phase 3D authorization to $500 in this conversation",
+  "supersedes_usd": [
+    100,
+    200
+  ],
+  "stage1": "All NDXP 0-5 calendar DTE calls and puts, 09:30-10:00 ET, 2023-03-28 through 2026-09-24, no strike-envelope filter",
+  "stage2": "Selected exact contracts through exit/expiration, 5/10/20 point widths, opening credits approximately $2 through first $10; proceed after Stage 1 automated validation",
+  "include_prior_phase3d_charges": true,
+  "raw_storage": "/Volumes/Personal-Drive/MGC-research/ndxp-phase3d",
+  "benchmark_unchanged": true
+}

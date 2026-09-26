@@ -1,0 +1,16 @@
+{
+  "purpose": "Missing final-day parent symbol inventory, not pricing or execution coverage",
+  "request": {
+    "dataset": "OPRA.PILLAR",
+    "end": "2026-09-24T14:00:00+00:00",
+    "limit": 1,
+    "schema": "cmbp-1",
+    "start": "2026-09-24T13:30:00+00:00",
+    "stype_in": "parent",
+    "symbols": [
+      "NDXP.OPT"
+    ]
+  },
+  "reserved_cost_usd": 0.0025600128000000002,
+  "started_utc": "2026-09-26T14:44:48.186273+00:00"
+}

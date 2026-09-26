@@ -1,0 +1,6 @@
+intents/
+receipts/
+transfers/
+.acquisition.lock
+*.tmp
+*.dbn.zst

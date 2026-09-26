@@ -1,0 +1,37 @@
+{
+  "accounting_at_restart": {
+    "active_reservation_usd": 0,
+    "actual_provider_charge_usd": null,
+    "completed_estimated_metered_cost_usd": 2.44522370624,
+    "uncertain_failed_request_reservation_usd": 11.54304
+  },
+  "failed_attempts_automatically_retried": false,
+  "live_trading_code_modified": false,
+  "offline_tests": {
+    "passed": 110
+  },
+  "raw_files_in_git": false,
+  "request_count": {
+    "all_strikes": true,
+    "calendar_dte": [
+      0,
+      5
+    ],
+    "canonical_requests": 1792,
+    "completed_requests": 28,
+    "cost_metadata_calls": 0,
+    "max_symbols_per_request": 2000,
+    "opening_window_et": [
+      "09:30",
+      "10:00"
+    ],
+    "previously_attempted_requests": 36,
+    "requests_avoided_by_reuse": 2,
+    "requests_before_reuse": 1794,
+    "schema": "cmbp-1",
+    "sessions": 877,
+    "stype_in": "raw_symbol",
+    "unattempted_requests": 1756
+  },
+  "status": "stage1_in_progress_not_complete"
+}
