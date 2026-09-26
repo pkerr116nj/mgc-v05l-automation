@@ -1,0 +1,14 @@
+[
+  {
+    "path": "/Users/patrick/Dev/MGC-v05l-ndxp-research/outputs/ndxp_2026_ytd/20260921/xqc_settlements.csv",
+    "sha256": "7ff64928adb5e28abf384eaf19a67e9ff6dc10307774da4320d3d7c003de36c1"
+  },
+  {
+    "path": "/Users/patrick/Dev/MGC-v05l-ndxp-research/outputs/ndxp_naive_baseline/max_history/xqc_settlements.csv",
+    "sha256": "5325f23db46c162e9b29b4315b9304ad85ccc17c9d32d478800029146db26647"
+  },
+  {
+    "path": "/Users/patrick/Dev/MGC-v05l-ndxp-research/outputs/ndxp_naive_baseline/partial_event_snapshot/xqc_settlements.csv",
+    "sha256": "01debf152d55643135e708eb09d60886716590c8c6b68370a6f50cce0112c51d"
+  }
+]

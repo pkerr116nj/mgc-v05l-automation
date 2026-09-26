@@ -1,0 +1,38 @@
+{
+  "version": 1,
+  "expiry_cutoff": "2024-12-31; candidates expiring later are excluded from pilot execution analysis",
+  "conditional_exit_diagnostic": "separate hypothetical frozen baseline STO fill at entry_time, credit=entry_mid-0.05; activate BTC immediately; does not validate that entry or imply an actual fill",
+  "development_end": "2024-12-31",
+  "max_leg_age_seconds": 1,
+  "entry_window_seconds": [
+    0,
+    60
+  ],
+  "context_window_seconds": [
+    -60,
+    300
+  ],
+  "target": 3.0,
+  "baseline_touch_mid": 2.95,
+  "quote_window_seconds": [
+    -30,
+    60
+  ],
+  "modeled_entry": "first valid synchronized midpoint >= cohort credit in [entry,entry+60s); hypothetical complex midpoint fill, not proof",
+  "resting_activation": "immediately after modeled fill; strictly later event timestamps only",
+  "strong": "valid nonstale spread ask <= 3 with positive executable-side leg sizes; diagnostic sufficient legged-price evidence, not complex queue proof",
+  "plausible": "valid nonstale spread midpoint <= 3 and positive quoted sizes on all sides; hypothetical resting midpoint evidence",
+  "ambiguous": "missing modeled entry, incomplete window, or only bid crosses; missing coverage never means unlikely",
+  "unlikely": "modeled entry exists, >=95% fresh valid window duration, and no bid/mid/ask target crossing",
+  "duration": "piecewise constant, capped at earliest leg timestamp+1s and next event; no extension beyond query boundary",
+  "invalid": "nonfinite/negative leg prices, bid>ask, zero/undefined prices, spread midpoint outside [0,10]; locked flagged separately",
+  "false_negative": "event ask/mid crossing during post-fill observed interval with no minute mid<=2.95 in the same floored UTC minute; descriptive sampling mismatch",
+  "fast_sequence": "mid >=6 then <=5 then <=4 then <=3 then >3 within 60s, no stale/invalid break",
+  "taxonomy": "censor unless entry and >=95% regular-session path coverage; success midpoint<=3, severe prehit>=9, adverse prehit>credit+0.5, otherwise clean",
+  "limitations": [
+    "No complex-order queue position",
+    "No guaranteed 20-lot fill",
+    "Single-leg trade context is not a spread execution",
+    "Thresholds descriptive, frozen before aggregate analysis"
+  ]
+}

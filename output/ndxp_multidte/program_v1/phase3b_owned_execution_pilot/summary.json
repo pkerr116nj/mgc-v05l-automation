@@ -1,0 +1,199 @@
+{
+  "requested_sessions": 60,
+  "diagnostic_sessions": 60,
+  "pilot_candidates": 246,
+  "entry_supported_sessions": 0,
+  "modeled_entry_candidates": 0,
+  "complete_path_candidates": 0,
+  "coverage_candidates": 3738,
+  "owned_pair_candidates": 2790,
+  "entry_supported_candidates": 0,
+  "indexed_files": 8657,
+  "decoded_files": 6162,
+  "minute_touches": 46635,
+  "minute_touches_any_fresh_events": 4128,
+  "classes": {
+    "strong fill evidence": 0,
+    "plausible fill evidence": 0,
+    "ambiguous": 46635,
+    "unlikely fill": 0
+  },
+  "false_negatives": {
+    "missed_minute_mid_crossings": 0,
+    "missed_minute_ask_crossings": 0,
+    "p2_rejected_supported": 0,
+    "p3_rejected_supported": 0,
+    "p2_approved_not_strong": 45168,
+    "p3_approved_not_strong": 44255,
+    "fast_6_5_4_3_rebound_sequences": 0
+  },
+  "taxonomy": {
+    "censored/insufficient coverage": 246
+  },
+  "settlements": {
+    "covered": 246,
+    "missing_expirations": [],
+    "nonzero_quote_intrinsic_differences": 77,
+    "max_abs_difference": 10.0
+  },
+  "pf_assessment": "unresolved",
+  "network_calls": 0,
+  "download_calls": 0,
+  "frozen_before_outcomes_sha256": {
+    "pilot_manifest.json": "2603f9ca0ee355113aea96474d184a90a462393160c7838b033774923164bc6c",
+    "execution_classification_rules.json": "4cf820016e9717740af155b9c49916b68c6022b0ae08cfa834ed0e70fe2a639b"
+  },
+  "by_dte_credit": [
+    {
+      "calendar_dte": 2,
+      "target_credit": 5.0,
+      "candidates": 43,
+      "minute_touches": 11816,
+      "strong fill evidence": 0,
+      "plausible fill evidence": 0,
+      "ambiguous": 11816,
+      "unlikely fill": 0
+    },
+    {
+      "calendar_dte": 2,
+      "target_credit": 6.0,
+      "candidates": 43,
+      "minute_touches": 7361,
+      "strong fill evidence": 0,
+      "plausible fill evidence": 0,
+      "ambiguous": 7361,
+      "unlikely fill": 0
+    },
+    {
+      "calendar_dte": 2,
+      "target_credit": 7.0,
+      "candidates": 43,
+      "minute_touches": 5600,
+      "strong fill evidence": 0,
+      "plausible fill evidence": 0,
+      "ambiguous": 5600,
+      "unlikely fill": 0
+    },
+    {
+      "calendar_dte": 3,
+      "target_credit": 5.0,
+      "candidates": 39,
+      "minute_touches": 9450,
+      "strong fill evidence": 0,
+      "plausible fill evidence": 0,
+      "ambiguous": 9450,
+      "unlikely fill": 0
+    },
+    {
+      "calendar_dte": 3,
+      "target_credit": 6.0,
+      "candidates": 39,
+      "minute_touches": 7463,
+      "strong fill evidence": 0,
+      "plausible fill evidence": 0,
+      "ambiguous": 7463,
+      "unlikely fill": 0
+    },
+    {
+      "calendar_dte": 3,
+      "target_credit": 7.0,
+      "candidates": 39,
+      "minute_touches": 4945,
+      "strong fill evidence": 0,
+      "plausible fill evidence": 0,
+      "ambiguous": 4945,
+      "unlikely fill": 0
+    }
+  ],
+  "next_acquisition": {
+    "purpose": "complete observation panel for unbiased intraminute missed-touch detection; exact selected legs, development regular sessions, owned header intervals subtracted",
+    "requests": 501,
+    "symbol_minutes": 543335.3584333295,
+    "owned_symbol_minutes_reused": 25284.6415666705,
+    "estimated_usd_low": 0.839445254189959,
+    "estimated_usd_central": 3.357781016759836,
+    "estimated_usd_high": 33.57781016759836,
+    "estimated_billable_gib_central": 20.98613134558321,
+    "basis": "linear scaling of saved 2024-06-12 provider 6-leg 30-minute CMBP sample; 0.25x..10x planning envelope, not guaranteed price cap; no paid calls",
+    "metadata_calls_needed_for_this_estimate": 0,
+    "purchase_authorized": false
+  },
+  "conditional_classes": {
+    "strong fill evidence": 3370,
+    "plausible fill evidence": 758,
+    "ambiguous": 42507,
+    "unlikely fill": 0
+  },
+  "conditional_false_negatives": {
+    "conditional_fast_6_5_4_3_rebound_sequences": 2440,
+    "conditional_missed_minute_mid_crossings": 13509,
+    "conditional_missed_raw_minute_mid_crossings": 12016,
+    "conditional_missed_raw_minute_ask_crossings": 417,
+    "conditional_p2_rejected_supported": 127,
+    "conditional_p3_rejected_supported": 209,
+    "conditional_p2_approved_not_strong": 41834,
+    "conditional_p3_approved_not_strong": 40953
+  },
+  "conditional_by_dte_credit": [
+    {
+      "calendar_dte": 2,
+      "target_credit": 5.0,
+      "candidates": 43,
+      "minute_touches": 11816,
+      "strong fill evidence": 420,
+      "plausible fill evidence": 110,
+      "ambiguous": 11286,
+      "unlikely fill": 0
+    },
+    {
+      "calendar_dte": 2,
+      "target_credit": 6.0,
+      "candidates": 43,
+      "minute_touches": 7361,
+      "strong fill evidence": 631,
+      "plausible fill evidence": 50,
+      "ambiguous": 6680,
+      "unlikely fill": 0
+    },
+    {
+      "calendar_dte": 2,
+      "target_credit": 7.0,
+      "candidates": 43,
+      "minute_touches": 5600,
+      "strong fill evidence": 1071,
+      "plausible fill evidence": 179,
+      "ambiguous": 4350,
+      "unlikely fill": 0
+    },
+    {
+      "calendar_dte": 3,
+      "target_credit": 5.0,
+      "candidates": 39,
+      "minute_touches": 9450,
+      "strong fill evidence": 382,
+      "plausible fill evidence": 111,
+      "ambiguous": 8957,
+      "unlikely fill": 0
+    },
+    {
+      "calendar_dte": 3,
+      "target_credit": 6.0,
+      "candidates": 39,
+      "minute_touches": 7463,
+      "strong fill evidence": 586,
+      "plausible fill evidence": 271,
+      "ambiguous": 6606,
+      "unlikely fill": 0
+    },
+    {
+      "calendar_dte": 3,
+      "target_credit": 7.0,
+      "candidates": 39,
+      "minute_touches": 4945,
+      "strong fill evidence": 280,
+      "plausible fill evidence": 37,
+      "ambiguous": 4628,
+      "unlikely fill": 0
+    }
+  ]
+}
